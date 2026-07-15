@@ -143,6 +143,12 @@ class AgentPlan:
     current: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ComposeServiceObservation:
+    running: bool = False
+    target_image_reusable: bool = False
+
+
 def _env_int(values: Mapping[str, str | None], key: str, default: int) -> int:
     raw = values.get(key)
     if raw is None or str(raw).strip() == "":
@@ -586,33 +592,76 @@ def _json_docs_from_compose_ps(stdout: str) -> list[dict[str, Any]]:
     return []
 
 
-def _compose_service_is_running(compose_base: list[str], service: str) -> bool:
+def _compose_doc_matches_service(doc: Mapping[str, Any], service: str) -> bool:
+    doc_service = str(doc.get("Service") or doc.get("Name") or "")
+    return not doc_service or (
+        doc_service == service
+        or doc_service.endswith(f"-{service}")
+        or f"-{service}-" in doc_service
+    )
+
+
+def _compose_image_matches_tag(image: str, image_tag: str) -> bool:
+    image_ref = image.split("@", 1)[0]
+    return image_ref == image_tag or image_ref.endswith(f":{image_tag}")
+
+
+def _compose_doc_is_idle_exit(doc: Mapping[str, Any]) -> bool:
+    state = str(doc.get("State") or "").lower()
+    status = str(doc.get("Status") or "").lower()
+    if state != "exited" and not status.startswith("exited"):
+        return False
+    raw_exit_code = doc.get("ExitCode")
+    if raw_exit_code is not None:
+        try:
+            return int(raw_exit_code) == 0
+        except (TypeError, ValueError):
+            return False
+    return status.startswith("exited (0)")
+
+
+def _compose_service_observation(
+    compose_base: list[str],
+    service: str,
+    *,
+    target_image_tag: str | None = None,
+) -> ComposeServiceObservation:
     try:
         result = subprocess.run(
-            [*compose_base, "ps", "--format", "json", service],
+            [*compose_base, "ps", "--all", "--format", "json", service],
             capture_output=True,
             text=True,
             timeout=30.0,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
+        return ComposeServiceObservation()
     if result.returncode != 0:
-        return False
+        return ComposeServiceObservation()
+    running = False
+    target_image_reusable = False
     for doc in _json_docs_from_compose_ps(result.stdout):
-        doc_service = str(doc.get("Service") or doc.get("Name") or "")
-        if (
-            doc_service
-            and doc_service != service
-            and not doc_service.endswith(f"-{service}")
-            and f"-{service}-" not in doc_service
-        ):
+        if not _compose_doc_matches_service(doc, service):
             continue
         state = str(doc.get("State") or "").lower()
         status = str(doc.get("Status") or "").lower()
-        if state == "running" or status.startswith("up "):
-            return True
-    return False
+        doc_running = state == "running" or status.startswith("up ")
+        running = running or doc_running
+        image = str(doc.get("Image") or "")
+        if (
+            target_image_tag
+            and _compose_image_matches_tag(image, target_image_tag)
+            and (doc_running or _compose_doc_is_idle_exit(doc))
+        ):
+            target_image_reusable = True
+    return ComposeServiceObservation(
+        running=running,
+        target_image_reusable=target_image_reusable,
+    )
+
+
+def _compose_service_is_running(compose_base: list[str], service: str) -> bool:
+    return _compose_service_observation(compose_base, service).running
 
 
 def _wait_for_compose_service_running(
@@ -628,8 +677,7 @@ def _wait_for_compose_service_running(
         if attempt < attempts:
             time.sleep(sleep_sec)
     raise RuntimeError(
-        f"docker compose service {service!r} did not reach running state "
-        f"after {attempts} check(s)",
+        f"docker compose service {service!r} did not reach running state after {attempts} check(s)",
     )
 
 
@@ -715,12 +763,17 @@ def _apply(args: argparse.Namespace) -> int:
         if desired_intent not in {"draining", "stopped"}:
             compose_base = _compose_base(args, args.env_file)
             try:
-                was_running = _compose_service_is_running(compose_base, args.service)
-                _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
+                observation = _compose_service_observation(
+                    compose_base,
+                    args.service,
+                    target_image_tag=desired.image_tag,
+                )
+                if not observation.target_image_reusable:
+                    _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
                 _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
                 if not args.dry_run:
                     _wait_for_compose_service_running(compose_base, args.service)
-                if was_running:
+                if observation.running:
                     last_apply_result = "docker compose worker reconciled"
                 else:
                     last_apply_result = "docker compose worker started"
@@ -764,7 +817,13 @@ def _apply(args: argparse.Namespace) -> int:
         compose_base = _compose_base(args, compose_env_file)
         desired_intent = str(plan.desired.get("capacity_intent") or "active")
         if desired_intent not in {"draining", "stopped"}:
-            _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
+            observation = _compose_service_observation(
+                compose_base,
+                args.service,
+                target_image_tag=desired.image_tag,
+            )
+            if not observation.target_image_reusable:
+                _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
         _run(
             [
                 *compose_base,

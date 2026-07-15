@@ -49,15 +49,23 @@ request fresh-fetches and pins the current merged `refs/heads/dev`; an operator
 cannot select a commit, ref, image tag, host subset, env file, credential,
 concurrency, or force flag.
 
+Before the driver may mutate a host unit, the deploy identity must report
+`Linger=yes` from `loginctl show-user`. Bootstrap this once through the host's
+normal user/admin path with `loginctl enable-linger "$USER"`; a missing linger
+grant fails rollout step 12 closed.
+
 The driver preserves this order for every active host:
 
 1. apply the candidate-owned environment-state profile;
 2. validate the exact desired image, env version, and source SHA;
 3. prepare the host checkout and generated private env;
 4. retire the legacy direct-worker service;
-5. start the node-agent with bounded host concurrency;
-6. require all 14 declared active-host reports and fresh linked worker registrations;
-7. pass environment-state, release-gate, and smoke.
+5. install the candidate's node-agent service and timer, start the oneshot once,
+   then enable and restart the periodic timer with bounded host concurrency;
+6. verify the installed unit bytes, linger grant, successful oneshot result,
+   and enabled/active/waiting timer;
+7. require all 14 declared active-host reports and fresh linked worker registrations;
+8. pass environment-state, release-gate, and smoke.
 
 Use only the public broker interface:
 
@@ -157,7 +165,12 @@ fetches the approved repository, checks out the candidate SHA, prepares the
 image, drains the old worker, and starts the target worker. Temporary Compose
 env files are private and remain outside the checkout. A missing registry image
 may trigger a candidate-bound local build; it may not fall back to a different
-tree.
+tree. The periodic active/no-drift path reuses a container whose runtime image
+already matches the desired tag, including a worker that exited normally after
+its idle window; it does not pull or rebuild that image on every timer tick.
+No-container or runtime-image drift still performs the candidate-bound
+pull/build before Compose reconciliation. `draining` and `stopped` intents
+never pull, build, or start the worker.
 
 The node-agent user service is `Type=oneshot`; successful convergence may end
 as `ActiveState=inactive` / `SubState=dead` with `Result=success`. Release
@@ -172,6 +185,12 @@ not `is-active` alone. Every active host must report:
 The legacy `loom-gb10-worker.service` direct Compose path must remain disabled
 during release-managed operation. It can otherwise race the node-agent and
 recreate a worker outside desired-state control.
+
+Do not run a second environment's node-agent identity against the same local
+tunnel ports and Compose root. In particular, a legacy production timer must
+remain stopped or use an isolated tunnel/runtime while the staging compatibility
+pool is active; restoring shared connectivity can otherwise make both desired
+states reconcile the same host concurrently.
 
 ## Current Validated State
 
@@ -210,6 +229,10 @@ worker registrations. Node 7 must remain `stopped`/`unreachable` and absent
 from rollout targets. Tunnel health, Docker reachability, source cleanliness,
 image/env identity, capacity, and worker heartbeat failures on any active host
 remain red; a runtime skip or partially healthy active fleet is not accepted.
+After rollout, close the operator SSH session, wait longer than one timer
+period, stop the worker on one active canary, and require the timer to restore
+the candidate image plus a fresh heartbeat within the next period. Recheck that
+node 7 has no fresh active worker.
 
 GB10 workers must not claim legacy tasks that lack `environment.cpu_arch`;
 Loom treats those requirements as `x86_64`. Only tasks explicitly marked
