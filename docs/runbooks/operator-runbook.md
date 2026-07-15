@@ -1508,18 +1508,40 @@ sudo ./scripts/ops/staging_rollout_host.py install \
   --smoke-on-behalf-team-id "<agentic-rl-team-uuid>"
 ```
 
-Once per newly generated service-key lifecycle, use an existing root-held admin
-identity as a bootstrap channel to add the new service public key to the exact
-14-host active set. The fixed 15-host topology remains validated, and a migrated
-legacy revocation ledger can retain all 15 hosts until node 7 is reachable.
-The idempotent bootstrap is also the controlled repair when trust
-`check` reports drift. It reads the service `.pub` file and sends it over
-stdin; it never copies or prints the private service key:
+Once per newly generated service-key lifecycle, use one explicitly approved
+Ed25519 admin identity as the bootstrap channel to the exact 14-host active
+set. The fixed 15-host topology remains validated, and a migrated legacy
+revocation ledger can retain all 15 hosts until node 7 is reachable. The
+identity must be an absolute, single-link, mode-0600 regular file under its
+same-owner mode-0700 parent. The tool derives its public key with the fixed
+system `ssh-keygen`; it never copies or prints either private key.
+
+Choose exactly one transition operation. Use `bootstrap` when the canonical
+`loom-staging-rollout` marker is absent, or when the target service key itself
+is the marked entry that needs idempotent repair. If the explicitly approved
+bootstrap key currently occupies that one canonical marker, use
+`rotate-bootstrap`; ordinary `bootstrap` deliberately rejects that ambiguous
+state. Rotation replaces only that exact canonical bootstrap entry with the
+service key. A missing, duplicate, option-prefixed, unrelated, or tombstoned
+marker fails without changing `authorized_keys`, and a repeated successful
+rotation is a no-write `already-present` result.
+
+Both operations create a process-private mode-0600 SSH config containing the
+bootstrap identity first and the service identity as retry fallback. This same
+config reaches every ProxyJump child, so a partial retry works after some hosts
+already accept only the service identity. Private hosts converge before the
+jump host; any private-host failure leaves the jump host unchanged:
 
 ```bash
+# Fresh or same-service-key repair:
 sudo /opt/loom-staging-runner/venv/bin/python \
   /usr/local/libexec/loom-staging-rollout-gb10-trust bootstrap \
-  --bootstrap-identity /root/<existing-admin-bootstrap-key>
+  --bootstrap-identity /secure/path/<approved-admin-ed25519-key>
+
+# Only when that approved bootstrap key occupies the canonical marker:
+sudo /opt/loom-staging-runner/venv/bin/python \
+  /usr/local/libexec/loom-staging-rollout-gb10-trust rotate-bootstrap \
+  --bootstrap-identity /secure/path/<approved-admin-ed25519-key>
 
 sudo ./scripts/ops/staging_rollout_host.py check --format json
 loom-staging-rollout start --dry-run

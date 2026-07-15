@@ -95,10 +95,17 @@ Bootstrap and normal checks target the 14-host active set; the full inventory
 remains authoritative for topology validation, legacy trust cleanup, and later
 #822 re-admission.
 
-Use an existing root-held admin identity to bootstrap the service public key
-once per new service-key lifecycle, or as controlled recovery when `check`
-reports drift. Bootstrap is idempotent and sends only the public key over
-stdin. Normal verification uses the service identity:
+Use an explicitly approved Ed25519 admin identity to bootstrap the service
+public key once per new service-key lifecycle, or as controlled recovery when
+`check` reports drift. Use `bootstrap --bootstrap-identity PATH` for a fresh
+canonical marker. If that approved bootstrap key itself occupies the one
+canonical `loom-staging-rollout` marker, use the explicit
+`rotate-bootstrap --bootstrap-identity PATH` transition instead. Rotation
+accepts only the exact canonical bootstrap or service entry, processes private
+hosts before the jump host, and is idempotent across partial retries. Missing,
+duplicate, option-prefixed, unrelated, or tombstoned markers fail unchanged.
+Both operations derive and send only public keys; they do not copy or print a
+private key. Normal verification uses the service identity:
 
 ```bash
 sudo /opt/loom-staging-runner/venv/bin/python \

@@ -758,7 +758,7 @@ git commit -m "feat(rollout): add independent staging broker"
 
 **Interfaces:**
 - Host tool exposes `plan`, `install --smoke-on-behalf-team-id UUID`, `check --format json`, and `uninstall --retain-ledger`; repository/ref/path are fixed.
-- Trust tool exposes `bootstrap --bootstrap-identity PATH`, `check`, and `revoke`; it accepts no target host/ref/user override, and hosts plus remote user come from the checked-in GB10 config.
+- Trust tool exposes `bootstrap --bootstrap-identity PATH`, strict transitional `rotate-bootstrap --bootstrap-identity PATH`, `check`, and `revoke`; it accepts no target host/ref/user override, and hosts plus remote user come from the checked-in GB10 config. Rotation is only for replacing the exact approved bootstrap key already occupying the canonical managed marker; it carries both identities through ProxyJump, converges private hosts before the jump host, and fails unchanged on ambiguous authority.
 - Revocation removes only the exact service public key.
 - Uninstall preserves request/rollout evidence by default and refuses while active.
 

@@ -28,6 +28,7 @@ from typing import Any, Protocol
 SSH_CONFIG_PATH = Path("/opt/loom-staging-runner/repo/deploy/worker-pools/gb10/ssh_config")
 KNOWN_HOSTS_PATH = Path("/etc/loom/staging-rollout-gb10-known-hosts")
 SSH_BINARY = Path("/usr/bin/ssh")
+SSH_KEYGEN_BINARY = Path("/usr/bin/ssh-keygen")
 SERVICE_PRIVATE_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
 SERVICE_PUBLIC_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519.pub")
 REVOCATION_LEDGER_PATH = Path("/etc/loom/staging-rollout-gb10-trust-revocation.json")
@@ -44,9 +45,11 @@ _EXPECTED_PORTS = (2221,) + (22,) * 14
 _EXPECTED_REMOTE_USER = "qianyi"
 _SAFE_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
 _PUBLIC_KEY_MAX_BYTES = 16 * 1024
+_BOOTSTRAP_ENVELOPE_MAX_BYTES = 32 * 1024
 _KNOWN_HOSTS_MAX_BYTES = 64 * 1024
 _LEDGER_MAX_BYTES = 64 * 1024
 _LEDGER_SCHEMA_VERSION = 2
+_BOOTSTRAP_ENVELOPE_SCHEMA_VERSION = 1
 _SSH_TIMEOUT_SECONDS = 30
 
 
@@ -655,19 +658,173 @@ def _key_fingerprint(public_key: bytes) -> str:
 
 
 def _validate_bootstrap_identity(path: Path) -> None:
-    if not path.is_absolute() or ".." in path.parts:
+    raw_path = str(path)
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or any(character in raw_path for character in ("\x00", "\r", "\n"))
+    ):
         raise TrustConfigurationError("bootstrap identity must be an absolute path")
     try:
         metadata = os.lstat(path)
+        parent_metadata = os.lstat(path.parent)
     except OSError as exc:
         raise TrustConfigurationError("bootstrap identity is unavailable") from exc
     if (
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISREG(metadata.st_mode)
         or metadata.st_size <= 0
+        or metadata.st_nlink != 1
         or stat.S_IMODE(metadata.st_mode) & 0o077
+        or stat.S_ISLNK(parent_metadata.st_mode)
+        or not stat.S_ISDIR(parent_metadata.st_mode)
+        or parent_metadata.st_uid != metadata.st_uid
+        or parent_metadata.st_gid != metadata.st_gid
+        or stat.S_IMODE(parent_metadata.st_mode) & 0o077
     ):
         raise TrustConfigurationError("bootstrap identity metadata is not approved")
+
+
+def _derive_bootstrap_public_key(path: Path, run: Runner) -> bytes:
+    try:
+        completed = run(
+            [str(SSH_KEYGEN_BINARY), "-y", "-f", str(path)],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=False,
+            check=False,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "SSH_ASKPASS_REQUIRE": "never",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise TrustConfigurationError("bootstrap identity public key is unavailable") from exc
+    payload = _as_bytes(completed.stdout)
+    if completed.returncode != 0 or not payload or len(payload) > _PUBLIC_KEY_MAX_BYTES:
+        raise TrustConfigurationError("bootstrap identity public key is unavailable")
+    _decoded_ed25519_blob(payload)
+    fields = payload.strip().split()
+    return b" ".join(fields[:2]) + b"\n"
+
+
+def _bootstrap_envelope(service_public_key: bytes, bootstrap_public_key: bytes) -> bytes:
+    _decoded_ed25519_blob(service_public_key)
+    _decoded_ed25519_blob(bootstrap_public_key)
+    payload = (
+        json.dumps(
+            {
+                "bootstrap_public_key": bootstrap_public_key.decode("ascii").strip(),
+                "schema_version": _BOOTSTRAP_ENVELOPE_SCHEMA_VERSION,
+                "service_public_key": service_public_key.decode("ascii").strip(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("ascii")
+    if len(payload) > _BOOTSTRAP_ENVELOPE_MAX_BYTES:
+        raise TrustConfigurationError("bootstrap trust envelope is too large")
+    return payload
+
+
+def _quote_ssh_config_value(value: str) -> str:
+    if not value or any(character in value for character in ("\x00", "\r", "\n", "%", "$")):
+        raise TrustConfigurationError("bootstrap SSH configuration value is unsafe")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _render_bootstrap_ssh_config(
+    inventory: SshInventory,
+    *,
+    bootstrap_identity: Path,
+) -> bytes:
+    identity = _quote_ssh_config_value(str(bootstrap_identity))
+    service_identity = _quote_ssh_config_value(str(inventory.identity_file))
+    lines: list[str] = []
+    for index, host in enumerate(inventory.hosts):
+        lines.extend(
+            [
+                f"Host {host}",
+                f"  HostName {inventory.hostnames[index]}",
+                f"  User {inventory.remote_user}",
+                f"  Port {inventory.ports[index]}",
+                f"  IdentityFile {identity}",
+                f"  IdentityFile {service_identity}",
+                "  IdentityAgent none",
+                "  IdentitiesOnly yes",
+                "  BatchMode yes",
+                "  PubkeyAuthentication yes",
+                "  PreferredAuthentications publickey",
+                "  PasswordAuthentication no",
+                "  KbdInteractiveAuthentication no",
+                "  GSSAPIAuthentication no",
+                "  HostbasedAuthentication no",
+                "  ControlMaster no",
+                "  StrictHostKeyChecking yes",
+                f"  UserKnownHostsFile {KNOWN_HOSTS_PATH}",
+                "  GlobalKnownHostsFile /dev/null",
+                "  UpdateHostKeys no",
+            ]
+        )
+        proxy_jump = inventory.proxy_jumps[index]
+        if proxy_jump is not None:
+            lines.append(f"  ProxyJump {proxy_jump}")
+        lines.append("")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+@contextlib.contextmanager
+def _bootstrap_ssh_config(
+    inventory: SshInventory,
+    *,
+    bootstrap_identity: Path,
+    parent: Path,
+    expected_uid: int,
+    expected_gid: int,
+) -> Iterator[Path]:
+    payload = _render_bootstrap_ssh_config(
+        inventory,
+        bootstrap_identity=bootstrap_identity,
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=".staging-rollout-gb10-bootstrap.",
+        dir=parent,
+    ) as raw_directory:
+        directory = Path(raw_directory)
+        metadata = os.lstat(directory)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != expected_uid
+            or metadata.st_gid != expected_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise TrustConfigurationError("bootstrap SSH configuration directory is unsafe")
+        path = directory / "ssh_config"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+            with os.fdopen(fd, "wb", closefd=True) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise TrustConfigurationError("bootstrap SSH configuration write failed") from exc
+        confirmed = os.lstat(path)
+        if (
+            not stat.S_ISREG(confirmed.st_mode)
+            or stat.S_ISLNK(confirmed.st_mode)
+            or confirmed.st_uid != expected_uid
+            or confirmed.st_gid != expected_gid
+            or stat.S_IMODE(confirmed.st_mode) != 0o600
+            or confirmed.st_size != len(payload)
+        ):
+            raise TrustConfigurationError("bootstrap SSH configuration metadata is unsafe")
+        yield path
 
 
 _REMOTE_SCRIPT = r"""
@@ -791,10 +948,25 @@ def load_authorized_keys(path):
     if metadata.st_size > 4 * 1024 * 1024:
         fail("oversized-authorized-keys")
     try:
-        text = path.read_text(encoding="utf-8")
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            text = handle.read()
     except (OSError, UnicodeError):
         fail("unreadable-authorized-keys")
     return text, text.splitlines()
+
+def replace_line_preserving_endings(text, lines, index, replacement):
+    raw_lines = text.splitlines(keepends=True)
+    if len(raw_lines) != len(lines) or index >= len(raw_lines):
+        fail("ambiguous-line-endings", 3)
+    original = raw_lines[index]
+    line = lines[index]
+    if not original.startswith(line):
+        fail("ambiguous-line-endings", 3)
+    ending = original[len(line):]
+    if ending not in {"", "\n", "\r", "\r\n"}:
+        fail("ambiguous-line-endings", 3)
+    raw_lines[index] = replacement + ending
+    return "".join(raw_lines)
 
 def ensure_ssh_directory(path):
     if os.path.lexists(path):
@@ -826,12 +998,45 @@ def atomic_write(path, text):
             pass
 
 operation = sys.argv[1] if len(sys.argv) == 2 else ""
-if operation not in {"bootstrap", "check", "revoke"}:
+if operation not in {"bootstrap", "rotate-bootstrap", "check", "revoke"}:
     fail("invalid-operation")
-payload = sys.stdin.buffer.read(16385)
-if not payload or len(payload) > 16384:
+limit = 32768 if operation == "rotate-bootstrap" else 16384
+payload = sys.stdin.buffer.read(limit + 1)
+if not payload or len(payload) > limit:
     fail("invalid-public-key")
-target_blob, target_base64 = decoded_blob(payload)
+bootstrap_fingerprint = None
+if operation == "rotate-bootstrap":
+    try:
+        pairs = json.loads(payload, object_pairs_hook=lambda value: value)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("invalid-rotation-envelope")
+    if not isinstance(pairs, list) or any(
+        not isinstance(pair, tuple) or len(pair) != 2 for pair in pairs
+    ):
+        fail("invalid-rotation-envelope")
+    keys = [pair[0] for pair in pairs]
+    required = {"bootstrap_public_key", "schema_version", "service_public_key"}
+    if len(keys) != len(set(keys)) or set(keys) != required:
+        fail("invalid-rotation-envelope")
+    envelope = dict(pairs)
+    if type(envelope["schema_version"]) is not int or envelope["schema_version"] != 1:
+        fail("invalid-rotation-envelope")
+    bootstrap_value = envelope["bootstrap_public_key"]
+    service_value = envelope["service_public_key"]
+    if not isinstance(bootstrap_value, str) or not isinstance(service_value, str):
+        fail("invalid-rotation-envelope")
+    try:
+        bootstrap_payload = (bootstrap_value + "\n").encode("ascii")
+        target_payload = (service_value + "\n").encode("ascii")
+    except UnicodeEncodeError:
+        fail("invalid-rotation-envelope")
+    bootstrap_blob, bootstrap_base64 = decoded_blob(bootstrap_payload)
+    bootstrap_fingerprint = fingerprint(bootstrap_blob)
+    target_blob, target_base64 = decoded_blob(target_payload)
+    if bootstrap_fingerprint == fingerprint(target_blob):
+        fail("invalid-rotation-envelope")
+else:
+    target_blob, target_base64 = decoded_blob(payload)
 target_fingerprint = fingerprint(target_blob)
 ssh_dir = Path.home() / ".ssh"
 authorized_keys = ssh_dir / "authorized_keys"
@@ -842,6 +1047,7 @@ if os.path.lexists(ssh_dir):
         fail("unsafe-ssh-directory")
 text, lines = load_authorized_keys(authorized_keys)
 matches = []
+bootstrap_matches = []
 marked = []
 for index, line in enumerate(lines):
     identity = line_identity(line)
@@ -850,13 +1056,44 @@ for index, line in enumerate(lines):
     line_fingerprint, key_end = identity
     if line_fingerprint == target_fingerprint:
         matches.append((index, key_end))
-    if line[key_end:].strip() in {COMMENT, TOMBSTONE_COMMENT}:
-        marked.append((index, line_fingerprint))
+    if bootstrap_fingerprint is not None and line_fingerprint == bootstrap_fingerprint:
+        bootstrap_matches.append((index, key_end))
+    marker = line[key_end:].strip()
+    if marker in {COMMENT, TOMBSTONE_COMMENT}:
+        marked.append((index, line_fingerprint, marker))
 if len(matches) > 1:
     fail("ambiguous-fingerprint", 3)
-if any(line_fingerprint != target_fingerprint for _, line_fingerprint in marked):
-    fail("ambiguous-marker", 3)
 if len(marked) > 1:
+    fail("ambiguous-marker", 3)
+if operation == "rotate-bootstrap":
+    if (
+        not os.path.lexists(ssh_dir)
+        or stat.S_IMODE(ssh_dir.stat().st_mode) != 0o700
+        or not os.path.lexists(authorized_keys)
+        or stat.S_IMODE(authorized_keys.stat().st_mode) != 0o600
+    ):
+        fail("rotation-authority-mode-invalid", 3)
+    if len(bootstrap_matches) > 1:
+        fail("ambiguous-bootstrap-fingerprint", 3)
+    if len(marked) != 1:
+        fail("rotation-marker-missing", 3)
+    marked_index, marked_fingerprint, marked_comment = marked[0]
+    if marked_comment == TOMBSTONE_COMMENT:
+        fail("rotation-marker-revoked", 3)
+    if marked_fingerprint not in {bootstrap_fingerprint, target_fingerprint}:
+        fail("ambiguous-marker", 3)
+    if marked_fingerprint == bootstrap_fingerprint:
+        if len(bootstrap_matches) != 1 or matches or lines[marked_index].strip() != normal_line(
+            bootstrap_base64
+        ):
+            fail("ambiguous-marker", 3)
+    elif (
+        len(matches) != 1
+        or bootstrap_matches
+        or lines[marked_index].strip() != normal_line(target_base64)
+    ):
+        fail("ambiguous-marker", 3)
+elif any(line_fingerprint != target_fingerprint for _, line_fingerprint, _ in marked):
     fail("ambiguous-marker", 3)
 expected_normal = normal_line(target_base64)
 expected_tombstone = tombstone_line(target_base64)
@@ -874,6 +1111,22 @@ if operation == "check":
     if lines[index].strip() != expected_normal:
         fail("incorrect-comment", 4)
     print(json.dumps({"status": "present"}, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+
+if operation == "rotate-bootstrap":
+    index, line_fingerprint, _ = marked[0]
+    if line_fingerprint == target_fingerprint:
+        changed = False
+        status_value = "already-present"
+    else:
+        changed = True
+        status_value = "rotated"
+    if changed:
+        atomic_write(
+            authorized_keys,
+            replace_line_preserving_endings(text, lines, index, expected_normal),
+        )
+    print(json.dumps({"status": status_value}, sort_keys=True, separators=(",", ":")))
     raise SystemExit(0)
 
 if operation == "bootstrap":
@@ -915,6 +1168,7 @@ print(json.dumps({"status": "revoked"}, sort_keys=True, separators=(",", ":")))
 
 _SUCCESS_STATUSES = {
     "bootstrap": frozenset({"installed", "updated", "restored", "already-present"}),
+    "rotate-bootstrap": frozenset({"rotated", "already-present"}),
     "check": frozenset({"present"}),
     "revoke": frozenset({"revoked", "absent"}),
 }
@@ -947,7 +1201,6 @@ def _ssh_argv(
     host: str,
     operation: str,
     ssh_config: Path,
-    bootstrap_identity: Path | None,
 ) -> list[str]:
     remote_command = shlex.join(["python3", "-c", _REMOTE_SCRIPT, operation])
     argv = [
@@ -971,8 +1224,6 @@ def _ssh_argv(
         "-o",
         "UpdateHostKeys=no",
     ]
-    if bootstrap_identity is not None:
-        argv.extend(["-i", str(bootstrap_identity)])
     return [*argv, host, remote_command]
 
 
@@ -981,9 +1232,8 @@ def converge_trust(
     *,
     hosts: Sequence[str],
     ssh_config: Path,
-    public_key: bytes,
+    payload: bytes,
     run: Runner,
-    bootstrap_identity: Path | None = None,
 ) -> tuple[HostResult, ...]:
     """Run one fixed trust operation on the supplied fixed hosts."""
     if operation not in _SUCCESS_STATUSES:
@@ -994,12 +1244,11 @@ def converge_trust(
             host=host,
             operation=operation,
             ssh_config=ssh_config,
-            bootstrap_identity=bootstrap_identity,
         )
         try:
             completed = run(
                 argv,
-                input=public_key,
+                input=payload,
                 capture_output=True,
                 text=False,
                 check=False,
@@ -1015,6 +1264,43 @@ def converge_trust(
             results.append(HostResult(host=host, ok=False, status="remote-failed"))
         else:
             results.append(HostResult(host=host, ok=True, status=status_value))
+    return tuple(results)
+
+
+def bootstrap_trust(
+    operation: str,
+    *,
+    inventory: SshInventory,
+    ssh_config: Path,
+    payload: bytes,
+    run: Runner,
+) -> tuple[HostResult, ...]:
+    """Converge private hosts before rotating or depending on the jump host."""
+    if operation not in {"bootstrap", "rotate-bootstrap"}:
+        raise ValueError("unsupported bootstrap operation")
+    jump_host = inventory.hosts[0]
+    private_hosts = tuple(host for host in inventory.active_hosts if host != jump_host)
+    results = list(
+        converge_trust(
+            operation,
+            hosts=private_hosts,
+            ssh_config=ssh_config,
+            payload=payload,
+            run=run,
+        )
+    )
+    if any(not result.ok for result in results):
+        results.append(HostResult(host=jump_host, ok=False, status="dependency-failed"))
+        return tuple(results)
+    results.extend(
+        converge_trust(
+            operation,
+            hosts=(jump_host,),
+            ssh_config=ssh_config,
+            payload=payload,
+            run=run,
+        )
+    )
     return tuple(results)
 
 
@@ -1138,7 +1424,7 @@ def revoke_trust(
             "revoke",
             hosts=(host,),
             ssh_config=ssh_config,
-            public_key=public_key,
+            payload=public_key,
             run=run,
         )[0]
         results.append(result)
@@ -1162,7 +1448,7 @@ def revoke_trust(
             "revoke",
             hosts=(jump_host,),
             ssh_config=ssh_config,
-            public_key=public_key,
+            payload=public_key,
             run=run,
         )[0]
         results.append(result)
@@ -1183,6 +1469,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="operation", required=True)
     bootstrap = subparsers.add_parser("bootstrap", allow_abbrev=False)
     bootstrap.add_argument("--bootstrap-identity", type=Path, required=True)
+    rotate = subparsers.add_parser("rotate-bootstrap", allow_abbrev=False)
+    rotate.add_argument("--bootstrap-identity", type=Path, required=True)
     subparsers.add_parser("check", allow_abbrev=False)
     subparsers.add_parser("revoke", allow_abbrev=False)
     subparsers.add_parser("initialize-ledger", allow_abbrev=False)
@@ -1251,7 +1539,7 @@ def main(
     try:
         config_payload = _read_bounded_regular_file(ssh_config_path)
         inventory = parse_ssh_inventory(config_payload.decode("utf-8"))
-        if args.operation in {"bootstrap", "check", "revoke"}:
+        if args.operation in {"bootstrap", "rotate-bootstrap", "check", "revoke"}:
             _read_known_hosts_authority(
                 known_hosts_path,
                 expected_uid=expected_uid,
@@ -1284,8 +1572,10 @@ def main(
             expected_gid=expected_gid,
         )
         bootstrap_identity = getattr(args, "bootstrap_identity", None)
+        bootstrap_public_key: bytes | None = None
         if bootstrap_identity is not None:
             _validate_bootstrap_identity(bootstrap_identity)
+            bootstrap_public_key = _derive_bootstrap_public_key(bootstrap_identity, run)
         if args.operation == "initialize-ledger":
             ledger = _initialize_ledger(
                 store,
@@ -1333,20 +1623,33 @@ def main(
                 inventory=inventory,
                 key_fingerprint=key_fingerprint,
             )
-            if args.operation == "bootstrap":
+            if args.operation in {"bootstrap", "rotate-bootstrap"}:
+                if bootstrap_identity is None or bootstrap_public_key is None:
+                    raise TrustConfigurationError("bootstrap identity is unavailable")
                 ledger = _register_revocation_hosts(
                     store,
                     ledger=ledger,
                     hosts=inventory.active_hosts,
                 )
-                results = converge_trust(
-                    "bootstrap",
-                    hosts=inventory.active_hosts,
-                    ssh_config=ssh_config_path,
-                    public_key=public_key,
-                    run=run,
-                    bootstrap_identity=bootstrap_identity,
+                bootstrap_payload = (
+                    public_key
+                    if args.operation == "bootstrap"
+                    else _bootstrap_envelope(public_key, bootstrap_public_key)
                 )
+                with _bootstrap_ssh_config(
+                    inventory,
+                    bootstrap_identity=bootstrap_identity,
+                    parent=lock_path.parent,
+                    expected_uid=expected_uid,
+                    expected_gid=expected_gid,
+                ) as bootstrap_config:
+                    results = bootstrap_trust(
+                        args.operation,
+                        inventory=inventory,
+                        ssh_config=bootstrap_config,
+                        payload=bootstrap_payload,
+                        run=run,
+                    )
             elif args.operation == "check":
                 if not set(inventory.active_hosts).issubset(ledger.revocation_hosts):
                     raise TrustConfigurationError(
@@ -1356,7 +1659,7 @@ def main(
                     "check",
                     hosts=inventory.active_hosts,
                     ssh_config=ssh_config_path,
-                    public_key=public_key,
+                    payload=public_key,
                     run=run,
                 )
             elif args.operation == "revoke":
