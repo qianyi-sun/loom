@@ -5333,17 +5333,23 @@ Acceptance:
 - a fresh post-activation audit reproduces the same snapshot identity;
 - workers rehash materialized bundles before image or driver startup.
 
-### Service vs. local CLI — IMPORTANT
+### Native task contract classification
 
-These exercises submit trials to the deployed Loom service (control plane
-+ worker), NOT the standalone `loom run` CLI. `loom run` runs locally on
-DockerDriver and does NOT build task Dockerfiles — it silently falls back
-to `alpine` when a task ships a `dockerfile` (every TB-2 task does), so an
-oracle smoke against `loom run` fails with
-`env: can't execute 'bash': No such file or directory`. Tracked as #232.
-Service-mode trials route through
-`src/loom_worker/task_image.py:resolve_task_image`, which builds the
-upstream Dockerfile and runs the bundle in the correct image.
+Classify the current 89 packages from their preserved native schema-1.1
+`upstream-task.toml`, then confirm the normalized Loom `task.toml` retains the
+supported contract. Record at least these dimensions in the audit evidence:
+
+- `[environment].docker_image` versus `dockerfile` plus
+  `docker_build_context` and `build_timeout_sec`;
+- `[environment].architecture`/`cpu_arch` and any GPU requirement;
+- declared environment variables, network policy, DNS/hosts/tmpfs,
+  healthcheck, user, and workdir;
+- `[agent].timeout_sec`/`setup_timeout_sec` and
+  `[verifier].timeout_sec`/`env_mode`.
+
+Do not infer these classes from historical task names, old task YAML fields, or
+Docker Compose sidecar assumptions. Service-mode trials must resolve exactly
+the image/build and architecture recorded for the selected rev-6 package.
 
 Authenticate first:
 
@@ -5380,14 +5386,16 @@ Acceptance:
   `loom.models.verifier.VerifierResult` shape — `to_tb2_report()` consumes
   it to produce the canonical TB-2 `BenchmarkResults` shape.
 
-Archive the ATIFs under `docs/evidence/issue-217/` and link them in the
-closing comment on #217.
+Store new evidence in the candidate-bound #749 evidence root and link it from
+#749. Existing `docs/evidence/issue-217/**` files remain historical and are not
+rewritten; #749 acceptance does not close or re-adjudicate #217.
 
 ### Architecture and environment-sensitive tasks
 
-Select every task classified by the rev-6 audit as needing distinct
-architecture, image-build, or environment behavior. Run the full selected set;
-do not reduce it to remembered TB2.0 names.
+Select coverage from every distinct native `task.toml` image/build,
+architecture, and environment class recorded above. Run the complete selected
+class matrix; do not reduce it to remembered TB2.0 names or compose-service
+categories.
 
 ```bash
 for task in ${TB21_ENVIRONMENT_SENSITIVE_TASK_IDS:?}; do
@@ -5398,11 +5406,15 @@ done
 
 Acceptance:
 
-- Each trial logs `started sidecar <name>` for every non-`client` service.
-- No trial fails with `sandbox: service <name> not reachable`.
-- The sidecar containers terminate when the trial ends (verify via
-  `kubectl -n loom-dev get pods -l loom.role=sidecar -w` until the trial
-  finishes, then assert the list is empty).
+- resolved task image/build digest and runtime architecture match the audited
+  native package and recorded Loom image provenance;
+- environment fields supported by the normalizer are present unchanged in the
+  runnable config and effective driver inputs;
+- unsupported or incompatible architecture/image/environment contracts fail
+  before agent execution with task-level classification rather than silently
+  substituting a default image or host;
+- private `solution/`, `tests/`, `verifier/`, and `upstream-task.toml` paths
+  appear only in the fresh verifier driver.
 
 ### G6 — Provider × Terminal-Bench-2 matrix
 
@@ -5414,6 +5426,10 @@ from the clean current audit for cost discipline.
 ```bash
 # Replace --provider/--model with the staging connection name for each
 # Claude SKU; `loom providers list` shows what's configured.
+case "${TB21_PROVIDER_SMOKE_TASK_ID:?}" in
+  terminal-bench-2@tb2.1-r6/*) ;;
+  *) exit 1 ;;
+esac
 for agent_model in \
   "claude-code|anthropic|claude-opus-4-7-20260101" \
   "claude-code|anthropic|claude-sonnet-4-6-20251202" \
@@ -5423,7 +5439,7 @@ for agent_model in \
     --agent "$agent" \
     --provider "$provider" \
     --model "$model" \
-  --task "$TB21_PROVIDER_SMOKE_TASK_ID"
+    --task "$TB21_PROVIDER_SMOKE_TASK_ID"
 done
 ```
 
@@ -5438,10 +5454,10 @@ Acceptance:
 
 ### G9 — Resource-budget profiling
 
-TB-2 inherits `max_agent_timeout_sec` and `max_test_timeout_sec` from
-upstream task YAML. Some tasks reserve 30-minute agent budgets, which
-collide with the default per-trial wall-clock on the staging sandbox
-class.
+TB2.1 preserves native schema-1.1 `[agent].timeout_sec` and
+`setup_timeout_sec`, `[verifier].timeout_sec`, and environment
+`build_timeout_sec` where declared. Profile the normalized values; do not read
+legacy `max_*_timeout_sec` task YAML fields.
 
 Profile a representative slice (one short, one medium, one long task):
 
@@ -5468,8 +5484,8 @@ python -m scripts.ops.summarize_observe \
 
 Acceptance:
 
-- For each profiled task, the observed `agent_wall_seconds` and
-  `verifier_wall_seconds` are within the upstream-declared budgets.
+- For each profiled task, the observed build/setup/agent/verifier durations are
+  within the corresponding native `task.toml` budgets.
 - If any task exceeds the sandbox per-trial wall-clock, record the override
   in `deploy/environments/<env>.profile` under `[task_budget_overrides]` and
   re-run.
@@ -5482,6 +5498,9 @@ When all five exercises above produce green evidence:
   audit logs).
 - Drop the `[WIP]` prefix from the title.
 - Close the issue.
+
+This closure applies only to #749's rev-6 profile scope. Do not close #217 or
+rewrite its 86-task historical evidence as part of this acceptance pass.
 
 If any exercise blocks, keep #749 open and record the failure mode. Do not
 activate a reduced profile, substitute TB2.0, or merge incomplete evidence.

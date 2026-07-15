@@ -34,7 +34,7 @@ def test_layer1_manifest_covers_every_v1_supported_benchmark() -> None:
 
     assert [r.status for r in results] == ["pass"]
     assert results[0].check_id == "benchmark_score_alignment.layer1_manifest"
-    assert "12 benchmark score-alignment entries" in results[0].detail
+    assert "13 benchmark score-alignment entries" in results[0].detail
     assert gate.manifest_benchmark_ids(manifest) == sorted(
         gate.V1_SUPPORTED_BENCHMARK_IDS
     )
@@ -152,13 +152,28 @@ def test_manifest_gate_rejects_wrong_harbor_repo(tmp_path: Path) -> None:
 def test_terminal_bench_2_layer3_manifest_records_preliminary_nonfinal_evidence() -> None:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     tb2 = _benchmark(manifest, "terminal-bench-2")
+    physical = _benchmark(manifest, "terminal-bench-2@tb2.1-r6")
+
+    assert "89" in physical["score_semantics"]["denominator"]
+    assert physical["harbor_support"]["status"] == "supported"
 
     layer3 = tb2["layer3_evidence"]
+    canonical = tb2["canonical_reference"]
+    assert canonical["source_type"] == "harbor_hub_dataset"
+    assert "terminal-bench-2-1/6" in canonical["url"]
+    assert "89" in canonical["justification"]
+    assert "terminal-bench-2@tb2.1-r6" in canonical["justification"]
+    score = tb2["score_semantics"]
+    assert "89" in score["denominator"]
+    assert "including 0" in score["task_reward"]
+    assert "platform/verifier failure" in score["task_reward"]
     assert layer3["status"] == "preliminary_pending_terminus_2_rerun"
     assert layer3["canonical_acceptance_status"] == "pending_terminus_2_rerun"
     assert "not canonical acceptance" in layer3["acceptance_caveat"].lower()
     assert "terminus-2" in layer3["acceptance_caveat"].lower()
     assert "trajectory_flush_failed" in layer3["acceptance_caveat"]
+    assert "historical tb2.0" in layer3["acceptance_caveat"].lower()
+    assert "not rev-6 profile evidence" in layer3["acceptance_caveat"].lower()
 
     runs = layer3["runs"]
     assert len(runs) == 1

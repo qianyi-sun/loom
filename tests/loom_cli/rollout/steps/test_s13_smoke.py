@@ -42,7 +42,10 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
 
     monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-token")
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
-    monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "terminal-bench-2/hello-world")
+    monkeypatch.setenv(
+        "LOOM_SMOKE_TASK_ID",
+        "terminal-bench-2@tb2.1-r6/chess-best-move",
+    )
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s13_smoke._ingress_base",
         lambda _ctx: "https://loom.test",
@@ -61,10 +64,13 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
             )
         if url.endswith("/api/v1/benchmarks"):
             return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
-        if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
+        if url.endswith(
+            "/api/v1/tasks/terminal-bench-2%40tb2.1-r6/chess-best-move",
+        ):
             return (
                 200,
-                b'{"id":"terminal-bench-2/hello-world","benchmark_id":"terminal-bench-2"}',
+                b'{"id":"terminal-bench-2@tb2.1-r6/chess-best-move",'
+                b'"benchmark_id":"terminal-bench-2@tb2.1-r6"}',
             )
         if url.endswith("/api/v1/trials/trial-1"):
             return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
@@ -91,7 +97,7 @@ def test_smoke_posts_current_trial_config_contract_with_user_owned_token(
     assert result.exit_code == 0
     assert captured_payloads == [
         {
-            "task_id": "terminal-bench-2/hello-world",
+            "task_id": "terminal-bench-2@tb2.1-r6/chess-best-move",
             "config": {"agent_name": "oracle", "agent_model": None},
             "idempotency_key": "smoke-"
             + hashlib.sha256(
@@ -113,7 +119,7 @@ def test_smoke_resolves_user_token_from_context_secret_source(
     ctx = make_ctx(
         tmp_path,
         smoke_api_token_source=f"file:{token_file}",
-        smoke_task_id="terminal-bench-2/hello-world",
+        smoke_task_id="terminal-bench-2@tb2.1-r6/chess-best-move",
     )
     ev = EvidenceDirectory(tmp_path, "test-rid")
     ev.ensure()
@@ -136,10 +142,13 @@ def test_smoke_resolves_user_token_from_context_secret_source(
             )
         if url.endswith("/api/v1/benchmarks"):
             return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
-        if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
+        if url.endswith(
+            "/api/v1/tasks/terminal-bench-2%40tb2.1-r6/chess-best-move",
+        ):
             return (
                 200,
-                b'{"id":"terminal-bench-2/hello-world","benchmark_id":"terminal-bench-2"}',
+                b'{"id":"terminal-bench-2@tb2.1-r6/chess-best-move",'
+                b'"benchmark_id":"terminal-bench-2@tb2.1-r6"}',
             )
         if url.endswith("/api/v1/trials/trial-1"):
             return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
@@ -179,7 +188,10 @@ def test_smoke_uses_token_when_heading_platform_trajectory_download_url(
     step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
-    monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "terminal-bench-2/hello-world")
+    monkeypatch.setenv(
+        "LOOM_SMOKE_TASK_ID",
+        "terminal-bench-2@tb2.1-r6/chess-best-move",
+    )
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s13_smoke._ingress_base",
         lambda _ctx: "https://loom.test",
@@ -196,10 +208,13 @@ def test_smoke_uses_token_when_heading_platform_trajectory_download_url(
             )
         if url.endswith("/api/v1/benchmarks"):
             return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
-        if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
+        if url.endswith(
+            "/api/v1/tasks/terminal-bench-2%40tb2.1-r6/chess-best-move",
+        ):
             return (
                 200,
-                b'{"id":"terminal-bench-2/hello-world","benchmark_id":"terminal-bench-2"}',
+                b'{"id":"terminal-bench-2@tb2.1-r6/chess-best-move",'
+                b'"benchmark_id":"terminal-bench-2@tb2.1-r6"}',
             )
         if url.endswith("/api/v1/trials/trial-1"):
             return (
@@ -309,7 +324,10 @@ def test_smoke_get_probes_platform_trajectory_when_head_not_allowed(
     step_dir = ev.step_dir(15, "smoke")
 
     monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
-    monkeypatch.setenv("LOOM_SMOKE_TASK_ID", "terminal-bench-2/hello-world")
+    monkeypatch.setenv(
+        "LOOM_SMOKE_TASK_ID",
+        "terminal-bench-2@tb2.1-r6/chess-best-move",
+    )
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s13_smoke._ingress_base",
         lambda _ctx: "https://loom.test",
@@ -326,10 +344,13 @@ def test_smoke_get_probes_platform_trajectory_when_head_not_allowed(
             )
         if url.endswith("/api/v1/benchmarks"):
             return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
-        if url.endswith("/api/v1/tasks/terminal-bench-2/hello-world"):
+        if url.endswith(
+            "/api/v1/tasks/terminal-bench-2%40tb2.1-r6/chess-best-move",
+        ):
             return (
                 200,
-                b'{"id":"terminal-bench-2/hello-world","benchmark_id":"terminal-bench-2"}',
+                b'{"id":"terminal-bench-2@tb2.1-r6/chess-best-move",'
+                b'"benchmark_id":"terminal-bench-2@tb2.1-r6"}',
             )
         if url.endswith("/api/v1/trials/trial-1"):
             return (
@@ -503,6 +524,80 @@ def test_full_cluster_smoke_requires_explicit_audited_task_id(
         match=r"--smoke-task-id.*audited current profile",
     ):
         _smoke_task_id(ctx)
+
+
+def test_full_cluster_smoke_submits_explicit_tb21_task_without_gb10_pool(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "terminal-bench-2@tb2.1-r6/chess-best-move"
+    ctx = make_ctx(tmp_path, scope="full-cluster", smoke_task_id=task_id)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(15, "smoke")
+    captured_payloads: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("LOOM_SMOKE_API_TOKEN", "smoke-user-token")
+    monkeypatch.delenv("LOOM_SMOKE_TASK_ID", raising=False)
+    monkeypatch.delenv("LOOM_SMOKE_REQUIRED_WORKER_POOL", raising=False)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s13_smoke._ingress_base",
+        lambda _ctx: "https://loom.test",
+    )
+
+    def fake_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
+        assert token == "smoke-user-token"
+        if url.endswith("/api/v1/health"):
+            return 200, b'{"status":"ok"}'
+        if url.endswith("/api/v1/auth/whoami"):
+            return (
+                200,
+                b'{"credential_type":"user_owned_api_token",'
+                b'"scopes":["read:own","submit"]}',
+            )
+        if url.endswith("/api/v1/benchmarks"):
+            return 200, b'{"items":[{"id":"terminal-bench-2"}]}'
+        if url.endswith(
+            "/api/v1/tasks/terminal-bench-2%40tb2.1-r6/chess-best-move",
+        ):
+            return (
+                200,
+                b'{"id":"terminal-bench-2@tb2.1-r6/chess-best-move",'
+                b'"benchmark_id":"terminal-bench-2@tb2.1-r6"}',
+            )
+        if url.endswith("/api/v1/trials/trial-1"):
+            return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":0}'
+        if url.endswith("/api/v1/usage"):
+            return 200, b'{"items":[]}'
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_post(
+        url: str,
+        payload: dict[str, object],
+        *,
+        token: str | None = None,
+    ) -> tuple[int, bytes]:
+        assert url.endswith("/api/v1/trials")
+        assert token == "smoke-user-token"
+        captured_payloads.append(dict(payload))
+        return 201, b'{"trial_id":"trial-1"}'
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_get", fake_get)
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_post", fake_post)
+
+    result = SmokeStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert captured_payloads == [
+        {
+            "task_id": task_id,
+            "config": {"agent_name": "oracle", "agent_model": None},
+            "idempotency_key": "smoke-"
+            + hashlib.sha256(
+                f"{ctx.image_tag}|{ctx.resolved_sha}".encode(),
+            ).hexdigest()[:16],
+        }
+    ]
 
 
 def test_smoke_rejects_non_user_owned_smoke_token_before_submit(
