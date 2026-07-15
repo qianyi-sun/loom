@@ -42,6 +42,7 @@ import {
 } from "../lib/agentReadiness";
 import { Button } from "./Button";
 import { Input } from "./Input";
+import { Tabs, type TabItem } from "./Tabs";
 
 export type ModelSource = "api" | "local-server" | "hf";
 export type HFExecution = "local-vllm" | "inference-api";
@@ -258,6 +259,22 @@ export function AgentModelPicker({
     const supported = new Set(compatibilityAgent.supported_model_sources);
     return ALL_SOURCES.filter((s) => supported.has(s));
   }, [compatibilityAgent]);
+  const activeSource = availableSources.includes(value.source)
+    ? value.source
+    : availableSources[0] ?? value.source;
+  const sourceTabItems: readonly TabItem<ModelSource>[] = useMemo(
+    () => {
+      const sources =
+        availableSources.length > 0 ? availableSources : [activeSource];
+      return sources.map((source) => ({
+        value: source,
+        label: sourceLabel(source),
+        disabled,
+        title: `Use ${sourceLabel(source)} as the model source for this agent.`,
+      }));
+    },
+    [activeSource, availableSources, disabled],
+  );
 
   // When the agent switches, snap the source into the new agent's
   // supported set. Avoids the picker rendering a tab the route would
@@ -770,6 +787,25 @@ export function AgentModelPicker({
     );
   };
 
+  const selectSource = (source: ModelSource): void => {
+    onChange({
+      ...value,
+      source,
+      modelProvider: "",
+      modelName: "",
+      providerConnectionId: undefined,
+      providerConnectionName: undefined,
+      manualModel: false,
+    });
+  };
+
+  const renderSourcePanel = (source: ModelSource): JSX.Element | null => {
+    if (source === "api") return renderCatalogPanel();
+    if (source === "hf") return renderHFPanel();
+    if (source === "local-server") return renderLocalServerPanel();
+    return null;
+  };
+
   const showAgentSelector = !specificAgentToggle || value.useSpecificAgent === true;
 
   const chooseAgent = (agentName: string): void => {
@@ -893,49 +929,22 @@ export function AgentModelPicker({
 
       {!selectedAgentReady ? null : needsModel ? (
         <div className="space-y-3">
-          {availableSources.length > 1 ? (
-            <div
-              role="tablist"
-              className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5"
-            >
-              {availableSources.map((s) => {
-                const active = value.source === s;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    title={`Use ${sourceLabel(s)} as the model source for this agent.`}
-                    onClick={() =>
-                      onChange({
-                        ...value,
-                        source: s,
-                        modelProvider: "",
-                        modelName: "",
-                        providerConnectionId: undefined,
-                        providerConnectionName: undefined,
-                        manualModel: false,
-                      })
-                    }
-                    disabled={disabled}
-                    className={
-                      "rounded-md px-3 py-1 text-xs font-medium transition-colors " +
-                      (active
-                        ? "bg-white text-slate-900 shadow-sm"
-                        : "text-slate-600 hover:text-slate-900")
-                    }
-                  >
-                    {sourceLabel(s)}
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
-
-          {value.source === "api" ? renderCatalogPanel() : null}
-          {value.source === "hf" ? renderHFPanel() : null}
-          {value.source === "local-server" ? renderLocalServerPanel() : null}
+          <Tabs
+            items={sourceTabItems}
+            value={activeSource}
+            onValueChange={selectSource}
+            ariaLabel="Model source"
+            hideTabList={availableSources.length <= 1}
+            className="space-y-3"
+            tabListClassName="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5"
+            tabClassName={({ selected }) =>
+              "rounded-md px-3 py-1 text-xs font-medium transition-colors " +
+              (selected
+                ? "bg-white text-slate-900 shadow-sm"
+                : "text-slate-600 hover:text-slate-900")
+            }
+            renderPanel={renderSourcePanel}
+          />
         </div>
       ) : (
         <p className="text-xs text-slate-500">

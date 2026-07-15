@@ -23,6 +23,7 @@ import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
+import { Tabs } from "../components/Tabs";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { oracleSmokeBatchCommand } from "../lib/quickstartSnippets";
 import { currentServerOrigin } from "../lib/serverOrigin";
@@ -724,32 +725,23 @@ export default function AdminAccess(): JSX.Element {
         </Card>
       ) : null}
 
-      <div
-        role="tablist"
-        aria-label="Team access sections"
-        className="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-white p-1"
-      >
-        {visibleSections.map((item) => {
-          const selected = activeSection === item.value;
-          return (
-            <button
-              key={item.value}
-              role="tab"
-              type="button"
-              aria-selected={selected}
-              className={`rounded-md px-3 py-2 text-sm font-medium ${
-                selected
-                  ? "bg-accent text-white"
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
-              }`}
-              onClick={() => setSection(item.value)}
-            >
-              {item.label}
-            </button>
-          );
-        })}
-      </div>
-
+      <Tabs
+        items={visibleSections}
+        value={activeSection}
+        onValueChange={setSection}
+        ariaLabel="Team access sections"
+        className="space-y-6"
+        tabListClassName="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-white p-1"
+        tabClassName={({ selected }) =>
+          `rounded-md px-3 py-2 text-sm font-medium ${
+            selected
+              ? "bg-accent text-white"
+              : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+          }`
+        }
+        panelClassName="space-y-6"
+        renderPanel={() => (
+          <>
       {isAdmin && activeSection === "teams" ? (
         <Card>
           <Card.Header
@@ -1381,6 +1373,9 @@ export default function AdminAccess(): JSX.Element {
           </Card.Body>
         </Card>
       ) : null}
+          </>
+        )}
+      />
     </div>
   );
 }
