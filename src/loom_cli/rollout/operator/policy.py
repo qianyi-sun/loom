@@ -77,6 +77,9 @@ def sanitized_child_environment(
         "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
         "KUBECONFIG": str(config.kubeconfig_path),
         "LC_ALL": "C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
         "LOOM_STAGING_ROLLOUT_CONFIG": str(config.config_path),
     }
 

@@ -189,10 +189,12 @@ def test_child_environment_is_an_exact_fixed_allowlist() -> None:
         "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{SERVICE_UID}/bus",
         "KUBECONFIG": "/var/lib/loom-staging-rollout/kubeconfig",
         "LC_ALL": "C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
         "LOOM_STAGING_ROLLOUT_CONFIG": "/etc/loom/staging-rollout.toml",
     }
     assert "PYTHONPATH" not in env
-    assert "GIT_CONFIG_GLOBAL" not in env
     assert "GIT_CONFIG_COUNT" not in env
     assert "GIT_DIR" not in env
     assert "GIT_WORK_TREE" not in env

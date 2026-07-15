@@ -272,7 +272,10 @@ def test_child_environment_drops_injection_vectors():
     env = sanitized_child_environment(make_config(), service_uid=SERVICE_UID)
     assert env["PATH"] == "/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin"
     assert "PYTHONPATH" not in env
-    assert "GIT_CONFIG_GLOBAL" not in env
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" not in env
     assert "LD_PRELOAD" not in env
 ```
 

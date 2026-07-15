@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 case "${SUDO_USER-}" in
   ""|*[!a-zA-Z0-9_-]*)
@@ -24,6 +25,9 @@ exec /usr/bin/env -i \
   PATH=/opt/loom-staging-runner/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
+  GIT_CONFIG_NOSYSTEM=1 \
+  GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_TERMINAL_PROMPT=0 \
   XDG_RUNTIME_DIR="${runtime_dir}" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/bus" \
   KUBECONFIG=/var/lib/loom-staging-rollout/kubeconfig \

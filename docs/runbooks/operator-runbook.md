@@ -1628,8 +1628,10 @@ policy, files, ownership, ACLs, service state, and merged `dev` SHA already
 match. An update first disables broker admission under the shared launch lock
 and refuses while a rollout is active. A failed update keeps admission disabled
 and records an uninstall-safe recovery ledger rather than exposing a partially
-updated runner. Candidate Git runs as `loom-rollout` through a fixed clean
-environment and `0077` umask. Existing group/world write bits are removed only
+updated runner. Installer-managed and broker candidate Git commands run as
+`loom-rollout` through a fixed clean environment and `0077` umask; the broker
+also disables system/global Git configuration and terminal prompts. Existing
+group/world write bits are removed only
 inside that maintenance transaction and only after full service ownership,
 ordinary entry type, and contained-symlink validation; foreign ownership,
 special files, or escaping symlinks fail closed. Candidate readiness repeats

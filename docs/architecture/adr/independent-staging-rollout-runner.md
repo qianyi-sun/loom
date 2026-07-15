@@ -84,8 +84,11 @@ must not be added to Git's global `safe.directory` list. Because Python has
 already loaded the checkout before the in-process ownership check runs, that
 check detects accidental pre-mutation drift; it is not an adversarial bootstrap
 trust boundary. This matches the declared operational threat model in which
-the installing root/Docker operators are already root-equivalent. Service-owned
-candidate Git commands run with a fixed `0077` umask. During a
+the installing root/Docker operators are already root-equivalent. Both the
+installer-managed Git path and the installed broker establish a fixed `0077`
+umask before service-owned candidate Git commands; the broker also disables
+system/global Git configuration and terminal prompts in its exact child
+environment. During a
 maintenance/inactivity transaction, an existing candidate may have group/world
 write bits removed only after its full tree has passed service ownership,
 ordinary-file/directory type, and contained symlink validation; any other drift
