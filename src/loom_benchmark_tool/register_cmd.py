@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +47,7 @@ from loom.trajectory.storage import (
     ObjectStore,
     bundle_file_metadata_body,
     bundle_file_metadata_sha256,
+    restore_bundle_file_metadata_sidecar,
 )
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
@@ -293,6 +296,56 @@ def _bundle_checksum(bundle_dir: Path) -> str:
     return cast(str, sha256_of_dir(bundle_dir))
 
 
+def _copy_hf_snapshot_bundle_for_registration(
+    *,
+    snapshot_root: Path,
+    hf_path: str,
+    out_root: Path,
+    expected_metadata_sha256: str | None,
+    require_sidecar: bool,
+) -> Path:
+    """Copy HF cache bytes into an owned tree, then restore trusted modes.
+
+    HF snapshot entries may be symlinks into a process-shared blob cache. We
+    intentionally read each file's bytes and create a new regular file before
+    validating or chmodding, so registration cannot mutate shared cache state.
+    """
+    relative_prefix = _validate_relative_prefix(hf_path, label="hf_path")
+    source = snapshot_root / relative_prefix
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError(f"HF bundle path is missing or not a regular directory: {hf_path!r}")
+    destination = out_root / relative_prefix
+    if destination.exists():
+        raise ValueError(f"duplicate HF bundle path in manifest: {hf_path!r}")
+    try:
+        for path in sorted(source.rglob("*")):
+            rel = path.relative_to(source)
+            target = destination / rel
+            if path.is_dir():
+                if path.is_symlink():
+                    raise ValueError(f"HF bundle contains a symlink directory: {rel.as_posix()!r}")
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not path.is_file():
+                raise ValueError(f"HF bundle contains a non-file entry: {rel.as_posix()!r}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+            target.chmod(0o644)
+        sidecar = destination / BUNDLE_FILE_METADATA_NAME
+        if sidecar.exists():
+            restore_bundle_file_metadata_sidecar(
+                destination,
+                expected_sha256=expected_metadata_sha256,
+                remove=True,
+            )
+        elif require_sidecar:
+            raise ValueError("HF bundle file metadata sidecar is required")
+        return destination
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
 def _mirror_prefix(
     *,
     repo_id: str,
@@ -371,6 +424,8 @@ async def mirror_manifest_task_bundle(
         if path.is_dir():
             continue
         rel = path.relative_to(bundle_dir).as_posix()
+        if rel == BUNDLE_FILE_METADATA_NAME:
+            continue
         key = f"{target_prefix}{rel}"
         body = path.read_bytes()
         try:
@@ -609,10 +664,11 @@ async def run_register(
     mirror_bytes_uploaded = 0
     mirror_bytes_skipped = 0
     mirrored_at = datetime.now(UTC).isoformat()
+    owned_snapshot_temp: tempfile.TemporaryDirectory[str] | None = None
     if source == "hf" and mirror_to_object_store:
         if object_store is None:
             raise ValueError("mirror_to_object_store requires object_store")
-        snapshot_root = await _download_hf_bundle_snapshot(
+        downloaded_snapshot_root = await _download_hf_bundle_snapshot(
             repo_id=repo_id,
             revision=revision,
             hf_token=hf_token,
@@ -620,6 +676,29 @@ async def run_register(
             chunk_size=chunk_size,
             chunk_sleep_secs=chunk_sleep_secs,
         )
+        owned_snapshot_temp = tempfile.TemporaryDirectory(prefix="loom-hf-register-")
+        snapshot_root = Path(owned_snapshot_temp.name)
+        try:
+            for task in manifest_tasks:
+                provenance = task.get("source_provenance")
+                task_provenance = provenance if isinstance(provenance, dict) else {}
+                expected_metadata_sha256 = task_provenance.get(
+                    "bundle_file_metadata_sha256",
+                )
+                _copy_hf_snapshot_bundle_for_registration(
+                    snapshot_root=downloaded_snapshot_root,
+                    hf_path=task["hf_path"],
+                    out_root=snapshot_root,
+                    expected_metadata_sha256=(
+                        expected_metadata_sha256
+                        if isinstance(expected_metadata_sha256, str)
+                        else None
+                    ),
+                    require_sidecar=(manifest.get("benchmark_id") == _TB21_PROFILE_ID),
+                )
+        except BaseException:
+            owned_snapshot_temp.cleanup()
+            raise
 
     registered = 0
     legacy_placeholders = 0
@@ -829,6 +908,8 @@ async def run_register(
                         registered += 1
     finally:
         await engine.dispose()
+        if owned_snapshot_temp is not None:
+            owned_snapshot_temp.cleanup()
 
     return {
         "registered": registered,

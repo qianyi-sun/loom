@@ -17,6 +17,7 @@ import pytest
 from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
 from loom_benchmarks.util import sha256_of_dir
 
+from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_benchmark_tool.publish_cmd import (
     MANIFEST_SCHEMA_VERSION,
     _bundle_checksum,
@@ -155,6 +156,7 @@ async def test_run_publish_includes_valid_task_config_in_manifest(
 
     captured_manifest: dict[str, Any] = {}
     captured_bundle_checksums: dict[str, str] = {}
+    captured_sidecars: dict[str, bytes] = {}
 
     class FakeHfApi:
         def __init__(self, *, token: str) -> None:
@@ -168,7 +170,11 @@ async def test_run_publish_includes_valid_task_config_in_manifest(
             captured_manifest.update(
                 json.loads((folder / "manifest.json").read_text()),
             )
-            captured_bundle_checksums["task-001"] = sha256_of_dir(folder / "task-001")
+            bundle = folder / "task-001"
+            sidecar = bundle / BUNDLE_FILE_METADATA_NAME
+            captured_sidecars["task-001"] = sidecar.read_bytes()
+            sidecar.unlink()
+            captured_bundle_checksums["task-001"] = sha256_of_dir(bundle)
 
         def list_repo_refs(self, **_kwargs: object) -> object:
             return SimpleNamespace(
@@ -195,6 +201,7 @@ async def test_run_publish_includes_valid_task_config_in_manifest(
     assert captured_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
     task = cast(dict[str, Any], captured_manifest["tasks"][0])
     assert task["checksum"] == captured_bundle_checksums["task-001"]
+    assert captured_sidecars["task-001"]
     assert task["task_config"]["task"]["id"] == "fake-bench/task-001"
     assert task["task_config"]["environment"]["docker_image"] == "python:3.12-slim"
     assert task["tags"] == {

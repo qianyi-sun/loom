@@ -1,17 +1,167 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from loom.trajectory.storage import bundle_file_metadata_sha256
+from loom.trajectory.storage import (
+    BUNDLE_FILE_METADATA_NAME,
+    bundle_file_metadata_sha256,
+    write_bundle_file_metadata_sidecar,
+)
+from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY
 from loom_benchmark_tool.register_cmd import (
+    _copy_hf_snapshot_bundle_for_registration,
     mirror_manifest_task_bundle,
     run_register,
     task_config_from_manifest_entry,
 )
+
+
+def test_hf_snapshot_copy_restores_mode_without_mutating_symlink_blob(
+    tmp_path: Path,
+) -> None:
+    published = tmp_path / "published"
+    (published / "verifier").mkdir(parents=True)
+    (published / "task.toml").write_text("[task]\nid='x'\n")
+    published_verifier = published / "verifier" / "run.sh"
+    published_verifier.write_text("#!/bin/sh\n")
+    published_verifier.chmod(0o755)
+    expected = bundle_file_metadata_sha256(published)
+    write_bundle_file_metadata_sidecar(published)
+
+    cache = tmp_path / "cache"
+    (cache / "task" / "verifier").mkdir(parents=True)
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    task_blob = blobs / "task.toml"
+    task_blob.write_bytes((published / "task.toml").read_bytes())
+    task_blob.chmod(0o644)
+    verifier_blob = blobs / "run.sh"
+    verifier_blob.write_bytes(published_verifier.read_bytes())
+    verifier_blob.chmod(0o644)
+    sidecar_blob = blobs / "metadata.json"
+    sidecar_blob.write_bytes((published / BUNDLE_FILE_METADATA_NAME).read_bytes())
+    (cache / "task" / "task.toml").symlink_to(task_blob)
+    (cache / "task" / "verifier" / "run.sh").symlink_to(verifier_blob)
+    (cache / "task" / BUNDLE_FILE_METADATA_NAME).symlink_to(sidecar_blob)
+    owned = tmp_path / "owned"
+
+    _copy_hf_snapshot_bundle_for_registration(
+        snapshot_root=cache,
+        hf_path="task/",
+        out_root=owned,
+        expected_metadata_sha256=expected,
+        require_sidecar=True,
+    )
+
+    restored = owned / "task" / "verifier" / "run.sh"
+    assert not restored.is_symlink()
+    assert restored.stat().st_mode & 0o777 == 0o755
+    assert verifier_blob.stat().st_mode & 0o777 == 0o644
+    assert not (owned / "task" / BUNDLE_FILE_METADATA_NAME).exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "tampered", "unsafe", "path-mismatch"])
+async def test_hf_snapshot_sidecar_failures_are_rejected_before_db_or_s3_write(
+    tmp_path: Path,
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot" / "task"
+    snapshot.mkdir(parents=True)
+    (snapshot / "task.toml").write_text("[task]\nid='x'\n")
+    checksum = _bundle_checksum(snapshot)
+    expected = bundle_file_metadata_sha256(snapshot)
+    write_bundle_file_metadata_sidecar(snapshot)
+    sidecar = snapshot / BUNDLE_FILE_METADATA_NAME
+    if case == "missing":
+        sidecar.unlink()
+    elif case == "tampered":
+        sidecar.write_bytes(sidecar.read_bytes() + b"\n")
+    else:
+        raw = json.loads(sidecar.read_bytes())
+        if case == "unsafe":
+            raw["files"]["../escape"] = {"mode": "0755"}
+        else:
+            raw["files"]["missing.txt"] = {"mode": "0644"}
+        sidecar.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+        expected = "sha256:" + hashlib.sha256(sidecar.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError):
+        _copy_hf_snapshot_bundle_for_registration(
+            snapshot_root=tmp_path / "snapshot",
+            hf_path="task/",
+            out_root=tmp_path / "owned",
+            expected_metadata_sha256=expected,
+            require_sidecar=True,
+        )
+
+    assert not (tmp_path / "owned" / "task" / "task.toml").exists()
+
+    task_id = "terminal-bench-2@tb2.1-r6/task"
+    manifest = {
+        "benchmark_id": "terminal-bench-2@tb2.1-r6",
+        "display_name": "Terminal-Bench 2.1",
+        "upstream_kind": "harbor-package",
+        "upstream_locator": "terminal-bench/terminal-bench-2-1",
+        "upstream_revision": "6",
+        "license_spdx": "Apache-2.0",
+        "license_url": "https://example.test/license",
+        "splits": ["test"],
+        "benchmark_profile_provenance": {
+            "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
+        },
+        "tasks": [
+            {
+                "task_id": task_id,
+                "hf_path": "task/",
+                "checksum": checksum,
+                "task_config": _valid_task_config(task_id),
+                "source_provenance": {
+                    "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
+                    "verifier_asset": {
+                        "script_path": "/workspace/verifier/run.sh",
+                        "sha256": "sha256:" + "a" * 64,
+                        "mode": "0755",
+                    },
+                    "bundle_file_metadata_sha256": expected,
+                },
+            }
+        ],
+    }
+
+    async def fake_download(**_kwargs: object) -> Path:
+        return tmp_path / "snapshot"
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd._download_hf_bundle_snapshot",
+        fake_download,
+    )
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd.create_async_engine",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("DB engine must not be created"),
+        ),
+    )
+
+    class _NoWriteStore:
+        def __getattr__(self, _name: str):  # type: ignore[no-untyped-def]
+            raise AssertionError("object store must not be called")
+
+    with pytest.raises(ValueError):
+        await run_register(
+            benchmark="terminal-bench-2",
+            hf_org="test-org",
+            hf_token=None,
+            db_url="postgresql://unused/test",
+            manifest=manifest,
+            mirror_to_object_store=True,
+            object_store=_NoWriteStore(),  # type: ignore[arg-type]
+        )
 
 
 def _valid_task_config(task_id: str = "fake-bench/task-001") -> dict[str, object]:

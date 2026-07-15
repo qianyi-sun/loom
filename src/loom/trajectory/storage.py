@@ -89,7 +89,10 @@ def bundle_file_metadata_body(task_dir: Path) -> bytes:
     for path in sorted(task_dir.rglob("*")):
         if path.is_dir():
             continue
-        rel = _validate_bundle_relative_path(path.relative_to(task_dir).as_posix())
+        raw_rel = path.relative_to(task_dir).as_posix()
+        if raw_rel == BUNDLE_FILE_METADATA_NAME:
+            continue
+        rel = _validate_bundle_relative_path(raw_rel)
         mode = 0o755 if stat.S_IMODE(path.stat().st_mode) & 0o111 else 0o644
         files[rel] = {"mode": f"{mode:04o}"}
     return json.dumps(
@@ -102,6 +105,18 @@ def bundle_file_metadata_body(task_dir: Path) -> bytes:
 def bundle_file_metadata_sha256(task_dir: Path) -> str:
     """Digest the canonical mode manifest for immutable provenance binding."""
     return f"sha256:{sha256(bundle_file_metadata_body(task_dir)).hexdigest()}"
+
+
+def write_bundle_file_metadata_sidecar(task_dir: Path) -> Path:
+    """Write canonical transport metadata after bundle identity is computed."""
+    if not task_dir.is_dir():
+        raise ValueError("bundle file metadata requires an existing task directory")
+    sidecar = task_dir / BUNDLE_FILE_METADATA_NAME
+    if sidecar.exists() and (sidecar.is_symlink() or not sidecar.is_file()):
+        raise ValueError("bundle file metadata sidecar must be a regular file")
+    sidecar.write_bytes(bundle_file_metadata_body(task_dir))
+    sidecar.chmod(0o644)
+    return sidecar
 
 
 async def upload_bundle_file_metadata(
@@ -164,6 +179,61 @@ def _restore_bundle_file_modes(
         if dest.is_symlink() or not dest.is_file() or not dest.resolve().is_relative_to(root):
             raise ValueError(f"bundle file metadata target is not a safe regular file: {rel!r}")
         dest.chmod(mode)
+
+
+def restore_bundle_file_metadata_sidecar(
+    task_dir: Path,
+    *,
+    expected_sha256: str | None,
+    remove: bool,
+) -> str:
+    """Validate an HF/object transport sidecar and restore safe inode modes.
+
+    The raw canonical sidecar digest is the immutable provenance value.  The
+    caller must run this only in an owned directory: shared HF cache symlinks
+    must be copied by bytes before calling, so chmod cannot mutate blob cache
+    targets used by another task or process.
+    """
+    sidecar = task_dir / BUNDLE_FILE_METADATA_NAME
+    if sidecar.is_symlink() or not sidecar.is_file():
+        raise ValueError("bundle file metadata sidecar is missing or not regular")
+    body = sidecar.read_bytes()
+    observed_sha256 = f"sha256:{sha256(body).hexdigest()}"
+    if expected_sha256 is not None and observed_sha256 != expected_sha256:
+        raise ValueError(
+            "bundle file metadata raw digest mismatch "
+            f"expected={expected_sha256} actual={observed_sha256}",
+        )
+    expected_paths: set[str] = set()
+    for path in sorted(task_dir.rglob("*")):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(task_dir).as_posix()
+        if rel == BUNDLE_FILE_METADATA_NAME:
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"bundle file metadata target is not regular: {rel!r}")
+        expected_paths.add(_validate_bundle_relative_path(rel))
+    modes = _parse_bundle_file_metadata(body, expected_paths=expected_paths)
+    canonical = json.dumps(
+        {
+            "schema_version": 1,
+            "files": {
+                rel: {"mode": f"{mode:04o}"}
+                for rel, mode in sorted(modes.items())
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if body != canonical:
+        raise ValueError("bundle file metadata sidecar is not canonical")
+    _restore_bundle_file_modes(out_dir=task_dir, modes=modes)
+    if bundle_file_metadata_sha256(task_dir) != observed_sha256:
+        raise ValueError("restored bundle file metadata digest mismatch")
+    if remove:
+        sidecar.unlink()
+    return observed_sha256
 
 
 def _is_retryable_client_error(exc: ClientError) -> bool:

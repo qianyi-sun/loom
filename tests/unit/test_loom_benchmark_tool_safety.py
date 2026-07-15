@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME, FakeObjectStore
+from loom.trajectory.storage import (
+    BUNDLE_FILE_METADATA_NAME,
+    FakeObjectStore,
+    bundle_file_metadata_sha256,
+    restore_bundle_file_metadata_sidecar,
+    write_bundle_file_metadata_sidecar,
+)
 from loom_benchmark_tool.import_cmd import _validate_instance_id
 from loom_benchmark_tool.upload import upload_task_dir
 
@@ -111,6 +117,29 @@ async def test_download_rejects_unsafe_file_mode_metadata(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="unsafe file mode"):
         await store.download_prefix(bucket="b", prefix=prefix, out_dir=tmp_path / "out")
+
+
+def test_hf_sidecar_restores_modes_after_transport_loss(tmp_path: Path) -> None:
+    (tmp_path / "task.toml").write_text("[task]\nid='x'\n")
+    verifier = tmp_path / "verifier" / "run.sh"
+    verifier.parent.mkdir()
+    verifier.write_text("#!/bin/sh\n")
+    verifier.chmod(0o755)
+    expected = bundle_file_metadata_sha256(tmp_path)
+    write_bundle_file_metadata_sidecar(tmp_path)
+
+    # HF snapshots preserve bytes but not executable inode bits.
+    verifier.chmod(0o644)
+    restored = restore_bundle_file_metadata_sidecar(
+        tmp_path,
+        expected_sha256=expected,
+        remove=True,
+    )
+
+    assert restored == expected
+    assert verifier.stat().st_mode & 0o777 == 0o755
+    assert not (tmp_path / BUNDLE_FILE_METADATA_NAME).exists()
+    assert bundle_file_metadata_sha256(tmp_path) == expected
 
 
 async def test_upload_task_dir_rejects_pytorch_index_as_sole_index_for_pypi_deps(

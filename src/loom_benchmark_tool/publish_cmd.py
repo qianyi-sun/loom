@@ -33,7 +33,7 @@ from loom_benchmarks.registry import REGISTRY
 from loom_benchmarks.util import sha256_of_dir
 
 from loom.license_policy import tags_with_license_execution_policy
-from loom.trajectory.storage import ObjectStore
+from loom.trajectory.storage import ObjectStore, write_bundle_file_metadata_sidecar
 from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 from loom_benchmark_tool.import_cmd import _select_instances, _validate_instance_id
 from loom_benchmark_tool.manifest import (
@@ -212,6 +212,10 @@ def _stage_bundles(
                 ),
             }
         )
+        # Transport inode modes separately from bundle identity. HF preserves
+        # bytes but not executable bits; direct object-store publication also
+        # carries this sidecar so both materializers enforce one contract.
+        write_bundle_file_metadata_sidecar(bundle_dir)
         stats["published"] += 1
 
     manifest = {

@@ -6,7 +6,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from loom.trajectory.storage import ObjectStore, upload_bundle_file_metadata
+from loom.trajectory.storage import (
+    BUNDLE_FILE_METADATA_NAME,
+    ObjectStore,
+    upload_bundle_file_metadata,
+)
 from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 
 
@@ -40,6 +44,8 @@ async def upload_task_dir(
         if path.is_dir():
             continue
         rel = path.relative_to(task_dir).as_posix()
+        if rel == BUNDLE_FILE_METADATA_NAME:
+            continue
         await store.put_object(
             bucket=bucket,
             key=prefix + rel,
