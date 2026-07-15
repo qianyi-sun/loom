@@ -20,6 +20,7 @@ from loom.db.schema import Batch, Benchmark, ProviderConnection, Team, Trial
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.routes.benchmarks import (
+    _aliases_by_profile,
     _bench_row,
     _benchmark_rows_with_readiness,
     _visible_benchmarks_statement,
@@ -65,9 +66,7 @@ async def _team_context(
         "role": ctx.role or ("platform_admin" if is_admin(ctx) else None),
         "scopes": list(ctx.scopes),
         "is_platform_admin": is_admin(ctx),
-        "submissions_paused": (
-            team.submissions_paused_at is not None if team else False
-        ),
+        "submissions_paused": (team.submissions_paused_at is not None if team else False),
     }
 
 
@@ -79,9 +78,7 @@ def _capabilities(ctx: AuthContext) -> dict[str, bool]:
     return {
         "can_read": True,
         "can_submit": has_team and has_submitter and (admin or "submit" in scopes),
-        "can_manage_providers": (
-            has_team and (admin or "providers:manage" in scopes)
-        ),
+        "can_manage_providers": (has_team and (admin or "providers:manage" in scopes)),
         "can_manage_team": has_team and (admin or "team:manage" in scopes),
     }
 
@@ -96,12 +93,20 @@ async def _provider_health(
     session: AsyncSession,
     team_id: UUID | None,
 ) -> dict[str, Any]:
-    stmt = select(ProviderConnection).where(
-        ProviderConnection.deleted_at.is_(None),
-    ).order_by(ProviderConnection.display_name)
-    rows = list((await session.scalars(
-        _scope_statement(stmt, ProviderConnection.team_id, team_id),
-    )).all())
+    stmt = (
+        select(ProviderConnection)
+        .where(
+            ProviderConnection.deleted_at.is_(None),
+        )
+        .order_by(ProviderConnection.display_name)
+    )
+    rows = list(
+        (
+            await session.scalars(
+                _scope_statement(stmt, ProviderConnection.team_id, team_id),
+            )
+        ).all()
+    )
     ready = sum(1 for row in rows if row.status == "valid")
     needs_attention = sum(1 for row in rows if row.status == "invalid")
     untested = len(rows) - ready - needs_attention
@@ -117,8 +122,7 @@ async def _provider_health(
                 "type": row.provider_type,
                 "status": row.status,
                 "last_validated_at": (
-                    row.last_validated_at.isoformat()
-                    if row.last_validated_at else None
+                    row.last_validated_at.isoformat() if row.last_validated_at else None
                 ),
                 "last_validation_error": row.last_validation_error,
             }
@@ -128,14 +132,30 @@ async def _provider_health(
 
 
 async def _benchmark_readiness(session: AsyncSession) -> dict[str, Any]:
-    benchmarks = list((await session.scalars(
-        _visible_benchmarks_statement().order_by(Benchmark.display_name),
-    )).all())
-    rows = await _benchmark_rows_with_readiness(session, benchmarks)
-    projected = [_bench_row(bench, readiness) for bench, readiness in rows]
-    runnable = sum(
-        1 for row in projected if row["readiness_state"] == "runnable"
+    benchmarks = list(
+        (
+            await session.scalars(
+                _visible_benchmarks_statement(include_historical=False).order_by(
+                    Benchmark.display_name,
+                ),
+            )
+        ).all(),
     )
+    rows = await _benchmark_rows_with_readiness(session, benchmarks)
+    aliases_by_profile = await _aliases_by_profile(
+        session,
+        [benchmark.id for benchmark, _readiness in rows],
+    )
+    projected = [
+        _bench_row(
+            benchmark,
+            readiness,
+            aliases=aliases_by_profile.get(benchmark.id, []),
+            public_selector=aliases_by_profile.get(benchmark.id, [benchmark.id])[0],
+        )
+        for benchmark, readiness in rows
+    ]
+    runnable = sum(1 for row in projected if row["readiness_state"] == "runnable")
     blocked = [
         {
             "id": row["id"],
@@ -165,8 +185,12 @@ async def _state_counts(
     states: tuple[str, ...],
     team_id: UUID | None,
 ) -> dict[str, int]:
-    stmt = select(state_col, func.count()).select_from(model).group_by(
-        state_col,
+    stmt = (
+        select(state_col, func.count())
+        .select_from(model)
+        .group_by(
+            state_col,
+        )
     )
     stmt = _scope_statement(stmt, team_col, team_id)
     counts = {state: 0 for state in states}
@@ -193,13 +217,19 @@ async def _run_activity(
     session: AsyncSession,
     team_id: UUID | None,
 ) -> dict[str, Any]:
-    latest_stmt = select(Batch).order_by(
-        Batch.created_at.desc(),
-        Batch.id.desc(),
-    ).limit(1)
-    latest = (await session.scalars(
-        _scope_statement(latest_stmt, Batch.team_id, team_id),
-    )).first()
+    latest_stmt = (
+        select(Batch)
+        .order_by(
+            Batch.created_at.desc(),
+            Batch.id.desc(),
+        )
+        .limit(1)
+    )
+    latest = (
+        await session.scalars(
+            _scope_statement(latest_stmt, Batch.team_id, team_id),
+        )
+    ).first()
     return {
         "batches": await _state_counts(
             session,
@@ -235,51 +265,55 @@ def _next_actions(
         and benchmark_readiness["runnable"] > 0
         and worker_health["active"] > 0
     ):
-        actions.append({
-            "id": "create_batch",
-            "label": "Create a batch",
-            "to": "/batches/new",
-            "kind": "user",
-            "priority": 10,
-        })
-    if (
-        capabilities["can_manage_providers"]
-        and provider_health["total"] == 0
-    ):
-        actions.append({
-            "id": "create_provider",
-            "label": "Create provider connection",
-            "to": "/providers/new",
-            "kind": "user",
-            "priority": 20,
-        })
-    if (
-        capabilities["can_manage_providers"]
-        and provider_health["needs_attention"] > 0
-    ):
-        actions.append({
-            "id": "repair_provider",
-            "label": "Repair provider connection",
-            "to": "/providers",
-            "kind": "user",
-            "priority": 30,
-        })
+        actions.append(
+            {
+                "id": "create_batch",
+                "label": "Create a batch",
+                "to": "/batches/new",
+                "kind": "user",
+                "priority": 10,
+            }
+        )
+    if capabilities["can_manage_providers"] and provider_health["total"] == 0:
+        actions.append(
+            {
+                "id": "create_provider",
+                "label": "Create provider connection",
+                "to": "/providers/new",
+                "kind": "user",
+                "priority": 20,
+            }
+        )
+    if capabilities["can_manage_providers"] and provider_health["needs_attention"] > 0:
+        actions.append(
+            {
+                "id": "repair_provider",
+                "label": "Repair provider connection",
+                "to": "/providers",
+                "kind": "user",
+                "priority": 30,
+            }
+        )
     if benchmark_readiness["runnable"] == 0:
-        actions.append({
-            "id": "publish_benchmarks",
-            "label": "Publish benchmark tasks",
-            "to": "/benchmarks",
-            "kind": "operator",
-            "priority": 40,
-        })
+        actions.append(
+            {
+                "id": "publish_benchmarks",
+                "label": "Publish benchmark tasks",
+                "to": "/benchmarks",
+                "kind": "operator",
+                "priority": 40,
+            }
+        )
     if worker_health["active"] == 0:
-        actions.append({
-            "id": "start_worker",
-            "label": "Start at least one worker",
-            "to": "/monitor",
-            "kind": "operator",
-            "priority": 50,
-        })
+        actions.append(
+            {
+                "id": "start_worker",
+                "label": "Start at least one worker",
+                "to": "/monitor",
+                "kind": "operator",
+                "priority": 50,
+            }
+        )
     return sorted(actions, key=lambda item: item["priority"])
 
 

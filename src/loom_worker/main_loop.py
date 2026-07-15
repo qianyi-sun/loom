@@ -738,6 +738,7 @@ async def _spawn_trial(
             raw_provenance = bundle.get("source_provenance")
             provenance = raw_provenance if isinstance(raw_provenance, dict) else {}
             raw_policy = provenance.get("workspace_staging_policy")
+            workspace_staging_policy: WorkspaceStagingPolicy | None
             if task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"):
                 workspace_staging_policy = _tb21_workspace_staging_policy_from_provenance(
                     raw_policy,

@@ -341,7 +341,12 @@ def _isolated_verifier_start_options(ctx: TrialContext) -> StartOptions:
         network=ctx.sandbox_network,
         environment=tuple(sorted(ctx.task_config.environment.environment.items())),
         extra_hosts=tuple(
-            sorted({*ctx.task_config.environment.extra_hosts, *ctx.sandbox_extra_hosts}),
+            sorted(
+                {
+                    *ctx.task_config.environment.extra_hosts.items(),
+                    *ctx.sandbox_extra_hosts,
+                },
+            ),
         ),
         dns=tuple(ctx.task_config.environment.dns),
         tmpfs=tuple(ctx.task_config.environment.tmpfs),
