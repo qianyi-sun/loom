@@ -20,6 +20,7 @@ function AuditRows({ events }: { events: AdminAuditEvent[] }): JSX.Element {
             <th className="px-3 py-2 font-semibold">Actor</th>
             <th className="px-3 py-2 font-semibold">Action</th>
             <th className="px-3 py-2 font-semibold">Target</th>
+            <th className="px-3 py-2 font-semibold">Request ID</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 bg-white">
@@ -37,6 +38,9 @@ function AuditRows({ events }: { events: AdminAuditEvent[] }): JSX.Element {
               <td className="px-3 py-2 text-slate-600">
                 {event.target_type}:{event.target_id}
               </td>
+              <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-600">
+                {event.request_id ?? "—"}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -53,7 +57,10 @@ export default function AdminAuditLog(): JSX.Element {
   });
 
   return (
-    <Card>
+    <Card
+      data-loom-query="audit-events"
+      data-loom-query-status={query.status}
+    >
       <Card.Header
         title="Audit log"
         description="Admin access decisions with actor, action, and target."

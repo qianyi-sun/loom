@@ -30,7 +30,7 @@ const auditPageOne = {
       action: "audit.first",
       target_type: "team",
       target_id: "team-1",
-      request_id: null,
+      request_id: "staging-admin-browser-request",
       source_ip_hash: null,
       user_agent_hash: null,
       metadata: {},
@@ -127,6 +127,12 @@ describe("AdminAuditLog", () => {
     renderWithProviders(<AdminAuditLog />);
 
     expect(await screen.findByText("audit.first")).toBeInTheDocument();
+    expect(screen.getByText("staging-admin-browser-request")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Audit log" }).closest(
+        '[data-loom-query="audit-events"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     expect(screen.getByRole("status")).toHaveTextContent(
       "Page 1, more results available",
     );

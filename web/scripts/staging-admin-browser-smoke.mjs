@@ -844,14 +844,12 @@ async function checkAdminAccess(page, options, checks, auditIdentity, ledger) {
     timeout: options.timeoutMs,
   });
   const [
-    auditResponse,
     teamsResponse,
     registrationsResponse,
     teamRegistrationsResponse,
     invitesResponse,
     tokensResponse,
   ] = await Promise.all([
-    ledger.waitForGet(urls.audit, options.timeoutMs),
     ledger.waitForGet(urls.teams, options.timeoutMs),
     ledger.waitForGet(urls.registrations, options.timeoutMs),
     ledger.waitForGet(urls.teamRegistrations, options.timeoutMs),
@@ -932,6 +930,7 @@ async function checkAdminAccess(page, options, checks, auditIdentity, ledger) {
   checks.admin_tokens_ui_visible = true;
 
   await selectAdminTab(page, "Audit", options.timeoutMs);
+  const auditResponse = await ledger.waitForGet(urls.audit, options.timeoutMs);
   await waitForCardHeading(page, "Audit log", options.timeoutMs);
   await waitForSuccessfulQueryCard(page, "audit-events", options.timeoutMs);
   checks.admin_audit_api_200 = responseStatusIs200(auditResponse);
