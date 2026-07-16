@@ -16,17 +16,41 @@ The gate uses a frozen `npm ci` install and requires:
 2. ESLint and Vitest with coverage floors of 80% statements, lines, and
    functions and 75% branches;
 3. a successful production Vite build;
-4. Chromium against that production build under the `/dev` route prefix at
-   1440x900 and 390x844 for logged-out, user, and admin routes; and
+4. Chromium against that production build under a validated local `/dev` or
+   `/prod` route prefix at 1440x900 and 390x844 for logged-out, user, and admin
+   routes; and
 5. zero serious or critical axe violations plus fail-closed page-error,
    console, unhandled-error, same-origin network, asset status, and MIME
    ledgers.
 
-The Vite default remains the shipped relative-asset build. Only the local
-browser test command supplies `VITE_E2E_ROUTE_BASE=/dev/`; this does not create
-a runtime switch or a live endpoint. Browser API responses are deterministic,
-local-only fixtures. Deliberate anonymous `401` and expired-link `404` console
-messages are exempt only by exact message and bounded expected count.
+The Vite default remains the shipped relative-asset build. The Playwright
+server reads one validated `BrowserHarnessConfig` from `LOOM_E2E_ORIGIN` and
+`LOOM_E2E_ROUTE_PREFIX`; the origin must be credential-free local HTTP and the
+prefix must be exactly `/dev` or `/prod`. The default is
+`http://127.0.0.1:4173/dev`. `build-browser-test.mjs` supplies that prefix to
+Vite and is the only command that compiles `IS_BROWSER_TEST_BUILD` as `true`.
+Normal production builds compile the constant as `false`; URL state, runtime
+configuration, HTTP responses, and endpoints cannot change it.
+
+`ApiHarness.install` installs deterministic local-only responses and returns an
+`ApiFixture`. Scenario-neutral `ApiOverride` rules match an exact uppercase
+method and route-relative path, derive the expected status from their response,
+and default to cardinality one. They support delayed JSON, arbitrary typed text
+(including deliberately invalid JSON with an explicit content type), HTTP
+statuses, and network failure. `ApiFixture.ledger`, `expectRequest`, and fixture
+teardown enforce exact method/path/status/cardinality. Exhausted overrides and
+unknown API requests fail closed. These fixtures contain synthetic identities
+only and must never receive local or live credentials.
+
+`FailureSink.expectDiagnostic` is an exact, consumed diagnostic ledger for
+browser-generated console and expected same-origin network events. An
+unconsumed declaration fails teardown; recovery boundary errors must not be
+allowlisted. Unexpected console and page errors retain only event kind,
+route-relative location, and a bounded reference while message content is
+redacted. All same-origin browser assets fail on non-success status, with
+script and stylesheet MIME validation. `waitForReady` accepts either a stable
+locator or a caller-provided asynchronous condition, so extensions can define
+their own success marker without changing the generic harness.
 
 ## Ownership boundary
 
@@ -40,10 +64,12 @@ policy, specialized browser harnesses, and aggregate behavior.
 
 ## Recovery extension contract
 
-Recovery work may consume the production-build server, prefix router, browser
-fixtures, axe integration, and console/network/error ledgers, then add its own
-recovery scenarios and specifications. Recovery UI and error-reporting behavior
-do not belong in this foundation.
+Recovery work may consume `BrowserHarnessConfig`, `ApiHarness.install`,
+`ApiOverride`, `ApiFixture`, `RequestExpectation`, `FailureSink`,
+`DiagnosticExpectation`, `waitForReady`, the production-build server, axe
+integration, and the console/network/error guards, then add its own recovery
+scenarios and specifications. Recovery UI and error-reporting behavior do not
+belong in this foundation.
 
 Any root-render fault seam used by recovery tests must be compiled only into an
 explicit test build. A URL, runtime configuration value, live response, or

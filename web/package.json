@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:browser-test": "node scripts/build-browser-test.mjs",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --max-warnings=0",
     "typecheck": "tsc --noEmit --pretty false && tsc --noEmit --pretty false -p tsconfig.e2e.json",

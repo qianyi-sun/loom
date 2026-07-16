@@ -116,14 +116,26 @@ npx --no-install playwright install chromium
 npm run test:e2e
 ```
 
+The Playwright command defaults to the local `/dev` prefix. To exercise the
+same generic production-build harness at the production basename without
+contacting a live environment, use:
+
+```bash
+LOOM_E2E_ROUTE_PREFIX=/prod npm run test:e2e
+```
+
+`LOOM_E2E_ORIGIN` may select a different localhost port. Both inputs are
+validated and never authorize staging or production access.
+
 Vitest enforces statements, lines, and functions at 80% and branches at 75%;
 only the generated `src/api/schema.d.ts` production source is excluded. The
-Playwright gate serves the production build at `/dev`, exercises logged-out,
-user, and admin routes at 1440x900 and 390x844, reloads deep links, and rejects
-empty roots, page errors, unexpected console output, same-origin request
-failures, and script/style status or MIME mismatches. Axe must report zero
-serious or critical violations. Its API fixtures are local-only and contain no
-deployment credentials.
+Playwright gate serves the production build at `/dev` by default and supports
+the same local contract at `/prod`. It exercises logged-out, user, and admin
+routes at 1440x900 and 390x844, reloads deep links, and rejects empty roots,
+page errors, unexpected console output, same-origin request failures, failed
+browser assets, and script/style MIME mismatches. Axe must report zero serious
+or critical violations. Its exact request/response fixtures are local-only and
+contain no deployment credentials.
 
 ```bash
 uv run ruff check src tests packages migrations

@@ -16,6 +16,14 @@ const apiProxyTarget =
 
 export default defineConfig({
   plugins: [react()],
+  // Recovery tests may consume this compile-time constant, but the normal
+  // production build always substitutes false. Only build-browser-test.mjs
+  // opts the local Playwright bundle into the test-only branch.
+  define: {
+    __LOOM_BROWSER_TEST_BUILD__: JSON.stringify(
+      process.env.VITE_BROWSER_TEST_BUILD === "true",
+    ),
+  },
   // Keep the shipped relative-asset contract by default. The browser quality
   // harness supplies an explicit prefix so deep-route reloads exercise the
   // same production build without depending on a live deployment.

@@ -1,5 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
+import { readBrowserHarnessConfig } from "./scripts/browser-harness-config.mjs";
+
+const harness = readBrowserHarnessConfig();
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
@@ -9,7 +13,7 @@ export default defineConfig({
   retries: 0,
   reporter: [["line"]],
   use: {
-    baseURL: "http://127.0.0.1:4173/dev",
+    baseURL: harness.baseURL,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },
@@ -24,8 +28,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "VITE_E2E_ROUTE_BASE=/dev/ npm run build && node scripts/prefix-preview-server.mjs",
-    url: "http://127.0.0.1:4173/dev/loom-frontend-config.json",
+    command: "node scripts/build-browser-test.mjs && node scripts/prefix-preview-server.mjs",
+    url: harness.configURL,
     timeout: 120_000,
     reuseExistingServer: !process.env.CI,
   },

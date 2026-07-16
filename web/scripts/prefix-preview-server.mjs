@@ -4,9 +4,12 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
 
-const host = "127.0.0.1";
-const port = Number(process.env.PORT ?? "4173");
-const prefix = "/dev";
+import { readBrowserHarnessConfig } from "./browser-harness-config.mjs";
+
+const config = readBrowserHarnessConfig();
+const host = config.hostname;
+const port = config.port;
+const prefix = config.routePrefix;
 const dist = resolve("dist");
 
 const mimeTypes = new Map([
@@ -51,16 +54,16 @@ createServer((request, response) => {
       "Cache-Control": "no-store",
     });
     response.end(JSON.stringify({
-      environment: "local",
-      environmentLabel: "Local browser quality gate",
+      environment: config.runtimeEnvironment,
+      environmentLabel: "Local browser quality gate fixture",
       routePath: prefix,
       apiBase: prefix,
-      apiRouteBase: `http://${host}:${port}${prefix}/api`,
+      apiRouteBase: config.apiBaseURL,
     }));
     return;
   }
   const file = localFile(url.pathname);
   sendFile(response, file ?? join(dist, "index.html"));
 }).listen(port, host, () => {
-  process.stdout.write(`prefix preview listening on http://${host}:${port}${prefix}/\n`);
+  process.stdout.write(`prefix preview listening on ${config.baseURL}/\n`);
 });
