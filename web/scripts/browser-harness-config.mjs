@@ -44,3 +44,12 @@ export function readBrowserHarnessConfig(environment = process.env) {
     runtimeEnvironment: routePrefix === "/prod" ? "production" : "local",
   });
 }
+
+export function browserWebServerConfig(config) {
+  return Object.freeze({
+    command: "node scripts/build-browser-test.mjs && node scripts/prefix-preview-server.mjs",
+    url: config.configURL,
+    timeout: 120_000,
+    reuseExistingServer: false,
+  });
+}

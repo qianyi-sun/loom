@@ -1,6 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
-import { readBrowserHarnessConfig } from "./scripts/browser-harness-config.mjs";
+import {
+  browserWebServerConfig,
+  readBrowserHarnessConfig,
+} from "./scripts/browser-harness-config.mjs";
 
 const harness = readBrowserHarnessConfig();
 
@@ -27,10 +30,5 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"], viewport: { width: 390, height: 844 } },
     },
   ],
-  webServer: {
-    command: "node scripts/build-browser-test.mjs && node scripts/prefix-preview-server.mjs",
-    url: harness.configURL,
-    timeout: 120_000,
-    reuseExistingServer: !process.env.CI,
-  },
+  webServer: browserWebServerConfig(harness),
 });

@@ -32,6 +32,13 @@ Vite and is the only command that compiles `IS_BROWSER_TEST_BUILD` as `true`.
 Normal production builds compile the constant as `false`; URL state, runtime
 configuration, HTTP responses, and endpoints cannot change it.
 
+Playwright sets `reuseExistingServer: false` for local and CI execution. Every
+browser evidence run must therefore invoke `build-browser-test.mjs` and start
+its own prefix server; an occupied origin fails the run instead of accepting a
+stale server, an ordinary production bundle, or an SPA fallback at the config
+URL. This binds local recovery evidence to the browser-test bundle that carries
+the compile-time marker.
+
 `ApiHarness.install` installs deterministic local-only responses and returns an
 `ApiFixture`. Scenario-neutral `ApiOverride` rules match an exact uppercase
 method and route-relative path, derive the expected status from their response,

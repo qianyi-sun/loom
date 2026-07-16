@@ -125,7 +125,10 @@ LOOM_E2E_ROUTE_PREFIX=/prod npm run test:e2e
 ```
 
 `LOOM_E2E_ORIGIN` may select a different localhost port. Both inputs are
-validated and never authorize staging or production access.
+validated and never authorize staging or production access. The harness never
+reuses an existing server: if the selected local origin is occupied, stop that
+process or select another localhost port so Playwright can build and serve its
+own browser-test bundle.
 
 Vitest enforces statements, lines, and functions at 80% and branches at 75%;
 only the generated `src/api/schema.d.ts` production source is excluded. The

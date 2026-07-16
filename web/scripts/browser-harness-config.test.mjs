@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { readBrowserHarnessConfig } from "./browser-harness-config.mjs";
+import {
+  browserWebServerConfig,
+  readBrowserHarnessConfig,
+} from "./browser-harness-config.mjs";
 
 describe("browser harness configuration", () => {
   it.each([
@@ -30,5 +33,16 @@ describe("browser harness configuration", () => {
     ["LOOM_E2E_ROUTE_PREFIX", "/dev/"],
   ])("rejects invalid %s values", (name, value) => {
     expect(() => readBrowserHarnessConfig({ [name]: value })).toThrow();
+  });
+
+  it("never reuses an ambient server for browser evidence", () => {
+    const harness = readBrowserHarnessConfig();
+    expect(browserWebServerConfig(harness)).toEqual({
+      command:
+        "node scripts/build-browser-test.mjs && node scripts/prefix-preview-server.mjs",
+      url: harness.configURL,
+      timeout: 120_000,
+      reuseExistingServer: false,
+    });
   });
 });
