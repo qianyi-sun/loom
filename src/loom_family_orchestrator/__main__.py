@@ -1,8 +1,12 @@
 """Entry point: ``python -m loom_family_orchestrator``.
 
-Boots the long-running family-run adapter orchestrator loop. Uses the
-same ``ControlPlaneSettings`` env prefix (``LOOM_CP_*``) so the
-Deployment can share the CP's env block wholesale.
+Boots the long-running family-run adapter orchestrator loop. Uses the same
+``ControlPlaneSettings`` env prefix (``LOOM_CP_*``) so the Deployment can share
+the CP's env block wholesale.  A host-local boot must load the repo-root
+``.env`` first; in particular, ``LOOM_CP_STEP_JWT_SIGNING_KEY`` is required by
+``ControlPlaneSettings`` and must be the same source used by the local Control
+Plane and Gateway.  The checked-in ``.env.example`` value is development-only.
+Protected deployments inject the key from their secret store instead.
 """
 
 from __future__ import annotations

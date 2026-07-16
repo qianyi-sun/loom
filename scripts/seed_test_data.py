@@ -6,8 +6,9 @@ Two modes:
   card-e2e RateCard, + team/worker tokens. Existing tests rely on these rows.
 - `--mode dev` — what `loom service up` calls: team/worker tokens + every shipped
   benchmark adapter registered from HF Hub so the SPA dropdown is
-  populated and submittable out of the box. Skips the hello-world Task
-  + card-e2e RateCard.
+  populated and submittable out of the box, plus a checked-in, network-free
+  25-SLB + 3-SkillFlow family-runs smoke slate. Skips the hello-world Task
+  + card-e2e RateCard. The family-runs rows are deterministic upserts.
 
 Default register path (`hf://`): dev mode walks every adapter in
 `loom_benchmarks.REGISTRY` and runs
@@ -40,12 +41,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import secrets
 import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import create_engine, insert, select
@@ -56,6 +59,132 @@ from loom.db.schema import Benchmark, RateCard, Task, Team, TeamQuota, Token
 
 DB_URL = "postgresql+psycopg://loom:loom@localhost:55432/loom"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_FAMILY_RUN_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "tasks" / "family-runs-dev"
+_FAMILY_RUN_FIXTURE_SOURCE = "fixture://family-runs-dev/smoke"
+_SLB_DEV_BASELINES = (
+    "skilllearnbench-human-authored",
+    "skilllearnbench-b1-one-shot-claude-haiku-4-5",
+    "skilllearnbench-b2-self-feedback-claude-haiku-4-5",
+    "skilllearnbench-b3-teacher-feedback-claude-haiku-4-5",
+    "skilllearnbench-b4-skill-creator-claude-haiku-4-5",
+)
+_SLB_DEV_TASKS = tuple(f"anthropic-poster-design-{index}" for index in range(1, 6))
+_SKILLFLOW_DEV_BENCHMARK = "skillflow-iterative"
+
+
+def _family_run_fixture_config(task_id: str, display_name: str) -> dict[str, Any]:
+    fixture = _FAMILY_RUN_FIXTURE_ROOT / "smoke" / "task.toml"
+    config = tomllib.loads(fixture.read_text(encoding="utf-8"))
+    config["task"]["id"] = task_id
+    config["task"]["name"] = display_name
+    return config
+
+
+def _family_run_fixture_checksum(config: dict[str, Any]) -> str:
+    """Bind a dev Task row to both its config and checked-in fixture bytes."""
+    digest = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode(),
+    )
+    for path in sorted(p for p in _FAMILY_RUN_FIXTURE_ROOT.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(_FAMILY_RUN_FIXTURE_ROOT).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _family_run_dev_task_rows() -> list[dict[str, Any]]:
+    """Build the deterministic, network-free family-runs dev task slate.
+
+    The five canonical SLB baseline rows each receive the same five-task
+    ``anthropic-poster-design`` smoke family (25 rows total). SkillFlow
+    iterative receives three tasks in one family. Its checked-in ranking file
+    is snapshotted into ``family_run_rank`` tags so service-side sequencing
+    does not depend on a worker-only bundle filesystem.
+    """
+    rows: list[dict[str, Any]] = []
+    for benchmark_id in _SLB_DEV_BASELINES:
+        for task_name in _SLB_DEV_TASKS:
+            task_id = f"anthropic-poster-design/{benchmark_id}/{task_name}"
+            config = _family_run_fixture_config(
+                task_id,
+                f"Dev SLB smoke: {benchmark_id} / {task_name}",
+            )
+            rows.append(
+                {
+                    "id": task_id,
+                    "checksum": _family_run_fixture_checksum(config),
+                    "config": config,
+                    "source": _FAMILY_RUN_FIXTURE_SOURCE,
+                    "license": None,
+                    "benchmark_id": benchmark_id,
+                    "tags": {
+                        "family": "anthropic-poster-design",
+                        "dev_fixture": "true",
+                    },
+                }
+            )
+
+    ranking_path = _FAMILY_RUN_FIXTURE_ROOT / "ALL_TASK_DIFFICULTY_RANKING.json"
+    ranking = json.loads(ranking_path.read_text(encoding="utf-8"))
+    if not isinstance(ranking, list) or any(not isinstance(name, str) for name in ranking):
+        raise RuntimeError(f"invalid SkillFlow dev ranking fixture: {ranking_path}")
+    for rank, task_name in enumerate(ranking):
+        task_id = f"skillflow-dev-family/{task_name}"
+        config = _family_run_fixture_config(
+            task_id,
+            f"Dev SkillFlow iterative smoke: {task_name}",
+        )
+        rows.append(
+            {
+                "id": task_id,
+                "checksum": _family_run_fixture_checksum(config),
+                "config": config,
+                "source": _FAMILY_RUN_FIXTURE_SOURCE,
+                "license": None,
+                "benchmark_id": _SKILLFLOW_DEV_BENCHMARK,
+                "tags": {
+                    "family": "skillflow-dev-family",
+                    "family_run_rank": str(rank),
+                    "dev_fixture": "true",
+                },
+            }
+        )
+    return rows
+
+
+def _seed_family_run_dev_tasks(s: Session) -> int:
+    """Upsert the small local family-run slate; safe to call repeatedly."""
+    rows = _family_run_dev_task_rows()
+    expected_benchmarks = {*_SLB_DEV_BASELINES, _SKILLFLOW_DEV_BENCHMARK}
+    present = set(
+        s.execute(
+            select(Benchmark.id).where(Benchmark.id.in_(expected_benchmarks)),
+        ).scalars(),
+    )
+    missing = sorted(expected_benchmarks - present)
+    if missing:
+        raise RuntimeError(
+            "family-runs dev fixtures require shipped benchmark adapters: " + ", ".join(missing),
+        )
+
+    statement = pg_insert(Task).values(rows)
+    excluded = statement.excluded
+    s.execute(
+        statement.on_conflict_do_update(
+            index_elements=[Task.id],
+            set_={
+                "checksum": excluded.checksum,
+                "config": excluded.config,
+                "source": excluded.source,
+                "license": excluded.license,
+                "benchmark_id": excluded.benchmark_id,
+                "task_set_id": None,
+                "tags": excluded.tags,
+            },
+        )
+    )
+    return len(rows)
 
 
 def _seed_benchmarks_from_entrypoints(s: Session) -> int:
@@ -88,7 +217,7 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
             # in the SPA's "Other" bucket forever.
             if existing[1] is None and adapter_series is not None:
                 s.execute(
-                    Benchmark.__table__.update()
+                    Benchmark.__table__.update()  # type: ignore[attr-defined]
                     .where(Benchmark.id == slug)
                     .values(series=adapter_series),
                 )
@@ -243,8 +372,8 @@ def main() -> None:
         help=(
             "test (default) — system-test fixture: hello-world Task, "
             "card-e2e RateCard, service tokens. `dev` — what "
-            "`loom service up` calls: service tokens + benchmark slate, "
-            "no placeholder rows."
+            "`loom service up` calls: service tokens + benchmark slate + "
+            "deterministic family-runs fixtures."
         ),
     )
     parser.add_argument(
@@ -346,7 +475,7 @@ def main() -> None:
 
     # Test-mode task fixture is loaded ONLY when --mode test (or
     # explicit --task-id). Dev mode skips it entirely.
-    config: dict | None = None
+    config: dict[str, Any] | None = None
     checksum: str | None = None
     if args.mode == "test":
         fixture_dir = REPO_ROOT / "tests" / "fixtures" / "tasks" / args.task_id
@@ -411,6 +540,11 @@ def main() -> None:
                     f"seed: registered {inserted} benchmark adapter(s) "
                     "from loom_benchmarks entry-points\n",
                 )
+            family_run_tasks = _seed_family_run_dev_tasks(s)
+            sys.stderr.write(
+                f"seed: ensured {family_run_tasks} deterministic family-run "
+                "dev task fixture(s)\n",
+            )
 
         s.commit()
     engine.dispose()

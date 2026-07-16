@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from loom_cli.__main__ import main
-from loom_cli.service_cmd import _compose_args
+from loom_cli.service_cmd import _compose_args, _mutable_dev_images
 
 
 def _read_admin_token(secret_file: Path) -> str:
@@ -162,6 +162,40 @@ def test_compose_args_omits_env_file_when_missing(
     assert str(compose) in args
 
 
+def test_mutable_dev_image_detection_is_literal_and_local(tmp_path: Path) -> None:
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        """services:
+  service:
+    image: loom-service:dev
+  worker:
+    image: 'loom-worker:dev'
+  release:
+    image: loom-control-plane:v1.0.0
+  external:
+    image: postgres:16
+  parameterized:
+    image: loom-gateway:${LOOM_IMAGE_TAG:-dev}
+""",
+    )
+
+    assert _mutable_dev_images(compose) == (
+        "loom-service:dev",
+        "loom-worker:dev",
+    )
+
+
+def test_dev_step_jwt_has_one_local_source() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    compose_text = (repo_root / "deploy" / "docker-compose.dev.yml").read_text()
+    env_text = (repo_root / ".env.example").read_text()
+    source = "${LOOM_CP_STEP_JWT_SIGNING_KEY:-dev-only-shared-jwt-key-do-not-use-in-prod}"
+
+    assert f'LOOM_CP_STEP_JWT_SIGNING_KEY: "{source}"' in compose_text
+    assert f'LOOM_GW_STEP_JWT_SIGNING_KEY: "{source}"' in compose_text
+    assert "LOOM_CP_STEP_JWT_SIGNING_KEY=" in env_text
+
+
 def test_up_invokes_docker_compose_up(
     tmp_path: Path,
 ) -> None:
@@ -188,6 +222,91 @@ def test_up_invokes_docker_compose_up(
         first_args = mock_run.call_args_list[0].args[0]
         assert "up" in first_args and "-d" in first_args
         assert mock_wait.called
+
+
+def test_up_builds_mutable_dev_images_before_start_and_migrations(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fresh, cached, and stale ``:dev`` images share one safe contract:
+    Compose checks/builds them before any DB-facing container starts.
+    """
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        "services:\n  service:\n    image: loom-service:dev\n    build: .\n",
+    )
+    env_file = tmp_path / ".env"
+    secret = "test-step-jwt-secret-that-must-not-be-printed"
+    env_file.write_text(f"LOOM_CP_STEP_JWT_SIGNING_KEY={secret}\n")
+    events: list[str] = []
+
+    def _capture_run(argv, *_args, **_kwargs):
+        events.append("up")
+        assert argv[-3:] == ["up", "-d", "--build"]
+        return CompletedProcess(argv, 0, "", "")
+
+    def _alembic(_db_url: str) -> int:
+        events.append("alembic")
+        return 0
+
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", side_effect=_alembic),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(1, {})),
+        patch(
+            "loom_cli.service_cmd._ensure_dev_admin_secret",
+            return_value="loom_admin_" + "A" * 43,
+        ),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(env_file),
+            ]
+        )
+
+    assert rc == 1
+    assert events == ["up", "alembic"]
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_up_does_not_force_build_for_immutable_images(tmp_path: Path) -> None:
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services:\n  service:\n    image: loom-service:v1.0.0\n")
+
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run") as mock_run,
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=False),
+    ):
+        mock_run.return_value = CompletedProcess([], 0, "", "")
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(tmp_path / "absent.env"),
+            ]
+        )
+
+    assert rc == 1
+    first_args = mock_run.call_args_list[0].args[0]
+    assert first_args[-2:] == ["up", "-d"]
+    assert "--build" not in first_args
 
 
 def test_seed_test_data_parses_all_tokens(

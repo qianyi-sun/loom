@@ -19,6 +19,7 @@ from loom.family_run.sequencers import (
 class _Task:
     id: str
     source: str | None = None
+    tags: dict[str, str] | None = None
 
 
 def test_alphabetical_orders_by_task_id():
@@ -43,6 +44,31 @@ def test_ranking_file_orders_by_json_array(tmp_path: Path):
     tasks = [_Task(id=f"fam/{n}") for n in ("task-a", "task-c", "task-b", "task-d")]
     ordered = seq.sequence("fam", tasks, {"path": str(ranking)})
     assert ordered == ["fam/task-b", "fam/task-a", "fam/task-c", "fam/task-d"]
+
+
+def test_ranking_snapshot_tags_override_missing_worker_bundle_path(tmp_path: Path):
+    seq = RankingFileSequencer()
+    tasks = [
+        _Task(id="fam/task-a", tags={"dev_fixture": "true", "family_run_rank": "1"}),
+        _Task(id="fam/task-b", tags={"dev_fixture": "true", "family_run_rank": "2"}),
+        _Task(id="fam/task-c", tags={"dev_fixture": "true", "family_run_rank": "0"}),
+    ]
+
+    ordered = seq.sequence("fam", tasks, {"path": str(tmp_path / "worker-only.json")})
+
+    assert ordered == ["fam/task-c", "fam/task-a", "fam/task-b"]
+
+
+def test_partial_ranking_snapshot_tags_fall_back_without_reordering(tmp_path: Path):
+    seq = RankingFileSequencer()
+    tasks = [
+        _Task(id="fam/b", tags={"dev_fixture": "true", "family_run_rank": "0"}),
+        _Task(id="fam/a", tags={}),
+    ]
+
+    ordered = seq.sequence("fam", tasks, {"path": str(tmp_path / "missing.json")})
+
+    assert ordered == ["fam/a", "fam/b"]
 
 
 def test_ranking_file_missing_falls_back_to_alphabetical(tmp_path: Path):
