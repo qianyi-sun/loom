@@ -336,10 +336,10 @@ async def test_script_verifier_writes_audit_log_on_success():
 
 async def test_script_verifier_truncates_oversized_audit_log():
     from loom.verifier.script_verifier import (
-        MAX_VERIFIER_LOG_BYTES,
         _VERIFIER_LOG_NAME,
-        _VERIFIER_META_NAME,
         _VERIFIER_LOG_TRUNCATION_MARKER,
+        _VERIFIER_META_NAME,
+        MAX_VERIFIER_LOG_BYTES,
     )
 
     huge = b"HEAD" + (b"x" * (MAX_VERIFIER_LOG_BYTES + 5000)) + b"TAIL_MARKER"

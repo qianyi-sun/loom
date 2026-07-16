@@ -18,7 +18,7 @@ EXPECTED_SHA = "91e10457b5410f16c44364da1a34cb6de8c488a5"
 # `test_verifier_shim_contract.py` for the shape the shim must
 # preserve.
 EXPECTED_SHIM_SHA256 = (
-    "dd3cfb9881e1690023188e3033507a9c3c933c2075aa2ccf622748f78de365cd"
+    "33d6e4c386203e939bcdd385ea5cba34f626e26f19396061ca30999f9a3063db"
 )
 
 

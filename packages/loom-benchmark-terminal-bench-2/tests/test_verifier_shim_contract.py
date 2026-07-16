@@ -137,3 +137,35 @@ def test_shim_creates_output_directory_when_missing(
     )
     assert nested.exists()
     VerifierResult.model_validate(json.loads(nested.read_text()))
+
+
+def test_shim_best_effort_audit_under_loom_task_dir(
+    shim_path: Path, tmp_path: Path,
+) -> None:
+    """When LOOM_TASK_DIR is set and writable, tee capped pytest output there."""
+    test_dir = _make_test_dir(tmp_path, exit_code=0)
+    output = tmp_path / "verifier.json"
+    task_dir = tmp_path / "workspace"
+    task_dir.mkdir()
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(shim_path)],
+        env={
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "TEST_DIR": str(test_dir),
+            "LOOM_VERIFIER_OUTPUT": str(output),
+            "LOOM_TASK_DIR": str(task_dir),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    log_path = task_dir / ".loom" / "verifier" / "pytest.log"
+    meta_path = task_dir / ".loom" / "verifier" / "pytest.log.meta.json"
+    assert log_path.is_file()
+    assert meta_path.is_file()
+    meta = json.loads(meta_path.read_text())
+    assert meta["return_code"] == 0
+    assert meta["truncated"] is False
