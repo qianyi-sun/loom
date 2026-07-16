@@ -175,6 +175,19 @@ elapsed-time, path-safety, free-capacity, and immutable-publication bounds
 remain independent and fail closed. Object exhaustion has the stable public
 reason `backup_object_limit_exceeded`.
 
+The MinIO transport is broker-owned and collision-free. Before `pg_dump`, the
+broker launches a localhost-only `kubectl port-forward` with an ephemeral local
+port (`:9000`), accepts the port only from the exact child readiness record,
+and keeps that child alive through the mirror. Cleanup targets and waits for
+only that child; unrelated long-running or concurrent port-forwards, including
+anything bound to the historical port `19000`, are never reused or terminated.
+No manifest, request envelope, attempt, or rollout unit may be published unless
+the transport was ready and its bounded cleanup was confirmed. Transport
+startup/cleanup failures use the redacted public token
+`backup_transport_failed` while the immutable manifest, capacity limits,
+secret redaction, and supported incomplete-backup cleanup contracts remain
+unchanged.
+
 The measured conservative entry charge is 6,420,179, maximum mirror depth is
 18, and maximum direct fanout is 6,530. At 80% utilization (800,000 objects or
 12,800,000 entries), the platform owner must repeat the aggregate shape review

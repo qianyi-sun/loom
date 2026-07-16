@@ -616,7 +616,11 @@ class RequestEvent:
                 "backup_cleanup_started",
                 "backup_cleanup_done",
                 "backup_cleanup_failed",
-            } and reason not in {"backup_failed", "backup_object_limit_exceeded"}:
+            } and reason not in {
+                "backup_failed",
+                "backup_object_limit_exceeded",
+                "backup_transport_failed",
+            }:
                 raise ValueError("backup event reason is not an approved public token")
         if (
             self.current_step is not None
