@@ -51,6 +51,7 @@ jobs:
       cluster_smoke: ${{ steps.plan.outputs.cluster_smoke }}
       staging_smoke: ${{ steps.plan.outputs.staging_smoke }}
       coverage_summary: ${{ steps.plan.outputs.coverage_summary }}
+      web_checks: ${{ steps.plan.outputs.web_checks }}
     # Skip on push to dev: every squash-merge to dev carries the same
     # content the PR CI just validated, so re-running burns minutes
     # for no signal. Push to main still runs (release-branch safety
@@ -570,6 +571,74 @@ jobs:
       - name: go test
         run: go test -race ./cmd/...
 
+  # Required frontend gate. It builds and serves the production bundle under
+  # a route prefix, then exercises logged-out, user, and admin paths at both
+  # supported viewports with strict browser failure ledgers and axe.
+  web-checks:
+    name: web-checks
+    runs-on: ubuntu-latest
+    needs: workflow-plan
+    timeout-minutes: 20
+    if: >-
+      needs.workflow-plan.outputs.web_checks == 'true' &&
+      (needs.workflow-plan.outputs.gate_mode == 'full' ||
+       needs.workflow-plan.outputs.gate_mode == 'preflight')
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frozen frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: TypeScript strict and ESLint
+        working-directory: web
+        run: |
+          npm run typecheck
+          npm run lint
+
+      - name: Vitest coverage gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f config/component-ownership.toml && -f scripts/component_ownership.py ]]; then
+            mapfile -t owned_tests < <(
+              python3 scripts/component_ownership.py test-paths --lane frontend
+            )
+            [[ ${#owned_tests[@]} -gt 0 ]]
+            web_tests=()
+            for test_path in "${owned_tests[@]}"; do
+              [[ "$test_path" == web/* ]]
+              web_tests+=("${test_path#web/}")
+            done
+            cd web
+            npx --no-install vitest run --coverage \
+              "${web_tests[@]}" \
+              scripts/frontend-route-browser-smoke.test.mjs \
+              scripts/staging-admin-browser-smoke.test.mjs
+          else
+            cd web
+            npm run test:coverage
+          fi
+
+      - name: Production build
+        working-directory: web
+        run: npm run build
+
+      - name: Install Chromium
+        working-directory: web
+        run: npx --no-install playwright install --with-deps chromium
+
+      - name: Prefix-route browser, axe, console, and network gate
+        working-directory: web
+        run: npm run test:e2e
+
   # Fast integration tier — testcontainers Postgres + MinIO only.
   # Excludes the `@pytest.mark.docker` tests (real DockerDriver,
   # network-policy, trial-e2e, subprocess-agent, gateway-with-litellm).
@@ -805,6 +874,7 @@ jobs:
       - integration
       - integration-docker
       - coverage-summary
+      - web-checks
     steps:
       - name: Enforce selected validation results
         env:
@@ -819,6 +889,8 @@ jobs:
           DOCKER_RESULT: ${{ needs.integration-docker.result }}
           COVERAGE_SELECTED: ${{ needs.workflow-plan.outputs.coverage_summary }}
           COVERAGE_RESULT: ${{ needs.coverage-summary.result }}
+          WEB_SELECTED: ${{ needs.workflow-plan.outputs.web_checks }}
+          WEB_RESULT: ${{ needs.web-checks.result }}
         run: |
           set -euo pipefail
           case "$GATE_MODE" in
@@ -861,9 +933,11 @@ jobs:
           require_boolean integration "$INTEGRATION_SELECTED"
           require_boolean integration_docker "$DOCKER_SELECTED"
           require_boolean coverage_summary "$COVERAGE_SELECTED"
+          require_boolean web_checks "$WEB_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
           require_success fast-checks "$FAST_RESULT"
           require_success go-checks "$GO_RESULT"
+          require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
           if [[ "$GATE_MODE" == "preflight" ]]; then
             echo "Fast preflight passed; protected contexts are reserved for the queue head."
             exit 0

@@ -88,6 +88,7 @@ class ValidationPlan:
     cluster_smoke: bool
     staging_smoke: bool
     coverage_summary: bool
+    web_checks: bool
     reasons: dict[str, tuple[str, ...]]
 
     def selected_heavy_checks(self) -> set[str]:
@@ -103,6 +104,7 @@ class ValidationPlan:
                 "unowned_runtime",
                 *HEAVY_CHECKS,
                 "coverage_summary",
+                "web_checks",
             )
         }
         outputs["gate_mode"] = self.gate_mode
@@ -206,7 +208,9 @@ def plan_validations(
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
-    selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary")}
+    selected = {
+        name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")
+    }
     reasons: dict[str, list[str]] = {name: [] for name in selected}
 
     def select(name: str, reason: str) -> None:
@@ -216,6 +220,7 @@ def plan_validations(
     if event_name == "merge_group":
         for name in HEAVY_CHECKS:
             select(name, "merge_group")
+        select("web_checks", "merge_group")
 
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
@@ -336,6 +341,15 @@ def plan_validations(
         "packages/",
         "web/",
     )
+    web_quality_exact = {
+        ".github/workflows/ci.yml",
+        "config/component-ownership.toml",
+        "deploy/Dockerfile.web",
+        "deploy/nginx-spa.conf",
+        "deploy/nginx-spa-security-headers.conf",
+        "deploy/web-runtime-config.sh",
+        "scripts/component_ownership.py",
+    }
 
     for path in paths:
         if _is_documentation_path(path):
@@ -363,6 +377,9 @@ def plan_validations(
         if _matches(path, exact=staging_exact, prefixes=staging_prefixes):
             select("staging_smoke", f"path:{path}")
             matched_owner = True
+        if path.startswith("web/") or path in web_quality_exact:
+            select("web_checks", f"path:{path}")
+            matched_owner = True
         if not matched_owner:
             unowned_runtime = True
             reason = f"unowned-runtime-path:{path}"
@@ -387,6 +404,7 @@ def plan_validations(
         cluster_smoke=selected["cluster_smoke"],
         staging_smoke=selected["staging_smoke"],
         coverage_summary=selected["coverage_summary"],
+        web_checks=selected["web_checks"],
         reasons={name: tuple(values) for name, values in reasons.items()},
     )
 
