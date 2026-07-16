@@ -5899,44 +5899,64 @@ migrations (`batches.family_run_spec`, `trials.family_key`,
 submit seeder, and worker pre-start helper. The orchestrator service
 and `skill_patcher_llm` adapter ship in PR-2.
 
-### Orchestrator gateway credentials (#697)
+### Orchestrator gateway credential and BYO routing (#695)
 
 `skill_patcher_llm` (the reference LLM-driven adapter) evolves the
 shared-skill directory between trials by calling the LLM gateway.
-Because the orchestrator runs as a service account — not a real trial
-— it cannot mint a step-JWT, so it uses a team-scoped token instead.
-Provision two secrets on the target namespace (both keys live on
-`loom-secrets`):
+The Deployment uses one dedicated, teamless family-orchestrator worker
+credential, not a represented team identity. An administrator with
+`admin:tokens` issues it through Control Plane
+`POST /admin/family-orchestrator-tokens`; the returned token has only the
+internal `family:evolve` scope and must be stored as the
+`family-orchestrator-token` key in `loom-secrets`:
 
 ```
 kubectl -n <ns> patch secret loom-secrets --type=merge -p '{
   "data": {
-    "family-orchestrator-team-id": "<b64-team-UUID>",
-    "family-orchestrator-token": "<b64-loom_team_...-token>"
+    "family-orchestrator-token": "<b64-loom_fo_...-token>"
   }
 }'
 kubectl -n <ns> rollout restart deploy/loom-family-orchestrator
 ```
 
-The keys are schema-owned so `loom cluster preflight` does not report
-them as orphan secrets, but `loom cluster bootstrap-secrets` intentionally
-does not emit placeholder values for them. Leave them absent until the
-operator is ready to enable an LLM-backed family adapter, then patch the
-real team id/token as above.
+Treat the one-time token response as a credential: do not print it to logs,
+paste it into issue comments, or retain it in evidence. The key is schema-owned
+so `loom cluster preflight` does not report it as an orphan, but
+`loom cluster bootstrap-secrets` intentionally does not emit a placeholder.
+Leave it absent until the operator is ready to enable an LLM-backed family
+adapter.
 
-Both keys are marked `optional: true` on the Deployment so the
-orchestrator boots without them — it just logs
+The key is marked `optional: true` on the Deployment so the orchestrator boots
+without it — it just logs
 `family_orchestrator_gateway_unconfigured` and refuses to call
 `SkillPatcherLLMAdapter.evolve` (non-LLM adapters still advance).
 
-Reuse an existing team with `llm:call` scope (e.g. the batch-runner
-service team) or create a dedicated `family-orchestrator` team via
-`loom admin teams create --name family-orchestrator` + `loom tokens
-issue --team family-orchestrator --scopes llm:call,batches:write`.
+The `family:evolve` credential cannot call the Gateway directly. For each
+evolve operation, `OrchestratorGatewayClient` sends the real completed trial
+id, represented batch team, `step_id="family_evolver"`, and an explicit
+`provider_connection_id` value (including null) to Control Plane
+`POST /admin/step-tokens`. The Control Plane loads the trial, requires its team
+to match the represented batch team, verifies that a configured provider is
+owned by or shared with that team, and returns a short-lived `llm:call` step
+JWT. That JWT binds the trial, team, family-evolver step, and provider before
+the request reaches the Gateway.
 
 For BYO provider routing (the operator wants the evolver to call
-their own upstream, not the platform default), the adapter forwards
-`provider_connection_id` from `family_run.adapter.params` to the
-gateway (both as `loom.provider_connection_id` in the body and the
-`x-loom-provider-connection-id` header). Callers set this on the
-batch's resolved family_run spec — no cluster-side change needed.
+their own upstream, not the platform default), set only
+`family_run.adapter.params.provider_connection_id`. At batch acceptance,
+`normalize_evolver_provider_connection()` canonicalizes the UUID and validates
+the connection against the represented batch team's owner/share boundary.
+Secret-like adapter parameter keys fail closed recursively; never put an API
+key, bearer token, authorization header, credential, password, cookie, or
+secret reference in `family_run.adapter.params`.
+
+The Gateway treats the step-JWT provider claim as authoritative. If the client
+also sends `x-loom-provider-connection-id` or
+`loom.provider_connection_id`, both must match the JWT or the request is
+rejected before dispatch. If the adapter has no configured evolver provider,
+the Control Plane receives an explicit null, the JWT carries an authoritative
+null provider claim, the header and body field are omitted, and the Gateway
+uses the platform path;
+it does not inherit the completed trial's provider. Cross-team provider ids
+remain existence-hiding failures, and errors/evidence must not record or echo
+credentials or secret references.

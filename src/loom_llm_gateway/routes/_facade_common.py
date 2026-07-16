@@ -135,34 +135,13 @@ def resolve_provider_connection_id(
     row); the header is operator-supplied. When they agree, the
     request is unambiguous regardless of trust level.
     """
-    header_uuid: UUID | None = None
-    if header_value:
-        try:
-            header_uuid = UUID(header_value)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=(f"x-loom-provider-connection-id is not a valid UUID: {exc}"),
-            ) from exc
-
-    jwt_uuid = ctx.provider_connection_id
-
-    if jwt_uuid is not None and header_uuid is not None:
-        if jwt_uuid != header_uuid:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "provider_connection_id mismatch: JWT scope says "
-                    f"{jwt_uuid}, header says {header_uuid}. The JWT "
-                    "scope is authoritative — drop the header or align "
-                    "it to the JWT value."
-                ),
-            )
-        return jwt_uuid
-    if jwt_uuid is not None:
-        return jwt_uuid
-    if header_uuid is not None:
-        return header_uuid
+    resolved = resolve_optional_provider_connection_id(
+        ctx,
+        header_value=header_value,
+        body_value=None,
+    )
+    if resolved is not None:
+        return resolved
     raise HTTPException(
         status_code=400,
         detail=(
@@ -171,6 +150,85 @@ def resolve_provider_connection_id(
             "with provider_connection_id in scope (issue #72)."
         ),
     )
+
+
+def resolve_optional_provider_connection_id(
+    ctx: AuthContext,
+    *,
+    header_value: str | None,
+    body_value: str | None,
+) -> UUID | None:
+    """Resolve an optional provider connection across JWT/header/body.
+
+    The step-JWT claim is authoritative when present. Every non-empty
+    caller-controlled source must agree with it. Without a JWT claim, body and
+    header are equivalent legacy transports: either one may supply the value,
+    but sending both with different UUIDs is rejected. Returning ``None`` is
+    intentional for routes such as ``/v1/chat/completions`` whose no-connection
+    shape selects the platform-credentialed path.
+    """
+
+    header_uuid = _parse_optional_connection_id(
+        header_value,
+        source="x-loom-provider-connection-id",
+    )
+    body_uuid = _parse_optional_connection_id(
+        body_value,
+        source="loom.provider_connection_id",
+    )
+    jwt_uuid = ctx.provider_connection_id
+    jwt_bound = ctx.provider_connection_id_bound or jwt_uuid is not None
+
+    if jwt_bound:
+        mismatches = [
+            (source, value)
+            for source, value in (
+                ("header", header_uuid),
+                ("body", body_uuid),
+            )
+            if value is not None and value != jwt_uuid
+        ]
+        if mismatches:
+            source, value = mismatches[0]
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "provider_connection_id mismatch: JWT scope says "
+                    f"{jwt_uuid or 'platform'}, {source} says {value}. The JWT scope is "
+                    "authoritative — drop the conflicting value or align it "
+                    "to the JWT value."
+                ),
+            )
+        return jwt_uuid
+
+    if header_uuid is not None and body_uuid is not None:
+        if header_uuid != body_uuid:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "provider_connection_id mismatch: body says "
+                    f"{body_uuid}, header says {header_uuid}. Align the two "
+                    "values or send only one."
+                ),
+            )
+        return body_uuid
+    return body_uuid or header_uuid
+
+
+def _parse_optional_connection_id(
+    raw: str | None,
+    *,
+    source: str,
+) -> UUID | None:
+    if not raw:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{source} is not a valid UUID: {exc}",
+        ) from exc
 
 
 async def resolve_facade_connection(
@@ -395,36 +453,36 @@ async def decrypt_facade_api_key(
     store = LocalEncryptedSecretStore(session)
     try:
         return await store.get(row.encrypted_api_key_ref)
-    except InvalidRefError as exc:
+    except InvalidRefError:
         raise HTTPException(
             status_code=502,
             detail=(
                 f"provider_connection {row.id} stored api_key reference is "
-                f"malformed (kind=malformed_ref): {exc}. The administrator "
+                "malformed (kind=malformed_ref). The administrator "
                 f"must repair this connection via "
                 f"`loom providers rotate-key`."
             ),
-        ) from exc
-    except SecretNotFoundError as exc:
+        ) from None
+    except SecretNotFoundError:
         raise HTTPException(
             status_code=502,
             detail=(
                 f"provider_connection {row.id} stored api_key secret is "
-                f"missing (kind=missing_secret): {exc}. The administrator "
+                "missing (kind=missing_secret). The administrator "
                 f"must re-register the api_key via "
                 f"`loom providers rotate-key`."
             ),
-        ) from exc
-    except DecryptError as exc:
+        ) from None
+    except DecryptError:
         raise HTTPException(
             status_code=502,
             detail=(
                 f"provider_connection {row.id} stored api_key cannot be "
-                f"decrypted (kind=decrypt_failed): {exc}. Restore the "
+                "decrypted (kind=decrypt_failed). Restore the "
                 f"SecretStore master key (or its rotation fallback) and "
                 f"retry."
             ),
-        ) from exc
+        ) from None
 
 
 def redact_api_key(text: str, api_key: str, *, limit: int = 500) -> str:

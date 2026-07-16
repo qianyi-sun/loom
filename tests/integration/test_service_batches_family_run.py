@@ -35,6 +35,8 @@ from sqlalchemy.orm import sessionmaker
 from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import (
     Batch,
+    ProviderConnection,
+    ProviderConnectionShare,
     Task,
     Team,
     TeamMembership,
@@ -48,6 +50,97 @@ from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
+
+
+def _family_run_override(
+    adapter_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "family_key_extractor": {
+            "name": "instance_id_prefix",
+            "params": {"depth": 2},
+        },
+        "sequencer": {"name": "submitted_order"},
+        "advance_predicate": {"name": "always_on_terminal"},
+        "adapter": {
+            "name": "skill_patcher_llm",
+            "params": adapter_params or {},
+        },
+        "failure_policy": {"name": "skip_and_advance"},
+        "state_backend": {"name": "s3_artifacts"},
+        "mount_path": "/root/.skills",
+    }
+
+
+async def _post_family_batch(
+    app: FastAPI,
+    raw_token: str,
+    *,
+    name: str,
+    adapter_params: dict[str, Any] | None = None,
+) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        return await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "name": name,
+                "task_filter": {
+                    "task_ids": [
+                        "benchmarks/skillflow-iterative/family-a/task-1",
+                    ],
+                },
+                "trial_config": {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "family_run": _family_run_override(adapter_params),
+                },
+            },
+        )
+
+
+def _insert_provider_connection(
+    postgres_url: str,
+    owner_team_id: UUID,
+    *,
+    display_name: str,
+) -> UUID:
+    connection_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    try:
+        with sl() as s:
+            s.execute(insert(ProviderConnection).values(
+                id=connection_id,
+                team_id=owner_team_id,
+                provider_type="openai-compatible",
+                display_name=display_name,
+                base_url="https://provider.invalid/v1",
+                upstream_host="provider.invalid",
+                encrypted_api_key_ref=(
+                    f"loom://test/{owner_team_id}/{connection_id}"
+                ),
+                created_by="test",
+            ))
+            s.commit()
+    finally:
+        sync_engine.dispose()
+    return connection_id
+
+
+def _insert_team(postgres_url: str, *, name: str) -> UUID:
+    team_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    try:
+        with sl() as s:
+            s.execute(insert(Team).values(id=team_id, name=name))
+            s.commit()
+    finally:
+        sync_engine.dispose()
+    return team_id
 
 
 def _task_config(task_id: str) -> dict[str, object]:
@@ -174,6 +267,8 @@ async def camp_setup(
             # CASCADE, so deleting Batch is enough.
             s.execute(delete(Trial))
             s.execute(delete(Batch))
+            s.execute(delete(ProviderConnectionShare))
+            s.execute(delete(ProviderConnection))
             s.execute(delete(Token))
             s.execute(delete(Task))
             s.execute(delete(Worker))
@@ -347,3 +442,169 @@ async def test_post_batch_no_family_run_stays_classic(
             assert count == 0
     finally:
         sync_engine.dispose()
+
+
+async def test_family_evolver_provider_owned_by_submission_team_is_canonicalized(
+    camp_setup: tuple[FastAPI, str, UUID, _FakeStateBackend],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, fake_backend = camp_setup
+    connection_id = _insert_provider_connection(
+        postgres_url,
+        team_id,
+        display_name="family-evolver-owner",
+    )
+
+    r = await _post_family_batch(
+        app,
+        raw,
+        name="family-evolver-owner",
+        adapter_params={"provider_connection_id": str(connection_id).upper()},
+    )
+
+    assert r.status_code == 201, r.text
+    assert len(fake_backend.initialized) == 1
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.connect() as conn:
+            spec = conn.execute(
+                text("SELECT family_run_spec FROM batches WHERE id = :bid"),
+                {"bid": r.json()["batch_id"]},
+            ).scalar_one()
+    finally:
+        sync_engine.dispose()
+    assert spec["adapter"]["params"]["provider_connection_id"] == str(
+        connection_id,
+    )
+
+
+async def test_family_evolver_provider_shared_with_submission_team_is_accepted(
+    camp_setup: tuple[FastAPI, str, UUID, _FakeStateBackend],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, fake_backend = camp_setup
+    owner_team_id = _insert_team(
+        postgres_url,
+        name=f"family-provider-owner-{uuid4().hex[:8]}",
+    )
+    connection_id = _insert_provider_connection(
+        postgres_url,
+        owner_team_id,
+        display_name="family-evolver-shared",
+    )
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    try:
+        with sl() as s:
+            s.execute(insert(ProviderConnectionShare).values(
+                provider_connection_id=connection_id,
+                target_team_id=team_id,
+                created_by_actor="test",
+            ))
+            s.commit()
+    finally:
+        sync_engine.dispose()
+
+    r = await _post_family_batch(
+        app,
+        raw,
+        name="family-evolver-shared",
+        adapter_params={"provider_connection_id": str(connection_id).upper()},
+    )
+
+    assert r.status_code == 201, r.text
+    assert len(fake_backend.initialized) == 1
+
+
+@pytest.mark.parametrize("provider_connection_id", ["", "not-a-uuid"])
+async def test_family_evolver_provider_must_be_non_empty_uuid_before_state_seed(
+    camp_setup: tuple[FastAPI, str, UUID, _FakeStateBackend],
+    provider_connection_id: str,
+) -> None:
+    app, raw, _team_id, fake_backend = camp_setup
+
+    r = await _post_family_batch(
+        app,
+        raw,
+        name="family-evolver-invalid-provider",
+        adapter_params={"provider_connection_id": provider_connection_id},
+    )
+
+    assert r.status_code == 400
+    assert "provider_connection_id" in r.text
+    if provider_connection_id:
+        assert provider_connection_id not in r.text
+    assert fake_backend.initialized == []
+
+
+async def test_family_evolver_unshared_provider_is_hidden_before_state_seed(
+    camp_setup: tuple[FastAPI, str, UUID, _FakeStateBackend],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id, fake_backend = camp_setup
+    owner_team_id = _insert_team(
+        postgres_url,
+        name=f"family-provider-other-{uuid4().hex[:8]}",
+    )
+    connection_id = _insert_provider_connection(
+        postgres_url,
+        owner_team_id,
+        display_name="family-evolver-unshared",
+    )
+
+    r = await _post_family_batch(
+        app,
+        raw,
+        name="family-evolver-unshared",
+        adapter_params={"provider_connection_id": str(connection_id)},
+    )
+
+    assert r.status_code == 404
+    assert str(connection_id) not in r.text
+    assert fake_backend.initialized == []
+
+
+@pytest.mark.parametrize(
+    "adapter_params",
+    [
+        {"api_key": "DO-NOT-ECHO"},
+        {"request_options": {"authorization": "DO-NOT-ECHO"}},
+        {"authToken": "DO-NOT-ECHO"},
+    ],
+)
+async def test_family_evolver_rejects_secret_like_param_keys_without_value_echo(
+    camp_setup: tuple[FastAPI, str, UUID, _FakeStateBackend],
+    adapter_params: dict[str, Any],
+) -> None:
+    app, raw, _team_id, fake_backend = camp_setup
+
+    r = await _post_family_batch(
+        app,
+        raw,
+        name="family-evolver-secret-param",
+        adapter_params=adapter_params,
+    )
+
+    assert r.status_code == 400
+    assert "secret-like key" in r.text
+    assert "DO-NOT-ECHO" not in r.text
+    assert fake_backend.initialized == []
+
+
+async def test_family_evolver_without_provider_keeps_platform_route_compatible(
+    camp_setup: tuple[FastAPI, str, UUID, _FakeStateBackend],
+) -> None:
+    app, raw, _team_id, fake_backend = camp_setup
+
+    r = await _post_family_batch(
+        app,
+        raw,
+        name="family-evolver-no-provider",
+        adapter_params={
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 256,
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    assert len(fake_backend.initialized) == 1

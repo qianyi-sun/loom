@@ -148,17 +148,9 @@ spec:
               value: "/var/run/loom/secrets/admin/secrets.toml"
             - name: LOOM_ENV
               value: "production"
-            # #672 blocker #697: BYO gateway credentials for the
-            # skill_patcher_llm adapter. Read straight from env (not
-            # via ControlPlaneSettings) so the orchestrator falls back
-            # cleanly when the operator hasn't provisioned them —
-            # the family-run loop still advances non-LLM adapters.
-            - name: LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TEAM_ID
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: family-orchestrator-team-id
-                  optional: true
+            # Dedicated family:evolve credential. The orchestrator exchanges
+            # it at the Control Plane for a real trial/team/provider-bound
+            # step JWT; this token is never sent to the Gateway directly.
             - name: LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:
