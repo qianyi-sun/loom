@@ -80,9 +80,9 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
 
     assert result.errors == ()
     assert result.workflow_count == 8
-    # 3 fewer refs (checkout + setup-uv + upload-artifact) after #857 dropped
-    # the `deploy-development` job. Local env is deployed manually, not via CI.
-    assert result.reference_count == 58
+    # Net-zero from #857: dropped `deploy-development` (-3 refs) and added
+    # `deploy-dev` (+3 refs: checkout + setup-uv + upload-artifact).
+    assert result.reference_count == 61
     assert set(result.remote_actions) == {
         "actions/cache",
         "actions/checkout",

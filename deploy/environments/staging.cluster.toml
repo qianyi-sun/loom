@@ -4,9 +4,9 @@ ingress_host = "yylx.world"
 ingress_redirect_hosts = ["www.yylx.world"]
 ingress_tls_secret_name = "loom-staging-tls"
 frontend_environment = "staging"
-frontend_environment_label = "Development / staging"
-frontend_route_path = "/dev"
-frontend_api_base_path = "/dev"
+frontend_environment_label = "Staging"
+frontend_route_path = "/staging"
+frontend_api_base_path = "/staging"
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
 env_state_profile = "../environment-state/staging.toml"
@@ -22,9 +22,10 @@ persistent_storage_host_path_root = "/data/loom-staging"
 # behavior as today).
 trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
 
-# v1.0 staging validation uses GB10 only. The in-cluster loom-worker
-# Deployment is omitted so trial execution capacity comes from the
-# release-managed external GB10 pool.
+# Trial execution capacity comes from Slurm-managed pools (`oldlab`
+# via on-demand controller, `gb10` via persistent `[gb10_pool]` ssh
+# rollouts). The in-cluster loom-worker Deployment is omitted so
+# workers don't compete with Slurm-scheduled ones for host resources.
 [replicas]
 web = 1
 
@@ -59,12 +60,27 @@ hosts = [
   { ssh_target = "trt-gb10-15", repo_path = "/shared_work/loom/loom-worker-build-staging", env_file_path = "/shared_work/loom/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
 ]
 
-# Staging is running a single-node kind cluster on bb8-1 today (#637).
-# Pinned to single-node until the k3s multi-node cluster is
-# provisioned; flip to `multi_node = true` in the same PR that lands
-# the k3s cutover so manifests match reality.
+# Multi-node k3s (bb8-1/2/3). Distributed postgres via CNPG (3 replicas)
+# + erasure-coded MinIO (3 replicas). This mirrors the intended prod
+# topology so multi-node bugs surface in staging before prod (#857).
 [topology]
-multi_node = false
-storage_backend = "host_path"
-postgres_replicas = 1
-minio_replicas = 1
+multi_node = true
+storage_backend = "longhorn"
+postgres_replicas = 3
+minio_replicas = 3
+anti_affinity = "preferred"
+
+# Slurm on-demand dispatch to oldlab (medium scale). GB10 capacity comes
+# from the persistent `[gb10_pool]` section above (14 hosts via ssh +
+# node-agent). After deploy, set via `kubectl set env` (cluster-render
+# doesn't ingest this field yet — follow-up to #857):
+#
+#   kubectl -n loom-staging set env deploy/loom-control-plane deploy/loom-family-orchestrator \
+#     LOOM_CP_SLURM_WORKER_CONTROLLERS_JSON='[
+#       {"enabled":true,"environment":"staging","pool_name":"oldlab",
+#        "allowed_nodes":["TRT-EAI-OLDLAB-1","trt-EAI-OLDLAB-2","trt-eai-oldlab-3","trt-eai-oldlab-4","trt-eai-oldlab-5"],
+#        "env_file":"/shared_work/loom/loom-worker-capacity/staging-oldlab.env",
+#        "repo_dir":"/shared_work/loom/loom-remote-worker",
+#        "time_limit":"3-00:00:00","requested_cpus":8,"requested_memory_mib":32000,
+#        "requested_concurrency":4,"max_jobs":5,"pending_job_cap":2,
+#        "min_queued_trials":1,"stale_after_seconds":300,"command_timeout_seconds":20.0}]'

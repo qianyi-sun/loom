@@ -1468,7 +1468,8 @@ _PERSISTENT_STORAGE_BACKENDS = frozenset(
 _FRONTEND_ENVIRONMENTS = frozenset(
     {
         "local",
-        "development",
+        "dev",
+        "development",  # legacy, kept for backwards compat during #857 cutover
         "staging",
         "production",
     }
@@ -1476,7 +1477,8 @@ _FRONTEND_ENVIRONMENTS = frozenset(
 _RUNTIME_ENVIRONMENTS = frozenset(
     {
         "local",
-        "development",
+        "dev",
+        "development",  # legacy, kept for backwards compat during #857 cutover
         "staging",
         "production",
     }

@@ -743,7 +743,8 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     [
         ("production.cluster.toml", "/prod"),
         ("local.cluster.toml", "/local"),
-        ("staging.cluster.toml", "/dev"),
+        ("dev.cluster.toml", "/dev"),
+        ("staging.cluster.toml", "/staging"),
     ],
 )
 def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(

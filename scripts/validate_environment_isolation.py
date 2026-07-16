@@ -28,11 +28,20 @@ EXPECTED_ENVIRONMENTS = {
         "allowed_refs": ("refs/heads/dev",),
         "allowed_tag_prefixes": (),
     },
-    "staging": {
-        "namespace": "loom-staging",
+    "dev": {
+        "namespace": "loom-dev",
         "ingress_host": "yylx.world",
         "frontend_route": "https://yylx.world/dev",
         "frontend_api_base": "https://yylx.world/dev/api",
+        "github_environment": "dev",
+        "allowed_refs": ("refs/heads/dev",),
+        "allowed_tag_prefixes": (),
+    },
+    "staging": {
+        "namespace": "loom-staging",
+        "ingress_host": "yylx.world",
+        "frontend_route": "https://yylx.world/staging",
+        "frontend_api_base": "https://yylx.world/staging/api",
         "github_environment": "staging",
         "allowed_refs": ("refs/heads/dev",),
         "allowed_tag_prefixes": (),
@@ -238,18 +247,15 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
             errors.append(f"{field} must be distinct across environments")
 
     if set(by_env) == set(EXPECTED_ENVIRONMENTS):
+        # Post-#857: 4 envs (local, dev, staging, production) each with a
+        # distinct frontend path. Route isolation requires all 4 to be
+        # pairwise-distinct; the earlier "prod must differ from non-prod"
+        # rule is subsumed by the generic distinctness check below.
         for field in ("frontend_route", "frontend_api_base"):
-            prod_value = getattr(by_env["production"], field)
-            local_value = getattr(by_env["local"], field)
-            staging_value = getattr(by_env["staging"], field)
-            if prod_value in {local_value, staging_value}:
-                errors.append(f"production {field} must differ from non-production")
-            # Post-#857: local uses /local, staging uses /dev — no longer required
-            # to share the same surface. They MUST be distinct so route isolation
-            # holds.
-            if local_value == staging_value:
+            values = [getattr(by_env[env_name], field) for env_name in EXPECTED_ENVIRONMENTS]
+            if len(values) != len(set(values)):
                 errors.append(
-                    f"local and staging {field} must be distinct for route isolation",
+                    f"{field} must be distinct across all environments for route isolation",
                 )
 
     for profile in profiles:

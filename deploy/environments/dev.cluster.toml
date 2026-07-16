@@ -1,0 +1,62 @@
+namespace = "loom-dev"
+runtime_environment = "dev"
+ingress_host = "yylx.world"
+ingress_redirect_hosts = ["www.yylx.world"]
+ingress_tls_secret_name = "loom-dev-tls"
+frontend_environment = "dev"
+frontend_environment_label = "Development"
+frontend_route_path = "/dev"
+frontend_api_base_path = "/dev"
+trajectories_bucket = "loom-dev-trajectories"
+artifacts_bucket = "loom-dev-artifacts"
+persistent_storage_backend = "static-host-path"
+persistent_storage_host_path_root = "/data/loom-dev"
+
+# Shared team-iteration environment (3-dev team on OLDLAB). Runs on the
+# k3s cluster as `loom-dev` namespace. Trial capacity comes from the
+# same Slurm pools as staging/prod (small allocations), so dev exercises
+# the same execution path — bugs surface here before staging.
+
+[k8s_worker]
+enabled = false
+
+[workload_contract]
+workload_trust_mode = "internal_trusted"
+taskset_transforms_enabled = false
+taskset_transform_network_isolated = false
+untrusted_workload_isolation = false
+
+# Single-node topology (#857): dev iteration doesn't need distributed-
+# system fidelity every day; staging catches multi-node bugs. Saves ~3×
+# standing overhead on the shared k3s cluster.
+[topology]
+multi_node = false
+storage_backend = "host_path"
+postgres_replicas = 1
+minio_replicas = 1
+
+# pgbouncer stays enabled: 3 devs + Slurm workers = enough concurrent
+# connections that the pool pays for itself.
+[pgbouncer]
+enabled = true
+
+# Slurm on-demand dispatch (#857): after deploy, set the multi-controller
+# JSON via `kubectl set env` (cluster-render doesn't ingest this cluster.toml
+# field yet — follow-up work). Recommended values for dev:
+#
+#   kubectl -n loom-dev set env deploy/loom-control-plane deploy/loom-family-orchestrator \
+#     LOOM_CP_SLURM_WORKER_CONTROLLERS_JSON='[
+#       {"enabled":true,"environment":"dev","pool_name":"oldlab",
+#        "allowed_nodes":["TRT-EAI-OLDLAB-1","trt-EAI-OLDLAB-2","trt-eai-oldlab-3","trt-eai-oldlab-4","trt-eai-oldlab-5"],
+#        "env_file":"/shared_work/loom/loom-worker-capacity/dev-oldlab.env",
+#        "repo_dir":"/shared_work/loom/loom-remote-worker",
+#        "time_limit":"1-00:00:00","requested_cpus":4,"requested_memory_mib":16000,
+#        "requested_concurrency":2,"max_jobs":1,"pending_job_cap":1,
+#        "min_queued_trials":1,"stale_after_seconds":300,"command_timeout_seconds":20.0},
+#       {"enabled":true,"environment":"dev","pool_name":"gb10",
+#        "allowed_nodes":["trt-gb10-1"],"partition":"gb10",
+#        "env_file":"/shared_work/loom/loom-worker-capacity/dev-gb10.env",
+#        "repo_dir":"/shared_work/loom/loom-remote-worker",
+#        "time_limit":"1-00:00:00","requested_cpus":4,"requested_memory_mib":16000,
+#        "requested_concurrency":2,"max_jobs":1,"pending_job_cap":1,
+#        "min_queued_trials":1,"stale_after_seconds":300,"command_timeout_seconds":20.0}]'

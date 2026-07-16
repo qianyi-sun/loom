@@ -8,7 +8,7 @@ set -euo pipefail
 : "${LOOM_DEPLOY_TOKEN:?environment-scoped GitHub secret is required}"
 
 case "${LOOM_DEPLOY_ENVIRONMENT}" in
-  local|staging|production)
+  local|dev|staging|production)
     ;;
   development)
     # #857: `development` env renamed to `local` (self-contained kind
