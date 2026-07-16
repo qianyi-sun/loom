@@ -399,15 +399,17 @@ def _fetch_artifact_bytes(
     *,
     bucket: str,
     key: str,
+    missing_code: str = "missing_native_artifact",
+    missing_message: str = "native Harbor artifact is missing from object storage",
 ) -> bytes:
     try:
         obj = client.get_object(Bucket=bucket, Key=key)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         raise Tb2V2ExportError(
-            "missing_native_artifact",
+            missing_code,
             {
-                "message": "native Harbor artifact is missing from object storage",
+                "message": missing_message,
                 "bucket": bucket,
                 "key": key,
                 "error_code": code,
@@ -497,6 +499,157 @@ def resolve_native_artifacts(
             )
 
     return resolved
+
+
+@dataclass(frozen=True)
+class VerifierDeliveryArtifact:
+    """One workspace verifier file packed into a raw-harbor delivery bundle (#865)."""
+
+    archive_path: str
+    data: bytes
+    content_hash: str
+    size_bytes: int
+    truncated: bool | None
+    share_status: str | None
+    blocked_reason: str | None
+    step_name: str | None
+    source_key: str
+
+
+_VERIFIER_KEY_MARKER = "/.loom/verifier/"
+
+
+def resolve_verifier_artifacts(
+    trial: Trial,
+    *,
+    client: Any,
+    artifacts_bucket: str,
+) -> list[VerifierDeliveryArtifact]:
+    """Fetch indexed ``.loom/verifier/**`` artifacts for delivery packing (#865).
+
+    Fail-closed when indexed verifier artifacts are missing, unreadable,
+    hash-mismatched, share-blocked, or contain secret-like content.
+    """
+    indexed = _index_artifacts(trial)
+    candidates = [
+        item
+        for item in indexed
+        if isinstance(item.get("key"), str)
+        and _VERIFIER_KEY_MARKER in str(item["key"])
+    ]
+    if not candidates:
+        return []
+
+    fetched: list[tuple[dict[str, Any], str, bytes, str]] = []
+    bodies_for_scan: dict[str, bytes] = {}
+    for item in sorted(candidates, key=lambda row: str(row.get("key"))):
+        key = str(item["key"])
+        share_status = item.get("share_status")
+        blocked_reason = item.get("blocked_reason")
+        if share_status == "blocked":
+            raise Tb2V2ExportError(
+                "verifier_artifact_blocked",
+                {
+                    "message": (
+                        "required verifier audit artifact is blocked from sharing"
+                    ),
+                    "trial_id": str(trial.id),
+                    "key": key,
+                    "blocked_reason": blocked_reason,
+                },
+            )
+
+        rel = _verifier_archive_relpath(key)
+        if rel is None:
+            raise Tb2V2ExportError(
+                "missing_verifier_artifact",
+                {
+                    "message": "verifier artifact key is not under .loom/verifier/",
+                    "trial_id": str(trial.id),
+                    "key": key,
+                },
+            )
+        archive_path = f"verifier/{rel}"
+        data = _fetch_artifact_bytes(
+            client,
+            bucket=artifacts_bucket,
+            key=key,
+            missing_code="missing_verifier_artifact",
+            missing_message="verifier audit artifact is missing from object storage",
+        )
+        actual_hash = hashlib.sha256(data).hexdigest()
+        expected_raw = item.get("content_hash")
+        if isinstance(expected_raw, str) and expected_raw.strip():
+            expected_hash = _normalize_hash(expected_raw)
+            if actual_hash != expected_hash:
+                raise Tb2V2ExportError(
+                    "verifier_artifact_hash_mismatch",
+                    {
+                        "message": "verifier audit artifact hash does not match index",
+                        "trial_id": str(trial.id),
+                        "key": key,
+                        "expected_hash": expected_hash,
+                        "actual_hash": actual_hash,
+                    },
+                )
+        fetched.append((item, archive_path, data, actual_hash))
+        bodies_for_scan[archive_path] = data
+
+    truncation_by_stem: dict[str, bool] = {}
+    for _item, archive_path, data, _digest in fetched:
+        if not archive_path.endswith(".meta.json"):
+            continue
+        try:
+            parsed = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("truncated"), bool):
+            stem = archive_path.removeprefix("verifier/").removesuffix(".meta.json")
+            truncation_by_stem[stem] = bool(parsed["truncated"])
+
+    resolved: list[VerifierDeliveryArtifact] = []
+    for item, archive_path, data, actual_hash in fetched:
+        rel = archive_path.removeprefix("verifier/")
+        truncated: bool | None = None
+        if archive_path.endswith(".meta.json"):
+            truncated = truncation_by_stem.get(rel.removesuffix(".meta.json"))
+        else:
+            truncated = truncation_by_stem.get(rel)
+
+        size_bytes = item.get("size")
+        if not isinstance(size_bytes, int):
+            size_bytes = len(data)
+        share_status = item.get("share_status")
+        blocked_reason = item.get("blocked_reason")
+        resolved.append(
+            VerifierDeliveryArtifact(
+                archive_path=archive_path,
+                data=data,
+                content_hash=f"sha256:{actual_hash}",
+                size_bytes=size_bytes,
+                truncated=truncated,
+                share_status=str(share_status) if share_status is not None else None,
+                blocked_reason=(
+                    str(blocked_reason) if blocked_reason is not None else None
+                ),
+                step_name=str(item["step_name"]) if item.get("step_name") else None,
+                source_key=str(item["key"]),
+            )
+        )
+
+    scan_members_for_secrets(bodies_for_scan)
+    return resolved
+
+
+def _verifier_archive_relpath(key: str) -> str | None:
+    marker = _VERIFIER_KEY_MARKER
+    idx = key.find(marker)
+    if idx < 0:
+        return None
+    rel = key[idx + len(marker) :]
+    if not rel or rel.startswith("/") or ".." in rel.split("/"):
+        return None
+    return rel
 
 
 def scan_members_for_secrets(members: dict[str, bytes]) -> None:

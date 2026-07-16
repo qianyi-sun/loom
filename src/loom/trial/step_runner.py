@@ -225,6 +225,12 @@ def _artifact_patterns(ctx: TrialContext, step: StepConfig) -> list[str]:
         loom_agent = ".loom/agent/**"
         if loom_agent not in patterns:
             patterns.append(loom_agent)
+    # #865: ScriptVerifier writes auditable logs under .loom/verifier/;
+    # collect them for MinIO + delivery export on success and failure.
+    if ctx.agent.name == "terminus-2" or getattr(ctx.verifier, "name", None) == "script":
+        loom_verifier = ".loom/verifier/**"
+        if loom_verifier not in patterns:
+            patterns.append(loom_verifier)
     return patterns
 
 

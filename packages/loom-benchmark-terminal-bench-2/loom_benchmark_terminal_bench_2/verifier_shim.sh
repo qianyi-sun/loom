@@ -10,18 +10,63 @@
 #   {"rewards": {"resolved": <0.0|1.0>},
 #    "checks": [{"name": "tb2_run_tests", "passed": <bool>,
 #                "score": <0.0|1.0>, "message": "exit=<N>"}]}
+#
+# #865: also tee test output into /app/.loom/verifier/pytest.log (capped)
+# so ArtifactCollector can retain auditable logs.
 
 set -u
 
 TEST_DIR="${TEST_DIR:-/app/environment/tb2-tests}"
 export TEST_DIR
+LOG_DIR="/app/.loom/verifier"
+LOG_FILE="$LOG_DIR/pytest.log"
+MAX_LOG_BYTES="${LOOM_VERIFIER_LOG_MAX_BYTES:-1048576}"
 
 cd /app 2>/dev/null || true
+mkdir -p "$LOG_DIR"
 
 set +e
-bash "$TEST_DIR/run-tests.sh"
+bash "$TEST_DIR/run-tests.sh" >"$LOG_FILE.raw" 2>&1
 rc=$?
 set -e
+
+raw_bytes=$(wc -c <"$LOG_FILE.raw" | tr -d ' ')
+if [ "$raw_bytes" -le "$MAX_LOG_BYTES" ]; then
+  mv "$LOG_FILE.raw" "$LOG_FILE"
+  truncated=false
+  kept_bytes=$raw_bytes
+else
+  head_bytes=360000
+  marker_file="$LOG_DIR/.truncation_marker"
+  printf '\n...[truncated verifier log; preserved trailing output]...\n' >"$marker_file"
+  marker_bytes=$(wc -c <"$marker_file" | tr -d ' ')
+  tail_bytes=$((MAX_LOG_BYTES - head_bytes - marker_bytes))
+  if [ "$tail_bytes" -lt 0 ]; then
+    tail_bytes=0
+  fi
+  {
+    head -c "$head_bytes" "$LOG_FILE.raw"
+    cat "$marker_file"
+    if [ "$tail_bytes" -gt 0 ]; then
+      tail -c "$tail_bytes" "$LOG_FILE.raw"
+    fi
+  } >"$LOG_FILE"
+  rm -f "$LOG_FILE.raw" "$marker_file"
+  truncated=true
+  kept_bytes=$(wc -c <"$LOG_FILE" | tr -d ' ')
+fi
+
+cat >"$LOG_DIR/pytest.log.meta.json" <<EOF
+{
+  "schema_version": "1",
+  "truncated": $truncated,
+  "original_bytes": $raw_bytes,
+  "kept_bytes": $kept_bytes,
+  "return_code": $rc,
+  "script_path": "$TEST_DIR/run-tests.sh",
+  "log_path": ".loom/verifier/pytest.log"
+}
+EOF
 
 if [ "$rc" -eq 0 ]; then
     reward="1.0"
