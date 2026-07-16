@@ -105,10 +105,17 @@ export function Tabs<Value extends string>({
   useEffect(() => {
     const handleDocumentFocusIn = (event: globalThis.FocusEvent): void => {
       const target = event.target;
+      const tabList = tabListRef.current;
       if (
         target instanceof Node &&
-        tabListRef.current?.contains(target)
+        tabList?.contains(target)
       ) {
+        return;
+      }
+      // An earlier document-capture listener (for example Modal's focus trap)
+      // may synchronously redirect an outside focus attempt back into this
+      // tablist. Preserve the ownership established by that nested focus event.
+      if (tabList?.querySelector(":focus") !== null) {
         return;
       }
       focusTokenRef.current += 1;

@@ -8,6 +8,7 @@ import {
   type TabItem,
   type TabsProps,
 } from "../../components/Tabs";
+import { Modal } from "../../components/Modal";
 
 type Value = "alpha" | "beta" | "gamma";
 
@@ -406,6 +407,66 @@ describe("Tabs", () => {
     );
     expect(onValueChange).toHaveBeenCalledWith("alpha");
   });
+
+  it.each([
+    {
+      change: "removed",
+      nextItems: [ITEMS[1], ITEMS[2]],
+    },
+    {
+      change: "disabled",
+      nextItems: [{ ...ITEMS[0], disabled: true }, ITEMS[1], ITEMS[2]],
+    },
+  ])(
+    "keeps focus inside a modal when its trapped tab is $change",
+    async ({ nextItems }) => {
+      const onValueChange = vi.fn();
+
+      const renderView = (
+        items: readonly TabItem<Value>[],
+        open: boolean,
+      ) => (
+        <StrictMode>
+          <button type="button">Dialog opener</button>
+          <Modal open={open} onClose={() => undefined} title="Tabbed dialog">
+            <Tabs
+              items={items}
+              value="alpha"
+              onValueChange={onValueChange}
+              ariaLabel="Modal sections"
+              renderPanel={(activeValue) => <p>{activeValue} content</p>}
+            />
+          </Modal>
+        </StrictMode>
+      );
+
+      const { rerender } = render(renderView(ITEMS, false));
+      const opener = screen.getByRole("button", { name: "Dialog opener" });
+      opener.focus();
+
+      rerender(renderView(ITEMS, true));
+      const alpha = await screen.findByRole("tab", { name: "Alpha" });
+      const dialog = screen.getByRole("dialog", { name: "Tabbed dialog" });
+      expect(alpha).toHaveFocus();
+
+      const outsideDialog = screen.getByRole("button", { name: "close modal" });
+      const outsideFocus = vi.fn();
+      outsideDialog.addEventListener("focus", outsideFocus);
+      outsideDialog.focus();
+      expect(outsideFocus).toHaveBeenCalledTimes(1);
+      expect(alpha).toHaveFocus();
+
+      rerender(renderView(nextItems, true));
+
+      const beta = screen.getByRole("tab", { name: "Beta" });
+      expect(beta).toHaveFocus();
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+      expect(onValueChange).toHaveBeenCalledWith("beta");
+
+      rerender(renderView(nextItems, false));
+      expect(opener).toHaveFocus();
+    },
+  );
 
   it("keeps single-source panel content mounted when a tablist becomes useful", async () => {
     const user = userEvent.setup();
