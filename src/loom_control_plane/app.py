@@ -19,7 +19,6 @@ from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.elastic_slurm_worker_controller import (
     SubprocessSlurmCommandRunner,
     build_controller_config,
-    build_controller_configs_from_json,
     run_elastic_slurm_worker_controller_loop,
 )
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
@@ -87,37 +86,28 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
 
-        # Multi-controller path (#857): JSON list overrides the singleton
-        # fields when set. Empty JSON => fall back to the singleton (kept
-        # for backwards compat with pre-#857 deployments).
-        slurm_controller_configs = build_controller_configs_from_json(
-            settings.slurm_worker_controllers_json,
+        slurm_controller_config = build_controller_config(
+            enabled=settings.slurm_worker_controller_enabled,
+            environment=settings.slurm_worker_controller_environment,
+            pool_name=settings.slurm_worker_controller_pool_name,
+            allowed_nodes_csv=settings.slurm_worker_controller_allowed_nodes,
+            env_file=settings.slurm_worker_controller_env_file,
+            repo_dir=settings.slurm_worker_controller_repo_dir,
+            partition=settings.slurm_worker_controller_partition,
+            time_limit=settings.slurm_worker_controller_time_limit,
+            requested_cpus=settings.slurm_worker_controller_requested_cpus,
+            requested_memory_mib=settings.slurm_worker_controller_requested_memory_mib,
+            requested_concurrency=(settings.slurm_worker_controller_requested_concurrency),
+            max_jobs=settings.slurm_worker_controller_max_jobs,
+            pending_job_cap=settings.slurm_worker_controller_pending_job_cap,
+            min_queued_trials=settings.slurm_worker_controller_min_queued_trials,
+            stale_after_seconds=settings.slurm_worker_controller_stale_after_seconds,
+            sbatch_path=settings.slurm_worker_controller_sbatch_path,
+            squeue_path=settings.slurm_worker_controller_squeue_path,
+            sacct_path=settings.slurm_worker_controller_sacct_path,
+            scancel_path=settings.slurm_worker_controller_scancel_path,
+            command_timeout_seconds=(settings.slurm_worker_controller_command_timeout_seconds),
         )
-        if not slurm_controller_configs:
-            legacy_config = build_controller_config(
-                enabled=settings.slurm_worker_controller_enabled,
-                environment=settings.slurm_worker_controller_environment,
-                pool_name=settings.slurm_worker_controller_pool_name,
-                allowed_nodes_csv=settings.slurm_worker_controller_allowed_nodes,
-                env_file=settings.slurm_worker_controller_env_file,
-                repo_dir=settings.slurm_worker_controller_repo_dir,
-                partition=settings.slurm_worker_controller_partition,
-                time_limit=settings.slurm_worker_controller_time_limit,
-                requested_cpus=settings.slurm_worker_controller_requested_cpus,
-                requested_memory_mib=settings.slurm_worker_controller_requested_memory_mib,
-                requested_concurrency=(settings.slurm_worker_controller_requested_concurrency),
-                max_jobs=settings.slurm_worker_controller_max_jobs,
-                pending_job_cap=settings.slurm_worker_controller_pending_job_cap,
-                min_queued_trials=settings.slurm_worker_controller_min_queued_trials,
-                stale_after_seconds=settings.slurm_worker_controller_stale_after_seconds,
-                sbatch_path=settings.slurm_worker_controller_sbatch_path,
-                squeue_path=settings.slurm_worker_controller_squeue_path,
-                sacct_path=settings.slurm_worker_controller_sacct_path,
-                scancel_path=settings.slurm_worker_controller_scancel_path,
-                command_timeout_seconds=(settings.slurm_worker_controller_command_timeout_seconds),
-            )
-            if legacy_config is not None:
-                slurm_controller_configs = (legacy_config,)
 
         crash_detector_task = asyncio.create_task(
             run_crash_detector_loop(
@@ -165,21 +155,18 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             ),
             name="loom-cp-worker-pool-autoscaler",
         )
-        # One controller task per pool — see #857 (multi-pool on-demand
-        # dispatch). The task name embeds the pool_name so operators can
-        # `kubectl logs` and pytest can pick specific controllers by name.
-        slurm_controller_tasks: list[asyncio.Task[None]] = []
-        for config in slurm_controller_configs:
-            slurm_controller_tasks.append(
-                asyncio.create_task(
-                    run_elastic_slurm_worker_controller_loop(
-                        session_factory=session_factory,
-                        config=config,
-                        runner=SubprocessSlurmCommandRunner().bind_config(config),
-                        interval_sec=settings.worker_reclaim_sweep_interval_sec,
+        slurm_controller_task: asyncio.Task[None] | None = None
+        if slurm_controller_config is not None:
+            slurm_controller_task = asyncio.create_task(
+                run_elastic_slurm_worker_controller_loop(
+                    session_factory=session_factory,
+                    config=slurm_controller_config,
+                    runner=SubprocessSlurmCommandRunner().bind_config(
+                        slurm_controller_config,
                     ),
-                    name=f"loom-cp-elastic-slurm-worker-controller-{config.pool_name}",
+                    interval_sec=settings.worker_reclaim_sweep_interval_sec,
                 ),
+                name="loom-cp-elastic-slurm-worker-controller",
             )
         try:
             yield
@@ -188,22 +175,23 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             metrics_refresher_task.cancel()
             retry_exhausted_task.cancel()
             worker_pool_autoscaler_task.cancel()
-            for controller_task in slurm_controller_tasks:
-                controller_task.cancel()
+            if slurm_controller_task is not None:
+                slurm_controller_task.cancel()
             # Bound the await so a stuck task (e.g. mid-DB call when
             # cancellation arrives, asyncpg connection takes a moment
             # to release) doesn't block the entire lifespan shutdown —
             # which then blocks `TestClient.__exit__`, which then
             # blocks the test. Five seconds is generous for a task
             # that should respond to cancel in microseconds.
-            shutdown_tasks: list[asyncio.Task[None]] = [
+            for t in (
                 crash_detector_task,
                 metrics_refresher_task,
                 retry_exhausted_task,
                 worker_pool_autoscaler_task,
-            ]
-            shutdown_tasks.extend(slurm_controller_tasks)
-            for t in shutdown_tasks:
+                slurm_controller_task,
+            ):
+                if t is None:
+                    continue
                 with contextlib.suppress(
                     asyncio.CancelledError,
                     asyncio.TimeoutError,

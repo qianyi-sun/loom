@@ -62,7 +62,6 @@ class ControlPlaneSettings(BaseSettings):
     slurm_worker_controller_squeue_path: str = "squeue"
     slurm_worker_controller_stale_after_seconds: int = 300
     slurm_worker_controller_time_limit: str = "7-00:00:00"
-    slurm_worker_controllers_json: str = ""
     stale_running_trial_grace_sec: float = 900.0
     stale_running_trial_reclaim_enabled: bool = True
     stale_running_trial_silence_sec: float = 900.0
