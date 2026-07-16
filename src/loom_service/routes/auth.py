@@ -989,6 +989,7 @@ async def create_staging_admin_browser_session(
         current_team_id=admin_team.id,
         session_ttl_seconds=_STAGING_ADMIN_BROWSER_SESSION_TTL_SEC,
         session_secret_prefix=STAGING_ADMIN_SESSION_SECRET_PREFIX,
+        update_last_login_at=False,
     )
     await session.flush()
     await write_admin_audit_event(

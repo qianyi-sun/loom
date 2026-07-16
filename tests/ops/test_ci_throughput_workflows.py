@@ -302,7 +302,7 @@ def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     assert any(step.get("name") == "Log in to GHCR" for step in publish["steps"])
 
 
-def test_service_image_build_and_publish_bake_exact_full_head_sha() -> None:
+def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     expected_steps = {
         "build": "Build without registry or cache write authority",
@@ -317,14 +317,17 @@ def test_service_image_build_and_publish_bake_exact_full_head_sha() -> None:
         )
         script = step["run"]
         assert step["env"]["HEAD_SHA"] == "${{ github.sha }}"
-        assert 'if [[ "$IMAGE_NAME" == "service" ]]; then' in script
+        assert step["env"]["BUILD_CONTEXT"] == "${{ matrix.context }}"
         assert (
-            'build_args+=(--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}")'
+            '--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"'
             in script
         )
+        assert 'build_args+=("$BUILD_CONTEXT")' in script
         assert script.index("LOOM_BUILD_SHA=${HEAD_SHA}") < script.index(
-            "build_args+=(.)"
+            'build_args+=("$BUILD_CONTEXT")'
         )
+        assert 'if [[ "$IMAGE_NAME" == "service" ]]' not in script
+        assert "build_args+=(.)" not in script
 
 
 def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
@@ -1132,6 +1135,12 @@ def test_staging_admin_browser_smoke_is_bounded_and_uploads_only_safe_json() -> 
     assert "name: auditIdentity.requestId" in smoke
     assert "name: `user:${auditIdentity.targetUserId}`" in smoke
     assert smoke.count("exact: true") >= 6
+    assert "verifyAdminTabsAccessibility" in smoke
+    for keyboard_key in ("ArrowRight", "ArrowLeft", "Home", "End"):
+        assert f'"{keyboard_key}"' in smoke
+    assert 'getAttribute("aria-controls")' in smoke
+    assert 'getAttribute("role") === "tabpanel"' in smoke
+    assert 'getAttribute("aria-labelledby") === tab.id' in smoke
     assert "checks.all_admin_tabs_operable =" in smoke
     assert "screenshot(" not in smoke
     assert "storageState" not in smoke

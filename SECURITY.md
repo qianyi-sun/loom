@@ -67,9 +67,9 @@ For public repository operation:
   distinct Secure HttpOnly SameSite=Lax cookie for at most 900 seconds, cannot
   refresh, and is invalid outside staging. The cookie may only read product
   state or call the exact logout endpoint; every other unsafe method fails
-  closed before route handling. The exchange also returns and audits the
-  immutable service build SHA. It is not a production or normal user login
-  mechanism.
+  closed before route handling. The exchange does not update the target's normal
+  login timestamp and also returns and audits the immutable service build SHA.
+  It is not a production or normal user login mechanism.
 - Invite onboarding uses one-time revealed `loom_invite_...` links. The
   database stores only invite hashes and safe prefixes; invite list, lookup,
   logs, and audit metadata must never include raw invite codes. Accepting an

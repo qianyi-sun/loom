@@ -473,6 +473,7 @@ function initialChecks() {
     audit_event_correlated: false,
     admin_access_document_2xx: false,
     authenticated_react_mount: false,
+    admin_tabs_accessibility: false,
     admin_requests_apis_200: false,
     admin_requests_ui_visible: false,
     admin_accounts_apis_200: false,
@@ -708,6 +709,98 @@ async function selectAdminTab(page, name, timeoutMs) {
   }
 }
 
+async function waitForAdminTabState(page, name, timeoutMs) {
+  try {
+    await page.waitForFunction(
+      ({ expectedName }) => {
+        const tabList = document.querySelector(
+          '[role="tablist"][aria-label="Team access sections"]',
+        );
+        const tab = Array.from(
+          tabList?.querySelectorAll('[role="tab"]') ?? [],
+        ).find((candidate) => candidate.textContent?.trim() === expectedName);
+        if (!(tab instanceof HTMLElement)) return false;
+        const panelId = tab.getAttribute("aria-controls");
+        const panel =
+          panelId === null ? null : document.getElementById(panelId);
+        return (
+          document.activeElement === tab &&
+          tab.getAttribute("aria-selected") === "true" &&
+          tab.tabIndex === 0 &&
+          panel?.getAttribute("role") === "tabpanel" &&
+          panel.getAttribute("aria-labelledby") === tab.id &&
+          panel.hidden === false
+        );
+      },
+      { expectedName: name },
+      { timeout: timeoutMs },
+    );
+  } catch {
+    throw new SafeSmokeError(
+      "admin_tabs_accessibility_failed",
+      "Admin Access tabs did not preserve focus, selection, and panel semantics",
+    );
+  }
+}
+
+export async function verifyAdminTabsAccessibility(page, timeoutMs) {
+  const tabList = page.getByRole("tablist", {
+    name: "Team access sections",
+    exact: true,
+  });
+  await tabList.waitFor({ state: "visible", timeout: timeoutMs });
+  const snapshot = await tabList.evaluate((element) => {
+    const tabs = Array.from(element.querySelectorAll('[role="tab"]'));
+    const relationshipsValid = tabs.every((tab) => {
+      if (!(tab instanceof HTMLElement) || tab.id.length === 0) return false;
+      const panelId = tab.getAttribute("aria-controls");
+      const panel = panelId === null ? null : document.getElementById(panelId);
+      return (
+        panel?.getAttribute("role") === "tabpanel" &&
+        panel.getAttribute("aria-labelledby") === tab.id
+      );
+    });
+    return {
+      names: tabs.map((tab) => tab.textContent?.trim() ?? ""),
+      orientation: element.getAttribute("aria-orientation"),
+      relationshipsValid,
+      selectedCount: tabs.filter(
+        (tab) => tab.getAttribute("aria-selected") === "true",
+      ).length,
+      rovingTabStopCount: tabs.filter(
+        (tab) => tab instanceof HTMLElement && tab.tabIndex === 0,
+      ).length,
+    };
+  });
+  if (
+    snapshot.orientation !== "horizontal" ||
+    snapshot.relationshipsValid !== true ||
+    snapshot.selectedCount !== 1 ||
+    snapshot.rovingTabStopCount !== 1 ||
+    snapshot.names.length !== ADMIN_TABS.length ||
+    snapshot.names.some((name, index) => name !== ADMIN_TABS[index])
+  ) {
+    throw new SafeSmokeError(
+      "admin_tabs_accessibility_failed",
+      "Admin Access tabs did not expose the expected ARIA tab-panel structure",
+    );
+  }
+
+  const requests = page.getByRole("tab", { name: "Requests", exact: true });
+  await requests.focus();
+  await waitForAdminTabState(page, "Requests", timeoutMs);
+  for (const [key, expectedName] of [
+    ["End", "Audit"],
+    ["Home", "Requests"],
+    ["ArrowRight", "Accounts"],
+    ["ArrowLeft", "Requests"],
+  ]) {
+    await page.keyboard.press(key);
+    await waitForAdminTabState(page, expectedName, timeoutMs);
+  }
+  return true;
+}
+
 async function waitForCardHeading(page, name, timeoutMs) {
   await page
     .getByRole("heading", { name, exact: true, level: 3 })
@@ -772,6 +865,10 @@ async function checkAdminAccess(page, options, checks, auditIdentity, ledger) {
   await page
     .getByRole("heading", { name: "Team access", exact: true, level: 1 })
     .waitFor({ state: "visible", timeout: options.timeoutMs });
+  checks.admin_tabs_accessibility = await verifyAdminTabsAccessibility(
+    page,
+    options.timeoutMs,
+  );
 
   await selectAdminTab(page, "Requests", options.timeoutMs);
   await waitForCardHeading(page, "Account requests", options.timeoutMs);
@@ -876,6 +973,7 @@ async function checkAdminAccess(page, options, checks, auditIdentity, ledger) {
   checks.audit_tab_event_visible = exactAuditEvent;
   checks.all_admin_tabs_operable =
     ADMIN_TABS.length === 6 &&
+    checks.admin_tabs_accessibility &&
     checks.admin_requests_apis_200 &&
     checks.admin_requests_ui_visible &&
     checks.admin_accounts_apis_200 &&

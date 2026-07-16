@@ -159,7 +159,10 @@ async def test_bootstrap_sets_fixed_secure_cookie_and_safe_audit(
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as connection:
         connection.execute(
-            update(User).where(User.id == target_id).values(status=target_status),
+            update(User).where(User.id == target_id).values(
+                status=target_status,
+                last_login_at=None,
+            ),
         )
 
     transport = httpx.ASGITransport(app=app)
@@ -237,6 +240,9 @@ async def test_bootstrap_sets_fixed_secure_cookie_and_safe_audit(
             SESSION_TTL_SEC
         )
         assert stored_session.revoked_at is not None
+        assert session.scalar(
+            select(User.last_login_at).where(User.id == target_id),
+        ) is None
     sync_engine.dispose()
 
 

@@ -4585,8 +4585,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `/opt/loom/build-sha` and the OCI `org.opencontainers.image.revision` label;
    runtime environment overrides do not establish identity. The check verifies
    the actual deployed build identity, exact correlated request ID and safe
-   audit event, every tab's product API, all six Admin Access states, the Audit
-   log, and Rate cards.
+   audit event, every tab's product API, all six Admin Access states, keyboard
+   roving focus with Arrow/Home/End, exact ARIA tab-to-panel relationships, the
+   Audit log, and Rate cards.
    It emits only the sanitized JSON report: do not retain a trace, screenshot,
    storage state, cookie, or bearer. Its `finally` cleanup logs out, revokes the
    session, and proves `/api/v1/auth/me` returns `401`; a cleanup failure fails

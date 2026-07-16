@@ -589,7 +589,9 @@ identity. The session is validation-only: `GET`, `HEAD`, and
 `OPTIONS` remain available, while every unsafe request fails `403` before route
 handling except the exact `POST /api/v1/auth/logout` cleanup path. It cannot be
 refreshed, and verification fails outside staging or after the target is
-disabled or loses platform-admin authority.
+disabled or loses platform-admin authority. Because this is automated
+acceptance rather than a human login, it does not update the target user's
+`last_login_at` field.
 
 The session creation and `auth.staging_admin_browser_session.create` audit row
 commit atomically. Audit metadata contains only the target username/status,

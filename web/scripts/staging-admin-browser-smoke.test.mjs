@@ -18,6 +18,7 @@ import {
   sanitizeReportValue,
   scrubBrowserEnvironment,
   validateBootstrapCookie,
+  verifyAdminTabsAccessibility,
   waitForSuccessfulQueryCard,
 } from "./staging-admin-browser-smoke.mjs";
 
@@ -235,6 +236,49 @@ describe("kind TLS boundary", () => {
 });
 
 describe("sanitized evidence contract", () => {
+  it("exercises Admin Access roving focus and ARIA tab-panel semantics", async () => {
+    const waitFor = vi.fn().mockResolvedValue(undefined);
+    const focus = vi.fn().mockResolvedValue(undefined);
+    const tabList = {
+      waitFor,
+      evaluate: vi.fn().mockResolvedValue({
+        names: [
+          "Requests",
+          "Accounts",
+          "Teams",
+          "Invites",
+          "API tokens",
+          "Audit",
+        ],
+        orientation: "horizontal",
+        relationshipsValid: true,
+        selectedCount: 1,
+        rovingTabStopCount: 1,
+      }),
+    };
+    const page = {
+      getByRole: vi.fn().mockImplementation((role, options) => {
+        if (role === "tablist") return tabList;
+        if (role === "tab" && options.name === "Requests") return { focus };
+        throw new Error(`unexpected role ${role}`);
+      }),
+      keyboard: { press: vi.fn().mockResolvedValue(undefined) },
+      waitForFunction: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(verifyAdminTabsAccessibility(page, 12_345)).resolves.toBe(
+      true,
+    );
+    expect(page.keyboard.press.mock.calls.map(([key]) => key)).toEqual([
+      "End",
+      "Home",
+      "ArrowRight",
+      "ArrowLeft",
+    ]);
+    expect(page.waitForFunction).toHaveBeenCalledTimes(5);
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
   it("requires a visible React query success marker before crediting UI", async () => {
     const waitFor = vi.fn().mockResolvedValue(undefined);
     const locator = vi.fn().mockReturnValue({ waitFor });

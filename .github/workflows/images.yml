@@ -250,10 +250,8 @@ jobs:
             --file "$DOCKERFILE"
             --tag "loom-ci-${IMAGE_DIGEST_NAME}:${image_tag}"
             --provenance=false
+            --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"
           )
-          if [[ "$IMAGE_NAME" == "service" ]]; then
-            build_args+=(--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}")
-          fi
           build_args+=("$BUILD_CONTEXT")
           "${build_args[@]}"
 
@@ -363,10 +361,8 @@ jobs:
             --tag "${image}:${REF_NAME}"
             --push
             --provenance=false
+            --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"
           )
-          if [[ "$IMAGE_NAME" == "service" ]]; then
-            build_args+=(--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}")
-          fi
           build_args+=("$BUILD_CONTEXT")
           "${build_args[@]}"
 

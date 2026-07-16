@@ -266,6 +266,7 @@ async def create_session_for_user(
     session_ttl_seconds: int,
     current_team_id: UUID | None = None,
     session_secret_prefix: SessionSecretPrefix = _DEFAULT_SESSION_SECRET_PREFIX,
+    update_last_login_at: bool = True,
 ) -> CreatedSession:
     """Create a browser session after a trusted onboarding action.
 
@@ -302,9 +303,10 @@ async def create_session_for_user(
         last_seen_at=now,
     )
     session.add(user_session)
-    await session.execute(
-        update(User).where(User.id == user.id).values(last_login_at=now),
-    )
+    if update_last_login_at:
+        await session.execute(
+            update(User).where(User.id == user.id).values(last_login_at=now),
+        )
     ctx = _ctx_from_session(
         user=user, user_session=user_session, role=role, team_id=team_id,
     )

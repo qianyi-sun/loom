@@ -85,7 +85,9 @@ Attach these to the release issue or release PR:
   build SHA reported by the running service and `https://yylx.world/dev`,
   produced only after the logged-out route smoke. It must show the correlated
   request ID and safe audit event, successful product APIs and visible state
-  for all six Admin Access tabs, Audit log, Rate cards, logout/revocation, and
+  for all six Admin Access tabs, including Arrow/Home/End roving focus and
+  exact ARIA tab-to-panel relationships, Audit log, Rate cards,
+  logout/revocation, and
   final `/api/v1/auth/me` `401`. The workflow may source the ephemeral singleton
   admin bearer only through an owner-only (`0600`) file or non-interactive stdin;
   it must upload no trace, screenshot, storage state, cookie, or raw secret.
