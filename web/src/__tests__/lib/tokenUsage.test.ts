@@ -10,4 +10,8 @@ describe("formatTokenUsage", () => {
     expect(text).not.toContain("P ");
     expect(text).not.toContain("C ");
   });
+
+  it("normalizes missing token counts to zero", () => {
+    expect(formatTokenUsage(null, undefined)).toBe("Input 0 / Output 0");
+  });
 });

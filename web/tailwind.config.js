@@ -28,9 +28,9 @@ export default {
       },
       colors: {
         accent: {
-          DEFAULT: "#6366f1",
-          hover: "#4f46e5",
-          glow: "rgba(99, 102, 241, 0.15)",
+          DEFAULT: "#4f46e5",
+          hover: "#4338ca",
+          glow: "rgba(79, 70, 229, 0.15)",
         },
       },
       borderRadius: {

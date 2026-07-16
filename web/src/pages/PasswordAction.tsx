@@ -50,8 +50,17 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
     password.length === 0 ||
     confirmPassword.length === 0 ||
     complete.isPending;
-  const username = lookup.data?.username ?? "";
-  const teamName = "team" in (lookup.data ?? {}) ? lookup.data?.team?.name : null;
+  const lookupData = lookup.data;
+  const username = lookupData?.username ?? "";
+  const teamName =
+    lookupData &&
+    "team" in lookupData &&
+    typeof lookupData.team === "object" &&
+    lookupData.team !== null &&
+    "name" in lookupData.team &&
+    typeof lookupData.team.name === "string"
+      ? lookupData.team.name
+      : null;
 
   return (
     <div className="mx-auto max-w-lg space-y-5">

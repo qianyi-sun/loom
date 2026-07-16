@@ -171,7 +171,7 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
                           title="Hidden models don't appear in New Batch's picker">
                           hidden
                         </span>
-                      ) : (<span className="text-slate-400">—</span>)}
+                      ) : (<span className="text-slate-600">—</span>)}
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-2">

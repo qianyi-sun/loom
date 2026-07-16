@@ -16,7 +16,10 @@ const apiProxyTarget =
 
 export default defineConfig({
   plugins: [react()],
-  base: "./",
+  // Keep the shipped relative-asset contract by default. The browser quality
+  // harness supplies an explicit prefix so deep-route reloads exercise the
+  // same production build without depending on a live deployment.
+  base: process.env.VITE_E2E_ROUTE_BASE ?? "./",
   server: {
     port: 5173,
     proxy: { "/api": apiProxyTarget },
@@ -25,5 +28,22 @@ export default defineConfig({
     environment: "happy-dom",
     setupFiles: ["./vitest.setup.ts"],
     globals: true,
+    exclude: ["e2e/**", "node_modules/**", "dist/**"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary", "lcov"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/api/schema.d.ts",
+        "src/__tests__/**",
+        "src/test-utils/**",
+      ],
+      thresholds: {
+        statements: 80,
+        lines: 80,
+        functions: 80,
+        branches: 75,
+      },
+    },
   },
 });

@@ -226,7 +226,7 @@ function CountBox({
 }): JSX.Element {
   return (
     <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-      <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+      <p className="text-xs font-medium uppercase tracking-wider text-slate-600">
         {label}
       </p>
       <p className="mt-1 text-sm font-semibold text-slate-900">{value}</p>
@@ -241,7 +241,7 @@ function ResourcePoolBreakdown({
 }): JSX.Element | null {
   if (!resources?.pools.length) return null;
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto" role="region" aria-label="Worker pool resources" tabIndex={0}>
       <table className="min-w-full divide-y divide-slate-200 text-sm">
         <thead>
           <tr className="bg-slate-50/50">
@@ -486,7 +486,7 @@ function MonitorHealthSummary({
         </div>
         <div className="grid gap-3 text-sm md:grid-cols-2">
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+            <p className="text-xs font-medium uppercase tracking-wider text-slate-600">
               Queue health
             </p>
             <p className="mt-1 text-slate-700">{queueStatusText(data)}</p>
@@ -497,7 +497,7 @@ function MonitorHealthSummary({
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+            <p className="text-xs font-medium uppercase tracking-wider text-slate-600">
               Backends
             </p>
             <p className="mt-1 text-slate-700">
@@ -623,7 +623,7 @@ function BatchesView({
       ) : null}
       <Card>
         <Card.Body className="p-0">
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto" role="region" aria-label="Monitored batches" tabIndex={0}>
             <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead>
               <tr className="bg-slate-50/50">
@@ -877,7 +877,7 @@ function TrialsView({
       ) : null}
       <Card>
       <Card.Body className="p-0">
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" role="region" aria-label="Monitored trials" tabIndex={0}>
           <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead>
               <tr className="bg-slate-50/50">
@@ -1106,7 +1106,7 @@ export default function Monitor(): JSX.Element {
           }
         />
         <label className="flex items-center gap-2 text-sm text-slate-600">
-          <span className="text-xs uppercase tracking-wider text-slate-400">State</span>
+          <span className="text-xs uppercase tracking-wider text-slate-600">State</span>
           <select
             value={stateFilter}
             onChange={(e) => updateParam("state", e.target.value)}
@@ -1124,7 +1124,7 @@ export default function Monitor(): JSX.Element {
         </label>
         {auth.isAdmin ? (
           <label className="flex items-center gap-2 text-sm text-slate-600">
-            <span className="text-xs uppercase tracking-wider text-slate-400">Team</span>
+            <span className="text-xs uppercase tracking-wider text-slate-600">Team</span>
             <select
               value={teamFilter}
               onChange={(e) => updateParam("team_id", e.target.value)}

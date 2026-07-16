@@ -58,7 +58,7 @@ describe("frontend runtime config", () => {
   });
 
   it("loads no-store runtime config before falling back to build env", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
           environment: "development",
@@ -80,7 +80,7 @@ describe("frontend runtime config", () => {
 
     const config = await loadFrontendConfig();
 
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/dev/loom-frontend-config.json",
       expect.objectContaining({ cache: "no-store" }),
     );

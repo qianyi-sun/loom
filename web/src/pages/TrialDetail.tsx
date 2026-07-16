@@ -149,7 +149,7 @@ function TrialHeader({
       <Card.Body className="space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-xs uppercase tracking-wider text-slate-400">
+            <p className="text-xs uppercase tracking-wider text-slate-600">
               Trial
             </p>
             <h1 className="mt-1 font-mono text-xl font-semibold text-slate-900 break-all">
@@ -345,7 +345,7 @@ function TrialHeader({
                       <span className="min-w-0 truncate font-medium text-slate-700">
                         Download artifact {label}
                       </span>
-                      <span className="shrink-0 font-mono text-xs text-slate-400">
+                      <span className="shrink-0 font-mono text-xs text-slate-600">
                         {formatBytes(artifact.size)}
                       </span>
                     </button>
@@ -450,7 +450,7 @@ function Trajectory({ trialId }: { trialId: string }): JSX.Element {
             {fallback.isFetching ? "Loading…" : "Load more"}
           </Button>
         ) : stream.status === "complete" && events.length > 0 ? (
-          <p className="pt-1 text-center text-xs text-slate-400">
+          <p className="pt-1 text-center text-xs text-slate-600">
             End of trajectory.
           </p>
         ) : null}

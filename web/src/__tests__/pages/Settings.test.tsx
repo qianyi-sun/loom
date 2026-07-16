@@ -78,7 +78,7 @@ describe("Settings", () => {
       apiBase: "/dev",
       apiRouteBase: `${window.location.origin}/dev/api`,
     });
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (
       input: RequestInfo | URL,
       init?: RequestInit,
     ) => {
@@ -194,7 +194,7 @@ describe("Settings", () => {
   });
 
   it("summarizes the current team, members, and owner setup actions", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {

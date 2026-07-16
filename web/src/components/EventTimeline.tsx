@@ -110,12 +110,12 @@ function Row({ event }: { event: Event }): JSX.Element {
             {summary(event)}
           </span>
           {event.step_id ? (
-            <span className="shrink-0 text-xs text-slate-400">
+            <span className="shrink-0 text-xs text-slate-600">
               step={event.step_id}
             </span>
           ) : null}
         </div>
-        <span className="shrink-0 font-mono text-xs text-slate-400">
+        <span className="shrink-0 font-mono text-xs text-slate-600">
           {event.emitted_at?.slice(11, 23) ?? ""}
         </span>
       </div>
