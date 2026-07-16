@@ -519,8 +519,17 @@ class VerifierDeliveryArtifact:
 _VERIFIER_KEY_MARKER = "/.loom/verifier/"
 MAX_VERIFIER_LOG_BYTES = 1_048_576
 MAX_VERIFIER_META_BYTES = 65_536
+MAX_VERIFIER_OUTPUT_BYTES = 1_048_576
+MAX_VERIFIER_JUNIT_BYTES = 4_194_304
 MAX_VERIFIER_ARTIFACT_FILES = 16
 _SHA256_RE = re.compile(r"sha256:([0-9a-f]{64})")
+_VERIFIER_LOG_NAMES = frozenset(
+    {"script.log", "pytest.log", "pytest-install.log"}
+)
+_VERIFIER_CANONICAL_LIMITS = {
+    "output.json": MAX_VERIFIER_OUTPUT_BYTES,
+    "junit.xml": MAX_VERIFIER_JUNIT_BYTES,
+}
 
 
 def _verifier_index_fields(
@@ -812,29 +821,44 @@ def resolve_verifier_artifacts(
             {"message": "too many indexed verifier audit files", "trial_id": str(trial.id)},
         )
 
-    fetched: dict[str, tuple[dict[str, Any], bytes, str]] = {}
+    fetched: dict[tuple[str, str], tuple[dict[str, Any], bytes, str]] = {}
     for item in sorted(candidates, key=lambda row: str(row.get("key"))):
         key, rel, size, expected_hash = _verifier_index_fields(
             trial,
             item,
             artifacts_bucket=artifacts_bucket,
         )
-        if rel in fetched:
+        step_name = str(item["step_name"])
+        identity = (step_name, rel)
+        if identity in fetched:
             raise Tb2V2ExportError(
                 "duplicate_verifier_artifact",
                 {
                     "message": "multiple source keys map to the same verifier archive path",
                     "path": rel,
+                    "step_name": step_name,
                 },
             )
-        if rel.endswith(".log"):
+        if "/" in rel:
+            raise Tb2V2ExportError(
+                "invalid_verifier_artifact_pair",
+                {"message": "verifier artifact names must be canonical leaves", "path": rel},
+            )
+        if rel in _VERIFIER_LOG_NAMES:
             max_bytes = MAX_VERIFIER_LOG_BYTES
-        elif rel.endswith(".log.meta.json"):
+        elif rel.endswith(".meta.json") and rel.removesuffix(
+            ".meta.json"
+        ) in _VERIFIER_LOG_NAMES:
             max_bytes = MAX_VERIFIER_META_BYTES
+        elif rel in _VERIFIER_CANONICAL_LIMITS:
+            max_bytes = _VERIFIER_CANONICAL_LIMITS[rel]
         else:
             raise Tb2V2ExportError(
                 "invalid_verifier_artifact_pair",
-                {"message": "verifier audit files must be .log/.log.meta.json pairs", "path": rel},
+                {
+                    "message": "verifier artifact name is not in the canonical allowlist",
+                    "path": rel,
+                },
             )
         data = _fetch_bounded_verifier_artifact(
             client,
@@ -855,27 +879,44 @@ def resolve_verifier_artifacts(
                     "actual_hash": actual_hash,
                 },
             )
-        fetched[rel] = (item, data, actual_hash)
+        fetched[identity] = (item, data, actual_hash)
 
-    log_rels = {rel for rel in fetched if rel.endswith(".log")}
-    meta_rels = {rel for rel in fetched if rel.endswith(".log.meta.json")}
-    expected_meta_rels = {f"{rel}.meta.json" for rel in log_rels}
-    if meta_rels != expected_meta_rels:
+    step_names = {step_name for step_name, _rel in fetched}
+    multiple_steps = len(step_names) > 1
+    log_keys = {key for key in fetched if key[1] in _VERIFIER_LOG_NAMES}
+    meta_keys = {
+        key
+        for key in fetched
+        if key[1].endswith(".meta.json")
+        and key[1].removesuffix(".meta.json") in _VERIFIER_LOG_NAMES
+    }
+    expected_meta_keys = {
+        (step_name, f"{rel}.meta.json") for step_name, rel in log_keys
+    }
+    if meta_keys != expected_meta_keys:
         raise Tb2V2ExportError(
             "invalid_verifier_artifact_pair",
             {
                 "message": "verifier audit logs and metadata must be complete pairs",
-                "logs": sorted(log_rels),
-                "metadata": sorted(meta_rels),
+                "logs": sorted(f"{step}/{rel}" for step, rel in log_keys),
+                "metadata": sorted(f"{step}/{rel}" for step, rel in meta_keys),
+            },
+        )
+    if _agent_name_for_trial(trial) == "terminus-2" and not log_keys:
+        raise Tb2V2ExportError(
+            "missing_verifier_artifact",
+            {
+                "message": "eligible trial has no complete verifier audit log pair",
+                "trial_id": str(trial.id),
             },
         )
 
     resolved: list[VerifierDeliveryArtifact] = []
     bodies_for_scan: dict[str, bytes] = {}
-    for log_rel in sorted(log_rels):
-        log_item, log_data, log_hash = fetched[log_rel]
+    for step_name, log_rel in sorted(log_keys):
+        log_item, log_data, log_hash = fetched[(step_name, log_rel)]
         meta_rel = f"{log_rel}.meta.json"
-        meta_item, meta_data, meta_hash = fetched[meta_rel]
+        meta_item, meta_data, meta_hash = fetched[(step_name, meta_rel)]
         meta = _validate_verifier_meta(
             data=meta_data,
             log_rel=log_rel,
@@ -885,7 +926,9 @@ def resolve_verifier_artifacts(
             (log_rel, log_item, log_data, log_hash),
             (meta_rel, meta_item, meta_data, meta_hash),
         ):
-            archive_path = f"verifier/{rel}"
+            archive_path = (
+                f"verifier/{step_name}/{rel}" if multiple_steps else f"verifier/{rel}"
+            )
             bodies_for_scan[archive_path] = data
             resolved.append(
                 VerifierDeliveryArtifact(
@@ -900,6 +943,29 @@ def resolve_verifier_artifacts(
                     source_key=str(item["key"]),
                 )
             )
+
+    canonical_keys = {
+        key for key in fetched if key[1] in _VERIFIER_CANONICAL_LIMITS
+    }
+    for step_name, rel in sorted(canonical_keys):
+        item, data, digest = fetched[(step_name, rel)]
+        archive_path = (
+            f"verifier/{step_name}/{rel}" if multiple_steps else f"verifier/{rel}"
+        )
+        bodies_for_scan[archive_path] = data
+        resolved.append(
+            VerifierDeliveryArtifact(
+                archive_path=archive_path,
+                data=data,
+                content_hash=f"sha256:{digest}",
+                size_bytes=len(data),
+                truncated=None,
+                share_status="shared",
+                blocked_reason=None,
+                step_name=step_name,
+                source_key=str(item["key"]),
+            )
+        )
 
     scan_members_for_secrets(bodies_for_scan)
     return resolved

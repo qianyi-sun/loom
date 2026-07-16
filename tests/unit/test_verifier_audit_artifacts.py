@@ -10,7 +10,10 @@ from uuid import uuid4
 import pytest
 
 from loom.db.schema import Trial
-from loom.trial.step_runner import _artifact_patterns
+from loom.trial.step_runner import (
+    _artifact_patterns,
+    _verifier_artifact_patterns,
+)
 from loom_service.delivery_export_tb2_v2 import (
     Tb2V2ExportError,
     resolve_verifier_artifacts,
@@ -50,18 +53,30 @@ class _Body:
         self.closed = True
 
 
+def _audit_result(*paths: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        structured={
+            "loom_verifier_audit": {
+                "artifacts": [{"path": path} for path in paths],
+            }
+        }
+    )
+
+
 def _trial_with_verifier_artifacts(
     *,
     log_body: bytes,
+    log_name: str = "script.log",
     meta: dict[str, object] | None = None,
     share_status: str = "shared",
     content_hash: str | None = None,
     include_meta: bool = True,
+    canonical: dict[str, bytes] | None = None,
 ) -> tuple[Trial, _FakeS3, str]:
     trial_id = uuid4()
     team_id = uuid4()
-    log_key = f"{team_id}/{trial_id}/main/.loom/verifier/script.log"
-    meta_key = f"{team_id}/{trial_id}/main/.loom/verifier/script.log.meta.json"
+    log_key = f"{team_id}/{trial_id}/main/.loom/verifier/{log_name}"
+    meta_key = f"{log_key}.meta.json"
     digest = hashlib.sha256(log_body).hexdigest()
     artifacts = [
         {
@@ -83,7 +98,7 @@ def _trial_with_verifier_artifacts(
             "kept_bytes": len(log_body),
             "return_code": 0,
             "script_path": "/app/verifier/run.sh",
-            "log_path": ".loom/verifier/script.log",
+            "log_path": f".loom/verifier/{log_name}",
         }
         if meta is not None:
             meta_payload.update(meta)
@@ -100,6 +115,21 @@ def _trial_with_verifier_artifacts(
             }
         )
         objects[("artifacts", meta_key)] = meta_bytes
+
+    for name, body in (canonical or {}).items():
+        key = f"{team_id}/{trial_id}/main/.loom/verifier/{name}"
+        artifacts.append(
+            {
+                "step_name": "main",
+                "bucket": "artifacts",
+                "key": key,
+                "size": len(body),
+                "content_hash": f"sha256:{hashlib.sha256(body).hexdigest()}",
+                "share_status": "shared",
+                "blocked_reason": None,
+            }
+        )
+        objects[("artifacts", key)] = body
 
     trial = Trial(
         id=trial_id,
@@ -122,7 +152,20 @@ def test_artifact_patterns_adds_verifier_glob_for_terminus2() -> None:
     patterns = _artifact_patterns(ctx, step)  # type: ignore[arg-type]
     assert "output.txt" in patterns
     assert ".loom/agent/**" in patterns
-    assert ".loom/verifier/**" in patterns
+    assert ".loom/verifier/**" not in patterns
+    platform_patterns = _verifier_artifact_patterns(  # type: ignore[arg-type]
+        ctx,
+        _audit_result(
+            ".loom/verifier/script.log",
+            ".loom/verifier/script.log.meta.json",
+            ".loom/verifier/output.json",
+        ),
+    )
+    assert ".loom/verifier/pytest.log" in platform_patterns
+    assert ".loom/verifier/pytest.log.meta.json" in platform_patterns
+    assert ".loom/verifier/script.log" in platform_patterns
+    assert ".loom/verifier/script.log.meta.json" in platform_patterns
+    assert ".loom/verifier/output.json" in platform_patterns
 
 
 def test_artifact_patterns_adds_verifier_glob_for_script_verifier() -> None:
@@ -130,10 +173,56 @@ def test_artifact_patterns_adds_verifier_glob_for_script_verifier() -> None:
         agent=SimpleNamespace(name="oracle"),
         verifier=SimpleNamespace(name="script"),
     )
-    step = SimpleNamespace(artifacts=[])
+    step = SimpleNamespace(
+        artifacts=[
+            ".loom/verifier/**",
+            ".loom/verifier/agent-planted.txt",
+            "other/../.loom/verifier/stale.log",
+        ]
+    )
     patterns = _artifact_patterns(ctx, step)  # type: ignore[arg-type]
-    assert ".loom/verifier/**" in patterns
+    assert patterns == []
+    assert _verifier_artifact_patterns(  # type: ignore[arg-type]
+        ctx,
+        _audit_result(
+            ".loom/verifier/script.log",
+            ".loom/verifier/script.log.meta.json",
+            ".loom/verifier/output.json",
+            ".loom/verifier/agent-planted.txt",
+        ),
+    ) == [
+        ".loom/verifier/script.log",
+        ".loom/verifier/script.log.meta.json",
+        ".loom/verifier/output.json",
+    ]
     assert ".loom/agent/**" not in patterns
+
+
+def test_artifact_patterns_adds_verifier_glob_for_pytest_verifier() -> None:
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(name="oracle"),
+        verifier=SimpleNamespace(name="pytest"),
+    )
+    step = SimpleNamespace(artifacts=["out.txt"])
+    patterns = _artifact_patterns(ctx, step)  # type: ignore[arg-type]
+    assert "out.txt" in patterns
+    assert ".loom/verifier/**" not in patterns
+    assert ".loom/agent/**" not in patterns
+    platform_patterns = _verifier_artifact_patterns(  # type: ignore[arg-type]
+        ctx,
+        _audit_result(
+            ".loom/verifier/pytest.log",
+            ".loom/verifier/pytest.log.meta.json",
+            ".loom/verifier/pytest-install.log",
+            ".loom/verifier/pytest-install.log.meta.json",
+            ".loom/verifier/junit.xml",
+        ),
+    )
+    assert ".loom/verifier/pytest.log" in platform_patterns
+    assert ".loom/verifier/pytest.log.meta.json" in platform_patterns
+    assert ".loom/verifier/pytest-install.log" in platform_patterns
+    assert ".loom/verifier/pytest-install.log.meta.json" in platform_patterns
+    assert ".loom/verifier/junit.xml" in platform_patterns
 
 
 def test_resolve_verifier_artifacts_happy_path() -> None:
@@ -156,6 +245,82 @@ def test_resolve_verifier_artifacts_happy_path() -> None:
     assert log_entry.share_status == "shared"
     assert log_entry.content_hash.startswith("sha256:")
     assert log_entry.step_name == "main"
+
+
+def test_resolve_pytest_pair_and_canonical_junit() -> None:
+    junit = b'<testsuite tests="1"><testcase name="ok"/></testsuite>'
+    trial, client, _key = _trial_with_verifier_artifacts(
+        log_body=b"1 passed\n",
+        log_name="pytest.log",
+        meta={"script_path": "pytest -q"},
+        canonical={"junit.xml": junit},
+    )
+    resolved = resolve_verifier_artifacts(
+        trial,
+        client=client,
+        artifacts_bucket="artifacts",
+    )
+    by_path = {item.archive_path: item for item in resolved}
+    assert by_path["verifier/pytest.log"].data == b"1 passed\n"
+    assert by_path["verifier/junit.xml"].data == junit
+    assert by_path["verifier/junit.xml"].truncated is None
+
+
+def test_resolve_script_pair_and_canonical_output() -> None:
+    output = b'{"rewards":{"passed":1.0}}'
+    trial, client, _key = _trial_with_verifier_artifacts(
+        log_body=b"scored\n",
+        canonical={"output.json": output},
+    )
+    resolved = resolve_verifier_artifacts(
+        trial,
+        client=client,
+        artifacts_bucket="artifacts",
+    )
+    by_path = {item.archive_path: item for item in resolved}
+    assert by_path["verifier/output.json"].data == output
+
+
+def test_resolve_rejects_noncanonical_verifier_leaf() -> None:
+    trial, client, _key = _trial_with_verifier_artifacts(
+        log_body=b"ok\n",
+        canonical={"agent-planted.txt": b"not platform owned"},
+    )
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=client,
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "invalid_verifier_artifact_pair"
+
+
+def test_resolve_scopes_duplicate_names_by_step() -> None:
+    trial, client, _key = _trial_with_verifier_artifacts(log_body=b"ok\n")
+    copies: list[dict[str, object]] = []
+    for artifact in list(trial.trajectory_index["artifacts"]):
+        copied = dict(artifact)
+        old_key = str(copied["key"])
+        new_key = old_key.replace("/main/.loom/", "/verify-2/.loom/")
+        copied["step_name"] = "verify-2"
+        copied["key"] = new_key
+        copies.append(copied)
+        client._objects[("artifacts", new_key)] = client._objects[
+            ("artifacts", old_key)
+        ]
+    trial.trajectory_index["artifacts"].extend(copies)
+
+    resolved = resolve_verifier_artifacts(
+        trial,
+        client=client,
+        artifacts_bucket="artifacts",
+    )
+    assert {item.archive_path for item in resolved} == {
+        "verifier/main/script.log",
+        "verifier/main/script.log.meta.json",
+        "verifier/verify-2/script.log",
+        "verifier/verify-2/script.log.meta.json",
+    }
 
 
 def test_resolve_verifier_artifacts_hash_mismatch() -> None:

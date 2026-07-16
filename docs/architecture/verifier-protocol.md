@@ -205,6 +205,42 @@ export treats any indexed audit data as a fail-closed pair and rejects missing
 partners, invalid metadata, non-shared entries, hash or size mismatches, unsafe
 paths, and logs larger than 1 MiB.
 
+## Shared verifier artifact channel
+
+`ScriptVerifier` and `PytestVerifier` use the same workspace-relative channel.
+The platform collects exact, platform-owned names rather than a broad hidden
+directory glob:
+
+- Script: `script.log`, `script.log.meta.json`, and canonical `output.json`.
+- Pytest: `pytest.log`, `pytest.log.meta.json`, canonical `junit.xml`, and an
+  optional `pytest-install.log` pair when dependency setup fails.
+
+All names live under `$LOOM_TASK_DIR/.loom/verifier/`. Logs are capped at 1
+MiB with head-and-tail retention. Canonical scoring JSON is capped at 1 MiB and
+JUnit XML at 4 MiB; an oversized canonical file is not published as an audit
+artifact. A log is collectable only with its schema-v1 metadata partner. If a
+late upload or stale-target cleanup fails, the attempt emits no artifact refs
+and scoring continues. Artifact collection admits reserved-namespace files only
+through those successful internal refs; task-authored globs such as `*` and
+`.loom/*` cannot traverse into `.loom/verifier/`. The source `output.json` or
+`junit.xml` is also cleared before execution, and a failure to establish that
+clean scoring path fails closed instead of accepting prior-step bytes.
+
+`VerifierResult.structured.loom_verifier_audit` contains only byte counts,
+return code, duration, persistence status, artifact references, and a
+redacted summary of at most 512 characters. It never contains the full raw
+log. When audit I/O fails, the namespace remains present with
+`persisted=false` and no log/meta references. Secret-bearing raw artifacts may
+remain team-scoped in MinIO, but share scanning blocks them from raw-Harbor
+delivery.
+
+A non-zero script exit with valid scoring JSON remains a scored result; the
+process return code is recorded in audit metadata. Missing or malformed JSON,
+including a non-object `structured` value, is a verifier parse failure. Both
+raw-Harbor TB2 profiles pack only allowlisted, indexed verifier files after
+hash, indexed/runtime size, metadata, share-status, pair, and secret checks.
+Multiple-step deliveries scope otherwise duplicate verifier names by step.
+
 ## Why each lives where it does
 
 | Concern            | Verifier's job?  | Driver's job? | Trajectory's job? |

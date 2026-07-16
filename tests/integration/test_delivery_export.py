@@ -1295,12 +1295,15 @@ def _seed_tb2_v2_trial(
         + "\n"
     ).encode()
     verifier_meta_key = f"{verifier_log_key}.meta.json"
+    verifier_output = b'{"rewards":{"passed":1.0}}'
+    verifier_output_key = f"{prefix}/main/.loom/verifier/output.json"
     fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
         _tb2_v2_events_jsonl(trial_id=trial_id, artifact_hash=artifact_hash)
     )
     fake_s3.objects[(settings.artifacts_bucket, artifact_key)] = native
     fake_s3.objects[(settings.artifacts_bucket, verifier_log_key)] = verifier_log
     fake_s3.objects[(settings.artifacts_bucket, verifier_meta_key)] = verifier_meta
+    fake_s3.objects[(settings.artifacts_bucket, verifier_output_key)] = verifier_output
     conn.execute(
         update(Trial)
         .where(Trial.id == trial_id)
@@ -1340,6 +1343,17 @@ def _seed_tb2_v2_trial(
                         "size": len(verifier_meta),
                         "content_hash": (
                             f"sha256:{hashlib.sha256(verifier_meta).hexdigest()}"
+                        ),
+                        "share_status": "shared",
+                        "blocked_reason": None,
+                    },
+                    {
+                        "step_name": "main",
+                        "bucket": settings.artifacts_bucket,
+                        "key": verifier_output_key,
+                        "size": len(verifier_output),
+                        "content_hash": (
+                            f"sha256:{hashlib.sha256(verifier_output).hexdigest()}"
                         ),
                         "share_status": "shared",
                         "blocked_reason": None,
@@ -1558,6 +1572,9 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
             f"agent_runs/{first_task}/{first_trial}/native/harbor_trajectory.json"
             in names
         )
+        assert (
+            f"agent_runs/{first_task}/{first_trial}/verifier/output.json" in names
+        )
         trajectory = json.load(
             tar.extractfile(f"agent_runs/{first_task}/{first_trial}/trajectory.json")  # type: ignore[arg-type]
         )
@@ -1587,6 +1604,16 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
             f"agent_runs/{first_task}/{first_trial}/native/harbor_trajectory.json"
         ).read()
         assert native == native_by_trial[first_trial]
+        artifact_manifest = json.load(
+            tar.extractfile(  # type: ignore[arg-type]
+                f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json"
+            )
+        )
+        assert "verifier/output.json" in {
+            row["path"]
+            for row in artifact_manifest["artifacts"]
+            if row.get("kind") == "verifier_artifact"
+        }
         rendered = json.dumps(trajectory)
         # task_id values like `task-0001` contain `sk-` as a substring; use export scan patterns.
         _assert_no_secret_patterns(rendered)
@@ -1627,8 +1654,11 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
     ).encode()
     log_key = f"{team_id}/{first_trial}/main/.loom/verifier/script.log"
     meta_key = f"{team_id}/{first_trial}/main/.loom/verifier/script.log.meta.json"
+    output_body = b'{"rewards":{"passed":1.0}}'
+    output_key = f"{team_id}/{first_trial}/main/.loom/verifier/output.json"
     fake_s3.objects[(settings.artifacts_bucket, log_key)] = log_body
     fake_s3.objects[(settings.artifacts_bucket, meta_key)] = meta_body
+    fake_s3.objects[(settings.artifacts_bucket, output_key)] = output_body
 
     sync_engine = create_engine(postgres_url)
     try:
@@ -1668,6 +1698,17 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
                                 "size": len(meta_body),
                                 "content_hash": (
                                     f"sha256:{hashlib.sha256(meta_body).hexdigest()}"
+                                ),
+                                "share_status": "shared",
+                                "blocked_reason": None,
+                            },
+                            {
+                                "step_name": "main",
+                                "bucket": settings.artifacts_bucket,
+                                "key": output_key,
+                                "size": len(output_body),
+                                "content_hash": (
+                                    f"sha256:{hashlib.sha256(output_body).hexdigest()}"
                                 ),
                                 "share_status": "shared",
                                 "blocked_reason": None,
@@ -1741,9 +1782,12 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
         meta_member = (
             f"agent_runs/{first_task}/{first_trial}/verifier/script.log.meta.json"
         )
+        output_member = f"agent_runs/{first_task}/{first_trial}/verifier/output.json"
         assert log_member in set(tar.getnames())
         assert meta_member in set(tar.getnames())
+        assert output_member in set(tar.getnames())
         assert tar.extractfile(log_member).read() == log_body  # type: ignore[union-attr]
+        assert tar.extractfile(output_member).read() == output_body  # type: ignore[union-attr]
         manifest = json.load(
             tar.extractfile(  # type: ignore[arg-type]
                 f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json"
@@ -1757,6 +1801,7 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
         assert {row["path"] for row in verifier_entries} == {
             "verifier/script.log",
             "verifier/script.log.meta.json",
+            "verifier/output.json",
         }
         log_entry = next(
             row for row in verifier_entries if row["path"] == "verifier/script.log"
