@@ -369,8 +369,18 @@ Raw Harbor modes keep those lightweight files and add:
 - `agent_runs/<task_id>/<trial_id>/execution_result.json`, `metrics.json`,
   `artifact_manifest.json`, `verifier_output.json`,
   `provider_logs_manifest.json`, and `atif.json`.
+- `agent_runs/<task_id>/<trial_id>/verifier/` for eligible, allowlisted
+  verifier audit logs, schema metadata, and canonical `output.json` or
+  `junit.xml`. Multi-step trials add the step name below `verifier/` to avoid
+  filename collisions.
 - `derived/sft_messages.jsonl`, derived from the redacted provider logs for
   downstream SFT-style pipelines.
+
+Verifier delivery is fail-closed: incomplete log/meta pairs, unknown verifier
+filenames, non-shared or secret-bearing objects, missing bodies, and hash or
+indexed/runtime size mismatches prevent a shareable archive from being marked
+ready. Full verifier logs stay in artifact storage and the delivery tar; the
+persisted verifier result contains only a bounded redacted summary and refs.
 
 The base `raw-harbor` mode preserves the Loom-native event stream as
 `agent_runs/<task_id>/<trial_id>/trajectory.jsonl` and leaves assistant payload
