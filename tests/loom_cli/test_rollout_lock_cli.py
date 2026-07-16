@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from loom_cli import admin_cmd, cluster_cmd
 from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import ApplyResult, ClusterStatus, ComponentStatus
 from loom_cli.cluster_config import ClusterConfig, cluster_config_from_mapping
@@ -28,6 +29,15 @@ _ATTRIBUTION = {
     "attempt_operator": "devansh",
     "attempt_uid": 2501,
 }
+
+
+def test_cluster_and_admin_share_rollout_lock_cli_contracts() -> None:
+    assert admin_cmd._add_rollout_lock_args is cluster_cmd._add_rollout_lock_args
+    assert admin_cmd._load_broker_rollout_envelope is cluster_cmd._load_broker_rollout_envelope
+    assert admin_cmd._require_real_file is cluster_cmd._require_real_file
+    assert (
+        admin_cmd._fixed_rollout_lock_evidence_path is cluster_cmd._fixed_rollout_lock_evidence_path
+    )
 
 
 @dataclass(frozen=True)
