@@ -21,8 +21,8 @@ the node-agent remains the host-local convergence mechanism.
   entrypoint on port `2221`; `trt-gb10-2` through `trt-gb10-15` use their
   private addresses on port `22` through `ProxyJump trt-gb10-1`.
 - Host checkout and Compose root:
-  `/home/qianyi/loom-worker-build-staging`.
-- Host runtime env: `/home/qianyi/loom-worker-build-staging/.env`, mode 0600.
+  `/shared_work/loom/loom-worker-build-staging`.
+- Host runtime env: `/shared_work/loom/loom-worker-build-staging/.env`, mode 0600.
 
 The worker-facing OLDLAB-1 services stay private. Public internet traffic must
 continue to reach only Web/API over TLS. Remote workers use the existing local

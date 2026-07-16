@@ -44,7 +44,7 @@ allowed_nodes = [
   "trt-gb10-15",
 ]
 env_file = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-${IMAGE_TAG}.env"
-repo_dir = "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}"
+repo_dir = "/shared_work/loom/loom-remote-worker-${IMAGE_TAG}"
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
@@ -88,7 +88,7 @@ LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS = "7200"
 [catalog_provisioning]
 required = true
 command = "loom datasets register skilllearnbench --hf-org PRHW --revision \"$PUBLISHED_SHA\" --mirror-to-object-store --bucket loom-benchmarks --registered-by catalog-provision && loom datasets publish-local deploy/catalog/gb10-smoke --bucket loom-benchmarks --imported-by catalog-provision && loom datasets audit --all --verify-bundles"
-env_file = "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env"
+env_file = "/shared_work/loom/loom-worker-capacity/staging-catalog-provisioning.env"
 required_env = [
   "PUBLISHED_SHA",
   "HF_TOKEN",

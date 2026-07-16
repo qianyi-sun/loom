@@ -770,7 +770,7 @@ loom admin gb10-workers status \
 ```
 
 On each GB10 host, the node-agent reads the host-local staging env file
-`/home/qianyi/loom-worker-build-staging/.env`, compares it with Control Plane desired state, writes
+`/shared_work/loom/loom-worker-build-staging/.env`, compares it with Control Plane desired state, writes
 only non-secret env updates, then runs Docker Compose locally. If desired state
 contains `source_git_commit`, the apply path fetches `origin` and checks out
 that commit before pull/build/restart, so local-build fallback cannot silently
@@ -788,18 +788,18 @@ loom worker gb10-agent plan \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/qianyi/loom-worker-build-staging/.env \
-  --source-dir /home/qianyi/loom-worker-build-staging
+  --env-file /shared_work/loom/loom-worker-build-staging/.env \
+  --source-dir /shared_work/loom/loom-worker-build-staging
 
 loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/qianyi/loom-worker-build-staging/.env \
+  --env-file /shared_work/loom/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
   --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
-  --source-dir /home/qianyi/loom-worker-build-staging
+  --source-dir /shared_work/loom/loom-worker-build-staging
 ```
 
 For worker-token rotation, run the same host-local plan/apply with the active
@@ -814,8 +814,8 @@ loom worker gb10-agent plan \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/qianyi/loom-worker-build-staging/.env \
-  --source-dir /home/qianyi/loom-worker-build-staging \
+  --env-file /shared_work/loom/loom-worker-build-staging/.env \
+  --source-dir /shared_work/loom/loom-worker-build-staging \
   --worker-token file:/secure/path/current-worker-token
 
 loom worker gb10-agent apply \
@@ -823,10 +823,10 @@ loom worker gb10-agent apply \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10-arm64 \
-  --env-file /home/qianyi/loom-worker-build-staging/.env \
+  --env-file /shared_work/loom/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
   --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
-  --source-dir /home/qianyi/loom-worker-build-staging \
+  --source-dir /shared_work/loom/loom-worker-build-staging \
   --worker-token file:/secure/path/current-worker-token
 ```
 
@@ -1298,8 +1298,8 @@ available only on the OLDLAB submit host, mark the policy as externally run:
       "trt-eai-oldlab-4",
       "trt-eai-oldlab-5"
     ],
-    "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
-    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
+    "env_file": "/shared_work/loom/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
+    "repo_dir": "/shared_work/loom/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 2,
     "requested_memory_mib": 8192,
     "requested_concurrency": 1,
@@ -1359,8 +1359,8 @@ node 7, the active 14-node, 10-slot policy has a ceiling of 140 slots:
       "trt-gb10-14",
       "trt-gb10-15"
     ],
-    "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-${IMAGE_TAG}.env",
-    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
+    "env_file": "/shared_work/loom/loom-worker-capacity/staging-gb10-worker-${IMAGE_TAG}.env",
+    "repo_dir": "/shared_work/loom/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 20,
     "requested_memory_mib": 115000,
     "requested_concurrency": 10,

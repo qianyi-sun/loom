@@ -88,7 +88,7 @@ The generated Slurm job script also traps `EXIT`, `INT`, and `TERM` and runs
 worker container instead of leaving a live worker outside Slurm accounting.
 
 Shared-resource smoke evidence from 2026-06-24 is stored on platform-dev at
-`/shared_work/qianyi/loom-worker-capacity/issue435-20260624T164151Z/`. It used
+`/shared_work/loom/loom-worker-capacity/issue435-20260624T164151Z/`. It used
 reduced shared Slurm slices because OLDLAB 4/5 were partially occupied, proving
 worker registration, heartbeat, claim, gateway call, result writeback, and
 trajectory index writeback on the BFCL smoke batch. During later opportunistic

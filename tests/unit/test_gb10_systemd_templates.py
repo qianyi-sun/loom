@@ -3,13 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_gb10_node_agent_service_exposes_qianyi_staging_paths() -> None:
+def test_gb10_node_agent_service_exposes_shared_loom_staging_paths() -> None:
     service = Path("deploy/worker-pools/gb10/loom-gb10-node-agent.service")
     text = service.read_text(encoding="utf-8")
 
+    # PATH still points at the operator's local uv install; ownership of that
+    # path is a separate follow-up (uv should live in a team-owned prefix).
     assert "Environment=PATH=/home/qianyi/.local/bin:/usr/local/bin:/usr/bin:/bin" in text
-    assert "WorkingDirectory=/home/qianyi/loom-worker-build-staging" in text
-    assert "--env-file /home/qianyi/loom-worker-build-staging/.env" in text
+    assert "WorkingDirectory=/shared_work/loom/loom-worker-build-staging" in text
+    assert "--env-file /shared_work/loom/loom-worker-build-staging/.env" in text
     assert "ExecStart=/usr/bin/env uv run loom worker gb10-agent apply" in text
 
 

@@ -5608,8 +5608,8 @@ link it from #217; do not merge incomplete evidence.
         "trt-eai-oldlab-4",
         "trt-eai-oldlab-5"
       ],
-      "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
-      "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
+      "env_file": "/shared_work/loom/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
+      "repo_dir": "/shared_work/loom/loom-remote-worker-${IMAGE_TAG}",
       "requested_cpus": 2,
       "requested_memory_mib": 8192,
       "requested_concurrency": 1,
@@ -5695,7 +5695,7 @@ link it from #217; do not merge incomplete evidence.
   that change to `dev`, and start a broker rollout. It must not be performed as
   a per-host interactive apply against shared staging.
 
-  Treat `/home/qianyi/loom-worker-build-staging/gb10-node-agent.env` and
+  Treat `/shared_work/loom/loom-worker-build-staging/gb10-node-agent.env` and
   node-agent transient compose env files as host-local runtime material, not
   release source. Current node-agent apply writes transient env files under the
   user runtime/tmp directory and removes legacy repo-root `..env.*.tmp` files on
