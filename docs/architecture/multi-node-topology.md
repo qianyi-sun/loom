@@ -30,7 +30,7 @@ fields = {
 
 Profiles pin explicit values so a schema-default flip cannot silently break existing deployments:
 
-- `local.cluster.toml`: pinned `multi_node = false` (kind is single-node by construction)
+- `development.cluster.toml`: pinned `multi_node = false` (kind is single-node by construction)
 - `staging.cluster.toml`: pinned `multi_node = false` **temporarily**; flipped `true` in the same PR that lands k3s cutover
 - `production.cluster.toml`: pinned `multi_node = true`, `storage_backend = "longhorn"`, 3 Postgres replicas, 4 MinIO replicas, required anti-affinity
 
