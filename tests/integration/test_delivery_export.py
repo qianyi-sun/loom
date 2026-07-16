@@ -1278,10 +1278,29 @@ def _seed_tb2_v2_trial(
     artifact_hash = hashlib.sha256(native).hexdigest()
     prefix = f"{team_id}/{trial_id}"
     artifact_key = f"{prefix}/main/.loom/agent/trajectory.json"
+    verifier_log = b"pytest: 3 passed\n"
+    verifier_log_key = f"{prefix}/main/.loom/verifier/pytest.log"
+    verifier_meta = (
+        json.dumps(
+            {
+                "schema_version": "1",
+                "truncated": False,
+                "original_bytes": len(verifier_log),
+                "kept_bytes": len(verifier_log),
+                "return_code": 0,
+                "script_path": "/app/environment/tb2-tests/run-tests.sh",
+                "log_path": ".loom/verifier/pytest.log",
+            }
+        )
+        + "\n"
+    ).encode()
+    verifier_meta_key = f"{verifier_log_key}.meta.json"
     fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
         _tb2_v2_events_jsonl(trial_id=trial_id, artifact_hash=artifact_hash)
     )
     fake_s3.objects[(settings.artifacts_bucket, artifact_key)] = native
+    fake_s3.objects[(settings.artifacts_bucket, verifier_log_key)] = verifier_log
+    fake_s3.objects[(settings.artifacts_bucket, verifier_meta_key)] = verifier_meta
     conn.execute(
         update(Trial)
         .where(Trial.id == trial_id)
@@ -1302,7 +1321,29 @@ def _seed_tb2_v2_trial(
                         "key": artifact_key,
                         "size": len(native),
                         "content_hash": f"sha256:{artifact_hash}",
-                    }
+                    },
+                    {
+                        "step_name": "main",
+                        "bucket": settings.artifacts_bucket,
+                        "key": verifier_log_key,
+                        "size": len(verifier_log),
+                        "content_hash": (
+                            f"sha256:{hashlib.sha256(verifier_log).hexdigest()}"
+                        ),
+                        "share_status": "shared",
+                        "blocked_reason": None,
+                    },
+                    {
+                        "step_name": "main",
+                        "bucket": settings.artifacts_bucket,
+                        "key": verifier_meta_key,
+                        "size": len(verifier_meta),
+                        "content_hash": (
+                            f"sha256:{hashlib.sha256(verifier_meta).hexdigest()}"
+                        ),
+                        "share_status": "shared",
+                        "blocked_reason": None,
+                    },
                 ],
             },
         )
