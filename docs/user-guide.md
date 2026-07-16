@@ -890,6 +890,10 @@ legacy team requests, approve account setup and password reset requests, switch
 to fixed-team maintenance, create/list legacy invites, manage API tokens, or
 inspect the audit log. Team owners see only invite and API-token sections.
 Account setup/reset links are revealed only once and must be shared manually.
+The platform-admin Audit tab loads only when opened and provides Previous/Next
+controls over the complete timestamp/id-ordered history. Loading marks page
+controls unavailable without removing keyboard focus; an error keeps Previous
+and Retry available; the terminal page is announced explicitly.
 
 Most web workflows now include contextual quickstarts directly on the page. Use
 the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
@@ -1054,6 +1058,15 @@ Use the SPA top-level **Run Library** page:
   artifact metadata for the complete set.
 - Platform admins can use the team filter with internal team names across the
   whole platform; ordinary users see only their joined teams.
+- Use **Next** and **Previous** to traverse older and newer pages. Cursor
+  history is kept only for the current browser session and never added to the
+  URL; the shareable URL continues to contain only scope and filters.
+- Changing any scope or filter returns to page one before requesting the new
+  selection. Loading guards both page controls with accessible unavailable
+  state while keeping them focusable, failed pages offer Retry and preserve
+  Previous when available, and an empty or final page explicitly says that the
+  end of results was reached. Keyboard focus stays on the control or filter the
+  user activated.
 
 Open a Library row to inspect task selection, agent/model config, trial rollup,
 debug evidence, provenance, and artifact group previews. For multi-agent/model

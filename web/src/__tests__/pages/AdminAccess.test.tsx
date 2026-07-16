@@ -257,6 +257,12 @@ describe("AdminAccess", () => {
     expect(screen.getByText(
       "Approve older team-registration requests into an invite link. Username/password account approvals are listed above.",
     )).toBeInTheDocument();
+    expect(
+      fetchSpy.mock.calls.filter(
+        ([input]: [RequestInfo | URL, RequestInit?]) =>
+          String(input).includes("/api/v1/admin/audit-events"),
+      ),
+    ).toHaveLength(0);
 
     await userEvent.clear(screen.getByLabelText("Admin actor"));
     await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
@@ -302,6 +308,12 @@ describe("AdminAccess", () => {
       ),
     ).toHaveAttribute("data-loom-query-status", "success");
     await waitFor(() => {
+      expect(
+        fetchSpy.mock.calls.filter(
+          ([input]: [RequestInfo | URL, RequestInit?]) =>
+            String(input).includes("/api/v1/admin/audit-events"),
+        ),
+      ).toHaveLength(1);
       const approveCall = fetchSpy.mock.calls.find(([input]) =>
         String(input).endsWith("/reg-1/approve"),
       );

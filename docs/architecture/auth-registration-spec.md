@@ -558,12 +558,18 @@ once. The old link fails with `invalid invite`.
 
 `GET /api/v1/admin/audit-events?limit=50&cursor=<event-id>`
 
-Returns recent admin audit rows with cursor pagination. The current backend uses
-the last event id as the next cursor. Team users never see this endpoint. Raw
-tokens, provider secrets, request bodies, and artifact paths must not appear in
-audit metadata. The platform-admin Audit table renders each safe request ID so
-browser acceptance can visibly correlate a row with the current bootstrap
-request instead of matching only a repeated action name.
+Returns recent admin audit rows ordered by `created_at DESC, id DESC`. The wire
+cursor remains the last event UUID for rolling compatibility. The service looks
+up that event's timestamp, then applies the same timestamp/id tie-breaker,
+including when many events share a timestamp. This lets old and new pods accept
+each other's cursors during a rolling update. The response remains
+`{items, next_cursor}` and returns a null cursor at the terminal page. The
+platform-admin Audit tab keeps cursor history in the current session only,
+fetches the endpoint only when that tab is mounted, and renders each safe
+request ID so browser acceptance can visibly correlate a row with the current
+bootstrap request instead of matching only a repeated action name. Team users
+never see this endpoint. Raw tokens, provider secrets, request bodies, and
+artifact paths must not appear in audit metadata.
 
 ### Staging Admin Browser Acceptance Session
 

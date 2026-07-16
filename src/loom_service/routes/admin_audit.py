@@ -45,18 +45,22 @@ async def list_admin_audit_events(
             cursor_id = UUID(cursor)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid cursor") from exc
-        cursor_row = (await session.execute(
-            select(AdminAuditEvent).where(AdminAuditEvent.id == cursor_id),
-        )).scalar_one_or_none()
+        cursor_row = (
+            await session.execute(
+                select(AdminAuditEvent).where(AdminAuditEvent.id == cursor_id),
+            )
+        ).scalar_one_or_none()
         if cursor_row is None:
             raise HTTPException(status_code=400, detail="invalid cursor")
-        stmt = stmt.where(or_(
-            AdminAuditEvent.created_at < cursor_row.created_at,
-            and_(
-                AdminAuditEvent.created_at == cursor_row.created_at,
-                AdminAuditEvent.id < cursor_row.id,
-            ),
-        ))
+        stmt = stmt.where(
+            or_(
+                AdminAuditEvent.created_at < cursor_row.created_at,
+                and_(
+                    AdminAuditEvent.created_at == cursor_row.created_at,
+                    AdminAuditEvent.id < cursor_row.id,
+                ),
+            )
+        )
 
     rows = (await session.execute(stmt.limit(limit + 1))).scalars().all()
     has_more = len(rows) > limit

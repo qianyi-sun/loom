@@ -5,6 +5,9 @@ from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import and_, column
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.postgresql import JSONB
 
 from loom.auth import AuthContext
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch, Team, Trial
@@ -15,7 +18,7 @@ from loom_control_plane.routes.trajectory import (
 from loom_service.routes.run_library import (
     _artifact_inventory,
     _artifact_rows_for_library,
-    _legacy_artifact_matches_filters,
+    _legacy_artifact_filter_predicates,
     _serialize_typed_artifact,
     _typed_artifact_matches_filters,
 )
@@ -233,7 +236,7 @@ def test_typed_artifact_serializer_redacts_cross_team_unsafe_metadata() -> None:
     )
 
 
-def test_artifact_filters_cover_typed_and_legacy_sources() -> None:
+def test_typed_artifact_filters_cover_registry_sources() -> None:
     team_id = uuid4()
     batch_id = uuid4()
     trial_id = uuid4()
@@ -267,9 +270,14 @@ def test_artifact_filters_cover_typed_and_legacy_sources() -> None:
             "provenance_relation": "produced_from",
         },
     )
-    assert _legacy_artifact_matches_filters(
-        {"key": "team/trial/atif.json", "role": "report", "share_status": "shared"},
-        _trial(team_id, trial_id, batch_id),
+
+
+def test_legacy_artifact_filters_compile_all_registry_predicates() -> None:
+    team_id = uuid4()
+    batch_id = uuid4()
+    trial_id = uuid4()
+    predicates, share_status = _legacy_artifact_filter_predicates(
+        column("legacy_item", JSONB),
         {
             "artifact_type": "atif_projection",
             "owner_team_id": team_id,
@@ -279,11 +287,27 @@ def test_artifact_filters_cover_typed_and_legacy_sources() -> None:
             "provenance_relation": "produced_from",
         },
     )
-    assert not _legacy_artifact_matches_filters(
-        {"key": "team/trial/debug.log", "role": "raw", "share_status": "blocked"},
-        _trial(team_id, trial_id, batch_id),
-        {"safety_state": "safe"},
+
+    rendered = str(
+        and_(*predicates).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        ),
     )
+    rendered_share_status = str(
+        share_status.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        ),
+    )
+
+    assert len(predicates) == 6
+    assert "atif_projection" in rendered
+    assert str(team_id) in rendered
+    assert str(batch_id) in rendered
+    assert str(trial_id) in rendered
+    assert "produced_from" not in rendered
+    assert "share_status" in rendered_share_status
 
 
 def test_artifact_inventory_groups_typed_and_legacy_fallback() -> None:
