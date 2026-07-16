@@ -1278,10 +1278,29 @@ def _seed_tb2_v2_trial(
     artifact_hash = hashlib.sha256(native).hexdigest()
     prefix = f"{team_id}/{trial_id}"
     artifact_key = f"{prefix}/main/.loom/agent/trajectory.json"
+    verifier_log = b"pytest: 3 passed\n"
+    verifier_log_key = f"{prefix}/main/.loom/verifier/pytest.log"
+    verifier_meta = (
+        json.dumps(
+            {
+                "schema_version": "1",
+                "truncated": False,
+                "original_bytes": len(verifier_log),
+                "kept_bytes": len(verifier_log),
+                "return_code": 0,
+                "script_path": "/app/environment/tb2-tests/run-tests.sh",
+                "log_path": ".loom/verifier/pytest.log",
+            }
+        )
+        + "\n"
+    ).encode()
+    verifier_meta_key = f"{verifier_log_key}.meta.json"
     fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
         _tb2_v2_events_jsonl(trial_id=trial_id, artifact_hash=artifact_hash)
     )
     fake_s3.objects[(settings.artifacts_bucket, artifact_key)] = native
+    fake_s3.objects[(settings.artifacts_bucket, verifier_log_key)] = verifier_log
+    fake_s3.objects[(settings.artifacts_bucket, verifier_meta_key)] = verifier_meta
     conn.execute(
         update(Trial)
         .where(Trial.id == trial_id)
@@ -1302,7 +1321,29 @@ def _seed_tb2_v2_trial(
                         "key": artifact_key,
                         "size": len(native),
                         "content_hash": f"sha256:{artifact_hash}",
-                    }
+                    },
+                    {
+                        "step_name": "main",
+                        "bucket": settings.artifacts_bucket,
+                        "key": verifier_log_key,
+                        "size": len(verifier_log),
+                        "content_hash": (
+                            f"sha256:{hashlib.sha256(verifier_log).hexdigest()}"
+                        ),
+                        "share_status": "shared",
+                        "blocked_reason": None,
+                    },
+                    {
+                        "step_name": "main",
+                        "bucket": settings.artifacts_bucket,
+                        "key": verifier_meta_key,
+                        "size": len(verifier_meta),
+                        "content_hash": (
+                            f"sha256:{hashlib.sha256(verifier_meta).hexdigest()}"
+                        ),
+                        "share_status": "shared",
+                        "blocked_reason": None,
+                    },
                 ],
             },
         )
@@ -1549,3 +1590,179 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
         rendered = json.dumps(trajectory)
         # task_id values like `task-0001` contain `sk-` as a substring; use export scan patterns.
         _assert_no_secret_patterns(rendered)
+
+
+async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    """#865: indexed .loom/verifier/** objects are embedded in the delivery tar."""
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    supplemental_batch_id = delivery_setup["supplemental_batch_id"]
+    targeted_batch_id = delivery_setup["targeted_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    task_ids: list[str] = delivery_setup["task_ids"]  # type: ignore[assignment]
+    settings: LoomServiceSettings = delivery_setup["settings"]  # type: ignore[assignment]
+    fake_s3: _FakeS3Client = delivery_setup["fake_s3"]  # type: ignore[assignment]
+    team_id: UUID = delivery_setup["team_id"]  # type: ignore[assignment]
+
+    first_task = task_ids[0]
+    first_trial = selected_trials[first_task]
+    log_body = b"--- stdout ---\npytest: 3 passed\n"
+    meta_body = (
+        json.dumps(
+            {
+                "schema_version": "1",
+                "truncated": False,
+                "original_bytes": len(log_body),
+                "kept_bytes": len(log_body),
+                "return_code": 0,
+                "script_path": "/app/verifier/run.sh",
+                "log_path": ".loom/verifier/script.log",
+            }
+        )
+        + "\n"
+    ).encode()
+    log_key = f"{team_id}/{first_trial}/main/.loom/verifier/script.log"
+    meta_key = f"{team_id}/{first_trial}/main/.loom/verifier/script.log.meta.json"
+    fake_s3.objects[(settings.artifacts_bucket, log_key)] = log_body
+    fake_s3.objects[(settings.artifacts_bucket, meta_key)] = meta_body
+
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.begin() as conn:
+            prefix = f"{team_id}/{first_trial}"
+            conn.execute(
+                update(Trial)
+                .where(Trial.id == first_trial)
+                .values(
+                    result={
+                        "aggregate_reward": 1.0,
+                        "reward": {"passed": 1.0},
+                    },
+                    trajectory_index={
+                        "trajectory_uri": (
+                            f"s3://{settings.trajectories_bucket}/{prefix}/events.jsonl"
+                        ),
+                        "atif_uri": (
+                            f"s3://{settings.trajectories_bucket}/{prefix}/atif.json"
+                        ),
+                        "artifacts": [
+                            {
+                                "step_name": "main",
+                                "bucket": settings.artifacts_bucket,
+                                "key": log_key,
+                                "size": len(log_body),
+                                "content_hash": (
+                                    f"sha256:{hashlib.sha256(log_body).hexdigest()}"
+                                ),
+                                "share_status": "shared",
+                                "blocked_reason": None,
+                            },
+                            {
+                                "step_name": "main",
+                                "bucket": settings.artifacts_bucket,
+                                "key": meta_key,
+                                "size": len(meta_body),
+                                "content_hash": (
+                                    f"sha256:{hashlib.sha256(meta_body).hexdigest()}"
+                                ),
+                                "share_status": "shared",
+                                "blocked_reason": None,
+                            },
+                        ],
+                    },
+                )
+            )
+            conn.execute(
+                insert(LlmCall).values(
+                    team_id=team_id,
+                    trial_id=first_trial,
+                    step_id="step-1",
+                    dialect="openai_facade",
+                    model="gpt-4o",
+                    input_tokens=10,
+                    output_tokens=5,
+                    provider_extras={
+                        "_loom_raw_provider_log": {
+                            "schema_version": "1",
+                            "ref": "llm_calls/raw-1/provider_extras/_loom_raw_provider_log",
+                            "request": {
+                                "body": {
+                                    "messages": [
+                                        {"role": "user", "content": "prompt 1"}
+                                    ]
+                                }
+                            },
+                            "response": {
+                                "body": {
+                                    "choices": [
+                                        {
+                                            "message": {
+                                                "role": "assistant",
+                                                "content": "answer 1",
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    },
+                    request_params={"status": "available", "parameters": {}},
+                    cost_usd=0,
+                    rate_card_hash="facade:operator-supplied",
+                    captured_at=datetime.now(UTC),
+                )
+            )
+    finally:
+        sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "mode": "raw-harbor-tb2-v1",
+                "supplemental_batch_ids": [
+                    str(supplemental_batch_id),
+                    str(targeted_batch_id),
+                ],
+            },
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
+
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        log_member = f"agent_runs/{first_task}/{first_trial}/verifier/script.log"
+        meta_member = (
+            f"agent_runs/{first_task}/{first_trial}/verifier/script.log.meta.json"
+        )
+        assert log_member in set(tar.getnames())
+        assert meta_member in set(tar.getnames())
+        assert tar.extractfile(log_member).read() == log_body  # type: ignore[union-attr]
+        manifest = json.load(
+            tar.extractfile(  # type: ignore[arg-type]
+                f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json"
+            )
+        )
+        verifier_entries = [
+            row
+            for row in manifest["artifacts"]
+            if row.get("kind") == "verifier_artifact"
+        ]
+        assert {row["path"] for row in verifier_entries} == {
+            "verifier/script.log",
+            "verifier/script.log.meta.json",
+        }
+        log_entry = next(
+            row for row in verifier_entries if row["path"] == "verifier/script.log"
+        )
+        assert log_entry["truncated"] is False
+        assert log_entry["share_status"] == "shared"
+        assert log_entry["size_bytes"] == len(log_body)
+        assert log_entry["content_hash"].startswith("sha256:")
+        assert log_entry["step_name"] == "main"

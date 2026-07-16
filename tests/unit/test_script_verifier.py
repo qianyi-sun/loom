@@ -267,3 +267,166 @@ async def test_script_verifier_skips_agent_output_for_glob_artifact():
     # script has to walk LOOM_TASK_DIR itself.
     assert "LOOM_AGENT_OUTPUT" not in captured_env
     assert captured_env["LOOM_TASK_DIR"] == "/workspace"
+
+
+# ---- #865: retain capped verifier audit logs under .loom/verifier/ ----
+
+
+async def test_script_verifier_writes_audit_log_on_success():
+    def _handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        return ExecResult(
+            return_code=0,
+            stdout=b"pytest collected 3 items\n3 passed\n",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.2,
+        )
+
+    fake = FakeDriver(exec_handler=_handler)
+    await fake.start(options=StartOptions())
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = json.dumps(
+        {"rewards": {"passed": 1.0}, "checks": [{"name": "ok", "passed": True}]}
+    ).encode()
+
+    from loom.models.task import (
+        AgentDefaults,
+        EnvironmentConfig,
+        StepConfig,
+        TaskConfig,
+        TaskMetadata,
+        VerifierDefaults,
+    )
+    from loom.verifier.script_verifier import (
+        _VERIFIER_LOG_NAME,
+        _VERIFIER_META_NAME,
+    )
+
+    task = TaskConfig(
+        task=TaskMetadata(id="t/1", name="t 1"),
+        environment=EnvironmentConfig(
+            os="linux",
+            docker_image="python:3.11-slim",
+            workdir=PurePosixPath("/app"),
+        ),
+        agent=AgentDefaults(name="terminus-2"),
+        verifier=VerifierDefaults(name="script", args={"script_path": "/x/run.sh"}),
+        steps=[StepConfig(name="main")],
+    )
+    v = ScriptVerifier(script_path=PurePosixPath("/app/verifier/loom_verify.sh"))
+    result = await v.verify(
+        task=task,
+        env=fake,
+        artifacts_dir=PurePosixPath("/app"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+    assert result.rewards == {"passed": 1.0}
+    assert result.error is None
+
+    log_path = PurePosixPath("/app/.loom/verifier") / _VERIFIER_LOG_NAME
+    meta_path = PurePosixPath("/app/.loom/verifier") / _VERIFIER_META_NAME
+    assert log_path in fake.filesystem
+    assert meta_path in fake.filesystem
+    log_text = fake.filesystem[log_path].decode()
+    assert "3 passed" in log_text
+    meta = json.loads(fake.filesystem[meta_path].decode())
+    assert meta["truncated"] is False
+    assert meta["return_code"] == 0
+    assert meta["kept_bytes"] == len(fake.filesystem[log_path])
+
+
+async def test_script_verifier_truncates_oversized_audit_log():
+    from loom.verifier.script_verifier import (
+        _VERIFIER_LOG_NAME,
+        _VERIFIER_LOG_TRUNCATION_MARKER,
+        _VERIFIER_META_NAME,
+        MAX_VERIFIER_LOG_BYTES,
+    )
+
+    huge = b"HEAD" + (b"x" * (MAX_VERIFIER_LOG_BYTES + 5000)) + b"TAIL_MARKER"
+
+    def _handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        return ExecResult(
+            return_code=0,
+            stdout=huge,
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.5,
+        )
+
+    fake = FakeDriver(exec_handler=_handler)
+    await fake.start(options=StartOptions())
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = b'{"rewards": {"passed": 1.0}}'
+
+    from loom.models.task import (
+        AgentDefaults,
+        EnvironmentConfig,
+        StepConfig,
+        TaskConfig,
+        TaskMetadata,
+        VerifierDefaults,
+    )
+
+    task = TaskConfig(
+        task=TaskMetadata(id="t/1", name="t 1"),
+        environment=EnvironmentConfig(
+            os="linux",
+            docker_image="python:3.11-slim",
+            workdir=PurePosixPath("/app"),
+        ),
+        agent=AgentDefaults(name="terminus-2"),
+        verifier=VerifierDefaults(name="script"),
+        steps=[StepConfig(name="main")],
+    )
+    v = ScriptVerifier(script_path=PurePosixPath("/app/verifier/loom_verify.sh"))
+    result = await v.verify(
+        task=task,
+        env=fake,
+        artifacts_dir=PurePosixPath("/app"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+    assert result.error is None
+    log_path = PurePosixPath("/app/.loom/verifier") / _VERIFIER_LOG_NAME
+    meta_path = PurePosixPath("/app/.loom/verifier") / _VERIFIER_META_NAME
+    kept = fake.filesystem[log_path]
+    assert len(kept) <= MAX_VERIFIER_LOG_BYTES
+    assert kept.startswith(b"--- stdout ---\nHEAD")
+    assert _VERIFIER_LOG_TRUNCATION_MARKER in kept
+    assert kept.endswith(b"TAIL_MARKER") or kept.rstrip().endswith(b"TAIL_MARKER")
+    meta = json.loads(fake.filesystem[meta_path].decode())
+    assert meta["truncated"] is True
+    assert meta["original_bytes"] > MAX_VERIFIER_LOG_BYTES
+
+
+async def test_script_verifier_shell_quotes_audit_workspace_path():
+    commands: list[str] = []
+
+    def _handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        commands.append(cmd)
+        return ExecResult(
+            return_code=0,
+            stdout=b"ok\n",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.01,
+        )
+
+    fake = FakeDriver(exec_handler=_handler)
+    await fake.start(options=StartOptions())
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = b'{"rewards": {}}'
+    task = _task_with_single_artifact("answer.txt")
+    task = task.model_copy(
+        update={
+            "environment": task.environment.model_copy(
+                update={"workdir": PurePosixPath("/workspace/team's task")},
+            ),
+        },
+    )
+
+    await ScriptVerifier(script_path=PurePosixPath("/workspace/verifier/run.sh")).verify(
+        task=task,
+        env=fake,
+        artifacts_dir=PurePosixPath("/workspace/artifacts"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+
+    assert "mkdir -p -- '/workspace/team'\"'\"'s task/.loom/verifier'" in commands
