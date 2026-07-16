@@ -53,6 +53,7 @@ function AuditRows({ events }: { events: AdminAuditEvent[] }): JSX.Element {
             <th className="px-3 py-2 font-semibold">Actor</th>
             <th className="px-3 py-2 font-semibold">Action</th>
             <th className="px-3 py-2 font-semibold">Target</th>
+            <th className="px-3 py-2 font-semibold">Request ID</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 bg-white">
@@ -63,6 +64,9 @@ function AuditRows({ events }: { events: AdminAuditEvent[] }): JSX.Element {
               <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-700">{event.action}</td>
               <td className="px-3 py-2 text-slate-600">
                 {event.target_type}:{event.target_id}
+              </td>
+              <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-600">
+                {event.request_id ?? "—"}
               </td>
             </tr>
           ))}
@@ -485,7 +489,10 @@ export default function AdminAccess(): JSX.Element {
   }
 
   const accountRequestsCard = (
-    <Card>
+    <Card
+      data-loom-query="registration-requests"
+      data-loom-query-status={userRegistrationRequests.status}
+    >
       <Card.Header
         title="Account requests"
         description="Approve a username into its requested team, then share the one-time password setup link manually."
@@ -743,7 +750,10 @@ export default function AdminAccess(): JSX.Element {
         renderPanel={() => (
           <>
       {isAdmin && activeSection === "teams" ? (
-        <Card>
+        <Card
+          data-loom-query="admin-teams"
+          data-loom-query-status={adminTeams.status}
+        >
           <Card.Header
             title="Internal teams"
             description="Maintain the fixed teams that new members can join during approval."
@@ -836,7 +846,10 @@ export default function AdminAccess(): JSX.Element {
         <div className="grid gap-4 xl:grid-cols-2">
           {accountRequestsCard}
 
-          <Card>
+          <Card
+            data-loom-query="password-reset-requests"
+            data-loom-query-status={passwordResetRequests.status}
+          >
             <Card.Header
               title="Password resets"
               description="Approve reset requests only after verifying the request out of band, then share the one-time reset link manually."
@@ -908,7 +921,10 @@ export default function AdminAccess(): JSX.Element {
       ) : null}
 
       {activeSection === "tokens" ? (
-      <Card>
+      <Card
+        data-loom-query="api-tokens"
+        data-loom-query-status={tokens.status}
+      >
         <Card.Header
           title="API tokens"
           description="Create scoped tokens for CLI and automation. Raw token values are shown only once after create or rotate."
@@ -1064,7 +1080,10 @@ export default function AdminAccess(): JSX.Element {
       {isAdmin && activeSection === "requests" ? (
         <div className="grid gap-4">
           {accountRequestsCard}
-          <Card>
+          <Card
+            data-loom-query="team-registrations"
+            data-loom-query-status={registrations.status}
+          >
             <Card.Header
               title="Legacy team registrations"
               description="Approve older team-registration requests into an invite link. Username/password account approvals are listed above."
@@ -1268,7 +1287,10 @@ export default function AdminAccess(): JSX.Element {
         </Card.Body>
       </Card>
 
-      <Card>
+      <Card
+        data-loom-query="invites"
+        data-loom-query-status={invites.status}
+      >
         <Card.Header
           title={`${inviteStatus[0].toUpperCase()}${inviteStatus.slice(1)} invites`}
           description="Invite links are listed by status without exposing raw codes."
@@ -1361,7 +1383,10 @@ export default function AdminAccess(): JSX.Element {
       ) : null}
 
       {isAdmin && activeSection === "audit" ? (
-        <Card>
+        <Card
+          data-loom-query="audit-events"
+          data-loom-query-status={audit.status}
+        >
           <Card.Header
             title="Audit log"
             description="Recent admin access decisions with actor, action, and target."

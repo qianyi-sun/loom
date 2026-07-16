@@ -4558,6 +4558,59 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    same-origin error is exempt. The trace comes only from the
    command's fresh logged-out context; retain it as rollout evidence and do not
    substitute a signed-in profile.
+
+   **Staging-only authenticated admin UI acceptance.** After the logged-out
+   route smoke passes in the candidate-bound brokered protected-staging
+   rollout, validate the protected Admin Access and Rate cards surfaces with
+   the short-lived, audited #692 exchange. The ephemeral kind workflow renders
+   `runtime_environment = "development"` and performs only a credential-free
+   `404` deny probe; it cannot substitute for or impersonate protected staging.
+   Keep the broker-created request envelope, backup guard, and rollout mutation
+   lease intact. Read the singleton admin bearer from an owner-only (`0600`)
+   mounted file or redirected, non-interactive stdin; never place the raw
+   bearer on the command line or in the process environment. Bind the report to
+   the build identity exposed by the running service, not an ambient checkout
+   or PR ref:
+
+   The broker-owned rollout sequence must be extended to execute this command
+   and store its report with the request/attempt evidence. Until that integration
+   exists and succeeds, this acceptance item remains unmet; do not run it
+   manually against shared staging from an ambient checkout. Once integrated,
+   operators inspect the evidence with `loom-staging-rollout status REQUEST_ID`
+   and `loom-staging-rollout logs REQUEST_ID`.
+
+   The following illustrates the required broker-owned step, not an authorized
+   standalone operator command:
+
+   ```bash
+   DEPLOYED_SHA="$(kubectl --context kind-loom-staging -n loom \
+     exec deploy/loom-service -- cat /opt/loom/build-sha | tr -d '\r\n')"
+   npm --prefix web run smoke:staging-admin -- \
+     --route https://yylx.world/dev \
+     --expected-deployed-sha "$DEPLOYED_SHA" \
+     --admin-token-source file:/absolute/path/to/mounted/staging-admin-token \
+     --username qianyi \
+     --report /tmp/loom-staging-admin-browser-smoke.json
+   ```
+
+   Use only an existing enabled `active` or `pending_setup` platform admin who
+   is already an owner of the enabled `admin` team. The bootstrap must not
+   create, enable, promote, or repair any authority; normal grant/revoke remains
+   the #802 workflow. The image build bakes that SHA into
+   `/opt/loom/build-sha` and the OCI `org.opencontainers.image.revision` label;
+   runtime environment overrides do not establish identity. The check verifies
+   the actual deployed build identity, exact correlated request ID and safe
+   audit event, every tab's product API, all six Admin Access states, keyboard
+   roving focus with Arrow/Home/End, exact ARIA tab-to-panel relationships, the
+   Audit log, and Rate cards.
+   It emits only the sanitized JSON report: do not retain a trace, screenshot,
+   storage state, cookie, or bearer. Its `finally` cleanup logs out, revokes the
+   session, and proves `/api/v1/auth/me` returns `401`; a cleanup failure fails
+   the gate. The bootstrap route is deliberately `404` outside staging and its
+   fixed 900-second session cannot be refreshed or mutate any endpoint except
+   exact logout. This admin-only report does
+   not replace the later normal-user onboarding and submission evidence.
+
 5. **Remote-worker private tunnels hold.** If remote workers are attached, the
    shared-staging broker collects watchdog evidence and verifies the exact
    worker-facing URLs from the control node and declared worker hosts. Inspect
@@ -5231,10 +5284,12 @@ checklist:
   REAL images, applies them, waits for every pod to reach Ready,
   probes `/healthz` + `/metrics` on every component. Closes the
   cold-start regression gap (~15-20 min). This required PR gate is
-  credential-free: it never enters `ci-aws` and does not claim real AWS S3
-  coverage. Record real-AWS validation only from a separately protected,
-  trusted post-merge/release run; a missing or skipped cloud run is not AWS
-  evidence.
+  credential-free and renders `runtime_environment=development`; it proves the
+  staging-only admin exchange stays hidden with a `404`, but does not perform
+  authenticated staging acceptance. It never enters `ci-aws` and does not
+  claim real AWS S3 coverage. Record authenticated staging and real-AWS
+  validation only from separately protected, brokered post-merge/release runs;
+  a missing or skipped protected run is not evidence.
 - **`scripts/staging_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team non-admin user-owned API-token auth, provider/model
   discovery, runnable benchmark catalog presence, sampled ready benchmark bundle objects,

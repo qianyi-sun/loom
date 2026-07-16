@@ -302,6 +302,34 @@ def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     assert any(step.get("name") == "Log in to GHCR" for step in publish["steps"])
 
 
+def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    expected_steps = {
+        "build": "Build without registry or cache write authority",
+        "publish": "Build and publish trusted image",
+    }
+
+    for job_name, step_name in expected_steps.items():
+        step = next(
+            step
+            for step in workflow["jobs"][job_name]["steps"]
+            if step.get("name") == step_name
+        )
+        script = step["run"]
+        assert step["env"]["HEAD_SHA"] == "${{ github.sha }}"
+        assert step["env"]["BUILD_CONTEXT"] == "${{ matrix.context }}"
+        assert (
+            '--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"'
+            in script
+        )
+        assert 'build_args+=("$BUILD_CONTEXT")' in script
+        assert script.index("LOOM_BUILD_SHA=${HEAD_SHA}") < script.index(
+            'build_args+=("$BUILD_CONTEXT")'
+        )
+        assert 'if [[ "$IMAGE_NAME" == "service" ]]' not in script
+        assert "build_args+=(.)" not in script
+
+
 def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
     invalid_gates: dict[str, str] = {}
     for workflow_path, (gate_id, _) in GATE_CONTRACTS.items():
@@ -841,6 +869,7 @@ def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
         "Verify prefixed frontend routes through ingress-nginx",
         "Verify prefixed frontend routes mount in Chromium",
         "Upload frontend route browser trace",
+        "Verify staging admin exchange stays hidden in kind",
         "Verify /healthz on every service via port-forward",
     ]
     route_contract_indices = [step_names.index(name) for name in route_contract_steps]
@@ -979,6 +1008,148 @@ def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
     assert lock["packages"]["node_modules/@playwright/test"]["version"] == "1.61.1"
     assert lock["packages"]["node_modules/playwright"]["version"] == "1.61.1"
     assert lock["packages"]["node_modules/playwright-core"]["version"] == "1.61.1"
+
+
+def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    steps = workflow["jobs"]["smoke"]["steps"]
+    names = [step.get("name") for step in steps]
+    anonymous_index = names.index("Verify prefixed frontend routes mount in Chromium")
+    anonymous_trace_index = names.index("Upload frontend route browser trace")
+    deny_index = names.index("Verify staging admin exchange stays hidden in kind")
+    assert anonymous_index < anonymous_trace_index < deny_index
+    for forbidden_step in (
+        "Verify authenticated staging admin browser surfaces",
+        "Upload sanitized staging admin browser report",
+        "Cleanup staging admin browser secret files",
+    ):
+        assert forbidden_step not in names
+    assert "smoke:staging-admin" not in str(workflow)
+
+    bootstrap = next(
+        step for step in steps if step.get("name") == "Bootstrap namespace + Secrets"
+    )["run"]
+    assert "/tmp/loom-staging-admin-token" not in bootstrap
+    assert "$GITHUB_ENV" not in bootstrap
+
+    cluster_config = next(
+        step for step in steps if step.get("name") == "Generate cluster-config.toml"
+    )["run"]
+    assert 'runtime_environment = "development"' in cluster_config
+    assert 'runtime_environment = "staging"' not in cluster_config
+
+    deny_script = steps[deny_index]["run"]
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=deny_script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+    assert "--request POST" in deny_script
+    assert "--data-binary '{'" in deny_script
+    assert "https://yylx.world/dev/api/v1/auth/staging-admin-browser-session" in deny_script
+    assert '[[ "$status" != "404" ]]' in deny_script
+    assert "!= '{\"detail\":\"not found\"}'" in deny_script
+    assert "grep -Eqi '^(location|set-cookie|x-loom-build-sha):'" in deny_script
+    for forbidden in (
+        "Authorization",
+        "ADMIN_TOKEN",
+        "smoke:staging-admin",
+        "loom-staging-admin-browser-smoke.json",
+    ):
+        assert forbidden not in deny_script
+
+    build = next(
+        step for step in steps if step.get("name") == "Build images (parallel)"
+    )
+    assert "checkout_sha=$(git rev-parse HEAD)" in build["run"]
+    assert (
+        'build_args+=(--build-arg "LOOM_BUILD_SHA=${checkout_sha}")'
+        in build["run"]
+    )
+    assert "org.opencontainers.image.revision" in build["run"]
+    assert '[[ "$service_revision" == "$checkout_sha" ]]' in build["run"]
+
+    adr = (
+        REPO_ROOT / "docs/architecture/adr/independent-staging-rollout-runner.md"
+    ).read_text(encoding="utf-8")
+    launch = (REPO_ROOT / "docs/runbooks/staging-launch.md").read_text(
+        encoding="utf-8",
+    )
+    operator = (REPO_ROOT / "docs/runbooks/operator-runbook.md").read_text(
+        encoding="utf-8",
+    )
+    assert "acceptance row remains unmet" in adr
+    assert "this evidence item remains unmet" in launch
+    assert "this acceptance item remains unmet" in operator
+
+
+def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:
+    package = json.loads((REPO_ROOT / "web/package.json").read_text(encoding="utf-8"))
+    assert package["scripts"]["smoke:staging-admin"] == (
+        "node scripts/staging-admin-browser-smoke.mjs"
+    )
+    assert package["scripts"]["test:staging-admin-browser-unit"] == (
+        "vitest run scripts/staging-admin-browser-smoke.test.mjs"
+    )
+
+    smoke = (REPO_ROOT / "web/scripts/staging-admin-browser-smoke.mjs").read_text(
+        encoding="utf-8",
+    )
+    assert '`${options.route}/api/v1/auth/logout`' in smoke
+    assert "cleanup.auth_me_after_logout_status" in smoke
+    assert 'recordVideo: undefined' in smoke
+    for api_path in (
+        "/api/v1/admin/registration-requests?status=pending",
+        "/api/v1/admin/team-registrations?status=pending",
+        "/api/v1/admin/password-reset-requests?status=pending",
+        "/api/v1/admin/teams",
+        "/api/v1/invites?status=pending",
+        "/api/v1/tokens",
+        "/api/v1/admin/audit-events?limit=50",
+        "/api/v1/rate-cards",
+    ):
+        assert api_path in smoke
+    for event in (
+        'page.on("console"',
+        'page.on("pageerror"',
+        'page.on("request"',
+        'page.on("requestfinished"',
+        'page.on("requestfailed"',
+    ):
+        assert event in smoke
+    for query_name in (
+        "registration-requests",
+        "team-registrations",
+        "password-reset-requests",
+        "admin-teams",
+        "invites",
+        "api-tokens",
+        "audit-events",
+        "rate-cards",
+    ):
+        assert f'"{query_name}"' in smoke
+    assert "await pageMonitor.waitForQuiet(options.timeoutMs)" in smoke
+    assert smoke.index("await pageMonitor.waitForQuiet") < smoke.index(
+        "await page.close()"
+    )
+    assert smoke.index("await page.close()") < smoke.index(
+        "pageMonitor.applyChecks(checks)"
+    )
+    assert "name: auditIdentity.requestId" in smoke
+    assert "name: `user:${auditIdentity.targetUserId}`" in smoke
+    assert smoke.count("exact: true") >= 6
+    assert "verifyAdminTabsAccessibility" in smoke
+    for keyboard_key in ("ArrowRight", "ArrowLeft", "Home", "End"):
+        assert f'"{keyboard_key}"' in smoke
+    assert 'getAttribute("aria-controls")' in smoke
+    assert 'getAttribute("role") === "tabpanel"' in smoke
+    assert 'getAttribute("aria-labelledby") === tab.id' in smoke
+    assert "checks.all_admin_tabs_operable =" in smoke
+    assert "screenshot(" not in smoke
+    assert "storageState" not in smoke
 
 
 def test_staging_browser_route_smoke_waits_for_explicit_settled_state() -> None:

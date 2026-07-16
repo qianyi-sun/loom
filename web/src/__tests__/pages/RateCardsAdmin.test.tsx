@@ -50,5 +50,10 @@ describe("RateCardsAdmin", () => {
     expect(await screen.findByText("Rate-card JSON example")).toBeInTheDocument();
     expect(screen.getByText(/"model": "gpt-4o-mini"/)).toBeInTheDocument();
     expect(screen.getByText(/rate_card_provider/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Published" }).closest(
+        '[data-loom-query="rate-cards"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
   });
 });

@@ -63,6 +63,16 @@ image tag, backup, config digest, and rollout ID even when `dev` has advanced.
 Rollback of code is a merged revert on `dev` followed by a new request. Direct
 deployment of an older SHA is not an operational rollback mechanism.
 
+Candidate-bound authenticated staging browser acceptance follows the same
+authority. Only a broker-owned rollout step may exchange the singleton admin
+bearer, and its sanitized report must bind the request/attempt envelope's
+resolved SHA to the build SHA read from the running service. Pull-request kind
+CI remains credential-free and non-protected; its `development` runtime may
+only prove that the staging-only exchange returns `404`. A kind artifact,
+manual invocation, ambient checkout, or unmerged ref is never candidate
+evidence. Until the broker-owned positive browser step completes, this
+acceptance row remains unmet.
+
 ### Service authority and secrets
 
 The root installation owns the runner source, venv, client, broker, sudoers,

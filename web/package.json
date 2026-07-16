@@ -10,8 +10,10 @@
     "lint": "eslint . --ext ts,tsx --max-warnings=0",
     "gen-api": "openapi-typescript http://localhost:8090/openapi.json -o src/api/schema.d.ts",
     "smoke:routes": "node scripts/frontend-route-browser-smoke.mjs",
+    "smoke:staging-admin": "node scripts/staging-admin-browser-smoke.mjs",
     "test": "vitest run",
     "test:route-browser-unit": "vitest run scripts/frontend-route-browser-smoke.test.mjs",
+    "test:staging-admin-browser-unit": "vitest run scripts/staging-admin-browser-smoke.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

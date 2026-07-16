@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +28,7 @@ from loom.db.schema import (
     UserRegistrationRequest,
     UserSession,
 )
+from loom.security.redaction import redact_text
 from loom.system_identities import TASKSET_FENCE_CANARY_TEAM_ID
 from loom_service.admin_audit import (
     actor_from_context,
@@ -40,10 +45,12 @@ from loom_service.password_auth import (
 )
 from loom_service.public_links import public_base_url
 from loom_service.session_auth import (
+    STAGING_ADMIN_SESSION_SECRET_PREFIX,
     consume_login_challenge,
     create_login_challenge,
     create_session_for_user,
     hash_secret,
+    is_staging_admin_browser_session,
     refresh_session,
     revoke_session,
     rotate_csrf_token,
@@ -83,6 +90,17 @@ class _SwitchTeamReq(BaseModel):
 class _UsernamePasswordLoginReq(BaseModel):
     username: str = Field(min_length=2, max_length=64)
     password: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def _strip_username(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class _StagingAdminBrowserSessionReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=2, max_length=64)
 
     @field_validator("username", mode="before")
     @classmethod
@@ -136,6 +154,50 @@ class _ResetCompleteReq(BaseModel):
 
 
 _ACTION_TOKEN_TTL = timedelta(days=14)
+_STAGING_ADMIN_BROWSER_SESSION_TTL_SEC = 900
+_SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_BUILD_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_IMAGE_BUILD_SHA_PATH = Path("/opt/loom/build-sha")
+
+
+def _require_staging_admin_browser_session_runtime() -> None:
+    if os.environ.get("LOOM_ENV", "").strip().lower() != "staging":
+        raise HTTPException(status_code=404, detail="not found")
+
+
+def _require_runtime_build_sha() -> str:
+    try:
+        build_sha = _IMAGE_BUILD_SHA_PATH.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        build_sha = ""
+    if not _BUILD_SHA_RE.fullmatch(build_sha):
+        raise HTTPException(
+            status_code=503,
+            detail="staging build identity unavailable",
+        )
+    return build_sha
+
+
+def _require_safe_audit_header(value: str | None, *, name: str) -> str:
+    cleaned = value.strip() if value else ""
+    if not cleaned:
+        raise HTTPException(status_code=400, detail=f"{name} header is required")
+    if len(cleaned) > 128:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} must be at most 128 characters",
+        )
+    if value != cleaned:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} must not contain surrounding whitespace",
+        )
+    if redact_text(cleaned) != cleaned:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} must not contain secret-looking material",
+        )
+    return cleaned
 
 
 def _raw_action_token(purpose: str) -> str:
@@ -831,6 +893,135 @@ async def reset_complete(
     }
 
 
+@router.post(
+    "/staging-admin-browser-session",
+    status_code=204,
+    include_in_schema=False,
+    dependencies=[Depends(_require_staging_admin_browser_session_runtime)],
+)
+async def create_staging_admin_browser_session(
+    request: Request,
+    response: Response,
+    sc: AdminSessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+) -> None:
+    """Exchange the singleton staging bearer for one audited browser session."""
+    session, ctx = sc
+    if ctx.type != "admin" or ctx.auth_kind != "bearer":
+        raise HTTPException(
+            status_code=403,
+            detail="singleton admin bearer required",
+        )
+    build_sha = _require_runtime_build_sha()
+
+    actor = _require_safe_audit_header(
+        x_loom_admin_actor,
+        name="X-Loom-Admin-Actor",
+    )
+    request_id = _require_safe_audit_header(
+        x_request_id,
+        name="X-Request-ID",
+    )
+    if not _SAFE_REQUEST_ID_RE.fullmatch(request_id):
+        raise HTTPException(
+            status_code=400,
+            detail="X-Request-ID contains unsupported characters",
+        )
+
+    try:
+        payload = _StagingAdminBrowserSessionReq.model_validate_json(
+            await request.body(),
+        )
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+    username = normalize_username(payload.username)
+    user = (await session.execute(
+        select(User)
+        .where(
+            User.username_normalized == username,
+            User.is_platform_admin.is_(True),
+            User.status.in_(("active", "pending_setup")),
+            User.disabled_at.is_(None),
+        )
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="eligible staging platform admin not found",
+        )
+
+    admin_teams = list((await session.execute(
+        select(Team)
+        .where(
+            func.lower(Team.name) == "admin",
+            Team.disabled_at.is_(None),
+        )
+        .order_by(Team.id.asc())
+        .with_for_update(),
+    )).scalars().all())
+    if len(admin_teams) != 1:
+        raise HTTPException(
+            status_code=404,
+            detail="eligible staging platform admin not found",
+        )
+    admin_team = admin_teams[0]
+    membership = (await session.execute(
+        select(TeamMembership)
+        .where(
+            TeamMembership.user_id == user.id,
+            TeamMembership.team_id == admin_team.id,
+            TeamMembership.role == "owner",
+        )
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(
+            status_code=404,
+            detail="eligible staging platform admin not found",
+        )
+
+    created = await create_session_for_user(
+        session,
+        user=user,
+        current_team_id=admin_team.id,
+        session_ttl_seconds=_STAGING_ADMIN_BROWSER_SESSION_TTL_SEC,
+        session_secret_prefix=STAGING_ADMIN_SESSION_SECRET_PREFIX,
+        update_last_login_at=False,
+    )
+    await session.flush()
+    await write_admin_audit_event(
+        session,
+        actor=actor,
+        action="auth.staging_admin_browser_session.create",
+        target_type="user",
+        target_id=str(user.id),
+        request=request,
+        metadata={
+            "auth_source": "singleton_admin_bearer",
+            "target_status": user.status,
+            "target_username": user.username_normalized,
+            "ttl_seconds": _STAGING_ADMIN_BROWSER_SESSION_TTL_SEC,
+            "build_sha": build_sha,
+        },
+    )
+    await session.commit()
+
+    response.set_cookie(
+        value=created.raw_session,
+        **session_cookie_options(
+            request.app.state.settings,
+            max_age=_STAGING_ADMIN_BROWSER_SESSION_TTL_SEC,
+            force_secure=True,
+        ),
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Loom-Build-SHA"] = build_sha
+
+
 def _set_auth_cookies(
     response: Response, request: Request, *, raw_session: str,
 ) -> None:
@@ -955,6 +1146,13 @@ async def refresh(
 ) -> dict[str, Any]:
     session, ctx = sc
     settings = request.app.state.settings
+    if is_staging_admin_browser_session(
+        request.cookies.get(settings.auth_session_cookie_name),
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="staging admin browser sessions cannot be refreshed",
+        )
     refreshed_tokens = await refresh_session(
         session, ctx=ctx, session_ttl_seconds=settings.auth_session_ttl_sec,
     )

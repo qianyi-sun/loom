@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -66,6 +67,10 @@ from loom_service.routes import (
     trajectory,
     trials,
     usage,
+)
+from loom_service.session_auth import (
+    is_staging_admin_browser_session,
+    staging_admin_browser_request_allowed,
 )
 from loom_service.storage import (
     create_minio_client,
@@ -297,6 +302,38 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(local_servers.router, prefix="/api/v1")
     app.include_router(provider_connections.router, prefix="/api/v1")
     app.include_router(secret_store_admin.router, prefix="/api/v1")
+
+    @app.middleware("http")
+    async def _staging_admin_validation_session_middleware(  # type: ignore[no-untyped-def]
+        request: Request,
+        call_next,
+    ):
+        """Fail closed on every mutation except exact session cleanup."""
+        raw_cookie = request.cookies.get(settings.auth_session_cookie_name)
+        request_path = request.scope.get("path", request.url.path)
+        hidden_bootstrap_probe = (
+            os.environ.get("LOOM_ENV", "").strip().lower() != "staging"
+            and request.method.upper() == "POST"
+            and request_path == "/api/v1/auth/staging-admin-browser-session"
+        )
+        if (
+            is_staging_admin_browser_session(raw_cookie)
+            and not hidden_bootstrap_probe
+            and not staging_admin_browser_request_allowed(
+                method=request.method,
+                path=request_path,
+            )
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": (
+                        "staging admin browser session is validation-only"
+                    ),
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        return await call_next(request)
 
     @app.middleware("http")
     async def _metrics_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
