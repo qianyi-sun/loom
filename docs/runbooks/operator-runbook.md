@@ -1496,6 +1496,18 @@ symlinks, hard links, special files, traversal-limit drift, and every root conta
 request-scoped and idempotent; it never deletes a valid manifest-backed restore
 point and leaves the request status failed for audit.
 
+Before starting the expensive PostgreSQL dump, the broker opens its own
+localhost-only MinIO transport with `kubectl port-forward --address 127.0.0.1
+service/loom-minio :9000` and derives the ephemeral local port only from that
+child process's exact readiness line. It never claims, probes, reuses, or stops
+the historical local port `19000`, so an operator-owned or concurrent tunnel
+on that port is outside the broker lifecycle. The broker keeps its child alive
+through the bounded MinIO mirror and confirms that exact child has exited
+before any manifest can be published. Startup or cleanup failure is reported
+as the non-secret public reason `backup_transport_failed`; it publishes no
+envelope or rollout unit and remains eligible for the same request-scoped
+incomplete-backup cleanup path.
+
 Only one full staging request may be pending or running. A second `start` or
 `resume` fails instead of queueing or preempting and reports only safe active
 request metadata. `status` and `logs` are available to every operator; a
