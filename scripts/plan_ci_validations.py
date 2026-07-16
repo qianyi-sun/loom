@@ -14,6 +14,9 @@ HEAVY_CHECKS = (
     "staging_smoke",
 )
 
+SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch"}
+FULL_GATE_LABEL = "ci:merge-ready"
+
 LABEL_TO_CHECK = {
     "ci:integration": "integration",
     "ci:integration-docker": "integration_docker",
@@ -74,6 +77,9 @@ PROTECTED_STAGING_ROLLOUT_PREFIXES = (
 
 @dataclass(frozen=True)
 class ValidationPlan:
+    event_relevant: bool
+    full_gate: bool
+    gate_mode: str
     docs_only: bool
     unowned_runtime: bool
     integration: bool
@@ -91,14 +97,65 @@ class ValidationPlan:
         outputs = {
             name: str(bool(getattr(self, name))).lower()
             for name in (
+                "event_relevant",
+                "full_gate",
                 "docs_only",
                 "unowned_runtime",
                 *HEAVY_CHECKS,
                 "coverage_summary",
             )
         }
+        outputs["gate_mode"] = self.gate_mode
         outputs["reasons_json"] = json.dumps(self.reasons, sort_keys=True, separators=(",", ":"))
         return outputs
+
+
+def _pull_request_gate_mode(
+    *,
+    labels: Collection[str],
+    action: str,
+    action_label: str,
+    draft: bool,
+    base_changed: bool,
+) -> tuple[bool, bool, str]:
+    """Return event relevance, full-gate eligibility, and the gate context mode.
+
+    Only the coordinator-owned ``ci:merge-ready`` label authorizes a PR to
+    emit the four protected contexts. Drafts are filtered; non-queue-head PRs
+    retain a fast preflight without producing names branch protection accepts.
+    Removing merge readiness or converting a labeled PR back to draft emits an
+    explicit protected-context failure so a prior green result on the same SHA
+    cannot remain merge-authoritative.
+    """
+
+    label_set = set(labels)
+    full_gate = FULL_GATE_LABEL in label_set and not draft
+    relevant_labels = {*LABEL_TO_CHECK, FULL_GATE_LABEL}
+
+    if action == "unlabeled" and action_label == FULL_GATE_LABEL:
+        return True, False, "invalidate"
+    if action == "converted_to_draft" and FULL_GATE_LABEL in label_set:
+        return True, False, "invalidate"
+    if draft:
+        return False, False, "filtered"
+
+    if action in {"labeled", "unlabeled"}:
+        event_relevant = action_label in relevant_labels
+    elif action == "edited":
+        event_relevant = base_changed
+    else:
+        event_relevant = action in {
+            "opened",
+            "ready_for_review",
+            "reopened",
+            "synchronize",
+        }
+
+    if not event_relevant:
+        return False, full_gate, "filtered"
+    if full_gate:
+        return True, True, "full"
+    return True, False, "preflight"
 
 
 def _is_documentation_path(path: str) -> bool:
@@ -126,7 +183,26 @@ def plan_validations(
     changed_paths: Sequence[str],
     labels: Collection[str],
     event_name: str,
+    pull_request_action: str = "opened",
+    pull_request_action_label: str = "",
+    pull_request_draft: bool = False,
+    pull_request_base_changed: bool = False,
 ) -> ValidationPlan:
+    if event_name not in SUPPORTED_EVENTS:
+        raise ValueError(f"unsupported event_name: {event_name}")
+
+    event_relevant = True
+    full_gate = True
+    gate_mode = "full"
+    if event_name == "pull_request":
+        event_relevant, full_gate, gate_mode = _pull_request_gate_mode(
+            labels=labels,
+            action=pull_request_action,
+            action_label=pull_request_action_label,
+            draft=pull_request_draft,
+            base_changed=pull_request_base_changed,
+        )
+
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
@@ -300,6 +376,9 @@ def plan_validations(
         docs_only = False
 
     return ValidationPlan(
+        event_relevant=event_relevant,
+        full_gate=full_gate,
+        gate_mode=gate_mode,
         docs_only=docs_only,
         unowned_runtime=unowned_runtime,
         integration=selected["integration"],
@@ -317,6 +396,18 @@ def main() -> int:
     parser.add_argument("--changed-files", type=Path, required=True)
     parser.add_argument("--labels-json", default="[]")
     parser.add_argument("--event-name", required=True)
+    parser.add_argument("--pull-request-action", default="")
+    parser.add_argument("--pull-request-action-label", default="")
+    parser.add_argument(
+        "--pull-request-draft",
+        choices=("true", "false"),
+        default="false",
+    )
+    parser.add_argument(
+        "--pull-request-base-changed",
+        choices=("true", "false"),
+        default="false",
+    )
     parser.add_argument("--github-output", type=Path, required=True)
     args = parser.parse_args()
     labels = json.loads(args.labels_json or "[]")
@@ -326,6 +417,10 @@ def main() -> int:
         changed_paths=args.changed_files.read_text(encoding="utf-8").splitlines(),
         labels=set(labels),
         event_name=args.event_name,
+        pull_request_action=args.pull_request_action,
+        pull_request_action_label=args.pull_request_action_label,
+        pull_request_draft=args.pull_request_draft == "true",
+        pull_request_base_changed=args.pull_request_base_changed == "true",
     )
     with args.github_output.open("a", encoding="utf-8") as handle:
         for name, value in plan.github_outputs().items():

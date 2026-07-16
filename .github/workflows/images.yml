@@ -21,9 +21,9 @@ name: images
 
 on:
   pull_request:
-    # The workflow always reports its stable gate. The shared planner selects
-    # image builds from changed paths or the additive `ci:images` label.
-    types: [opened, synchronize, reopened, labeled, edited]
+    # Protected names are reserved for the queue head; other PR events report
+    # distinct preflight/filtered contexts.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
   merge_group:
     types: [checks_requested]
   push:
@@ -43,6 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       required: ${{ steps.plan.outputs.required }}
+      gate_mode: ${{ steps.required.outputs.gate_mode }}
       images: ${{ steps.plan.outputs.images }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -63,6 +64,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_ACTION_LABEL: ${{ github.event.label.name }}
+          PR_DRAFT: ${{ github.event.pull_request.draft || false }}
+          PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -101,6 +106,10 @@ jobs:
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
+            --pull-request-action "$PR_ACTION" \
+            --pull-request-action-label "$PR_ACTION_LABEL" \
+            --pull-request-draft "$PR_DRAFT" \
+            --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Select affected images
@@ -137,6 +146,7 @@ jobs:
     needs: plan
     if: >-
       github.event_name != 'push' &&
+      needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
     runs-on: ubuntu-latest
@@ -250,6 +260,7 @@ jobs:
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
+      needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
     runs-on: ubuntu-latest
@@ -354,7 +365,11 @@ jobs:
           "${build_args[@]}"
 
   images-gate:
-    name: ${{ github.event_name == 'workflow_dispatch' && 'images-gate-manual' || 'images-gate' }}
+    name: >-
+      ${{ github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
+          (needs.plan.outputs.gate_mode == 'full' || needs.plan.outputs.gate_mode == 'invalidate') && 'images-gate' ||
+          needs.plan.outputs.gate_mode == 'preflight' && 'images-gate-preflight' ||
+          'images-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
     needs: [plan, build, publish]
@@ -363,12 +378,26 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PLAN_RESULT: ${{ needs.plan.result }}
+          GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           BUILD_RESULT: ${{ needs.build.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          case "$GATE_MODE" in
+            full|preflight|filtered|invalidate) ;;
+            *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
+          esac
+          if [[ "$GATE_MODE" == "invalidate" ]]; then
+            echo "FAIL: merge-ready authority was removed from this candidate" >&2
+            exit 1
+          fi
+          if [[ "$GATE_MODE" == "filtered" || "$GATE_MODE" == "preflight" ]]; then
+            [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
+            [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
+            exit 0
+          fi
           case "$EVENT_NAME" in
             pull_request|merge_group|workflow_dispatch|push) ;;
             *) echo "FAIL: invalid event name" >&2; exit 1 ;;

@@ -9,14 +9,16 @@
 > Loom is public-readiness hardened and is operated as an issue-scoped
 > GitHub-flow project. Normal
 > changes land through PRs into `dev`; `main` remains reserved for
-> release promotion from `dev`. Every normal PR reports four stable validation
-> contexts: `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
+> release promotion from `dev`. Only the coordinator-selected queue head
+> reports the four stable validation contexts: `repository-checks`,
+> `images-gate`, `cluster-smoke-gate`, and
 > `staging-smoke-gate`. The shared planner selects the applicable validation
 > work from changed paths, while labels can request additional validation.
-> Labels may add validation but cannot remove path-inferred validation. Every
-> normal `dev` PR uses GitHub squash auto-merge immediately after opening. This
-> queues the merge; GitHub waits for every required gate on the
-> current head SHA before merging.
+> Labels may add validation but cannot remove path-inferred validation. The
+> coordinator applies `ci:merge-ready` and enables GitHub squash auto-merge
+> only for the current `dev` queue head. GitHub waits for every required gate
+> on that current head SHA before merging; other PRs run distinct preflight or
+> filtered contexts.
 > Static documentation is a location-and-format allowlist; unknown runtime
 > paths fail safe to the full validation set. Manual runs report `*-manual`
 > contexts and cannot satisfy protected PR contexts. These four strict,
@@ -152,9 +154,11 @@ secrets.
   their validation work from changed paths; labels request additional work but
   cannot turn off path-inferred work. A new non-document path without a known
   owner selects every heavy lane until its ownership is declared.
-- Every normal `dev` PR uses GitHub squash auto-merge immediately after
-  opening. It remains queued until every required gate is visible and
-  successful on the current head SHA. The four strict, app-bound checks are the
+- The coordinator applies `ci:merge-ready` and enables GitHub squash auto-merge
+  only for the current `dev` queue head. It remains queued until every required
+  gate is visible and successful on the current head SHA. Other PRs run
+  distinct preflight/filtered contexts and cannot satisfy branch protection.
+  The four strict, app-bound checks are the
   only merge authority: `dev` requires no human approval, no CODEOWNER
   approval, and no conversation resolution. Do not hand-merge an eligible
   `dev` PR just because CI is green.

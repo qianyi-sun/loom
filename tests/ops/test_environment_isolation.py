@@ -176,9 +176,8 @@ def test_deploy_workflow_keeps_production_secrets_on_main_only() -> None:
 
 def test_repository_checks_run_environment_isolation_tests() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
-    steps = workflow["jobs"]["tests-root"]["steps"]
-    pytest_steps = [step for step in steps if "run" in step and "uv run pytest" in str(step["run"])]
-    assert any("tests/ops" in str(step["run"]) for step in pytest_steps)
+    shards = workflow["jobs"]["tests-root"]["strategy"]["matrix"]["include"]
+    assert any("tests/ops" in shard["test_paths"].split() for shard in shards)
 
 
 def test_dockerignore_excludes_operator_local_artifacts_from_image_context() -> None:

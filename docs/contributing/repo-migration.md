@@ -43,8 +43,10 @@ governance:
 - repo labels copied from `carinrc/loom`;
 - repo milestones copied from `carinrc/loom`.
 
-Normal `dev` PRs use squash auto-merge, and the four checks above are their
-only merge authority. CODEOWNERS is advisory on `dev`. `main` accepts only a
+The current `dev` queue head uses squash auto-merge and carries
+`ci:merge-ready`; only that candidate emits the four protected checks above.
+Other PRs run distinct preflight/filtered checks. The protected checks remain
+the only merge authority, and CODEOWNERS is advisory on `dev`. `main` accepts only a
 production release promotion from `dev`; Qianyi (`@qianyi-sun`) personally
 reviews the fixed candidate and evidence and performs the manual squash merge.
 Never enable auto-merge on a promotion PR. GitHub exposes

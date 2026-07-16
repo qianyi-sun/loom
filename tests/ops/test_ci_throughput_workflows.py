@@ -318,12 +318,21 @@ def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
     assert not invalid_gates, invalid_gates
 
 
-def test_protected_workflows_rerun_when_pull_request_base_is_edited() -> None:
+def test_protected_workflows_cover_gate_authority_pr_transitions() -> None:
     for workflow_path in GATE_CONTRACTS:
         workflow = _workflow(workflow_path)
         pull_request = _workflow_on(workflow)["pull_request"]
 
-        assert "edited" in pull_request["types"], workflow_path
+        assert {
+            "opened",
+            "synchronize",
+            "reopened",
+            "ready_for_review",
+            "converted_to_draft",
+            "labeled",
+            "unlabeled",
+            "edited",
+        } <= set(pull_request["types"]), workflow_path
 
 
 def test_manual_aggregate_contexts_have_distinct_event_specific_names() -> None:
@@ -331,11 +340,11 @@ def test_manual_aggregate_contexts_have_distinct_event_specific_names() -> None:
         workflow = _workflow(workflow_path)
         gate_name = workflow["jobs"][gate_id]["name"]
 
-        assert gate_name == (
-            "${{ github.event_name == 'workflow_dispatch' "
-            f"&& '{protected_name}-manual' || '{protected_name}' "
-            "}}"
-        )
+        assert f"'{protected_name}-manual'" in gate_name
+        assert f"'{protected_name}'" in gate_name
+        assert f"'{protected_name}-preflight'" in gate_name
+        assert f"'{protected_name}-filtered'" in gate_name
+        assert "gate_mode == 'invalidate'" in gate_name
 
 
 @pytest.mark.parametrize("required", ["", "invalid"])
@@ -374,7 +383,12 @@ def test_optional_gate_scripts_fail_closed_for_invalid_required(
         input=_gate_script(workflow_path, gate_id),
         text=True,
         capture_output=True,
-        env={"PLAN_RESULT": "success", "REQUIRED": required, **result_env},
+        env={
+            "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
+            "REQUIRED": required,
+            **result_env,
+        },
         check=False,
     )
 
@@ -415,6 +429,7 @@ def test_optional_gate_scripts_preserve_result_semantics(
         capture_output=True,
         env={
             "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
             "REQUIRED": required,
             **dict.fromkeys(result_names, heavy_result),
         },
@@ -448,6 +463,7 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
         env={
             "EVENT_NAME": event_name,
             "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
             "PUBLISH_RESULT": publish_result,
@@ -482,6 +498,7 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
         env={
             "EVENT_NAME": event_name,
             "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
             "PUBLISH_RESULT": publish_result,
@@ -508,6 +525,7 @@ def test_repository_checks_fails_closed_for_invalid_planner_booleans(
 ) -> None:
     env = {
         "PLAN_RESULT": "success",
+        "GATE_MODE": "full",
         "FAST_RESULT": "success",
         "GO_RESULT": "success",
         "DOCS_ONLY": "false",
@@ -548,6 +566,7 @@ def test_repository_checks_preserves_result_semantics(
         capture_output=True,
         env={
             "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
             "FAST_RESULT": "success",
             "GO_RESULT": "success",
             "DOCS_ONLY": "false",
@@ -614,6 +633,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
 
         for job_id, result_env in heavy_jobs.items():
             assert "plan" in jobs[job_id]["needs"]
+            assert "needs.plan.outputs.gate_mode == 'full'" in jobs[job_id]["if"]
             assert "needs.plan.outputs.required == 'true'" in jobs[job_id]["if"]
             assert gate_env[result_env] == f"${{{{ needs.{job_id}.result }}}}"
             assert f'"${result_env}"' in gate_script
@@ -630,8 +650,12 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "tests-root",
         "tests-packages",
     }
-    assert jobs["integration"]["needs"] == "fast-checks"
-    assert jobs["integration-docker"]["needs"] == "fast-checks"
+    assert "gate_mode == 'full'" in jobs["fast-checks"]["if"]
+    assert "gate_mode == 'preflight'" in jobs["fast-checks"]["if"]
+    assert jobs["integration"]["needs"] == "workflow-plan"
+    assert jobs["integration-docker"]["needs"] == "workflow-plan"
+    assert "gate_mode == 'full'" in jobs["integration"]["if"]
+    assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
     assert "repository-checks" in jobs["repository-checks"]["name"]
     assert set(jobs["repository-checks"]["needs"]) == {
         "workflow-plan",
@@ -648,6 +672,9 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
 
     assert {
         "docs_only",
+        "event_relevant",
+        "full_gate",
+        "gate_mode",
         "integration",
         "integration_docker",
         "images",
@@ -663,6 +690,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     )
     assert aggregate_step["env"] == {
         "PLAN_RESULT": "${{ needs.workflow-plan.result }}",
+        "GATE_MODE": "${{ needs.workflow-plan.outputs.gate_mode }}",
         "FAST_RESULT": "${{ needs.fast-checks.result }}",
         "GO_RESULT": "${{ needs.go-checks.result }}",
         "DOCS_ONLY": "${{ needs.workflow-plan.outputs.docs_only }}",
@@ -683,6 +711,57 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "COVERAGE_RESULT",
     ):
         assert f'"${result_name}"' in aggregate_script
+
+
+def test_python_test_shards_are_complete_and_non_overlapping() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    jobs = workflow["jobs"]
+
+    root_matrix = jobs["tests-root"]["strategy"]["matrix"]["include"]
+    assert root_matrix == [
+        {"shard": "unit-ops", "test_paths": "tests/unit tests/ops"},
+        {
+            "shard": "cli-contract-property",
+            "test_paths": "tests/loom_cli tests/contract tests/property",
+        },
+    ]
+    root_paths = [
+        path
+        for shard in root_matrix
+        for path in shard["test_paths"].split()
+    ]
+    assert len(root_paths) == len(set(root_paths))
+    assert set(root_paths) == {
+        "tests/unit",
+        "tests/ops",
+        "tests/loom_cli",
+        "tests/contract",
+        "tests/property",
+    }
+
+    integration_matrix = jobs["integration"]["strategy"]["matrix"]["include"]
+    assert integration_matrix == [
+        {"shard": "a-r", "test_glob": "tests/integration/test_[a-r]*.py"},
+        {"shard": "s-z", "test_glob": "tests/integration/test_[s-z]*.py"},
+    ]
+    all_tests = set((REPO_ROOT / "tests/integration").glob("test_*.py"))
+    expanded = [
+        set(REPO_ROOT.glob(shard["test_glob"]))
+        for shard in integration_matrix
+    ]
+    assert expanded[0].isdisjoint(expanded[1])
+    assert expanded[0] | expanded[1] == all_tests
+
+    root_upload = next(
+        step for step in jobs["tests-root"]["steps"]
+        if step.get("name") == "Upload root coverage data"
+    )
+    integration_upload = next(
+        step for step in jobs["integration"]["steps"]
+        if step.get("name") == "Upload integration coverage data"
+    )
+    assert "${{ matrix.shard }}" in root_upload["with"]["name"]
+    assert "${{ matrix.shard }}" in integration_upload["with"]["name"]
 
 
 def test_ci_supports_merge_queue_merge_group_event() -> None:

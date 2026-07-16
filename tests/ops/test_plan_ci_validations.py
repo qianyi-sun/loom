@@ -6,6 +6,100 @@ from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_non_queue_head_pr_runs_preflight_without_protected_gate() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action="synchronize",
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is False
+    assert plan.gate_mode == "preflight"
+
+
+def test_merge_ready_pr_runs_full_gate() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels={"ci:merge-ready"},
+        event_name="pull_request",
+        pull_request_action="labeled",
+        pull_request_action_label="ci:merge-ready",
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
+
+
+def test_draft_pr_is_filtered() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action="synchronize",
+        pull_request_draft=True,
+    )
+
+    assert plan.event_relevant is False
+    assert plan.full_gate is False
+    assert plan.gate_mode == "filtered"
+
+
+@pytest.mark.parametrize(
+    ("action", "action_label", "labels", "draft"),
+    [
+        ("unlabeled", "ci:merge-ready", set(), False),
+        ("converted_to_draft", "", {"ci:merge-ready"}, True),
+    ],
+)
+def test_removing_merge_authority_invalidates_prior_protected_context(
+    action: str,
+    action_label: str,
+    labels: set[str],
+    draft: bool,
+) -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=labels,
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_action_label=action_label,
+        pull_request_draft=draft,
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is False
+    assert plan.gate_mode == "invalidate"
+
+
+@pytest.mark.parametrize(
+    ("action", "action_label", "base_changed"),
+    [
+        ("labeled", "triage", False),
+        ("unlabeled", "triage", False),
+        ("edited", "", False),
+    ],
+)
+def test_irrelevant_pr_metadata_event_is_filtered(
+    action: str,
+    action_label: str,
+    base_changed: bool,
+) -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_action_label=action_label,
+        pull_request_base_changed=base_changed,
+    )
+
+    assert plan.event_relevant is False
+    assert plan.gate_mode == "filtered"
+
+
 def test_docs_only_selects_no_heavy_validation() -> None:
     plan = plan_validations(
         changed_paths=["docs/user-guide.md", "CONTRIBUTING.md"],

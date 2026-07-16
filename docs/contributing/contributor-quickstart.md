@@ -92,8 +92,8 @@ report. Runtime Markdown outside that boundary, executable files in `docs/`,
 and unknown non-document paths do not take the fast path; unknown runtime paths
 select all heavy lanes until they gain an explicit owner.
 
-`repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, root
-tests, and sibling-package tests run in parallel jobs, then it combines their
+`repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, two
+root-test shards, and sibling-package tests run in parallel jobs, then it combines their
 coverage artifacts, applies the 70% fast-tier gate, and writes the default
 fast-tier coverage summary. The mypy step uses a GitHub Actions cache for
 `.mypy_cache`; a restored cache is only a speed-up, not a replacement for
@@ -103,7 +103,7 @@ squash-merged PR already produced the required context.
 ```bash
 uv run ruff check src tests packages migrations
 uv run mypy
-uv run pytest tests/unit tests/contract tests/property tests/loom_cli tests/ops
+uv run pytest tests/unit tests/ops tests/loom_cli tests/contract tests/property
 uv run pytest packages/loom-launcher/tests \
               packages/loom-benchmarks/tests \
               packages/loom-benchmark-terminal-bench-2/tests
@@ -129,6 +129,19 @@ pytest tests/system -v
 LOOM_RUN_DAYTONA_INTEGRATION=1 DAYTONA_API_KEY=... \
   pytest tests/integration/test_daytona_driver.py -v
 ```
+
+On GitHub, selected non-Docker integration tests are split into two disjoint
+filename shards and start directly after the planner, in parallel with the
+fast tier. The local commands remain serial equivalents so they are easy to
+reproduce.
+
+PR CI has two execution levels. Ordinary, non-draft PRs run the fast
+`repository-checks-preflight` lane and do not emit any branch-protection
+context. The merge coordinator applies the single-owner `ci:merge-ready` label
+only to the queue head; that candidate runs all selected validations and emits
+the four protected contexts. Removing that label or converting the candidate
+back to draft explicitly invalidates its protected contexts. Unrelated label
+changes and PR title/body edits run only the planner and a `*-filtered` check.
 
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
@@ -230,8 +243,8 @@ and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
 and follow the normal `dev` auto-merge policy.
 
-Every normal `dev` PR uses squash auto-merge immediately after opening. GitHub
-keeps the merge queued until `repository-checks`, `images-gate`,
+Only the current `dev` queue head carries `ci:merge-ready` and uses squash
+auto-merge. GitHub keeps that candidate queued until `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate` are visible and successful on
 the current head SHA. Those four strict, GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
@@ -249,8 +262,9 @@ Current `dev` branch-protection settings (verified by Task 6):
 - `required_linear_history: true`
 - `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate` are the required stable status checks
-- `allow_auto_merge: true`; normal `dev` PRs enable it immediately after
-  opening, and GitHub holds the merge until the policy above passes
+- `allow_auto_merge: true`; the coordinator enables it together with
+  `ci:merge-ready` only for the queue head, and GitHub holds that candidate
+  until the policy above passes
 - `enforce_admins: true` on `dev` - admins go through the gate too
 - no human approval, no CODEOWNER approval, and no conversation resolution;
   CODEOWNERS is advisory routing on `dev`, not a merge gate
