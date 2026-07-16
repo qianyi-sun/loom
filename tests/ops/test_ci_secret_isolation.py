@@ -225,48 +225,34 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
         )
 
 
-def test_staging_admin_browser_smoke_uses_only_ephemeral_secret_indirection() -> None:
+def test_staging_kind_smoke_never_receives_admin_browser_credentials() -> None:
     workflow = _workflow(".github/workflows/staging-smoke.yml")
     smoke = workflow["jobs"]["smoke"]
     bootstrap = _named_step(smoke, "Bootstrap namespace + Secrets")["run"]
-    browser = _named_step(
+    deny_probe = _named_step(
         smoke,
-        "Verify authenticated staging admin browser surfaces",
+        "Verify staging admin exchange stays hidden in kind",
     )["run"]
-    upload = _named_step(
-        smoke,
-        "Upload sanitized staging admin browser report",
-    )
-    cleanup = _named_step(
-        smoke,
-        "Cleanup staging admin browser secret files",
-    )
+    step_names = [step.get("name") for step in smoke["steps"]]
 
     assert 'ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"' in bootstrap
     assert 'echo "::add-mask::${ADMIN_TOKEN}"' in bootstrap
-    assert "install -m 0600 /dev/null /tmp/loom-staging-admin-token" in bootstrap
     assert "umask 077" in bootstrap
     assert "trap cleanup_bootstrap_secret EXIT" in bootstrap
     assert 'rm -f "$admin_toml"' in bootstrap
     assert "GITHUB_ENV" not in bootstrap
-    assert '--admin-token-source "file:${admin_token_file}"' in browser
-    assert "trap 'rm -f \"$admin_token_file\"' EXIT" in browser
-    assert "Authorization:" not in browser
-    assert "Bearer" not in browser
-    assert "${ADMIN_TOKEN}" not in browser
+    assert "/tmp/loom-staging-admin-token" not in bootstrap
+    assert "--request POST" in deny_probe
+    assert "--data-binary '{'" in deny_probe
+    assert "Authorization:" not in deny_probe
+    assert "Bearer" not in deny_probe
+    assert "ADMIN_TOKEN" not in deny_probe
+    assert "--admin-token-source" not in deny_probe
     assert "${{ secrets." not in str(smoke)
-    assert cleanup["if"] == "always()"
-    assert cleanup["run"] == (
-        "rm -f /tmp/loom-staging-admin-token /tmp/admin.toml"
-    )
-
-    assert upload["if"] == "always()"
-    assert upload["with"]["path"] == "/tmp/loom-staging-admin-browser-smoke.json"
-    assert upload["with"]["path"].endswith(".json")
-    assert all(
-        forbidden not in str(upload["with"])
-        for forbidden in ("trace", "screenshot", "storage", "cookie", "session")
-    )
+    assert "Verify authenticated staging admin browser surfaces" not in step_names
+    assert "Upload sanitized staging admin browser report" not in step_names
+    assert "Cleanup staging admin browser secret files" not in step_names
+    assert "loom-staging-admin-browser-smoke.json" not in str(smoke)
 
 
 @pytest.mark.parametrize(

@@ -602,6 +602,13 @@ solely an audited #692 browser-acceptance bridge. It does not replace #802
 grant/revoke controls, normal password/setup flows, or candidate evidence from
 a non-admin user.
 
+Ephemeral kind CI is deliberately non-protected and renders
+`runtime_environment = "development"`. It sends only a credential-free,
+malformed deny probe and requires this endpoint to return `404` without a
+cookie. Positive browser acceptance belongs exclusively to a candidate-bound,
+brokered protected-staging rollout with the normal backup, mutation lease, and
+request-envelope guards intact; kind CI never impersonates that environment.
+
 ### Legacy Email-Code Browser Auth
 
 `POST /api/v1/auth/login/start`
@@ -818,8 +825,10 @@ They are not normal browser identity for public users.
 - Browser sessions must set HttpOnly, SameSite cookies. Production deployments
   must use Secure cookies by running with `LOOM_ENV=production` behind HTTPS.
 - Staging browser acceptance may use only the audited, fixed-lifetime exchange
-  described above. Its sanitized report is candidate evidence, not a reusable
-  login credential or proof of normal-user acceptance.
+  described above. Only a broker-produced report bound to the rollout request,
+  attempt, resolved merged `dev` SHA, and running service build SHA is candidate
+  evidence; PR kind tests validate the mechanism and deny boundary only. The
+  report is not a reusable login credential or proof of normal-user acceptance.
 - Existing batch/trial/artifact execution and control routes remain owner-team
   scoped. Org-wide completed-result sharing is explicit Run Library behavior
   with redaction/share-state enforcement.

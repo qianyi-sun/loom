@@ -250,9 +250,10 @@ async def test_bootstrap_sets_fixed_secure_cookie_and_safe_audit(
 async def test_bootstrap_is_hidden_outside_staging_before_auth(
     staging_admin_session_app: tuple[FastAPI, UUID, str],
     monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
     runtime: str,
 ) -> None:
-    app, _target_id, target_username = staging_admin_session_app
+    app, target_id, target_username = staging_admin_session_app
     monkeypatch.setenv("LOOM_ENV", runtime)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -272,8 +273,28 @@ async def test_bootstrap_is_hidden_outside_staging_before_auth(
     assert response.status_code == 404
     assert response.json() == {"detail": "not found"}
     assert "set-cookie" not in response.headers
+    assert "x-loom-build-sha" not in response.headers
     assert malformed.status_code == 404
     assert malformed.json() == {"detail": "not found"}
+    assert "set-cookie" not in malformed.headers
+    assert "x-loom-build-sha" not in malformed.headers
+
+    sync_engine = create_engine(postgres_url)
+    with sessionmaker(sync_engine)() as session:
+        assert session.scalar(
+            select(func.count()).select_from(UserSession).where(
+                UserSession.user_id == target_id,
+            ),
+        ) == 0
+        assert session.scalar(
+            select(func.count()).select_from(AdminAuditEvent).where(
+                AdminAuditEvent.target_id == str(target_id),
+            ),
+        ) == 0
+        assert session.scalar(
+            select(User.last_login_at).where(User.id == target_id),
+        ) is None
+    sync_engine.dispose()
 
 
 async def test_staging_cookie_is_rejected_if_runtime_changes(

@@ -83,14 +83,22 @@ Attach these to the release issue or release PR:
   smoke and release evidence should use the canonical bare-domain routes.
 - Sanitized `loom-staging-admin-browser-smoke.json` evidence bound to the exact
   build SHA reported by the running service and `https://yylx.world/dev`,
-  produced only after the logged-out route smoke. It must show the correlated
-  request ID and safe audit event, successful product APIs and visible state
-  for all six Admin Access tabs, including Arrow/Home/End roving focus and
-  exact ARIA tab-to-panel relationships, Audit log, Rate cards,
-  logout/revocation, and
-  final `/api/v1/auth/me` `401`. The workflow may source the ephemeral singleton
-  admin bearer only through an owner-only (`0600`) file or non-interactive stdin;
-  it must upload no trace, screenshot, storage state, cookie, or raw secret.
+  to be produced only by a candidate-bound brokered protected-staging rollout
+  after the logged-out route smoke. Until that broker step exists and succeeds,
+  this evidence item remains unmet. The ephemeral kind workflow remains
+  `runtime_environment = "development"` and only proves that this exchange is
+  hidden with a credential-free `404`; it must never pose as protected staging.
+  Archive the report with the broker request ID, attempt, resolved merged `dev`
+  SHA, and matching running-service build SHA; a PR artifact or manual command
+  is not candidate evidence. The rollout evidence must show the correlated
+  browser request ID and safe audit event, successful product APIs and visible
+  state for all six Admin Access tabs,
+  including Arrow/Home/End roving focus and exact ARIA tab-to-panel
+  relationships, Audit log, Rate cards, logout/revocation, and final
+  `/api/v1/auth/me` `401`. The brokered rollout may source the ephemeral
+  singleton admin bearer only through an owner-only (`0600`) file or
+  non-interactive stdin; it must upload no trace, screenshot, storage state,
+  cookie, or raw secret.
   This staging-only admin evidence does not replace normal-user onboarding,
   team-boundary, or submission evidence.
 - For first prod, the release-promotion manifest's `prod_staging_isolation` check

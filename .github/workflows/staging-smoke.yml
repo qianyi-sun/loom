@@ -284,8 +284,6 @@ jobs:
           kubectl --context kind-loom-staging create namespace loom
           ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"
           echo "::add-mask::${ADMIN_TOKEN}"
-          install -m 0600 /dev/null /tmp/loom-staging-admin-token
-          printf '%s\n' "${ADMIN_TOKEN}" > /tmp/loom-staging-admin-token
 
           eval "$(uv run loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
 
@@ -307,7 +305,7 @@ jobs:
           cat > /tmp/cluster-config.toml <<EOF
           namespace = "loom"
           image_tag = "${IMAGE_TAG}"
-          runtime_environment = "staging"
+          runtime_environment = "development"
           ingress_host = "yylx.world"
           ingress_redirect_hosts = ["www.yylx.world"]
           frontend_environment = "staging"
@@ -793,44 +791,28 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Verify authenticated staging admin browser surfaces
+      - name: Verify staging admin exchange stays hidden in kind
+        # This ephemeral cluster is deliberately non-protected development.
+        # Positive staging-session acceptance belongs only to the candidate-
+        # bound brokered staging rollout. This malformed, credential-free POST
+        # proves the runtime guard returns 404 before auth or body validation.
         run: |
           set -euo pipefail
-          admin_token_file=/tmp/loom-staging-admin-token
-          trap 'rm -f "$admin_token_file"' EXIT
-          checkout_sha=$(git rev-parse HEAD)
-          deployed_sha=$(
-            kubectl --context kind-loom-staging -n loom exec deploy/loom-service \
-              -- cat /opt/loom/build-sha | tr -d '\r\n'
-          )
-          [[ "$deployed_sha" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "FAIL: deployed service build identity unavailable" >&2
+          response_headers=$(mktemp)
+          response_body=$(mktemp)
+          trap 'rm -f "$response_headers" "$response_body"' EXIT
+          status=$(curl --insecure --silent --show-error --path-as-is \
+            --request POST --header 'content-type: application/json' \
+            --data-binary '{' --no-location --max-redirs 0 --max-time 10 \
+            --dump-header "$response_headers" --output "$response_body" \
+            --write-out '%{http_code}' \
+            https://yylx.world/dev/api/v1/auth/staging-admin-browser-session)
+          if [[ "$status" != "404" ]] \
+             || [[ "$(<"$response_body")" != '{"detail":"not found"}' ]] \
+             || grep -Eqi '^(location|set-cookie|x-loom-build-sha):' "$response_headers"; then
+            echo "::error::staging admin exchange was exposed in kind: HTTP ${status}"
             exit 1
-          }
-          [[ "$deployed_sha" == "$checkout_sha" ]] || {
-            echo "FAIL: deployed service does not match checkout" >&2
-            exit 1
-          }
-          CI=true npm --prefix web run smoke:staging-admin -- \
-            --route https://yylx.world/dev \
-            --expected-deployed-sha "$deployed_sha" \
-            --admin-token-source "file:${admin_token_file}" \
-            --username qianyi \
-            --report /tmp/loom-staging-admin-browser-smoke.json \
-            --insecure-for-kind
-
-      - name: Upload sanitized staging admin browser report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: staging-admin-browser-smoke-${{ github.run_id }}
-          path: /tmp/loom-staging-admin-browser-smoke.json
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Cleanup staging admin browser secret files
-        if: always()
-        run: rm -f /tmp/loom-staging-admin-token /tmp/admin.toml
+          fi
 
       - name: Verify /healthz on every service via port-forward
         # Probe each service's /healthz from a temporary port-forward.

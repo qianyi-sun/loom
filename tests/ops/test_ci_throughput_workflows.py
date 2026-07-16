@@ -869,8 +869,7 @@ def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
         "Verify prefixed frontend routes through ingress-nginx",
         "Verify prefixed frontend routes mount in Chromium",
         "Upload frontend route browser trace",
-        "Verify authenticated staging admin browser surfaces",
-        "Upload sanitized staging admin browser report",
+        "Verify staging admin exchange stays hidden in kind",
         "Verify /healthz on every service via port-forward",
     ]
     route_contract_indices = [step_names.index(name) for name in route_contract_steps]
@@ -1011,64 +1010,56 @@ def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
     assert lock["packages"]["node_modules/playwright-core"]["version"] == "1.61.1"
 
 
-def test_staging_admin_browser_smoke_is_bounded_and_uploads_only_safe_json() -> None:
+def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() -> None:
     workflow = _workflow(".github/workflows/staging-smoke.yml")
     steps = workflow["jobs"]["smoke"]["steps"]
     names = [step.get("name") for step in steps]
     anonymous_index = names.index("Verify prefixed frontend routes mount in Chromium")
     anonymous_trace_index = names.index("Upload frontend route browser trace")
-    admin_index = names.index("Verify authenticated staging admin browser surfaces")
-    report_index = names.index("Upload sanitized staging admin browser report")
-    cleanup_index = names.index("Cleanup staging admin browser secret files")
-    assert (
-        anonymous_index
-        < anonymous_trace_index
-        < admin_index
-        < report_index
-        < cleanup_index
-    )
+    deny_index = names.index("Verify staging admin exchange stays hidden in kind")
+    assert anonymous_index < anonymous_trace_index < deny_index
+    for forbidden_step in (
+        "Verify authenticated staging admin browser surfaces",
+        "Upload sanitized staging admin browser report",
+        "Cleanup staging admin browser secret files",
+    ):
+        assert forbidden_step not in names
+    assert "smoke:staging-admin" not in str(workflow)
+
+    bootstrap = next(
+        step for step in steps if step.get("name") == "Bootstrap namespace + Secrets"
+    )["run"]
+    assert "/tmp/loom-staging-admin-token" not in bootstrap
+    assert "$GITHUB_ENV" not in bootstrap
 
     cluster_config = next(
         step for step in steps if step.get("name") == "Generate cluster-config.toml"
     )["run"]
-    assert 'runtime_environment = "staging"' in cluster_config
+    assert 'runtime_environment = "development"' in cluster_config
+    assert 'runtime_environment = "staging"' not in cluster_config
 
-    admin = steps[admin_index]
-    script = admin["run"]
-    assert "CI=true npm --prefix web run smoke:staging-admin --" in script
-    assert "--route https://yylx.world/dev" in script
-    assert (
-        "kubectl --context kind-loom-staging -n loom exec deploy/loom-service"
-        in script
+    deny_script = steps[deny_index]["run"]
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=deny_script,
+        text=True,
+        capture_output=True,
+        check=False,
     )
-    assert "-- cat /opt/loom/build-sha" in script
-    assert '[[ "$deployed_sha" == "$checkout_sha" ]]' in script
-    assert '--expected-deployed-sha "$deployed_sha"' in script
-    assert '--admin-token-source "file:${admin_token_file}"' in script
-    assert "trap 'rm -f \"$admin_token_file\"' EXIT" in script
-    assert "--username qianyi" in script
-    assert "--report /tmp/loom-staging-admin-browser-smoke.json" in script
-    assert "--insecure-for-kind" in script
-    for forbidden in ("--trace", "--screenshot", "--storage-state", "storageState"):
-        assert forbidden not in script
-
-    upload = steps[report_index]
-    assert upload["if"] == "always()"
-    assert upload["uses"] == (
-        f"actions/upload-artifact@{_locked_action_sha('actions/upload-artifact')}"
-    )
-    assert upload["with"]["path"] == "/tmp/loom-staging-admin-browser-smoke.json"
-    assert upload["with"]["if-no-files-found"] == "error"
-    assert list(upload["with"])[1:] == [
-        "path",
-        "if-no-files-found",
-        "retention-days",
-    ]
-    cleanup = steps[cleanup_index]
-    assert cleanup["if"] == "always()"
-    assert cleanup["run"] == (
-        "rm -f /tmp/loom-staging-admin-token /tmp/admin.toml"
-    )
+    assert syntax.returncode == 0, syntax.stderr
+    assert "--request POST" in deny_script
+    assert "--data-binary '{'" in deny_script
+    assert "https://yylx.world/dev/api/v1/auth/staging-admin-browser-session" in deny_script
+    assert '[[ "$status" != "404" ]]' in deny_script
+    assert "!= '{\"detail\":\"not found\"}'" in deny_script
+    assert "grep -Eqi '^(location|set-cookie|x-loom-build-sha):'" in deny_script
+    for forbidden in (
+        "Authorization",
+        "ADMIN_TOKEN",
+        "smoke:staging-admin",
+        "loom-staging-admin-browser-smoke.json",
+    ):
+        assert forbidden not in deny_script
 
     build = next(
         step for step in steps if step.get("name") == "Build images (parallel)"
@@ -1081,6 +1072,21 @@ def test_staging_admin_browser_smoke_is_bounded_and_uploads_only_safe_json() -> 
     assert "org.opencontainers.image.revision" in build["run"]
     assert '[[ "$service_revision" == "$checkout_sha" ]]' in build["run"]
 
+    adr = (
+        REPO_ROOT / "docs/architecture/adr/independent-staging-rollout-runner.md"
+    ).read_text(encoding="utf-8")
+    launch = (REPO_ROOT / "docs/runbooks/staging-launch.md").read_text(
+        encoding="utf-8",
+    )
+    operator = (REPO_ROOT / "docs/runbooks/operator-runbook.md").read_text(
+        encoding="utf-8",
+    )
+    assert "acceptance row remains unmet" in adr
+    assert "this evidence item remains unmet" in launch
+    assert "this acceptance item remains unmet" in operator
+
+
+def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:
     package = json.loads((REPO_ROOT / "web/package.json").read_text(encoding="utf-8"))
     assert package["scripts"]["smoke:staging-admin"] == (
         "node scripts/staging-admin-browser-smoke.mjs"

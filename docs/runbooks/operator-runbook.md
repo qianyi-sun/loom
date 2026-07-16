@@ -4560,12 +4560,27 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    substitute a signed-in profile.
 
    **Staging-only authenticated admin UI acceptance.** After the logged-out
-   route smoke passes, validate the protected Admin Access and Rate cards
-   surfaces with the short-lived, audited #692 exchange. Read the singleton
-   admin bearer from an owner-only (`0600`) mounted file or redirected,
-   non-interactive stdin; never place the raw bearer on the command line or in
-   the process environment. Bind the report to the build identity exposed by
-   the running service, not an ambient checkout or PR ref:
+   route smoke passes in the candidate-bound brokered protected-staging
+   rollout, validate the protected Admin Access and Rate cards surfaces with
+   the short-lived, audited #692 exchange. The ephemeral kind workflow renders
+   `runtime_environment = "development"` and performs only a credential-free
+   `404` deny probe; it cannot substitute for or impersonate protected staging.
+   Keep the broker-created request envelope, backup guard, and rollout mutation
+   lease intact. Read the singleton admin bearer from an owner-only (`0600`)
+   mounted file or redirected, non-interactive stdin; never place the raw
+   bearer on the command line or in the process environment. Bind the report to
+   the build identity exposed by the running service, not an ambient checkout
+   or PR ref:
+
+   The broker-owned rollout sequence must be extended to execute this command
+   and store its report with the request/attempt evidence. Until that integration
+   exists and succeeds, this acceptance item remains unmet; do not run it
+   manually against shared staging from an ambient checkout. Once integrated,
+   operators inspect the evidence with `loom-staging-rollout status REQUEST_ID`
+   and `loom-staging-rollout logs REQUEST_ID`.
+
+   The following illustrates the required broker-owned step, not an authorized
+   standalone operator command:
 
    ```bash
    DEPLOYED_SHA="$(kubectl --context kind-loom-staging -n loom \
@@ -5269,10 +5284,12 @@ checklist:
   REAL images, applies them, waits for every pod to reach Ready,
   probes `/healthz` + `/metrics` on every component. Closes the
   cold-start regression gap (~15-20 min). This required PR gate is
-  credential-free: it never enters `ci-aws` and does not claim real AWS S3
-  coverage. Record real-AWS validation only from a separately protected,
-  trusted post-merge/release run; a missing or skipped cloud run is not AWS
-  evidence.
+  credential-free and renders `runtime_environment=development`; it proves the
+  staging-only admin exchange stays hidden with a `404`, but does not perform
+  authenticated staging acceptance. It never enters `ci-aws` and does not
+  claim real AWS S3 coverage. Record authenticated staging and real-AWS
+  validation only from separately protected, brokered post-merge/release runs;
+  a missing or skipped protected run is not evidence.
 - **`scripts/staging_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team non-admin user-owned API-token auth, provider/model
   discovery, runnable benchmark catalog presence, sampled ready benchmark bundle objects,
