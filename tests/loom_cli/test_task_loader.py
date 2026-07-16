@@ -61,6 +61,15 @@ def test_load_tasks_yields_one_per_instance(
 ) -> None:
     from loom_benchmarks import registry
 
+    def _fail_if_hugging_face_is_called(
+        *args: object, **kwargs: object,
+    ) -> None:
+        raise AssertionError("synthetic CLI benchmark source must stay offline")
+
+    monkeypatch.setattr(
+        "loom_benchmarks.fetch.datasets.load_dataset",
+        _fail_if_hugging_face_is_called,
+    )
     monkeypatch.setitem(registry.REGISTRY, "stub", _StubAdapter())
     out = list(load_tasks(
         dataset="stub", split="test",
