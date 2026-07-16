@@ -12,6 +12,7 @@ and delivery export can retain auditable verifier output on success.
 from __future__ import annotations
 
 import json
+import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -30,9 +31,7 @@ _DIAGNOSTIC_TAIL_BYTES = 4096
 # Hard cap for retained verifier audit logs (#865 PR1).
 MAX_VERIFIER_LOG_BYTES = 1_048_576
 _VERIFIER_LOG_HEAD_BYTES = 360_000
-_VERIFIER_LOG_TRUNCATION_MARKER = (
-    b"\n...[truncated verifier log; preserved trailing output]...\n"
-)
+_VERIFIER_LOG_TRUNCATION_MARKER = b"\n...[truncated verifier log; preserved trailing output]...\n"
 _VERIFIER_AUDIT_RELDIR = ".loom/verifier"
 _VERIFIER_LOG_NAME = "script.log"
 _VERIFIER_META_NAME = "script.log.meta.json"
@@ -201,7 +200,10 @@ async def _persist_verifier_audit_log(
     log_path = audit_dir / _VERIFIER_LOG_NAME
     meta_path = audit_dir / _VERIFIER_META_NAME
     try:
-        await env.exec(f"mkdir -p {audit_dir.as_posix()}", user="root")
+        await env.exec(
+            f"mkdir -p -- {shlex.quote(audit_dir.as_posix())}",
+            user="root",
+        )
         with tempfile.TemporaryDirectory() as td:
             local_root = Path(td)
             local_log = local_root / _VERIFIER_LOG_NAME

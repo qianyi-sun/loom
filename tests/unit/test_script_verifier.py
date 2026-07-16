@@ -395,3 +395,38 @@ async def test_script_verifier_truncates_oversized_audit_log():
     meta = json.loads(fake.filesystem[meta_path].decode())
     assert meta["truncated"] is True
     assert meta["original_bytes"] > MAX_VERIFIER_LOG_BYTES
+
+
+async def test_script_verifier_shell_quotes_audit_workspace_path():
+    commands: list[str] = []
+
+    def _handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        commands.append(cmd)
+        return ExecResult(
+            return_code=0,
+            stdout=b"ok\n",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.01,
+        )
+
+    fake = FakeDriver(exec_handler=_handler)
+    await fake.start(options=StartOptions())
+    fake.filesystem[PurePosixPath("/loom/verifier/output.json")] = b'{"rewards": {}}'
+    task = _task_with_single_artifact("answer.txt")
+    task = task.model_copy(
+        update={
+            "environment": task.environment.model_copy(
+                update={"workdir": PurePosixPath("/workspace/team's task")},
+            ),
+        },
+    )
+
+    await ScriptVerifier(script_path=PurePosixPath("/workspace/verifier/run.sh")).verify(
+        task=task,
+        env=fake,
+        artifacts_dir=PurePosixPath("/workspace/artifacts"),
+        trajectory=None,  # type: ignore[arg-type]
+    )
+
+    assert "mkdir -p -- '/workspace/team'\"'\"'s task/.loom/verifier'" in commands

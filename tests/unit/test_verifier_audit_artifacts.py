@@ -30,18 +30,24 @@ class _FakeS3:
                 {"Error": {"Code": "NoSuchKey", "Message": "missing"}},
                 "GetObject",
             )
-        return {"Body": _Body(data)}
+        return {"Body": _Body(data), "ContentLength": len(data)}
 
 
 class _Body:
     def __init__(self, data: bytes) -> None:
         self._data = data
+        self._position = 0
+        self.closed = False
 
-    def read(self) -> bytes:
-        return self._data
+    def read(self, amount: int = -1) -> bytes:
+        if amount < 0:
+            amount = len(self._data) - self._position
+        start = self._position
+        self._position = min(len(self._data), start + amount)
+        return self._data[start : self._position]
 
     def close(self) -> None:
-        return None
+        self.closed = True
 
 
 def _trial_with_verifier_artifacts(
@@ -70,12 +76,17 @@ def _trial_with_verifier_artifacts(
     ]
     objects: dict[tuple[str, str], bytes] = {("artifacts", log_key): log_body}
     if include_meta:
-        meta_payload = meta or {
+        meta_payload: dict[str, object] = {
             "schema_version": "1",
             "truncated": False,
             "original_bytes": len(log_body),
             "kept_bytes": len(log_body),
+            "return_code": 0,
+            "script_path": "/app/verifier/run.sh",
+            "log_path": ".loom/verifier/script.log",
         }
+        if meta is not None:
+            meta_payload.update(meta)
         meta_bytes = (json.dumps(meta_payload) + "\n").encode()
         artifacts.append(
             {
@@ -129,7 +140,7 @@ def test_resolve_verifier_artifacts_happy_path() -> None:
     body = b"--- stdout ---\n3 passed\n"
     trial, client, _key = _trial_with_verifier_artifacts(
         log_body=body,
-        meta={"schema_version": "1", "truncated": True, "original_bytes": 9999},
+        meta={"truncated": True, "original_bytes": 9999},
     )
     resolved = resolve_verifier_artifacts(
         trial,
@@ -152,7 +163,6 @@ def test_resolve_verifier_artifacts_hash_mismatch() -> None:
     trial, client, _key = _trial_with_verifier_artifacts(
         log_body=body,
         content_hash="sha256:" + ("0" * 64),
-        include_meta=False,
     )
     with pytest.raises(Tb2V2ExportError) as exc:
         resolve_verifier_artifacts(
@@ -167,7 +177,6 @@ def test_resolve_verifier_artifacts_missing_object() -> None:
     body = b"ok\n"
     trial, client, key = _trial_with_verifier_artifacts(
         log_body=body,
-        include_meta=False,
     )
     client._objects.clear()
     with pytest.raises(Tb2V2ExportError) as exc:
@@ -185,7 +194,6 @@ def test_resolve_verifier_artifacts_blocked_share_status() -> None:
     trial, client, _key = _trial_with_verifier_artifacts(
         log_body=body,
         share_status="blocked",
-        include_meta=False,
     )
     with pytest.raises(Tb2V2ExportError) as exc:
         resolve_verifier_artifacts(
@@ -200,7 +208,6 @@ def test_resolve_verifier_artifacts_secret_scan_fails() -> None:
     body = b"authorization: Bearer sk-ABCDEFGHIJKLMNOPQRST\n"
     trial, client, _key = _trial_with_verifier_artifacts(
         log_body=body,
-        include_meta=False,
     )
     with pytest.raises(Tb2V2ExportError) as exc:
         resolve_verifier_artifacts(
@@ -211,7 +218,7 @@ def test_resolve_verifier_artifacts_secret_scan_fails() -> None:
     assert exc.value.code == "secret_scan_failed"
 
 
-def test_resolve_verifier_artifacts_empty_when_absent() -> None:
+def test_resolve_verifier_artifacts_fails_when_absent() -> None:
     trial = Trial(
         id=uuid4(),
         team_id=uuid4(),
@@ -221,9 +228,132 @@ def test_resolve_verifier_artifacts_empty_when_absent() -> None:
         config={"agent_name": "terminus-2"},
         trajectory_index={"artifacts": []},
     )
-    resolved = resolve_verifier_artifacts(
-        trial,
-        client=_FakeS3({}),
-        artifacts_bucket="artifacts",
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=_FakeS3({}),
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "missing_verifier_artifact"
+
+
+def test_resolve_verifier_artifacts_rejects_orphan_log() -> None:
+    trial, client, _key = _trial_with_verifier_artifacts(
+        log_body=b"ok\n",
+        include_meta=False,
     )
-    assert resolved == []
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=client,
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "invalid_verifier_artifact_pair"
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"schema_version": "2"},
+        {"truncated": "false"},
+        {"kept_bytes": 999},
+        {"truncated": True, "original_bytes": 3, "kept_bytes": 3},
+        {"log_path": ".loom/verifier/other.log"},
+        {"return_code": True},
+        {"script_path": ""},
+        {"driver_truncated": "false"},
+    ],
+)
+def test_resolve_verifier_artifacts_rejects_invalid_metadata(
+    meta: dict[str, object],
+) -> None:
+    trial, client, _key = _trial_with_verifier_artifacts(
+        log_body=b"ok\n",
+        meta=meta,
+    )
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=client,
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "invalid_verifier_artifact_metadata"
+
+
+@pytest.mark.parametrize("field", ["content_hash", "size"])
+def test_resolve_verifier_artifacts_requires_complete_index(field: str) -> None:
+    trial, client, _key = _trial_with_verifier_artifacts(log_body=b"ok\n")
+    del trial.trajectory_index["artifacts"][0][field]
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=client,
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "invalid_verifier_artifact_index"
+
+
+def test_resolve_verifier_artifacts_rejects_indexed_size_mismatch() -> None:
+    trial, client, _key = _trial_with_verifier_artifacts(log_body=b"ok\n")
+    trial.trajectory_index["artifacts"][0]["size"] = 2
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=client,
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "verifier_artifact_size_mismatch"
+
+
+def test_resolve_verifier_artifacts_rejects_duplicate_archive_path() -> None:
+    trial, client, _key = _trial_with_verifier_artifacts(log_body=b"ok\n")
+    duplicate = dict(trial.trajectory_index["artifacts"][0])
+    trial.trajectory_index["artifacts"].append(duplicate)
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=client,
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "duplicate_verifier_artifact"
+
+
+def test_resolve_verifier_artifacts_bounds_object_read_without_content_length() -> None:
+    trial, client, key = _trial_with_verifier_artifacts(log_body=b"ok\n")
+    huge = b"x" * 1_048_577
+    original_get_object = client.get_object
+
+    def _get_object(*, Bucket: str, Key: str):  # noqa: N803
+        if Key == key:
+            return {"Body": _Body(huge)}
+        return original_get_object(Bucket=Bucket, Key=Key)
+
+    client.get_object = _get_object  # type: ignore[method-assign]
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=client,
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "verifier_artifact_too_large"
+
+
+def test_resolve_verifier_artifacts_closes_body_on_content_length_mismatch() -> None:
+    trial, client, key = _trial_with_verifier_artifacts(log_body=b"ok\n")
+    body = _Body(b"ok\n")
+    original_get_object = client.get_object
+
+    def _get_object(*, Bucket: str, Key: str):  # noqa: N803
+        if Key == key:
+            return {"Body": body, "ContentLength": 999}
+        return original_get_object(Bucket=Bucket, Key=Key)
+
+    client.get_object = _get_object  # type: ignore[method-assign]
+    with pytest.raises(Tb2V2ExportError) as exc:
+        resolve_verifier_artifacts(
+            trial,
+            client=client,
+            artifacts_bucket="artifacts",
+        )
+    assert exc.value.code == "verifier_artifact_size_mismatch"
+    assert body.closed is True

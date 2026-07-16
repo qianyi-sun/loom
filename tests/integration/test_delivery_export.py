@@ -1578,6 +1578,8 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
                 "original_bytes": len(log_body),
                 "kept_bytes": len(log_body),
                 "return_code": 0,
+                "script_path": "/app/verifier/run.sh",
+                "log_path": ".loom/verifier/script.log",
             }
         )
         + "\n"

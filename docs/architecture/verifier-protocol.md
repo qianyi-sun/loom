@@ -195,6 +195,16 @@ stdout/stderr tails, truncation status, duration, script path, and
 emitted by an upstream verifier, including string diagnostics from legacy
 tasks.
 
+For Terminal-Bench-2 delivery auditing, the verifier bridge also streams the
+test command's combined output back to the caller and retains a bounded copy at
+`$LOOM_TASK_DIR/.loom/verifier/pytest.log`. The adjacent
+`pytest.log.meta.json` records schema version, truncation state, original and
+kept byte counts, return code, and the canonical log path. Audit writes are
+best-effort and cannot replace or suppress `$LOOM_VERIFIER_OUTPUT`; delivery
+export treats any indexed audit data as a fail-closed pair and rejects missing
+partners, invalid metadata, non-shared entries, hash or size mismatches, unsafe
+paths, and logs larger than 1 MiB.
+
 ## Why each lives where it does
 
 | Concern            | Verifier's job?  | Driver's job? | Trajectory's job? |
