@@ -100,6 +100,31 @@ fast-tier coverage summary. The mypy step uses a GitHub Actions cache for
 running `uv run mypy`. `dev` pushes skip the Python gate because the
 squash-merged PR already produced the required context.
 
+Frontend, SPA image/runtime-config, and frontend gate changes additionally
+select the required `web-checks` job. `repository-checks` fails when that
+selected job fails or is missing. Reproduce the complete frontend gate with a
+frozen install:
+
+```bash
+cd web
+npm ci
+npm run typecheck
+npm run lint
+npm run test:coverage
+npm run build
+npx --no-install playwright install chromium
+npm run test:e2e
+```
+
+Vitest enforces statements, lines, and functions at 80% and branches at 75%;
+only the generated `src/api/schema.d.ts` production source is excluded. The
+Playwright gate serves the production build at `/dev`, exercises logged-out,
+user, and admin routes at 1440x900 and 390x844, reloads deep links, and rejects
+empty roots, page errors, unexpected console output, same-origin request
+failures, and script/style status or MIME mismatches. Axe must report zero
+serious or critical violations. Its API fixtures are local-only and contain no
+deployment credentials.
+
 ```bash
 uv run ruff check src tests packages migrations
 uv run mypy
@@ -155,7 +180,14 @@ query one path with:
 ```bash
 python3 scripts/component_ownership.py validate
 python3 scripts/component_ownership.py query tests/integration/test_trial_e2e_docker.py
+python3 scripts/component_ownership.py test-paths --lane frontend
 ```
+
+When that authority is present, `web-checks` consumes its `frontend` lane
+output instead of copying the owned web test patterns into the workflow. The
+quality gate still owns thresholds, build/browser behavior, and the two
+specialized route-smoke unit harnesses; component and test ownership remains
+the manifest's responsibility.
 
 The validator fails for missing or ambiguous ownership, stale patterns,
 undeclared owner names, and a `pytest.mark.docker` module outside the Docker
