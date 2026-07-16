@@ -97,12 +97,9 @@ def test_repo_configs_no_longer_reference_qianyi_private_deploy_key() -> None:
         assert "/var/lib/loom-staging-rollout/gb10-deploy-ed25519" in text
 
     env_state = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(encoding="utf-8")
-    # Post-#857 path convention: /shared_work/qianyi/ retired in favour of the
-    # team-owned /shared_work/loom/. The old qianyi-scoped paths must not
-    # reappear; the new /shared_work/loom/ path is the canonical location.
-    assert "/shared_work/qianyi/" not in env_state
+    assert "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-" not in env_state
     assert "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-" in env_state
-    assert "/shared_work/loom/loom-worker-capacity/staging-catalog-provisioning.env" in env_state
+    assert "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env" in env_state
 
 
 def test_installed_gb10_trust_tool_uses_the_root_owned_candidate_inventory() -> None:

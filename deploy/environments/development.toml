@@ -1,0 +1,21 @@
+environment = "development"
+short_name = "dev"
+github_environment = "development"
+namespace = "loom-dev"
+ingress_host = "yylx.world"
+frontend_route = "https://yylx.world/dev"
+frontend_api_base = "https://yylx.world/dev/api"
+cluster_config = "deploy/environments/development.cluster.toml"
+allowed_refs = ["refs/heads/dev"]
+allowed_tag_prefixes = []
+
+database_name = "loom_dev"
+task_bucket = "loom-dev-tasks"
+trajectories_bucket = "loom-dev-trajectories"
+artifacts_bucket = "loom-dev-artifacts"
+secret_store_key_ref = "github-environment:development/LOOM_SECRET_STORE_MASTER_KEY"
+service_api_token_ref = "github-environment:development/LOOM_SERVICE_API_TOKEN"
+worker_token_ref = "github-environment:development/LOOM_WORKER_TOKEN"
+provider_secret_ref = "github-environment:development/LOOM_PROVIDER_SECRET_REF"
+yibuapi_secret_ref = "github-environment:development/YIBUAPI_API_KEY"
+provider_connection_namespace = "development"

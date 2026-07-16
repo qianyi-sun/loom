@@ -604,8 +604,8 @@ max_slots = 40
 backend = "docker"
 cpu_arch = "x86_64"
 allowed_nodes = ["oldlab-1"]
-env_file = "/shared_work/loom/loom-worker-capacity/staging-oldlab-worker.env"
-repo_dir = "/shared_work/loom/loom-remote-worker"
+env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
+repo_dir = "/shared_work/qianyi/loom-remote-worker"
 requested_cpus = 2
 requested_memory_mib = 8192
 requested_concurrency = 1
@@ -638,8 +638,8 @@ external_runner = true
                             "backend": "docker",
                             "cpu_arch": "x86_64",
                             "allowed_nodes": ["oldlab-1"],
-                            "env_file": "/shared_work/loom/loom-worker-capacity/staging-oldlab-worker.env",
-                            "repo_dir": "/shared_work/loom/loom-remote-worker",
+                            "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
+                            "repo_dir": "/shared_work/qianyi/loom-remote-worker",
                             "requested_cpus": 2,
                             "requested_memory_mib": 8192,
                             "requested_concurrency": 1,
@@ -658,8 +658,8 @@ external_runner = true
                         "state": "running",
                         "nodelist": "oldlab-1",
                         "redacted_env": {
-                            "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/loom/loom-worker-capacity/issue45-oldlab-4-warm-1608b05.env",
-                            "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/loom/loom-remote-worker-1608b05",
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/issue45-oldlab-4-warm-1608b05.env",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker-1608b05",
                             "LOOM_WORKER_MAX_CONCURRENT": "1",
                         },
                     },
@@ -756,8 +756,8 @@ max_slots = 40
 
 [worker_pool_autoscaler_policies.actuator_config]
 allowed_nodes = ["oldlab-1"]
-env_file = "/shared_work/loom/loom-worker-capacity/staging-oldlab-worker.env"
-repo_dir = "/shared_work/loom/loom-remote-worker"
+env_file = "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env"
+repo_dir = "/shared_work/qianyi/loom-remote-worker"
 requested_concurrency = 1
 external_runner = true
 """.strip()
@@ -780,8 +780,8 @@ external_runner = true
                         "state": "running",
                         "nodelist": "oldlab-1",
                         "redacted_env": {
-                            "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/loom/loom-worker-capacity/staging-oldlab-worker.env",
-                            "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/loom/loom-remote-worker",
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker.env",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work/qianyi/loom-remote-worker",
                             "LOOM_WORKER_AUTH_FINGERPRINT": (
                                 f"sha256:{hashlib.sha256(stale_token.encode()).hexdigest()[:12]} "
                                 f"len={len(stale_token)}"
@@ -1727,7 +1727,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert "LOOM_CATALOG_SOURCE_" not in command
     assert (
         profile.catalog_provisioning["env_file"]
-        == "/shared_work/loom/loom-worker-capacity/staging-catalog-provisioning.env"
+        == "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env"
     )
     assert profile.catalog_provisioning["env"] == {
         "PUBLISHED_SHA": "79087002d62bb22169a704bc941c8d614082d880",

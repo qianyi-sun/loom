@@ -127,7 +127,7 @@ fields = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3,
 
 ### Profile overrides
 
-- `deploy/environments/local.cluster.toml`: `pgbouncer.enabled = false` (kind dev doesn't need it; keeps kind boot simple).
+- `deploy/environments/development.cluster.toml`: `pgbouncer.enabled = false` (kind dev doesn't need it; keeps kind boot simple).
 - `deploy/environments/staging.cluster.toml`: `pgbouncer.enabled = true` (schema default).
 - `deploy/environments/production.cluster.toml`: `pgbouncer.enabled = true`.
 

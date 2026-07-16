@@ -69,7 +69,7 @@ def _deployment_env_value(docs: list[dict], deployment: str, env_name: str) -> s
 # that share OLDLAB hosts with Slurm must not double-schedule the host.
 # Render tests that exercise the worker Deployment / worker
 # NetworkPolicy must opt in explicitly. `_DEFAULT_CFG` mirrors the
-# local.cluster.toml profile (worker enabled) so the canonical
+# development.cluster.toml profile (worker enabled) so the canonical
 # `deploy/k8s/*.yaml` golden files still apply.
 def _default_cfg(**kwargs: object) -> ClusterConfig:
     k8s_worker_cls = type(ClusterConfig().k8s_worker)
@@ -742,7 +742,7 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     ("filename", "route_path"),
     [
         ("production.cluster.toml", "/prod"),
-        ("local.cluster.toml", "/local"),
+        ("development.cluster.toml", "/dev"),
         ("staging.cluster.toml", "/dev"),
     ],
 )
@@ -1385,7 +1385,7 @@ def test_render_omits_worker_deployment_when_disabled() -> None:
 
 
 def test_render_includes_worker_when_enabled_via_profile() -> None:
-    """local.cluster.toml opts back in for local kind clusters.
+    """development.cluster.toml opts back in for local kind clusters.
 
     Dynamic-storage profiles render loom-worker as a StatefulSet with
     per-pod PVCs from volumeClaimTemplates so RWO Longhorn volumes on
@@ -1409,7 +1409,7 @@ def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:
     of the schema default. See #383 rationale."""
     envs_dir = _REPO_ROOT / "deploy" / "environments"
     expected = {
-        "local.cluster.toml": True,
+        "development.cluster.toml": True,
         "staging.cluster.toml": False,
         "production.cluster.toml": False,
     }
