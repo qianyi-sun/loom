@@ -240,6 +240,17 @@ function clearPendingFailureContext(
   }
 }
 
+function retireFailureContext(
+  value: unknown,
+  context: BrowserFailureContext,
+): void {
+  clearPendingFailureContext(value, context);
+  if (isObjectLike(value) && failureContext(value) === context) {
+    defineRedactedProperty(value, failureContextKey, undefined);
+  }
+  context.settled = true;
+}
+
 function existingPendingFailureContext(
   value: unknown,
 ): BrowserFailureContext | null {
@@ -312,6 +323,7 @@ export function prepareBrowserFailureForBoundary(error: unknown): string {
   redactBrowserThrowable(error);
   markBrowserFailureForConsoleRedaction(error);
   let context = failureContext(error) ?? existingPendingFailureContext(error);
+  if (context?.settled) context = null;
   if (!context) {
     context = pendingFailureContext(error);
     // Keep one context through the React boundary commit. This lets sibling
@@ -320,7 +332,7 @@ export function prepareBrowserFailureForBoundary(error: unknown): string {
     // Map-key retention and retiring frozen-object episodes.
     const pendingContext = context;
     window.setTimeout(() => {
-      clearPendingFailureContext(error, pendingContext);
+      retireFailureContext(error, pendingContext);
       if (!isObjectLike(error)) {
         capturedPrimitives.delete(error);
       }
@@ -340,16 +352,29 @@ function isCapturedFailure(value: unknown): boolean {
   return capturedPrimitives.has(value);
 }
 
+function isClaimedBoundaryFailure(value: unknown): boolean {
+  if (!isCapturedFailure(value)) return false;
+  const context = failureContext(value) ?? existingPendingFailureContext(value);
+  return context?.claimedByBoundary === true && !context.settled;
+}
+
 /**
- * React 18 production logs a captured boundary value directly to console.error
- * before componentDidCatch. Primitive markers are released after the capture
- * window. Object markers remain in a WeakSet because the same Error can retain
- * secret-bearing custom fields and WeakSet membership does not retain it.
+ * React 18 production logs a captured boundary value directly to console.error.
+ * Suppress that duplicate during the bounded claim window: the RecoveryPanel
+ * and bounded reporter remain the observable signal, while browser checks can
+ * continue treating any console error as an uncaught failure. Later explicit
+ * logging of a tainted value is still replaced with a fixed safe diagnostic.
+ * Primitive markers are released after the capture window. Object markers
+ * remain in a WeakSet because the same Error can retain secret-bearing custom
+ * fields and WeakSet membership does not retain it.
  */
 export function installBrowserConsoleErrorRedaction(): () => void {
   return retainSharedInstallation(consoleInstallationKey, () => {
     const original = console.error;
     const wrapped: typeof console.error = (...args: unknown[]) => {
+      if (args.some((value) => isClaimedBoundaryFailure(value))) {
+        return;
+      }
       if (args.some((value) => isCapturedFailure(value))) {
         original.call(console, BROWSER_ERROR_REDACTION);
         return;
@@ -386,10 +411,8 @@ export function installBrowserErrorEventRedaction(): () => void {
     ): void => {
       const timer = window.setTimeout(() => {
         pendingReports.delete(timer);
-        clearPendingFailureContext(rawValue, context);
+        retireFailureContext(rawValue, context);
         clearBrowserFailureConsoleRedaction(rawValue);
-        if (context.settled) return;
-        context.settled = true;
         if (!context.claimedByBoundary) {
           reportBrowserFailure(
             kind,
@@ -424,7 +447,6 @@ export function installBrowserErrorEventRedaction(): () => void {
       defineRedactedProperty(event, "lineno", 0);
       defineRedactedProperty(event, "colno", 0);
       event.preventDefault();
-      console.error(BROWSER_ERROR_REDACTION);
       scheduleUnhandledReport(
         "uncaught-runtime",
         context,
@@ -443,7 +465,6 @@ export function installBrowserErrorEventRedaction(): () => void {
       markBrowserFailureForConsoleRedaction(rawReason);
       defineRedactedProperty(event, "reason", createRedactedError(context));
       event.preventDefault();
-      console.error(BROWSER_ERROR_REDACTION);
       scheduleUnhandledReport(
         "unhandled-rejection",
         context,

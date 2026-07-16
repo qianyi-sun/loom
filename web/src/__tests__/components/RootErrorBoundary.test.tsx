@@ -73,6 +73,10 @@ describe("RootErrorBoundary", () => {
       ]);
       expect(JSON.stringify(reports)).not.toContain("signature");
       expect(JSON.stringify(reports)).not.toContain("raw-root");
+      const callsAfterBoundary = consoleSink.mock.calls.length;
+      console.error(BROKEN_ROOT_ERROR);
+      expect(consoleSink).toHaveBeenCalledTimes(callsAfterBoundary);
+      await new Promise((resolve) => window.setTimeout(resolve, 75));
       console.error(BROKEN_ROOT_ERROR);
       expect(consoleSink.mock.calls.at(-1)).toEqual([
         BROWSER_ERROR_REDACTION,
@@ -111,6 +115,42 @@ describe("RootErrorBoundary", () => {
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Root recovered")).toBeInTheDocument();
+  });
+
+  it("reports a fresh reference when retry fails with the same error", async () => {
+    const reports: BrowserFailureReport[] = [];
+    const repeatedError = new Error("same retry failure");
+    setBrowserFailureReporter((report) => reports.push(report));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    function RepeatedFailure(): JSX.Element {
+      throw repeatedError;
+    }
+
+    render(
+      <RootErrorBoundary>
+        <RepeatedFailure />
+      </RootErrorBoundary>,
+    );
+    const firstReference = screen
+      .getByRole("alert")
+      .textContent?.match(/WEB-[0-9A-F]{8}/u)?.[0];
+    expect(firstReference).toBeDefined();
+
+    await new Promise((resolve) => window.setTimeout(resolve, 75));
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Retry" }));
+
+    const secondReference = screen
+      .getByRole("alert")
+      .textContent?.match(/WEB-[0-9A-F]{8}/u)?.[0];
+    expect(secondReference).toBeDefined();
+    expect(secondReference).not.toBe(firstReference);
+    expect(reports.map(({ referenceId }) => referenceId)).toEqual([
+      firstReference,
+      secondReference,
+    ]);
   });
 
   it("reports distinct root sibling failures with distinct references", () => {
@@ -220,7 +260,7 @@ describe("RootErrorBoundary", () => {
       expect(event.colno).toBe(0);
       expect(rawError.message).toBe(BROWSER_ERROR_REDACTION);
       expect(rawError.stack).toBe(`Error: ${BROWSER_ERROR_REDACTION}`);
-      expect(consoleSink).toHaveBeenCalledWith(BROWSER_ERROR_REDACTION);
+      expect(consoleSink).not.toHaveBeenCalled();
       console.error(rawError);
       expect(consoleSink.mock.calls.at(-1)).toEqual([
         BROWSER_ERROR_REDACTION,
@@ -354,7 +394,7 @@ describe("RootErrorBoundary", () => {
       expect((event.reason as Error).message).toBe(
         BROWSER_ERROR_REDACTION,
       );
-      expect(consoleSink).toHaveBeenCalledWith(BROWSER_ERROR_REDACTION);
+      expect(consoleSink).not.toHaveBeenCalled();
       console.error(rawReason);
       expect(consoleSink.mock.calls.at(-1)).toEqual([
         BROWSER_ERROR_REDACTION,

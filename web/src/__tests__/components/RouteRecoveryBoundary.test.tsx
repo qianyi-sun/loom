@@ -171,6 +171,10 @@ describe("RouteRecoveryBoundary", () => {
       ]);
       expect(JSON.stringify(reports)).not.toContain("token");
       expect(JSON.stringify(reports)).not.toContain("response body");
+      const callsAfterBoundary = consoleSink.mock.calls.length;
+      console.error(rawError);
+      expect(consoleSink).toHaveBeenCalledTimes(callsAfterBoundary);
+      await new Promise((resolve) => window.setTimeout(resolve, 75));
       console.error(rawError);
       expect(consoleSink.mock.calls.at(-1)).toEqual([
         BROWSER_ERROR_REDACTION,

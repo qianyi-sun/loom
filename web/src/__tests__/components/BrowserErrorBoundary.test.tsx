@@ -69,6 +69,10 @@ describe("BrowserErrorBoundary", () => {
           referenceId,
         }),
       ]);
+      const callsAfterBoundary = consoleSink.mock.calls.length;
+      console.error(rawError);
+      expect(consoleSink).toHaveBeenCalledTimes(callsAfterBoundary);
+      await new Promise((resolve) => window.setTimeout(resolve, 75));
       console.error(rawError);
       expect(consoleSink.mock.calls.at(-1)).toEqual([
         BROWSER_ERROR_REDACTION,
@@ -87,6 +91,53 @@ describe("BrowserErrorBoundary", () => {
     } finally {
       restoreConsoleRedaction();
     }
+  });
+
+  it("reports a fresh reference when a route retry fails with the same error", async () => {
+    const reports: BrowserFailureReport[] = [];
+    const repeatedError = new Error("same route retry failure");
+    setBrowserFailureReporter((report) => reports.push(report));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    function RepeatedFailure(): JSX.Element {
+      throw repeatedError;
+    }
+
+    render(
+      <BrowserErrorBoundary
+        resetKey="repeated-route"
+        pathname="/dev/repeated-route"
+        renderFallback={({ referenceId, retry }) => (
+          <div role="alert">
+            <span>{referenceId}</span>
+            <button type="button" onClick={retry}>
+              Retry route
+            </button>
+          </div>
+        )}
+      >
+        <RepeatedFailure />
+      </BrowserErrorBoundary>,
+    );
+    const firstReference = screen
+      .getByRole("alert")
+      .textContent?.match(/WEB-[0-9A-F]{8}/u)?.[0];
+    expect(firstReference).toBeDefined();
+
+    await new Promise((resolve) => window.setTimeout(resolve, 75));
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Retry route" }));
+
+    const secondReference = screen
+      .getByRole("alert")
+      .textContent?.match(/WEB-[0-9A-F]{8}/u)?.[0];
+    expect(secondReference).toBeDefined();
+    expect(secondReference).not.toBe(firstReference);
+    expect(reports.map(({ referenceId }) => referenceId)).toEqual([
+      firstReference,
+      secondReference,
+    ]);
   });
 
   it.each([
