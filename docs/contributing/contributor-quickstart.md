@@ -183,11 +183,12 @@ python3 scripts/component_ownership.py query tests/integration/test_trial_e2e_do
 python3 scripts/component_ownership.py test-paths --lane frontend
 ```
 
-When that authority is present, `web-checks` consumes its `frontend` lane
-output instead of copying the owned web test patterns into the workflow. The
-quality gate still owns thresholds, build/browser behavior, and the two
-specialized route-smoke unit harnesses; component and test ownership remains
-the manifest's responsibility.
+When the authority exposes its frontend-lane query, `web-checks` consumes that
+output instead of copying the owned web test patterns into the workflow. Until
+that command is available, the job runs the complete Vitest suite. The quality
+gate still owns thresholds, build/browser behavior, and the two specialized
+route-smoke unit harnesses; component and test ownership remains the manifest's
+responsibility.
 
 The validator fails for missing or ambiguous ownership, stale patterns,
 undeclared owner names, and a `pytest.mark.docker` module outside the Docker

@@ -32,10 +32,11 @@ messages are exempt only by exact message and bounded expected count.
 
 `config/component-ownership.toml` and
 `scripts/component_ownership.py test-paths --lane frontend` are the authority
-for component/test membership when available. The workflow consumes their
-output and does not maintain a second copy of the owned TypeScript test globs.
-This document and the workflow own only the quality policy, specialized browser
-harnesses, and aggregate behavior.
+for component/test membership when that lane query is available. The workflow
+feature-detects and consumes its output; before that command lands it runs the
+complete Vitest suite. It does not maintain a second copy of the owned
+TypeScript test globs. This document and the workflow own only the quality
+policy, specialized browser harnesses, and aggregate behavior.
 
 ## Recovery extension contract
 

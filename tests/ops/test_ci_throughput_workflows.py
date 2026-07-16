@@ -756,6 +756,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         step.get("run", "") for step in jobs["web-checks"]["steps"] if "run" in step
     )
     assert "component_ownership.py test-paths --lane frontend" in web_script
+    assert "component_ownership.py --help | grep -q -- 'test-paths'" in web_script
     assert "npm run typecheck" in web_script
     assert "npm run lint" in web_script
     assert "vitest run --coverage" in web_script

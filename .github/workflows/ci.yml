@@ -607,7 +607,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -f config/component-ownership.toml && -f scripts/component_ownership.py ]]; then
+          if [[ -f config/component-ownership.toml && \
+                -f scripts/component_ownership.py ]] && \
+             python3 scripts/component_ownership.py --help | grep -q -- 'test-paths'; then
             mapfile -t owned_tests < <(
               python3 scripts/component_ownership.py test-paths --lane frontend
             )
