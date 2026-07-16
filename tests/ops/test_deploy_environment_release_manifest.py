@@ -71,7 +71,8 @@ def test_deploy_workflow_uploads_rollout_evidence_artifact() -> None:
         ),
     )
 
-    for job_name in ("deploy-development", "deploy-staging", "deploy-production"):
+    # #857: `deploy-development` dropped; `local` env is manual-only.
+    for job_name in ("deploy-staging", "deploy-production"):
         job = workflow["jobs"][job_name]
         assert job["env"]["LOOM_ROLLOUT_EVIDENCE_DIR"] == "rollout-evidence"
         assert "rollout-evidence" in str(job)

@@ -36,12 +36,14 @@ def test_environment_profiles_pin_approved_names_and_isolated_state() -> None:
     assert report["status"] == "pass"
 
     profiles = {profile["environment"]: profile for profile in report["profiles"]}
-    assert set(profiles) == {"development", "staging", "production"}
+    assert set(profiles) == {"local", "staging", "production"}
 
-    assert profiles["development"]["namespace"] == "loom-dev"
-    assert profiles["development"]["ingress_host"] == "yylx.world"
-    assert profiles["development"]["frontend_route"] == "https://yylx.world/dev"
-    assert profiles["development"]["frontend_api_base"] == "https://yylx.world/dev/api"
+    # Post-#857: `development` env renamed to `local`; the Slurm-backed
+    # `dev` env (PR 4) will be added separately with its own assertions.
+    assert profiles["local"]["namespace"] == "loom-local"
+    assert profiles["local"]["ingress_host"] == "yylx.world"
+    assert profiles["local"]["frontend_route"] == "https://yylx.world/local"
+    assert profiles["local"]["frontend_api_base"] == "https://yylx.world/local/api"
     assert profiles["staging"]["namespace"] == "loom-staging"
     assert profiles["staging"]["ingress_host"] == "yylx.world"
     assert profiles["staging"]["frontend_route"] == "https://yylx.world/dev"
@@ -147,17 +149,16 @@ def test_deploy_workflow_keeps_production_secrets_on_main_only() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text())
     jobs = workflow["jobs"]
 
-    dev_job = jobs["deploy-development"]
+    # #857: `deploy-development` was dropped — `local` env is manual-only,
+    # not CI-deployed. Only staging + production get automated jobs.
+    assert "deploy-development" not in jobs
     staging_job = jobs["deploy-staging"]
     prod_job = jobs["deploy-production"]
 
-    assert dev_job["environment"]["name"] == "development"
     assert staging_job["environment"]["name"] == "staging"
     assert prod_job["environment"]["name"] == "production"
 
-    assert "refs/heads/dev" in dev_job["if"]
     assert "refs/heads/dev" in staging_job["if"]
-    assert "production" not in dev_job["if"]
     assert "production" not in staging_job["if"]
 
     assert "refs/heads/main" in prod_job["if"]
@@ -169,7 +170,6 @@ def test_deploy_workflow_keeps_production_secrets_on_main_only() -> None:
         "LOOM_CLUSTER_CONFIG_B64",
         "LOOM_DEPLOY_TOKEN",
     ):
-        assert dev_job["env"][secret_name] == f"${{{{ secrets.{secret_name} }}}}"
         assert staging_job["env"][secret_name] == f"${{{{ secrets.{secret_name} }}}}"
         assert prod_job["env"][secret_name] == f"${{{{ secrets.{secret_name} }}}}"
 

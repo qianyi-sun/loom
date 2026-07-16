@@ -8,7 +8,6 @@ on:
         required: true
         type: choice
         options:
-          - development
           - staging
           - production
       image_tag:
@@ -38,42 +37,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy-development:
-    name: Deploy development
-    if: >-
-      ${{
-        github.event_name == 'workflow_dispatch' &&
-        inputs.environment == 'development' &&
-        github.ref == 'refs/heads/dev'
-      }}
-    runs-on: ubuntu-latest
-    environment:
-      name: development
-    env:
-      LOOM_KUBECONFIG_B64: ${{ secrets.LOOM_KUBECONFIG_B64 }}
-      LOOM_CLUSTER_CONFIG_B64: ${{ secrets.LOOM_CLUSTER_CONFIG_B64 }}
-      LOOM_DEPLOY_TOKEN: ${{ secrets.LOOM_DEPLOY_TOKEN }}
-      LOOM_DEPLOY_ENVIRONMENT: development
-      LOOM_IMAGE_TAG: ${{ inputs.image_tag }}
-      LOOM_DRY_RUN: ${{ inputs.dry_run }}
-      LOOM_ROLLOUT_EVIDENCE_DIR: rollout-evidence
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-      - name: Deploy development
-        run: bash scripts/ops/deploy_environment.sh
-      - name: Upload rollout evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: rollout-evidence-${{ inputs.environment }}-${{ inputs.image_tag }}
-          path: rollout-evidence/
-          if-no-files-found: warn
+  # `local` is not deployed via GH Actions (#857). It's a self-contained
+  # kind-on-laptop / CI runner deployment; developers run
+  # `kind create cluster && LOOM_DEPLOY_ENVIRONMENT=local bash scripts/ops/deploy_environment.sh`
+  # directly. Only staging + production get automated deploys.
 
   deploy-staging:
     name: Deploy staging
