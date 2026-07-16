@@ -1020,6 +1020,13 @@ from explicit allow-lists. Provider tabs are URL-addressable with
 `?tab=overview`, `?tab=models`, and `?tab=settings`, so operators can link
 directly to the relevant setup or debugging view.
 
+Tabbed views use one keyboard contract across provider details, task-set
+details, Team access, and the model-source picker. Press Tab to enter the
+selected tab, Left/Right to move and activate, or Home/End to jump to the first
+or last available tab. Disabled choices are skipped. Each tab is linked to its
+panel for screen readers, and changing tabs does not change the underlying API
+request or saved payload semantics.
+
 Contextual snippets are not a substitute for diagnostics. If a quickstart
 command fails, open the same page's diagnostic panel or detail view, then copy
 the relevant `loom eval batch show`, `loom eval trial show`, `loom eval trial

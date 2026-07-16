@@ -235,7 +235,14 @@ describe("AdminAccess", () => {
     renderWithProviders(<AdminAccess />);
 
     expect(await screen.findByRole("tablist", { name: "Team access sections" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Requests" })).toHaveAttribute("aria-selected", "true");
+    const requestsTab = screen.getByRole("tab", { name: "Requests" });
+    expect(requestsTab).toHaveAttribute("aria-selected", "true");
+    expect(requestsTab).toHaveAttribute("tabindex", "0");
+    expect(
+      document.getElementById(
+        requestsTab.getAttribute("aria-controls") ?? "missing",
+      ),
+    ).toHaveAttribute("aria-labelledby", requestsTab.id);
     expect(screen.getByRole("tab", { name: "Teams" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Invites" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "API tokens" })).toBeInTheDocument();

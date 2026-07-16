@@ -51,7 +51,17 @@ describe("ProviderDetail", () => {
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: /prod-anthropic/i })).toBeInTheDocument();
     });
-    expect(screen.getByRole("tab", { name: /overview/i })).toHaveAttribute("aria-selected", "true");
+    const overviewTab = screen.getByRole("tab", { name: /overview/i });
+    expect(
+      screen.getByRole("tablist", { name: "Provider sections" }),
+    ).toContainElement(overviewTab);
+    expect(overviewTab).toHaveAttribute("aria-selected", "true");
+    expect(overviewTab).toHaveAttribute("tabindex", "0");
+    expect(
+      document.getElementById(
+        overviewTab.getAttribute("aria-controls") ?? "missing",
+      ),
+    ).toHaveAttribute("aria-labelledby", overviewTab.id);
   });
 
   it("explains readiness and allowed-model policy in plain language", async () => {

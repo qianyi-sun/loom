@@ -356,6 +356,16 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
 - **Providers** — provider detail tabs are URL-addressable. `/providers/:id`
   defaults to Overview, while `?tab=models` and `?tab=settings` open those tabs
   on first render and keep accessible tab/panel relationships intact.
+- **Tabbed navigation contract** — `web/src/components/Tabs.tsx` is the only
+  production owner of ARIA tab semantics. Provider details, task-set details,
+  Admin access, and model-source selection supply controlled values and panel
+  content while the primitive owns unique tab/panel ids, roving tabindex,
+  Left/Right/Home/End focus movement, activation, disabled-item skipping, and
+  dynamic fallback. Focus follows that fallback only when the removed or
+  disabled tab actually held DOM focus; permission-driven updates never pull
+  focus back from outside the tablist. A repository contract rejects page-local
+  `tab`, `tablist`, or `tabpanel` roles so new surfaces cannot silently regress
+  the behavior.
 
 A Batch detail page lives at `/batches/:id` for drill-down from
 either monitor view. It surfaces the config snapshot + lazy
