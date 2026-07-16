@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from loom.agent.terminus2.agent_message import parse_agent_message
 from loom.agent.terminus2.gateway_ledger import (
     CheckpointBridgeError,
     GatewayCallLedger,
@@ -24,6 +25,7 @@ from loom.models.trajectory import (
     Terminus2RuntimeProvenanceEvent,
     Terminus2TerminalObservationEvent,
     Terminus2TurnEvent,
+    Terminus2UserPromptEvent,
 )
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
@@ -107,13 +109,35 @@ class HarborCheckpointBridge:
             step_id = step.get("step_id")
             if not isinstance(step_id, int) or step_id in self._seen_step_ids:
                 continue
-            if step.get("source") != "agent":
+            source = step.get("source")
+            if source == "user":
+                await self._bridge_user_step(step)
+                self._seen_step_ids.add(step_id)
+                synced += 1
+                continue
+            if source != "agent":
                 self._seen_step_ids.add(step_id)
                 continue
             await self._bridge_agent_step(step, completeness=completeness)
             self._seen_step_ids.add(step_id)
             synced += 1
         return synced
+
+    async def _bridge_user_step(self, step: dict[str, Any]) -> None:
+        harbor_step_id = int(step["step_id"])
+        message = str(step.get("message") or "")
+        await self._trajectory.append(
+            Terminus2UserPromptEvent(
+                emitted_at=datetime.now(UTC),
+                trial_id=self._trial_id,
+                step_id=self._step_id,
+                seq=self._next_seq(),
+                prompt_id=str(uuid4()),
+                harbor_step_id=harbor_step_id,
+                message=message,
+                is_initial=harbor_step_id == 1,
+            ),
+        )
 
     async def _bridge_agent_step(
         self,
@@ -152,6 +176,13 @@ class HarborCheckpointBridge:
             for tc in tool_calls
         )
         completion_state = "complete" if is_complete else "continue"
+        harbor_message = str(step.get("message") or "")
+        analysis, plan = parse_agent_message(harbor_message)
+        reasoning_content = step.get("reasoning_content")
+        reasoning_text = (
+            str(reasoning_content) if isinstance(reasoning_content, str) else ""
+        )
+        harbor_step_id = int(step["step_id"])
 
         await self._trajectory.append(
             llm_call_row_to_event(
@@ -168,13 +199,15 @@ class HarborCheckpointBridge:
                 step_id=self._step_id,
                 seq=self._next_seq(),
                 turn_id=turn_id,
-                turn_index=max(0, int(step.get("step_id", 1)) - 2),
+                turn_index=max(0, harbor_step_id - 2),
                 gateway_request_id=gateway_request_id,
                 parse_state="ok",
                 completion_state=completion_state,
-                analysis="",
-                plan="",
-                raw_response_excerpt=str(step.get("message") or "")[:2000],
+                analysis=analysis,
+                plan=plan,
+                raw_response_excerpt=harbor_message[:2000],
+                reasoning_content=reasoning_text,
+                harbor_step_id=harbor_step_id,
             ),
         )
 

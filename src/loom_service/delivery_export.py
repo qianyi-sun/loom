@@ -1090,6 +1090,8 @@ def _messages_from_raw_log(
             msg["content"] = (
                 _normalize_tb2_assistant_content(content) if normalize_tb2 else content
             )
+        if isinstance(assistant.get("reasoning_content"), str):
+            msg["reasoning_content"] = assistant["reasoning_content"]
         messages.append(msg)
     return messages
 

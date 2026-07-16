@@ -13,6 +13,7 @@ from loom.models.trajectory import (
     Terminus2CommandEvent,
     Terminus2TerminalObservationEvent,
     Terminus2TurnEvent,
+    Terminus2UserPromptEvent,
 )
 from loom.models.types import ModelSpec
 
@@ -63,6 +64,8 @@ def test_project_to_atif_joins_turn_command_observation() -> None:
             gateway_request_id=gw_id,
             parse_state="ok",
             completion_state="continue",
+            analysis="inspect raw feeds",
+            plan="list and cat source files",
         ),
         Terminus2CommandEvent(
             **_base(seq=3),
@@ -97,8 +100,178 @@ def test_project_to_atif_joins_turn_command_observation() -> None:
         agent_version="1.0",
     )
     assert len(doc["steps"]) == 1
+    assert doc["steps"][0]["source"] == "agent"
+    assert doc["steps"][0]["analysis"] == "inspect raw feeds"
+    assert doc["steps"][0]["plan"] == "list and cat source files"
+    assert (
+        doc["steps"][0]["message"]
+        == "Analysis: inspect raw feeds\nPlan: list and cat source files"
+    )
     assert doc["steps"][0]["gateway_request_id"] == gw_id
     assert doc["steps"][0]["observation"].startswith("New Terminal Output")
+
+
+def test_project_to_atif_parses_reasoning_from_excerpt_fallback() -> None:
+    gw_id = "gw-2"
+    turn_id = "turn-2"
+    events = [
+        Terminus2TurnEvent(
+            **_base(),
+            kind=EventKind.TERMINUS2_TURN,
+            turn_id=turn_id,
+            turn_index=0,
+            gateway_request_id=gw_id,
+            parse_state="ok",
+            completion_state="continue",
+            raw_response_excerpt="Analysis: fresh shell\nPlan: inspect files",
+        ),
+        Terminus2TerminalObservationEvent(
+            **_base(seq=1),
+            kind=EventKind.TERMINUS2_TERMINAL_OBSERVATION,
+            turn_id=turn_id,
+            command_batch_id="b",
+            observation_id="o",
+            text="output\n",
+            capture_source="incremental",
+            byte_len=1,
+            truncated=False,
+            completeness="full",
+            content_hash="h",
+            redaction_applied=False,
+            is_aggregate=False,
+        ),
+    ]
+    doc = Terminus2TrajectoryMapper.project_to_atif(
+        events,
+        task_id="task-1",
+        agent_name="terminus-2",
+        agent_version="1.0",
+    )
+    assert doc["steps"][0]["analysis"] == "fresh shell"
+    assert doc["steps"][0]["plan"] == "inspect files"
+
+
+def test_project_to_atif_includes_user_prompt_and_reasoning() -> None:
+    gw_id = "gw-3"
+    turn_id = "turn-3"
+    events = [
+        Terminus2UserPromptEvent(
+            **_base(),
+            kind=EventKind.TERMINUS2_USER_PROMPT,
+            prompt_id="prompt-1",
+            harbor_step_id=1,
+            message="You are an AI assistant...\nTask: do the thing",
+            is_initial=True,
+        ),
+        Terminus2TurnEvent(
+            **_base(seq=1),
+            kind=EventKind.TERMINUS2_TURN,
+            turn_id=turn_id,
+            turn_index=0,
+            gateway_request_id=gw_id,
+            parse_state="ok",
+            completion_state="continue",
+            analysis="look",
+            plan="ls",
+            reasoning_content="hidden chain",
+            harbor_step_id=2,
+        ),
+        Terminus2TerminalObservationEvent(
+            **_base(seq=2),
+            kind=EventKind.TERMINUS2_TERMINAL_OBSERVATION,
+            turn_id=turn_id,
+            command_batch_id="b",
+            observation_id="o",
+            text="output\n",
+            capture_source="incremental",
+            byte_len=1,
+            truncated=False,
+            completeness="full",
+            content_hash="h",
+            redaction_applied=False,
+            is_aggregate=False,
+        ),
+    ]
+    doc = Terminus2TrajectoryMapper.project_to_atif(
+        events,
+        task_id="task-1",
+        agent_name="terminus-2",
+        agent_version="1.0",
+    )
+    assert [s["source"] for s in doc["steps"]] == ["user", "agent"]
+    assert doc["steps"][0]["message"].startswith("You are an AI assistant")
+    assert doc["steps"][0]["is_initial_prompt"] is True
+    assert doc["steps"][1]["reasoning_content"] == "hidden chain"
+    assert doc["steps"][1]["step_id"] == "2"
+
+
+def test_project_to_atif_emits_null_reasoning_content_when_missing() -> None:
+    turn_id = "turn-4"
+    doc = Terminus2TrajectoryMapper.project_to_atif(
+        [
+            Terminus2TurnEvent(
+                **_base(),
+                kind=EventKind.TERMINUS2_TURN,
+                turn_id=turn_id,
+                turn_index=0,
+                gateway_request_id="gw-4",
+                parse_state="ok",
+                completion_state="continue",
+                analysis="inspect state",
+                plan="run ls",
+            ),
+            Terminus2TerminalObservationEvent(
+                **_base(seq=1),
+                kind=EventKind.TERMINUS2_TERMINAL_OBSERVATION,
+                turn_id=turn_id,
+                command_batch_id="b",
+                observation_id="o",
+                text="output\n",
+                capture_source="incremental",
+                byte_len=1,
+                truncated=False,
+                completeness="full",
+                content_hash="h",
+                redaction_applied=False,
+                is_aggregate=False,
+            ),
+        ],
+        task_id="task-1",
+        agent_name="terminus-2",
+        agent_version="1.0",
+    )
+    assert "reasoning_content" in doc["steps"][0]
+    assert doc["steps"][0]["reasoning_content"] is None
+    assert doc["steps"][0]["analysis"] == "inspect state"
+
+
+def test_enrich_from_native_backfills_user_prompt() -> None:
+    traj = {
+        "schema_version": "harbor-tb2-v2-projection",
+        "steps": [
+            {
+                "step_id": "1",
+                "source": "agent",
+                "message": "Analysis: x\nPlan: y",
+                "gateway_request_id": "gw-1",
+            }
+        ],
+    }
+    native = {
+        "steps": [
+            {"step_id": 1, "source": "user", "message": "TASK PROMPT HERE"},
+            {
+                "step_id": 2,
+                "source": "agent",
+                "message": "Analysis: x\nPlan: y",
+                "reasoning_content": "from native",
+            },
+        ]
+    }
+    enriched = Terminus2TrajectoryMapper.enrich_from_native(traj, native)
+    assert enriched["steps"][0]["source"] == "user"
+    assert enriched["steps"][0]["message"] == "TASK PROMPT HERE"
+    assert enriched["steps"][1]["reasoning_content"] == "from native"
 
 
 def test_validate_turn_joins_detects_missing_llm() -> None:

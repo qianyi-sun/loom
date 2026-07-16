@@ -310,6 +310,50 @@ def build_execution_trajectory(
     )
 
 
+def reasoning_by_gateway_from_calls(
+    calls: list[LlmCall],
+    *,
+    messages_from_raw_log: Any,
+) -> dict[str, str]:
+    """Map gateway/llm call id → reasoning_content from provider logs."""
+    out: dict[str, str] = {}
+    for call in calls:
+        extras = call.provider_extras if isinstance(call.provider_extras, dict) else {}
+        raw_log = extras.get("_loom_raw_provider_log")
+        if not isinstance(raw_log, dict):
+            continue
+        messages = messages_from_raw_log(raw_log, normalize_tb2=False)
+        for message in reversed(messages or []):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                out[str(call.id)] = reasoning
+            break
+    return out
+
+
+def enrich_execution_trajectory(
+    trajectory: dict[str, Any],
+    *,
+    native_bytes: bytes | None,
+    reasoning_by_gateway: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    native: dict[str, Any] | None = None
+    if native_bytes:
+        try:
+            parsed = json.loads(native_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            native = parsed
+    return Terminus2TrajectoryMapper.enrich_from_native(
+        trajectory,
+        native,
+        reasoning_by_gateway=reasoning_by_gateway,
+    )
+
+
 def build_export_provenance(
     events: list[TrajectoryEvent],
     *,
@@ -515,6 +559,14 @@ def build_per_trial_v2_bundle(
         events,
         client=client,
         artifacts_bucket=artifacts_bucket,
+    )
+    execution_trajectory = enrich_execution_trajectory(
+        execution_trajectory,
+        native_bytes=native_artifacts.get(NATIVE_HARBOR_TRAJECTORY),
+        reasoning_by_gateway=reasoning_by_gateway_from_calls(
+            calls,
+            messages_from_raw_log=messages_from_raw_log,
+        ),
     )
 
     artifact_manifest_entries = [
