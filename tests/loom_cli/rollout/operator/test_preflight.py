@@ -19,6 +19,8 @@ from loom_cli.rollout.operator.preflight import (
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 REAL_SHARED_REPOSITORY_BINDING = preflight_module._shared_repository_binding
+REMOTE_REPOSITORY_DEVICE = os.makedev(103, 203)
+REMOTE_REPOSITORY_INODE = 303
 
 
 def _test_shared_repository_binding(*, service_uid: int) -> dict[str, int]:
@@ -204,7 +206,8 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
         stdout = (
             "2005;2005,2007;2005;2007;2775;101;201;"
             f"{os.geteuid()};2007;2750;102;202;"
-            f"{os.geteuid()};2007;2750;103;203;"
+            f"{os.geteuid()};2007;2750;{REMOTE_REPOSITORY_DEVICE};"
+            f"{REMOTE_REPOSITORY_INODE};"
             f"{mount_type};{mount_source};103;203\n"
         )
     return subprocess.CompletedProcess(argv, 0, stdout, "")
@@ -268,6 +271,43 @@ def test_collect_preflight_probes_only_exact_merged_active_gb10_set(tmp_path: Pa
     assert shared.passed is True
     assert shared.evidence is not None
     assert shared.evidence.endswith("hosts=14")
+
+
+def test_collect_preflight_decodes_repository_st_dev_before_mount_comparison(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    live_shaped_device = 67
+    assert (os.major(live_shaped_device), os.minor(live_shaped_device)) == (0, 67)
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[:1] == ["ssh"] and argv[-1] != "true":
+            mount_type = "ext4" if argv[-2] == "trt-gb10-2" else "nfs4"
+            mount_source = (
+                "/dev/mapper/shared-work2"
+                if argv[-2] == "trt-gb10-2"
+                else "192.168.20.12:/shared_work2"
+            )
+            output = (
+                "2005;2005,2007;2005;2007;2775;67;148922524;"
+                f"{os.geteuid()};2007;2750;67;148922525;"
+                f"{os.geteuid()};2007;2750;67;148922526;"
+                f"{mount_type};{mount_source};0;67\n"
+            )
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        return successful_command(argv)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=run,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    shared = next(check for check in report.checks if check.name == "gb10-shared-repository")
+    assert shared.passed is True
+    assert shared.evidence is not None
 
 
 def test_shared_repository_binding_uses_nss_and_held_directories_not_install_record(
@@ -400,7 +440,8 @@ def test_collect_preflight_rejects_shared_repository_mount_drift(
             remote_output = (
                 "2005;2005,2007;2005;2007;2775;101;201;"
                 f"{os.geteuid()};2007;2750;102;202;"
-                f"{os.geteuid()};2007;2750;103;203;"
+                f"{os.geteuid()};2007;2750;{REMOTE_REPOSITORY_DEVICE};"
+                f"{REMOTE_REPOSITORY_INODE};"
                 f"{mount_type};{mount_source};{mount_major};{mount_minor}\n"
             )
             return subprocess.CompletedProcess(argv, 0, remote_output, "")

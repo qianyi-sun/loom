@@ -676,6 +676,13 @@ def _gb10_shared_repository_probe(
         parent = values[0:5]
         authority = values[5:10]
         repository = values[10:15]
+        try:
+            repository_device = (
+                os.major(repository[3]),
+                os.minor(repository[3]),
+            )
+        except OverflowError:
+            return None
         if (
             remote_uid != binding["consumer_uid"]
             or binding["shared_gid"] not in remote_groups
@@ -683,7 +690,7 @@ def _gb10_shared_repository_probe(
             or authority[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
             or repository[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
             or any(value <= 0 for value in (*parent[3:], *authority[3:], *repository[3:]))
-            or mount_device != tuple(repository[3:5])
+            or mount_device != repository_device
             or (
                 host == "trt-gb10-2"
                 and (mount_type != "ext4" or mount_source == _SHARED_REPOSITORY_SOURCE)
