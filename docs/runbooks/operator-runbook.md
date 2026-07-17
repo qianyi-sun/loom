@@ -1886,11 +1886,24 @@ Repository materialization always clones with `--no-hardlinks` inside a
 service-created unpredictable temp container that inherited the sharedwork
 group and setgid bit from the dedicated root. Before atomic publication it
 rejects authority symlinks, foreign ownership, group/other write, hard-linked
-or special files, and non-exact candidate HEADs while allowing tracked git
-symlinks. Replacement preserves the former service-owned tree under an
-unpredictable `.previous-...` direct child. Never delete that previous tree or
-an ambient temp path as part of rollout resume; removal is a separate,
-admission-closed maintenance decision.
+or special files, extra directories, and non-exact candidate HEADs while
+allowing tracked git symlinks. Publication uses Linux
+`renameat2(RENAME_NOREPLACE)`: an existing exact target is reused only after a
+complete immutable-tree validation, while any drift or different HEAD fails
+closed without replacement, cleanup, or takeover.
+
+Before request creation the broker also checks the exact 14 active GB10 SSH
+targets as `qianyi`: the shared root must have the fixed owner/group/mode and
+be readable/searchable but not writable. Immediately after the one-time
+checkout publish, and before environment-state apply, step 11 streams trusted
+candidate verifier bytes over the protected SSH stdin path to
+`/usr/bin/python3 -`; verifier code is never loaded from the target under test.
+All 14 nodes must independently observe the exact HEAD, a zero status including
+ignored and untracked entries, the complete index-derived file/directory modes,
+a readable deterministically selected tracked file, and non-writable
+root/target. Content digests and tracked-entry counts must agree across nodes.
+NFS device/inode
+values are recorded per node only and are not compared across nodes.
 
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.

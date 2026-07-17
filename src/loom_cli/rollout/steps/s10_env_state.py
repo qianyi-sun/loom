@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import pwd
 import re
 import secrets
 import shlex
@@ -29,7 +30,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -56,6 +57,7 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_env,
     candidate_relative_path,
     candidate_worktree,
+    validate_candidate_loom_source,
 )
 from loom_cli.rollout.steps.subprocess_util import run_captured
 from loom_cli.secret_source import SecretSourceError, resolve_secret_source
@@ -78,6 +80,15 @@ _CONTROL_PLANE_READY_INTERVAL_SECONDS = 0.5
 _MAX_CATALOG_SOURCE_BYTES = 1024 * 1024
 _MAX_PORT_FORWARD_LOG_CHARS = 64 * 1024
 _SHARED_WORKER_REPO_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_WORKER_REPO_CONSUMER = PurePosixPath("scripts/ops/staging_rollout_shared_repo_consumer.py")
+_GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
+_CANONICAL_SHARED_REPO_GIT_CONFIG = (
+    b"[core]\n"
+    b"\trepositoryformatversion = 0\n"
+    b"\tfilemode = true\n"
+    b"\tbare = false\n"
+    b"\tlogallrefupdates = true\n"
+)
 _TEST_RENAME_NOREPLACE_BACKEND: Callable[[int, str, int, str], None] | None = None
 _OVERSIZED_PORT_FORWARD_OUTPUT = "[REDACTED:oversized-port-forward-output]\n"
 _PORT_FORWARD_ENV_KEYS = frozenset(
@@ -1450,6 +1461,59 @@ def _git_stdout(argv: list[str]) -> str:
     return result.stdout.strip()
 
 
+def _shared_repo_git(repo_dir: Path, *arguments: str) -> str:
+    command = [
+        "/usr/bin/git",
+        "--git-dir",
+        str(repo_dir / ".git"),
+        "--work-tree",
+        str(repo_dir),
+    ]
+    for key, value in (
+        ("safe.directory", str(repo_dir)),
+        ("core.worktree", str(repo_dir)),
+        ("core.bare", "false"),
+        ("core.fsmonitor", "false"),
+        ("core.hooksPath", "/dev/null"),
+        ("core.attributesFile", "/dev/null"),
+        ("core.excludesFile", "/dev/null"),
+        ("core.untrackedCache", "false"),
+        ("submodule.recurse", "false"),
+        ("fetch.recurseSubmodules", "false"),
+        ("protocol.file.allow", "never"),
+        ("credential.helper", ""),
+        ("core.sshCommand", "/usr/bin/false"),
+    ):
+        command.extend(("-c", f"{key}={value}"))
+    command.extend(arguments)
+    result = run_captured(
+        command,
+        env={
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_PROTOCOL_FROM_USER": "0",
+            "GIT_PAGER": "cat",
+            "GIT_EXTERNAL_DIFF": "/usr/bin/false",
+            "GIT_SSH_COMMAND": "/usr/bin/false",
+            "HOME": "/nonexistent",
+            "XDG_CONFIG_HOME": "/nonexistent",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+    if result.returncode != 0 or result.stderr:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository Git verification failed safely",
+        )
+    return result.stdout
+
+
 @dataclass(frozen=True)
 class _BoundDirectory:
     """An opened directory whose identity must remain stable for one operation."""
@@ -1548,9 +1612,9 @@ def _open_child_directory(parent_fd: int, name: str) -> int:
     )
 
 
-def _index_modes(repo_dir: Path) -> dict[str, str]:
-    raw = _git_stdout(["git", "-C", str(repo_dir), "ls-files", "--stage", "-z"])
-    modes: dict[str, str] = {}
+def _index_entries(repo_dir: Path) -> dict[str, tuple[str, str]]:
+    raw = _shared_repo_git(repo_dir, "ls-files", "--stage", "-z")
+    entries: dict[str, tuple[str, str]] = {}
     for raw_entry in raw.split("\0"):
         if not raw_entry:
             continue
@@ -1560,21 +1624,58 @@ def _index_modes(repo_dir: Path) -> dict[str, str]:
             raise ExternalSlurmPrereqMaterializationError(
                 "external runner repository index is invalid",
             )
-        mode = fields[0]
+        mode, object_id = fields[:2]
         relative_path = PurePosixPath(relative)
         if (
             mode not in {"100644", "100755", "120000"}
+            or _GIT_OBJECT_ID_RE.fullmatch(object_id) is None
             or not relative
             or relative_path.is_absolute()
             or ".." in relative_path.parts
             or relative_path.parts[0] == ".git"
-            or relative in modes
+            or relative in entries
         ):
             raise ExternalSlurmPrereqMaterializationError(
                 "external runner repository index contains an unsupported entry",
             )
-        modes[relative] = mode
-    return modes
+        entries[relative] = (mode, object_id)
+    if not entries:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is empty",
+        )
+    return entries
+
+
+def _commit_tree_entries(repo_dir: Path, resolved_sha: str) -> dict[str, tuple[str, str]]:
+    raw = _shared_repo_git(repo_dir, "ls-tree", "-r", "-z", "--full-tree", resolved_sha)
+    entries: dict[str, tuple[str, str]] = {}
+    for raw_entry in raw.split("\0"):
+        if not raw_entry:
+            continue
+        metadata, separator, relative = raw_entry.partition("\t")
+        fields = metadata.split()
+        relative_path = PurePosixPath(relative)
+        if (
+            separator != "\t"
+            or len(fields) != 3
+            or fields[0] not in {"100644", "100755", "120000"}
+            or fields[1] != "blob"
+            or _GIT_OBJECT_ID_RE.fullmatch(fields[2]) is None
+            or not relative
+            or relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or relative_path.parts[0] == ".git"
+            or relative in entries
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository commit tree is invalid",
+            )
+        entries[relative] = (fields[0], fields[2])
+    if not entries:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository commit tree is empty",
+        )
+    return entries
 
 
 def _normalize_git_metadata(directory_fd: int, *, uid: int, gid: int) -> None:
@@ -1605,15 +1706,165 @@ def _normalize_git_metadata(directory_fd: int, *, uid: int, gid: int) -> None:
             os.chmod(name, 0o640, dir_fd=directory_fd, follow_symlinks=False)
 
 
+def _write_canonical_git_config(directory_fd: int, *, uid: int, gid: int) -> None:
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    config_fd = os.open("config", flags, dir_fd=directory_fd)
+    try:
+        metadata = os.fstat(config_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != uid
+            or metadata.st_gid != gid
+            or metadata.st_nlink != 1
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout Git configuration is unsafe",
+            )
+        os.ftruncate(config_fd, 0)
+        written = 0
+        while written < len(_CANONICAL_SHARED_REPO_GIT_CONFIG):
+            written += os.write(config_fd, _CANONICAL_SHARED_REPO_GIT_CONFIG[written:])
+        os.fchmod(config_fd, 0o640)
+        os.fsync(config_fd)
+        after = os.fstat(config_fd)
+        if after.st_size != len(_CANONICAL_SHARED_REPO_GIT_CONFIG):
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout Git configuration did not converge",
+            )
+    finally:
+        os.close(config_fd)
+
+
+def _validate_canonical_git_config(directory_fd: int, *, uid: int, gid: int) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    config_fd = os.open("config", flags, dir_fd=directory_fd)
+    try:
+        before = os.fstat(config_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != uid
+            or before.st_gid != gid
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o640
+            or before.st_size != len(_CANONICAL_SHARED_REPO_GIT_CONFIG)
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository Git configuration authority drifted",
+            )
+        payload = os.read(config_fd, len(_CANONICAL_SHARED_REPO_GIT_CONFIG) + 1)
+        after = os.fstat(config_fd)
+        if payload != _CANONICAL_SHARED_REPO_GIT_CONFIG or (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_size,
+        ) != (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository Git configuration drifted",
+            )
+    finally:
+        os.close(config_fd)
+
+
+def _validate_physical_metadata(
+    directory_fd: int,
+    *,
+    uid: int,
+    gid: int,
+    top_level: bool = True,
+) -> None:
+    for name in os.listdir(directory_fd):
+        if top_level and name == ".git":
+            continue
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if metadata.st_uid != uid or metadata.st_gid != gid:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository contains foreign-owned content",
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            if stat.S_IMODE(metadata.st_mode) != 0o750:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository directory mode drifted",
+                )
+            child_fd = _open_child_directory(directory_fd, name)
+            try:
+                _validate_physical_metadata(
+                    child_fd,
+                    uid=uid,
+                    gid=gid,
+                    top_level=False,
+                )
+            finally:
+                os.close(child_fd)
+        elif stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) not in {0o640, 0o750}:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository file mode drifted",
+                )
+        elif stat.S_ISLNK(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository contains a linked symlink",
+                )
+        else:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository contains an unsafe entry",
+            )
+
+
+def _git_blob_id(data: bytes) -> str:
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {len(data)}\0".encode("ascii"))
+    digest.update(data)
+    return digest.hexdigest()
+
+
+def _regular_git_blob_id(
+    directory_fd: int,
+    name: str,
+    *,
+    metadata: os.stat_result,
+) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_fd = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        before = os.fstat(file_fd)
+        if (before.st_dev, before.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository file binding drifted",
+            )
+        digest = hashlib.sha1(usedforsecurity=False)
+        digest.update(f"blob {before.st_size}\0".encode("ascii"))
+        size = 0
+        while chunk := os.read(file_fd, 1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+        after = os.fstat(file_fd)
+        if size != before.st_size or (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_size,
+        ) != (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository file changed while read",
+            )
+        return digest.hexdigest()
+    finally:
+        os.close(file_fd)
+
+
 def _normalize_worktree(
     directory_fd: int,
     *,
     index_modes: dict[str, str],
+    expected_directories: set[str],
     uid: int,
     gid: int,
     prefix: str = "",
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     materialized: set[str] = set()
+    directories: set[str] = set()
     for name in os.listdir(directory_fd):
         if not prefix and name == ".git":
             continue
@@ -1624,17 +1875,23 @@ def _normalize_worktree(
                 "fresh external runner checkout contains foreign-owned content",
             )
         if stat.S_ISDIR(metadata.st_mode):
+            if relative not in expected_directories:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "fresh external runner checkout contains an untracked directory",
+                )
+            directories.add(relative)
             child_fd = _open_child_directory(directory_fd, name)
             try:
-                materialized.update(
-                    _normalize_worktree(
-                        child_fd,
-                        index_modes=index_modes,
-                        uid=uid,
-                        gid=gid,
-                        prefix=relative,
-                    )
+                child_files, child_directories = _normalize_worktree(
+                    child_fd,
+                    index_modes=index_modes,
+                    expected_directories=expected_directories,
+                    uid=uid,
+                    gid=gid,
+                    prefix=relative,
                 )
+                materialized.update(child_files)
+                directories.update(child_directories)
                 os.fchmod(child_fd, 0o750)
             finally:
                 os.close(child_fd)
@@ -1661,7 +1918,7 @@ def _normalize_worktree(
                 "fresh external runner checkout contains an unsafe entry",
             )
         materialized.add(relative)
-    return materialized
+    return materialized, directories
 
 
 def _validate_git_metadata(directory_fd: int, *, uid: int, gid: int) -> None:
@@ -1672,7 +1929,7 @@ def _validate_git_metadata(directory_fd: int, *, uid: int, gid: int) -> None:
                 "external runner repository contains foreign-owned git metadata",
             )
         if stat.S_ISDIR(metadata.st_mode):
-            if stat.S_IMODE(metadata.st_mode) & 0o022:
+            if stat.S_IMODE(metadata.st_mode) != 0o750:
                 raise ExternalSlurmPrereqMaterializationError(
                     "external runner repository git metadata mode drifted",
                 )
@@ -1682,7 +1939,7 @@ def _validate_git_metadata(directory_fd: int, *, uid: int, gid: int) -> None:
             finally:
                 os.close(child_fd)
         elif stat.S_ISREG(metadata.st_mode):
-            if metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) & 0o022:
+            if metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o640:
                 raise ExternalSlurmPrereqMaterializationError(
                     "external runner repository git metadata is unsafe",
                 )
@@ -1692,15 +1949,69 @@ def _validate_git_metadata(directory_fd: int, *, uid: int, gid: int) -> None:
             )
 
 
+def _validate_single_git_authority(directory_fd: int, *, uid: int, gid: int) -> None:
+    entries = set(os.listdir(directory_fd))
+    if entries & {"commondir", "config.worktree"}:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository Git common authority redirection is forbidden",
+        )
+    for name in ("objects", "refs"):
+        child_fd = _open_child_directory(directory_fd, name)
+        try:
+            held = os.fstat(child_fd)
+            lexical = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                held.st_uid != uid
+                or held.st_gid != gid
+                or stat.S_IMODE(held.st_mode) != 0o750
+                or not stat.S_ISDIR(lexical.st_mode)
+                or (held.st_dev, held.st_ino) != (lexical.st_dev, lexical.st_ino)
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository Git object or ref authority drifted",
+                )
+        finally:
+            os.close(child_fd)
+    try:
+        git_info_fd = _open_child_directory(directory_fd, "info")
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            if "grafts" in set(os.listdir(git_info_fd)):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository Git legacy graft authority is forbidden",
+                )
+        finally:
+            os.close(git_info_fd)
+    objects_fd = _open_child_directory(directory_fd, "objects")
+    try:
+        try:
+            info_fd = _open_child_directory(objects_fd, "info")
+        except FileNotFoundError:
+            return
+        try:
+            if set(os.listdir(info_fd)) & {"alternates", "http-alternates"}:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository Git object authority redirection is forbidden",
+                )
+        finally:
+            os.close(info_fd)
+    finally:
+        os.close(objects_fd)
+
+
 def _validate_worktree(
     directory_fd: int,
     *,
-    index_modes: dict[str, str],
+    index_entries: dict[str, tuple[str, str]],
+    expected_directories: set[str],
     uid: int,
     gid: int,
     prefix: str = "",
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     materialized: set[str] = set()
+    directories: set[str] = set()
     for name in os.listdir(directory_fd):
         if not prefix and name == ".git":
             continue
@@ -1711,49 +2022,75 @@ def _validate_worktree(
                 "external runner repository contains foreign-owned content",
             )
         if stat.S_ISDIR(metadata.st_mode):
+            if relative not in expected_directories:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository contains an untracked directory",
+                )
             if stat.S_IMODE(metadata.st_mode) != 0o750:
                 raise ExternalSlurmPrereqMaterializationError(
                     "external runner repository directory mode drifted",
                 )
+            directories.add(relative)
             child_fd = _open_child_directory(directory_fd, name)
             try:
-                materialized.update(
-                    _validate_worktree(
-                        child_fd,
-                        index_modes=index_modes,
-                        uid=uid,
-                        gid=gid,
-                        prefix=relative,
-                    )
+                child_files, child_directories = _validate_worktree(
+                    child_fd,
+                    index_entries=index_entries,
+                    expected_directories=expected_directories,
+                    uid=uid,
+                    gid=gid,
+                    prefix=relative,
                 )
+                materialized.update(child_files)
+                directories.update(child_directories)
             finally:
                 os.close(child_fd)
             continue
-        expected = index_modes.get(relative)
+        expected = index_entries.get(relative)
         if stat.S_ISLNK(metadata.st_mode):
-            if expected != "120000":
+            object_id = _git_blob_id(os.fsencode(os.readlink(name, dir_fd=directory_fd)))
+            if expected is None or expected[0] != "120000" or expected[1] != object_id:
                 raise ExternalSlurmPrereqMaterializationError(
-                    "external runner repository contains an untracked symlink",
+                    "external runner repository symlink content drifted",
                 )
         elif stat.S_ISREG(metadata.st_mode):
-            expected_mode = 0o750 if expected == "100755" else 0o640
+            expected_mode = 0o750 if expected is not None and expected[0] == "100755" else 0o640
             if (
-                expected not in {"100644", "100755"}
+                expected is None
+                or expected[0] not in {"100644", "100755"}
                 or metadata.st_nlink != 1
                 or stat.S_IMODE(metadata.st_mode) != expected_mode
             ):
                 raise ExternalSlurmPrereqMaterializationError(
                     "external runner repository file mode drifted",
                 )
+            if _regular_git_blob_id(directory_fd, name, metadata=metadata) != expected[1]:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository file content drifted",
+                )
         else:
             raise ExternalSlurmPrereqMaterializationError(
                 "external runner repository contains an unsafe entry",
             )
         materialized.add(relative)
-    return materialized
+    return materialized, directories
 
 
-def _validate_repo_tree(repo_dir: Path, *, root: _BoundDirectory) -> None:
+def _expected_worktree_directories(index_entries: Collection[str]) -> set[str]:
+    return {
+        str(parent)
+        for relative in index_entries
+        for parent in PurePosixPath(relative).parents
+        if str(parent) != "."
+    }
+
+
+def _validate_repo_tree(
+    repo_dir: Path,
+    *,
+    root: _BoundDirectory,
+    resolved_sha: str,
+) -> None:
     root.assert_stable()
     try:
         repo_fd = _open_child_directory(root.fd, repo_dir.name)
@@ -1769,124 +2106,168 @@ def _validate_repo_tree(repo_dir: Path, *, root: _BoundDirectory) -> None:
             raise ExternalSlurmPrereqMaterializationError(
                 "existing external runner repository has unsafe authority",
             )
-        index_modes = _index_modes(repo_dir)
-        status = _git_stdout(
-            [
-                "git",
-                "-C",
-                str(repo_dir),
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--ignored=matching",
-            ]
-        )
-        if status:
-            raise ExternalSlurmPrereqMaterializationError(
-                "external runner repository contains untracked, ignored, or modified content",
-            )
         git_fd = _open_child_directory(repo_fd, ".git")
         try:
             git_top = os.fstat(git_fd)
+            lexical_git = os.stat(".git", dir_fd=repo_fd, follow_symlinks=False)
             if (
                 git_top.st_uid != os.geteuid()
                 or git_top.st_gid != root.identity.st_gid
-                or stat.S_IMODE(git_top.st_mode) & 0o022
+                or stat.S_IMODE(git_top.st_mode) != 0o750
+                or not stat.S_ISDIR(lexical_git.st_mode)
+                or (lexical_git.st_dev, lexical_git.st_ino) != (git_top.st_dev, git_top.st_ino)
             ):
                 raise ExternalSlurmPrereqMaterializationError(
                     "external runner repository git metadata authority drifted",
                 )
+            _validate_single_git_authority(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+            _validate_canonical_git_config(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
             _validate_git_metadata(
                 git_fd,
                 uid=os.geteuid(),
                 gid=root.identity.st_gid,
             )
+            _validate_physical_metadata(
+                repo_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+
+            object_format = _shared_repo_git(repo_dir, "rev-parse", "--show-object-format").strip()
+            if object_format != "sha1":
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository object format is unsupported",
+                )
+            head = _shared_repo_git(repo_dir, "rev-parse", "HEAD^{commit}").strip()
+            if head != resolved_sha:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository does not exactly match the resolved candidate",
+                )
+            index_entries = _index_entries(repo_dir)
+            tree_entries = _commit_tree_entries(repo_dir, resolved_sha)
+            if index_entries != tree_entries:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository index does not match its commit tree",
+                )
+            expected_directories = _expected_worktree_directories(index_entries)
+            materialized, directories = _validate_worktree(
+                repo_fd,
+                index_entries=index_entries,
+                expected_directories=expected_directories,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+            if materialized != set(index_entries) or directories != expected_directories:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository does not match its exact commit tree",
+                )
+
+            _validate_canonical_git_config(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+            _validate_single_git_authority(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+            _validate_git_metadata(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+            lexical_git_after = os.stat(".git", dir_fd=repo_fd, follow_symlinks=False)
+            git_after = os.fstat(git_fd)
+            if (
+                not stat.S_ISDIR(lexical_git_after.st_mode)
+                or (lexical_git_after.st_dev, lexical_git_after.st_ino)
+                != (git_top.st_dev, git_top.st_ino)
+                or (git_after.st_dev, git_after.st_ino) != (git_top.st_dev, git_top.st_ino)
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository Git authority changed during verification",
+                )
         finally:
             os.close(git_fd)
-        materialized = _validate_worktree(
-            repo_fd,
-            index_modes=index_modes,
-            uid=os.geteuid(),
-            gid=root.identity.st_gid,
-        )
-        if materialized != set(index_modes):
-            raise ExternalSlurmPrereqMaterializationError(
-                "external runner repository does not match its exact index",
-            )
     finally:
         os.close(repo_fd)
     root.assert_stable()
 
 
-def _normalize_repo_tree(repo_dir: Path, *, root: _BoundDirectory) -> None:
+def _normalize_repo_tree(
+    repo_dir: Path,
+    *,
+    root: _BoundDirectory,
+    resolved_sha: str,
+) -> None:
     root.assert_stable()
     repo_fd = _open_child_directory(root.fd, repo_dir.name)
     try:
-        index_modes = _index_modes(repo_dir)
         git_fd = _open_child_directory(repo_fd, ".git")
         try:
+            _write_canonical_git_config(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
             _normalize_git_metadata(
                 git_fd,
                 uid=os.geteuid(),
                 gid=root.identity.st_gid,
             )
             os.fchmod(git_fd, 0o750)
+            _validate_single_git_authority(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+            _validate_canonical_git_config(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
         finally:
             os.close(git_fd)
-        materialized = _normalize_worktree(
+        if _shared_repo_git(repo_dir, "rev-parse", "--show-object-format").strip() != "sha1":
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout object format is unsupported",
+            )
+        head = _shared_repo_git(repo_dir, "rev-parse", "HEAD^{commit}").strip()
+        if head != resolved_sha:
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout does not match the resolved candidate",
+            )
+        index_entries = _index_entries(repo_dir)
+        if index_entries != _commit_tree_entries(repo_dir, resolved_sha):
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout index does not match its commit tree",
+            )
+        index_modes = {relative: entry[0] for relative, entry in index_entries.items()}
+        expected_directories = _expected_worktree_directories(index_entries)
+        materialized, directories = _normalize_worktree(
             repo_fd,
             index_modes=index_modes,
+            expected_directories=expected_directories,
             uid=os.geteuid(),
             gid=root.identity.st_gid,
         )
         os.fchmod(repo_fd, 0o750)
-        if materialized != set(index_modes):
+        if materialized != set(index_modes) or directories != expected_directories:
             raise ExternalSlurmPrereqMaterializationError(
                 "fresh external runner checkout does not match its exact index",
             )
     finally:
         os.close(repo_fd)
-    _validate_repo_tree(repo_dir, root=root)
-
-
-def _repo_status(
-    repo_dir: Path,
-    *,
-    root: _BoundDirectory,
-) -> tuple[str, str] | None:
-    try:
-        _validate_repo_tree(repo_dir, root=root)
-    except FileNotFoundError:
-        return None
-    except (OSError, ExternalSlurmPrereqMaterializationError):
-        raise ExternalSlurmPrereqMaterializationError(
-            "existing external runner repository has unsafe authority",
-        ) from None
-    git_dir = repo_dir / ".git"
-    try:
-        git_metadata = git_dir.lstat()
-    except FileNotFoundError:
-        return None
-    if stat.S_ISLNK(git_metadata.st_mode) or not stat.S_ISDIR(git_metadata.st_mode):
-        return None
-    try:
-        head = _git_stdout(["git", "-C", str(repo_dir), "rev-parse", "HEAD"])
-        status = _git_stdout(
-            [
-                "git",
-                "-C",
-                str(repo_dir),
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--ignored=matching",
-            ]
-        )
-    except ExternalSlurmPrereqMaterializationError:
-        return None
-    return head, status
+    _validate_repo_tree(repo_dir, root=root, resolved_sha=resolved_sha)
 
 
 def _repo_matches(
@@ -1895,18 +2276,18 @@ def _repo_matches(
     *,
     root: _BoundDirectory,
 ) -> dict[str, Any] | None:
-    status = _repo_status(repo_dir, root=root)
-    if status is None:
+    try:
+        _validate_repo_tree(repo_dir, root=root, resolved_sha=resolved_sha)
+    except FileNotFoundError:
         return None
-    head, dirty = status
-    if dirty:
-        return None
-    if head != resolved_sha:
-        return None
+    except OSError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "existing external runner repository has unsafe authority",
+        ) from exc
     return {
         "repo_dir": str(repo_dir),
         "repo_action": "matched",
-        "repo_head": head,
+        "repo_head": resolved_sha,
         "repo_status": "clean",
         "repo_group_id": root.identity.st_gid,
         "repo_mode": "0750",
@@ -1919,24 +2300,10 @@ def _clone_repo_checkout(
     tmp_dir: Path,
     resolved_sha: str,
 ) -> None:
-    origin_result = run_captured(
-        [
-            "git",
-            "-C",
-            str(source_repo),
-            "config",
-            "--get",
-            "remote.origin.url",
-        ]
-    )
-    source_url = (
-        origin_result.stdout.strip()
-        if origin_result.returncode == 0 and origin_result.stdout.strip()
-        else str(source_repo)
-    )
     _git_stdout(
         [
             "git",
+            "--no-replace-objects",
             "clone",
             "--quiet",
             "--no-hardlinks",
@@ -1944,24 +2311,17 @@ def _clone_repo_checkout(
             str(tmp_dir),
         ]
     )
-    _git_stdout(["git", "-C", str(tmp_dir), "remote", "set-url", "origin", source_url])
-    _git_stdout(["git", "-C", str(tmp_dir), "checkout", "--detach", resolved_sha])
-    dirty = _git_stdout(
+    _git_stdout(
         [
             "git",
+            "--no-replace-objects",
             "-C",
             str(tmp_dir),
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignored=matching",
+            "checkout",
+            "--detach",
+            resolved_sha,
         ]
     )
-    if dirty:
-        raise ExternalSlurmPrereqMaterializationError(
-            f"fresh external runner checkout is dirty: {tmp_dir}",
-        )
 
 
 def _prepare_temp_root(
@@ -2121,21 +2481,20 @@ def _materialize_repo_dir(
                 raise ExternalSlurmPrereqMaterializationError(
                     "external runner temporary checkout authority changed during materialization",
                 )
-            _normalize_repo_tree(checkout, root=_BoundDirectory(temp_root, temp_fd, temp_identity))
+            _normalize_repo_tree(
+                checkout,
+                root=_BoundDirectory(temp_root, temp_fd, temp_identity),
+                resolved_sha=resolved_sha,
+            )
             _rename_directory_noreplace(temp_fd, "checkout", root.fd, repo_dir.name)
         finally:
             os.close(temp_fd)
 
-        _validate_repo_tree(repo_dir, root=root)
-        head = _git_stdout(["git", "-C", str(repo_dir), "rev-parse", "HEAD"])
-        if head != resolved_sha:
-            raise ExternalSlurmPrereqMaterializationError(
-                "published external runner checkout does not match the resolved candidate",
-            )
+        _validate_repo_tree(repo_dir, root=root, resolved_sha=resolved_sha)
         return {
             "repo_dir": str(repo_dir),
             "repo_action": "created",
-            "repo_head": head,
+            "repo_head": resolved_sha,
             "repo_status": "clean",
             "repo_group_id": root.identity.st_gid,
             "repo_mode": "0750",
@@ -2246,6 +2605,247 @@ def _materialize_external_slurm_runner_prerequisites(
     return records
 
 
+def _verify_external_slurm_runner_consumers(
+    ctx: RolloutContext,
+    step_dir: StepDir,
+    records: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Verify the immutable target as qianyi on every fixed GB10 node."""
+    if not records:
+        return None
+    if len(records) != 1 or ctx.scope != "current-gb10":
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner consumer verification requires one current-GB10 target",
+        )
+
+    from loom_cli.rollout.operator.preflight import ACTIVE_GB10_HOSTS
+    from loom_cli.rollout.steps.s04_gb10_prep import (
+        _gb10_prep_config_paths,
+        _ssh,
+        gb10_hosts_for,
+    )
+
+    record = records[0]
+    repo_value = record.get("repo_dir")
+    if (
+        not isinstance(repo_value, str)
+        or Path(repo_value).parent != _SHARED_WORKER_REPO_ROOT
+        or record.get("repo_head") != ctx.resolved_sha
+    ):
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner consumer target is not candidate-bound",
+        )
+    repo = Path(repo_value)
+    try:
+        consumer = pwd.getpwnam("qianyi")
+        shared_gid = grp.getgrnam("sharedwork").gr_gid
+        consumer_groups = {*os.getgrouplist(consumer.pw_name, consumer.pw_gid)}
+    except (KeyError, OSError) as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner consumer identity is unavailable",
+        ) from exc
+    owner_uid = os.geteuid()
+    if (
+        consumer.pw_uid <= 0
+        or shared_gid <= 0
+        or shared_gid not in consumer_groups
+        or record.get("repo_group_id") != shared_gid
+    ):
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner consumer identity is not authorized",
+        )
+
+    try:
+        _candidate_config, materialized_config = _gb10_prep_config_paths(ctx, step_dir)
+        hosts = gb10_hosts_for(ctx, config_path=materialized_config)
+    except CandidateToolingError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner consumer SSH inputs are not candidate-bound",
+        ) from exc
+    if tuple(host.ssh_target for host in hosts) != ACTIVE_GB10_HOSTS:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner consumer host set is not exact",
+        )
+
+    try:
+        candidate_root = validate_candidate_loom_source(step_dir).resolve(strict=True)
+        consumer_script = candidate_root / _SHARED_WORKER_REPO_CONSUMER
+        consumer_script.relative_to(candidate_root)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        verifier_fd = os.open(consumer_script, flags)
+        try:
+            verifier_before = os.fstat(verifier_fd)
+            if (
+                not stat.S_ISREG(verifier_before.st_mode)
+                or verifier_before.st_uid != owner_uid
+                or stat.S_IMODE(verifier_before.st_mode) & 0o022
+                or verifier_before.st_nlink != 1
+                or not 0 < verifier_before.st_size <= 1024 * 1024
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner consumer verifier is unsafe",
+                )
+            verifier_bytes = os.read(verifier_fd, verifier_before.st_size + 1)
+            verifier_after = os.fstat(verifier_fd)
+            if len(verifier_bytes) != verifier_before.st_size or (
+                verifier_after.st_dev,
+                verifier_after.st_ino,
+                verifier_after.st_mtime_ns,
+                verifier_after.st_size,
+            ) != (
+                verifier_before.st_dev,
+                verifier_before.st_ino,
+                verifier_before.st_mtime_ns,
+                verifier_before.st_size,
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner consumer verifier changed while read",
+                )
+        finally:
+            os.close(verifier_fd)
+        verifier_text = verifier_bytes.decode("utf-8")
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner consumer verifier is unavailable",
+        ) from exc
+    verifier_sha256 = hashlib.sha256(verifier_bytes).hexdigest()
+    command = " ".join(
+        shlex.quote(value)
+        for value in (
+            "/usr/bin/python3",
+            "-",
+            "--root",
+            str(_SHARED_WORKER_REPO_ROOT),
+            "--repo",
+            str(repo),
+            "--sha",
+            ctx.resolved_sha,
+            "--owner-uid",
+            str(owner_uid),
+            "--shared-gid",
+            str(shared_gid),
+            "--consumer-uid",
+            str(consumer.pw_uid),
+        )
+    )
+    artifact = step_dir.artifact_path("external-slurm-runner-consumer-verification.json")
+    evidence_hash = hashlib.sha256()
+    node_evidence: list[dict[str, object]] = []
+    expected_keys = {
+        "head",
+        "index_sha256",
+        "probe_file_sha256",
+        "root_device",
+        "root_inode",
+        "target_device",
+        "target_inode",
+        "tree_content_sha256",
+        "tracked_entries",
+    }
+    content_identity: tuple[str, str, str, int] | None = None
+    for host in hosts:
+        result = _ssh(host, command, stdin_text=verifier_text)
+        safe = False
+        parsed: dict[str, object] | None = None
+        if (
+            result.returncode == 0
+            and not result.stderr
+            and 0 < len(result.stdout) <= 1024
+            and result.stdout.count("\n") <= 1
+        ):
+            try:
+                candidate = json.loads(result.stdout)
+            except (TypeError, ValueError):
+                candidate = None
+            if isinstance(candidate, dict) and set(candidate) == expected_keys:
+                parsed = candidate
+                numeric_keys = {
+                    "root_device",
+                    "root_inode",
+                    "target_device",
+                    "target_inode",
+                    "tracked_entries",
+                }
+                safe = bool(
+                    candidate.get("head") == ctx.resolved_sha
+                    and all(
+                        isinstance(candidate.get(key), str)
+                        and re.fullmatch(r"[0-9a-f]{64}", str(candidate[key]))
+                        for key in {
+                            "index_sha256",
+                            "probe_file_sha256",
+                            "tree_content_sha256",
+                        }
+                    )
+                    and all(
+                        type(candidate.get(key)) is int and int(candidate[key]) > 0
+                        for key in numeric_keys
+                    )
+                )
+                if safe:
+                    candidate_identity = (
+                        str(candidate["index_sha256"]),
+                        str(candidate["probe_file_sha256"]),
+                        str(candidate["tree_content_sha256"]),
+                        int(candidate["tracked_entries"]),
+                    )
+                    if content_identity is None:
+                        content_identity = candidate_identity
+                    elif candidate_identity != content_identity:
+                        safe = False
+        if not safe or parsed is None:
+            evidence_hash.update(host.ssh_target.encode("ascii"))
+            evidence_hash.update(b"\0failed\0")
+            _write_safe_json(
+                artifact,
+                {
+                    "evidence_sha256": evidence_hash.hexdigest(),
+                    "expected_host_count": len(ACTIVE_GB10_HOSTS),
+                    "host_count": len(node_evidence),
+                    "nodes": node_evidence,
+                    "passed": False,
+                    "resolved_sha": ctx.resolved_sha,
+                    "verifier_sha256": verifier_sha256,
+                },
+            )
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner consumer verification failed safely",
+            )
+        evidence_hash.update(host.ssh_target.encode("ascii"))
+        evidence_hash.update(b"\0")
+        evidence_hash.update(result.stdout.strip().encode("ascii"))
+        evidence_hash.update(b"\0")
+        node_evidence.append(
+            {
+                "host": host.ssh_target,
+                "root_device": parsed["root_device"],
+                "root_inode": parsed["root_inode"],
+                "target_device": parsed["target_device"],
+                "target_inode": parsed["target_inode"],
+            }
+        )
+
+    if content_identity is None:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner consumer evidence is incomplete",
+        )
+    evidence = {
+        "evidence_sha256": evidence_hash.hexdigest(),
+        "expected_host_count": len(ACTIVE_GB10_HOSTS),
+        "host_count": len(node_evidence),
+        "index_sha256": content_identity[0],
+        "nodes": node_evidence,
+        "passed": True,
+        "probe_file_sha256": content_identity[1],
+        "resolved_sha": ctx.resolved_sha,
+        "tree_content_sha256": content_identity[2],
+        "tracked_entries": content_identity[3],
+        "verifier_sha256": verifier_sha256,
+    }
+    _write_safe_json(artifact, evidence)
+    return evidence
+
+
 class EnvStateStep(BaseStep):
     number = 11
     name = "env-state"
@@ -2307,10 +2907,26 @@ class EnvStateStep(BaseStep):
                 profile_path,
                 step_dir,
             )
+            consumer_evidence = _verify_external_slurm_runner_consumers(
+                ctx,
+                step_dir,
+                materialized,
+            )
         except ExternalSlurmPrereqMaterializationError as exc:
             message = _safe_text(exc)
             _write_safe_text(step_dir.stderr_path(), message + "\n")
-            return RunResult(exit_code=2, error=message)
+            consumer_artifact = step_dir.artifact_path(
+                "external-slurm-runner-consumer-verification.json"
+            )
+            return RunResult(
+                exit_code=2,
+                error=message,
+                artifacts=(
+                    {"external_runner_consumer_verification": str(consumer_artifact)}
+                    if consumer_artifact.exists()
+                    else {}
+                ),
+            )
         try:
             _wait_for_control_plane(ctx, step_dir)
         except ControlPlaneReadinessError as exc:
@@ -2449,6 +3065,10 @@ class EnvStateStep(BaseStep):
                 step_dir.artifact_path("environment-state-profile-materialization.json")
             ),
         }
+        if consumer_evidence is not None:
+            artifacts["external_runner_consumer_verification"] = str(
+                step_dir.artifact_path("external-slurm-runner-consumer-verification.json")
+            )
         if catalog_artifact is not None:
             artifacts["catalog_provisioning"] = catalog_artifact
         if check.returncode != 0:

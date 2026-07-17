@@ -1393,12 +1393,22 @@ and readiness rechecks metadata plus effective service/consumer access.
 Step 11 accepts only the candidate-named direct child of that exact root. It
 clones with `--no-hardlinks` into a private, unpredictable setgid-root temp
 container, normalizes the completed tree to shared-group read/execute without
-group or other write, and then publishes by a same-root atomic rename. Tracked
-repository symlinks remain valid; authority symlinks, foreign ownership,
-hard-linked or special files, wrong modes, and SHA drift fail closed. A
-replaced service-owned checkout is renamed to an unpredictable
-`.previous-...` sibling and preserved for explicit later maintenance; rollout
-materialization never cleans ambient or previous directories.
+group or other write, and then publishes with same-root
+`renameat2(RENAME_NOREPLACE)`. Tracked repository symlinks remain valid;
+authority symlinks, foreign ownership, hard-linked or special files, extra
+directories, wrong modes, and SHA drift fail closed. Existing targets are
+immutable: only an exact fully validated target is reused, and rollout never
+replaces, cleans, or takes over drifted or ambient directories.
+
+Broker preflight checks the fixed 14 active GB10 nodes against the root as the
+`qianyi` consumer. After publication and before environment-state apply, step
+11 streams a trusted candidate verifier to `/usr/bin/python3 -` over the same
+protected SSH config, identity, and known-hosts boundary. The target checkout
+is data only, never verifier authority. Every node must report the exact HEAD,
+zero modified/untracked/ignored status, exact physical index and modes,
+readability of the deterministic tracked probe file, and no qianyi write
+capability. Content identities must agree 14/14; NFS device/inode evidence is
+recorded per node without requiring equality across nodes.
 
 Keep the GB10 node-agent path only for Docker Compose rollout validation,
 legacy compatibility, or break-glass operation when Slurm is unavailable. The

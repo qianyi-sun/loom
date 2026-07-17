@@ -137,10 +137,20 @@ private temp directory that inherited sharedwork/setgid from the authority
 root. It permits tracked git symlinks but rejects authority symlinks, foreign
 ownership, group/other write, hard-linked or special files, and a non-exact
 resolved HEAD. After permission normalization it uses a same-root atomic
-rename. A prior service-owned checkout is atomically renamed to an
-unpredictable `.previous-...` sibling and retained; materialization cleans only
-the unchanged inode it created for the current temp container and never
-removes an ambient or previous tree.
+Linux `renameat2(RENAME_NOREPLACE)`. The candidate path is immutable: an
+existing exact checkout is reused only after full index/physical-tree
+validation, while any different HEAD, mode/content drift, or extra directory
+fails without replacement. Materialization cleans only the unchanged inode it
+created for its own temp container and never removes or takes over an ambient
+path.
+
+The broker preflight verifies the fixed 14 active GB10 nodes can consume the
+shared root as `qianyi` without writing it. After publication and before
+environment-state mutation, step 11 streams verifier bytes from the trusted
+candidate worktree over the protected SSH stdin path. It does not execute code
+from the checkout under verification. Exact HEAD/status/index/mode/readability
+and non-write checks must agree on all nodes; per-node NFS device/inode evidence
+is retained without cross-node equality assumptions.
 
 The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the
 safe resolved target of `/usr/bin/python3`, which must be Python 3.11 or newer

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -14,8 +15,11 @@ from typing import Any
 import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
-from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.context import RolloutContext
+from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
+from loom_cli.rollout.operator.preflight import ACTIVE_GB10_HOSTS
 from loom_cli.rollout.steps import s10_env_state as env_state_module
+from loom_cli.rollout.steps.s04_gb10_prep import GB10Host
 from loom_cli.rollout.steps.s10_env_state import (
     ControlPlaneReadinessError,
     EnvStateStep,
@@ -23,6 +27,7 @@ from loom_cli.rollout.steps.s10_env_state import (
     _control_plane_health_url,
     _materialize_external_slurm_runner_prerequisites,
     _materialize_repo_dir,
+    _verify_external_slurm_runner_consumers,
     _wait_for_control_plane,
 )
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
@@ -110,6 +115,164 @@ def _complete_worker_env_text() -> str:
             "",
         ]
     )
+
+
+def _consumer_verification_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[RolloutContext, StepDir, list[dict[str, Any]], list[tuple[str, str, str]]]:
+    ctx = make_ctx(tmp_path, resolved_sha="a" * 40, scope="current-gb10")
+    evidence = EvidenceDirectory(tmp_path, "test-rid")
+    evidence.ensure()
+    step_dir = evidence.step_dir(11, "env-state")
+    candidate = step_dir.path.parent / "01-worktree" / "src"
+    marker = candidate / "src" / "loom_cli" / "__main__.py"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("# candidate marker\n", encoding="utf-8")
+    verifier = candidate / "scripts" / "ops" / "staging_rollout_shared_repo_consumer.py"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("# trusted verifier bytes\n", encoding="utf-8")
+    verifier.chmod(0o640)
+    shared_root = tmp_path / "worker-repos"
+    target = shared_root / "loom-remote-worker-test"
+    malicious = target / "scripts" / "ops" / "staging_rollout_shared_repo_consumer.py"
+    malicious.parent.mkdir(parents=True)
+    malicious.write_text("print('forged')\n", encoding="utf-8")
+    shared_gid = os.getegid()
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", shared_root)
+    monkeypatch.setattr(
+        env_state_module.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_name="qianyi", pw_uid=os.geteuid(), pw_gid=os.getegid()),
+    )
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=shared_gid),
+    )
+    monkeypatch.setattr(
+        env_state_module.os,
+        "getgrouplist",
+        lambda _name, primary: [primary, shared_gid],
+    )
+    hosts = [
+        GB10Host(
+            ssh_target=host,
+            repo_path="/unused",
+            env_file_path="/unused/.env",
+            ssh_config_path="/candidate/ssh_config",
+            ssh_identity_file="/etc/loom/gb10-key",
+        )
+        for host in ACTIVE_GB10_HOSTS
+    ]
+    from loom_cli.rollout.steps import s04_gb10_prep
+
+    monkeypatch.setattr(
+        s04_gb10_prep,
+        "_gb10_prep_config_paths",
+        lambda _ctx, _step: (candidate / "cluster.toml", candidate / "materialized.toml"),
+    )
+    monkeypatch.setattr(
+        s04_gb10_prep,
+        "gb10_hosts_for",
+        lambda _ctx, *, config_path: hosts,
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    def ssh(host: GB10Host, command: str, *, stdin_text: str | None = None) -> SubprocessResult:
+        assert stdin_text is not None
+        calls.append((host.ssh_target, command, stdin_text))
+        position = hosts.index(host) + 1
+        payload = {
+            "head": ctx.resolved_sha,
+            "index_sha256": "b" * 64,
+            "probe_file_sha256": "c" * 64,
+            "root_device": position,
+            "root_inode": 100 + position,
+            "target_device": 200 + position,
+            "target_inode": 300 + position,
+            "tree_content_sha256": "e" * 64,
+            "tracked_entries": 10,
+        }
+        return SubprocessResult([], 0, json.dumps(payload) + "\n", "")
+
+    monkeypatch.setattr(s04_gb10_prep, "_ssh", ssh)
+    records = [
+        {
+            "repo_dir": str(target),
+            "repo_head": ctx.resolved_sha,
+            "repo_group_id": shared_gid,
+        }
+    ]
+    return ctx, step_dir, records, calls
+
+
+def test_post_publish_consumer_verification_streams_trusted_verifier_to_exact_14_hosts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+
+    evidence = _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+    assert evidence is not None
+    assert evidence["passed"] is True
+    assert evidence["host_count"] == 14
+    assert evidence["expected_host_count"] == 14
+    assert evidence["tracked_entries"] == 10
+    assert evidence["tree_content_sha256"] == "e" * 64
+    assert len(str(evidence["verifier_sha256"])) == 64
+    assert len(calls) == 14
+    assert [host for host, _, _ in calls] == list(ACTIVE_GB10_HOSTS)
+    assert all(command.startswith("/usr/bin/python3 - --root ") for _, command, _ in calls)
+    assert all(stdin_text == "# trusted verifier bytes\n" for _, _, stdin_text in calls)
+    assert all("forged" not in stdin_text for _, _, stdin_text in calls)
+    persisted = json.loads(
+        step_dir.artifact_path("external-slurm-runner-consumer-verification.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert persisted == evidence
+    assert len({node["root_device"] for node in persisted["nodes"]}) == 14
+
+
+def test_post_publish_consumer_verification_rejects_divergent_host_content_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, _calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+    from loom_cli.rollout.steps import s04_gb10_prep
+
+    original_ssh = s04_gb10_prep._ssh
+
+    def divergent(
+        host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        result = original_ssh(host, command, stdin_text=stdin_text)
+        if host.ssh_target == "trt-gb10-15":
+            payload = json.loads(result.stdout)
+            payload["index_sha256"] = "d" * 64
+            return SubprocessResult([], 0, json.dumps(payload) + "\n", "")
+        return result
+
+    monkeypatch.setattr(s04_gb10_prep, "_ssh", divergent)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="failed safely",
+    ):
+        _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+    persisted = json.loads(
+        step_dir.artifact_path("external-slurm-runner-consumer-verification.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert persisted["passed"] is False
+    assert persisted["host_count"] == 13
 
 
 def test_materializes_external_slurm_env_file_without_secret_evidence(
@@ -610,7 +773,10 @@ def test_wait_for_control_plane_uses_root_healthz_and_records_evidence(
     assert evidence["health_url"] == "http://127.0.0.1:18081/healthz"
 
 
-@pytest.mark.parametrize("drift", ("modified", "untracked", "ignored"))
+@pytest.mark.parametrize(
+    "drift",
+    ("modified", "untracked", "ignored", "empty-directory", "malicious-config"),
+)
 def test_materialize_repo_dir_rejects_any_worktree_drift_without_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -660,12 +826,24 @@ def test_materialize_repo_dir_rejects_any_worktree_drift_without_replacement(
         (repo_dir / "README.md").write_text("dirty half update\n", encoding="utf-8")
     elif drift == "untracked":
         (repo_dir / "untracked-output").write_text("unexpected\n", encoding="utf-8")
+    elif drift == "empty-directory":
+        (repo_dir / "untracked-empty").mkdir(mode=0o750)
+    elif drift == "malicious-config":
+        sentinel = tmp_path / "must-not-execute"
+        (repo_dir / ".git" / "config").write_text(
+            "[core]\n\tfsmonitor = !touch " + str(sentinel) + "\n"
+            '[filter "sentinel"]\n\tsmudge = touch ' + str(sentinel) + "\n",
+            encoding="utf-8",
+        )
+        (repo_dir / ".git" / "config").chmod(0o640)
+
+        def forbidden_git(*_args: object, **_kwargs: object) -> str:
+            raise AssertionError("Git must not run before canonical config validation")
+
+        monkeypatch.setattr(env_state_module, "_shared_repo_git", forbidden_git)
     else:
         (repo_dir / "ignored-output").write_text("unexpected\n", encoding="utf-8")
-    with pytest.raises(
-        ExternalSlurmPrereqMaterializationError,
-        match="unsafe authority",
-    ):
+    with pytest.raises(ExternalSlurmPrereqMaterializationError):
         _materialize_repo_dir(
             repo_dir=repo_dir,
             source_repo=source_repo,
@@ -677,9 +855,74 @@ def test_materialize_repo_dir_rejects_any_worktree_drift_without_replacement(
     assert (repo_dir / "README.md").read_text(encoding="utf-8") == (
         "dirty half update\n" if drift == "modified" else "target\n"
     )
-    if drift != "modified":
+    if drift in {"untracked", "ignored"}:
         assert (repo_dir / f"{drift}-output").read_text(encoding="utf-8") == "unexpected\n"
+    if drift == "empty-directory":
+        assert (repo_dir / "untracked-empty").is_dir()
+    if drift == "malicious-config":
+        assert not sentinel.exists()
     assert not list(repo_dir.parent.glob(f".{repo_dir.name}.previous-*"))
+
+
+def test_materialize_repo_dir_rejects_fresh_clone_with_untracked_empty_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    original_clone = env_state_module._clone_repo_checkout
+
+    def clone_with_empty_directory(**kwargs: Any) -> None:
+        original_clone(**kwargs)
+        (kwargs["tmp_dir"] / "untracked-empty").mkdir()
+
+    monkeypatch.setattr(
+        env_state_module,
+        "_clone_repo_checkout",
+        clone_with_empty_directory,
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="untracked directory",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=source_repo,
+            resolved_sha=head,
+            expected_ref="staging-abc123",
+        )
+
+    assert not repo_dir.exists()
+    assert not list(repo_root.glob(f".{repo_dir.name}.tmp-*"))
 
 
 def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
@@ -689,10 +932,10 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     clone_commands: list[list[str]] = []
     original_run_captured = env_state_module.run_captured
 
-    def record_git_commands(argv: list[str]) -> SubprocessResult:
-        if argv[:2] == ["git", "clone"]:
+    def record_git_commands(argv: list[str], **kwargs: Any) -> SubprocessResult:
+        if argv[:3] == ["git", "--no-replace-objects", "clone"]:
             clone_commands.append(argv)
-        return original_run_captured(argv)
+        return original_run_captured(argv, **kwargs)
 
     monkeypatch.setattr(env_state_module, "run_captured", record_git_commands)
     source_repo = tmp_path / "source"
@@ -744,6 +987,9 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     assert (repo_dir / "README.md").stat().st_ino != (source_repo / "README.md").stat().st_ino
     assert stat.S_IMODE((repo_dir / "README.md").stat().st_mode) == 0o640
     assert stat.S_IMODE((repo_dir / "run.sh").stat().st_mode) == 0o750
+    assert (repo_dir / ".git" / "config").read_bytes() == (
+        env_state_module._CANONICAL_SHARED_REPO_GIT_CONFIG
+    )
     assert clone_commands
     assert all("--no-hardlinks" in command for command in clone_commands)
 
@@ -1042,7 +1288,7 @@ def test_repo_tree_rejects_unsafe_authority_or_entries(
     root = env_state_module._open_bound_directory(repo_root)
     try:
         with pytest.raises(ExternalSlurmPrereqMaterializationError):
-            env_state_module._validate_repo_tree(repo_dir, root=root)
+            env_state_module._validate_repo_tree(repo_dir, root=root, resolved_sha=head)
     finally:
         os.close(root.fd)
 
@@ -1134,6 +1380,382 @@ def test_materialize_repo_dir_matches_exact_sha_without_reclone_and_rejects_wron
         ).stdout.strip()
         == first_sha
     )
+
+
+@pytest.mark.parametrize("hidden_flag", ("--assume-unchanged", "--skip-worktree"))
+def test_materialize_repo_dir_rejects_hidden_non_probe_content_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hidden_flag: str,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("probe\n", encoding="utf-8")
+    (source_repo / "other.txt").write_text("other\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "update-index", hidden_flag, "other.txt"],
+        check=True,
+    )
+    (repo_dir / ".git" / "index").chmod(0o640)
+    (repo_dir / "other.txt").write_text("hidden drift\n", encoding="utf-8")
+    (repo_dir / "other.txt").chmod(0o640)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="content drifted",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=source_repo,
+            resolved_sha=head,
+            expected_ref="staging-abc123",
+        )
+
+    assert (repo_dir / "other.txt").read_text(encoding="utf-8") == "hidden drift\n"
+
+
+def test_materialize_repo_dir_ignores_replace_ref_and_rejects_replacement_tree_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("candidate\n", encoding="utf-8")
+    (source_repo / "other.txt").write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "candidate"], check=True)
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (source_repo / "other.txt").write_text(
+        "hostile replacement payload\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qam", "replacement"], check=True)
+    replacement_sha = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=candidate_sha,
+        expected_ref="staging-abc123",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "replace", candidate_sha, replacement_sha],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "reset", "--hard", candidate_sha],
+        check=True,
+        capture_output=True,
+    )
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == candidate_sha
+    )
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "status", "--porcelain=v1"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == ""
+    )
+    assert (repo_dir / "other.txt").read_text(encoding="utf-8") == ("hostile replacement payload\n")
+    git_fd = os.open(repo_dir / ".git", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        env_state_module._normalize_git_metadata(
+            git_fd,
+            uid=os.geteuid(),
+            gid=os.getegid(),
+        )
+    finally:
+        os.close(git_fd)
+    for path in (repo_dir / "README.md", repo_dir / "other.txt"):
+        path.chmod(0o640)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="index does not match",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=source_repo,
+            resolved_sha=candidate_sha,
+            expected_ref="staging-abc123",
+        )
+
+
+def test_materialize_repo_dir_rejects_external_common_git_authority_before_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("candidate\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "candidate"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+    external_common = tmp_path / "external-common.git"
+    shutil.copytree(repo_dir / ".git", external_common, symlinks=True)
+    commondir = repo_dir / ".git" / "commondir"
+    commondir.write_text(str(external_common) + "\n", encoding="utf-8")
+    commondir.chmod(0o640)
+    assert subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "--git-common-dir"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == str(external_common)
+    sentinel = tmp_path / "must-not-execute"
+    (external_common / "config").write_text(
+        "[core]\n\tfsmonitor = !touch " + str(sentinel) + "\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_git(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("Git must not run before common authority validation")
+
+    monkeypatch.setattr(env_state_module, "_shared_repo_git", forbidden_git)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="common authority",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=source_repo,
+            resolved_sha=head,
+            expected_ref="staging-abc123",
+        )
+
+    assert not sentinel.exists()
+
+
+def test_fresh_clone_writes_canonical_git_config_before_shared_git_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("candidate\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    original = env_state_module._shared_repo_git
+    observed_configs: list[bytes] = []
+
+    def shared_repo_git(repo_dir: Path, *arguments: str) -> str:
+        observed_configs.append((repo_dir / ".git" / "config").read_bytes())
+        return original(repo_dir, *arguments)
+
+    monkeypatch.setattr(env_state_module, "_shared_repo_git", shared_repo_git)
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+
+    assert observed_configs
+    assert set(observed_configs) == {env_state_module._CANONICAL_SHARED_REPO_GIT_CONFIG}
+
+
+def test_shared_repo_git_uses_exact_safe_directory_argv_and_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "worker-repos" / "loom-remote-worker-test"
+    captured: dict[str, object] = {}
+
+    def run_captured(argv: list[str], *, env: dict[str, str]) -> SubprocessResult:
+        captured["argv"] = argv
+        captured["env"] = env
+        return SubprocessResult(argv, 0, "sha1\n", "")
+
+    monkeypatch.setattr(env_state_module, "run_captured", run_captured)
+
+    assert (
+        env_state_module._shared_repo_git(
+            repo,
+            "rev-parse",
+            "--show-object-format",
+        )
+        == "sha1\n"
+    )
+    assert captured["argv"] == [
+        "/usr/bin/git",
+        "--git-dir",
+        str(repo / ".git"),
+        "--work-tree",
+        str(repo),
+        "-c",
+        f"safe.directory={repo}",
+        "-c",
+        f"core.worktree={repo}",
+        "-c",
+        "core.bare=false",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.attributesFile=/dev/null",
+        "-c",
+        "core.excludesFile=/dev/null",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "fetch.recurseSubmodules=false",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "core.sshCommand=/usr/bin/false",
+        "rev-parse",
+        "--show-object-format",
+    ]
+    assert captured["env"] == {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_PROTOCOL_FROM_USER": "0",
+        "GIT_PAGER": "cat",
+        "GIT_EXTERNAL_DIFF": "/usr/bin/false",
+        "GIT_SSH_COMMAND": "/usr/bin/false",
+        "HOME": "/nonexistent",
+        "XDG_CONFIG_HOME": "/nonexistent",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
 
 
 def test_materialize_repo_dir_cleans_clone_failure_and_refuses_existing_drift(

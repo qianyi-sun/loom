@@ -62,6 +62,9 @@ PROTECTED_STAGING_ROLLOUT_EXACT = {
     "deploy/worker-pools/gb10/known_hosts",
     "deploy/worker-pools/gb10/ssh_config",
     "scripts/ops/verify_staging_rollout_secret_boundary.py",
+    "src/loom_cli/rollout/steps/s04_gb10_prep.py",
+    "src/loom_cli/rollout/steps/s10_env_state.py",
+    "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
     "tests/loom_cli/test_cluster_render.py",
     "tests/loom_cli/test_environment_state.py",
 }

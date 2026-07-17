@@ -4,6 +4,7 @@ import hashlib
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,32 @@ from loom_cli.rollout.operator.preflight import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+REAL_SHARED_REPOSITORY_BINDING = preflight_module._shared_repository_binding
+
+
+def _test_shared_repository_binding(*, service_uid: int) -> dict[str, int]:
+    return {
+        "service_uid": service_uid,
+        "service_primary_gid": 2006,
+        "consumer_uid": 2005,
+        "consumer_primary_gid": 2005,
+        "shared_gid": 2007,
+        "parent_device": 1,
+        "parent_inode": 11,
+        "authority_device": 1,
+        "authority_inode": 12,
+        "repository_device": 1,
+        "repository_inode": 13,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _fixed_shared_repository_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        preflight_module,
+        "_shared_repository_binding",
+        _test_shared_repository_binding,
+    )
 
 
 def test_preflight_report_contains_only_named_checks_and_safe_remediation() -> None:
@@ -167,6 +194,12 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, "", "")
     elif argv[-2:] == ["config", "current-context"]:
         stdout = "kind-loom-staging\n"
+    elif argv[:1] == ["ssh"] and argv[-1] != "true":
+        stdout = (
+            "2005;2005,2007;2005;2007;2775;101;201;"
+            f"{os.geteuid()};2007;2750;102;202;"
+            f"{os.geteuid()};2007;2750;103;203\n"
+        )
     return subprocess.CompletedProcess(argv, 0, stdout, "")
 
 
@@ -214,7 +247,7 @@ def test_collect_preflight_probes_only_exact_merged_active_gb10_set(tmp_path: Pa
     )
 
     assert report.passed, report.to_dict()
-    probed_hosts = tuple(argv[-2] for argv in calls if argv[:1] == ["ssh"])
+    probed_hosts = tuple(argv[-2] for argv in calls if argv[:1] == ["ssh"] and argv[-1] == "true")
     assert probed_hosts == preflight_module.ACTIVE_GB10_HOSTS
     assert len(probed_hosts) == 14
     assert "trt-gb10-7" not in probed_hosts
@@ -222,6 +255,130 @@ def test_collect_preflight_probes_only_exact_merged_active_gb10_set(tmp_path: Pa
     assert set(preflight_module.FULL_GB10_HOSTS) - set(probed_hosts) == {"trt-gb10-7"}
     topology = next(check for check in report.checks if check.name == "gb10-topology")
     assert topology.passed is True
+    shared_probes = tuple(argv[-2] for argv in calls if argv[:1] == ["ssh"] and argv[-1] != "true")
+    assert shared_probes == preflight_module.ACTIVE_GB10_HOSTS
+    shared = next(check for check in report.checks if check.name == "gb10-shared-repository")
+    assert shared.passed is True
+    assert shared.evidence is not None
+    assert shared.evidence.endswith("hosts=14")
+
+
+def test_shared_repository_binding_uses_nss_and_held_directories_not_install_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "qianyi"
+    authority = parent / ".loom-staging-rollout"
+    repository = authority / "worker-repos"
+    repository.mkdir(parents=True)
+    parent.chmod(0o2775)
+    authority.chmod(0o2750)
+    repository.chmod(0o2750)
+    shared_gid = os.getegid()
+    service_gid = shared_gid + 10000
+    consumer_gid = shared_gid + 10001
+    uid = os.geteuid()
+
+    def getpwnam(name: str) -> SimpleNamespace:
+        if name == "loom-rollout":
+            return SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=service_gid)
+        if name == "qianyi":
+            return SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=consumer_gid)
+        raise KeyError(name)
+
+    def getgrnam(name: str) -> SimpleNamespace:
+        if name == "loom-rollout":
+            return SimpleNamespace(gr_name=name, gr_gid=service_gid)
+        if name == "sharedwork":
+            return SimpleNamespace(gr_name=name, gr_gid=shared_gid)
+        raise KeyError(name)
+
+    monkeypatch.setattr(preflight_module.pwd, "getpwnam", getpwnam)
+    monkeypatch.setattr(preflight_module.grp, "getgrnam", getgrnam)
+    monkeypatch.setattr(
+        preflight_module.os,
+        "getgrouplist",
+        lambda name, primary: [primary, shared_gid] if name == "qianyi" else [primary],
+    )
+    capability_results = iter((True, False))
+    monkeypatch.setattr(
+        preflight_module.os,
+        "access",
+        lambda *args, **kwargs: next(capability_results),
+    )
+    monkeypatch.setattr(
+        preflight_module,
+        "_trusted_file_bytes",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("install record must not be read")
+        ),
+    )
+
+    binding = REAL_SHARED_REPOSITORY_BINDING(service_uid=uid, root=repository)
+
+    assert binding is not None
+    assert binding["service_uid"] == uid
+    assert binding["service_primary_gid"] == service_gid
+    assert binding["consumer_uid"] == uid
+    assert binding["consumer_primary_gid"] == consumer_gid
+    assert binding["shared_gid"] == shared_gid
+    assert binding["repository_inode"] == repository.stat().st_ino
+
+
+@pytest.mark.parametrize(
+    "remote_output",
+    [
+        ("2004;2005,2007;2005;2007;2775;101;201;2006;2007;2750;102;202;2006;2007;2750;103;203\n"),
+        ("2005;2005;2005;2007;2775;101;201;2006;2007;2750;102;202;2006;2007;2750;103;203\n"),
+        ("2005;2005,2007;2005;2007;2775;101;201;2006;2007;2770;102;202;2006;2007;2750;103;203\n"),
+    ],
+)
+def test_collect_preflight_rejects_shared_repository_identity_membership_or_mode_drift(
+    tmp_path: Path,
+    remote_output: str,
+) -> None:
+    config = make_config(tmp_path)
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[:1] == ["ssh"] and argv[-1] != "true":
+            return subprocess.CompletedProcess(argv, 0, remote_output, "")
+        return successful_command(argv)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=run,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    shared = next(check for check in report.checks if check.name == "gb10-shared-repository")
+    assert shared.passed is False
+    assert shared.evidence is None
+
+
+def test_collect_preflight_rejects_one_shared_repository_host_failure(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[:1] == ["ssh"] and argv[-2] == "trt-gb10-8" and argv[-1] != "true":
+            return subprocess.CompletedProcess(argv, 1, "", "failed")
+        return successful_command(argv)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=run,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    assert (
+        next(check for check in report.checks if check.name == "gb10-shared-repository").passed
+        is False
+    )
 
 
 @pytest.mark.parametrize(

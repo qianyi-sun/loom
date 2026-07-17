@@ -611,9 +611,16 @@ can write/search the dedicated root and that the `qianyi` Slurm submitter can
 read/search but not write it. Step 11 publishes only the exact image-tagged
 direct child through a private setgid temp container and same-root rename;
 authority symlinks, wrong owner/group/mode, hardlinks, special files, or a
-non-exact resolved SHA fail closed. The previous service-owned candidate is
-preserved as an unpredictable sibling and is never implicitly cleaned during
-rollout or resume.
+non-exact resolved SHA fail closed. Publication is no-replace and immutable:
+an exact existing target is accepted only after full index/physical-tree
+validation, and drift is never replaced or implicitly cleaned during rollout
+or resume. Broker preflight verifies the fixed 14 active nodes can read/search
+but not write the root. After publish and before environment-state apply, step
+11 streams trusted verifier bytes over protected SSH stdin (never from the
+target) and requires all 14 nodes to agree on exact HEAD, clean status,
+index/modes, deterministic tracked-file readability, and content identity.
+Per-node NFS device/inode values are evidence only, not cross-node equality
+constraints.
 The external Slurm autoscaler also treats release-state drift as a fail-closed
 decision. This includes a pending/running job whose node is no longer in the
 policy's `allowed_nodes`; such jobs are neither healthy warm capacity nor part
