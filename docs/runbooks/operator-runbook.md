@@ -1930,6 +1930,22 @@ and files created by the failed attempt in reverse order. Pre-existing exact
 directories are retained, while a wrong type, owner, or mode fails closed. It
 does not create a general root command channel.
 
+If `qianyi` already has access to the exporter's rootful Docker daemon, the
+reviewed Docker bootstrap handoff is an equivalent one-time administrator
+channel. It uses the exact content-addressed image built from
+`deploy/worker-pools/gb10/Containerfile.shared-work2-export-bootstrap`; its only
+entrypoint is the reviewed Python bootstrap launcher. The container must run
+with `--network none`, `--read-only`, `no-new-privileges`, an exact capability
+mask of `CHOWN`, `DAC_OVERRIDE`, and `FOWNER`, and no command override. Bind
+only the sealed bundle read-only plus `/opt`, `/usr/local`, `/etc`, and
+`/var/lib` at their identical paths with recursive bind propagation disabled.
+These four parent binds are the narrowest atomic route while all four exact
+authority children are absent; a recursive `/var/lib` bind would expose Docker
+state and is forbidden. The launcher refuses wrong mount roots/options,
+usable non-loopback devices or routes, a writable container root, capability drift,
+bundle drift, source drift, or non-atomic source publication. Do not substitute
+an interactive shell, `--privileged`, or a writable `/` bind.
+
 The sealed checkout may contain a reviewed Git symlink such as
 `deploy/.env -> ../.env`, but validation never follows it. An allowed link must
 be mode `120000` in both the exact tree and stage-zero index, retain the

@@ -283,6 +283,21 @@ idempotent, and rolls back a newly created fragment if `exportfs -ra` fails.
 Do not request a sudo password, allow a shell or wildcard command, enable root
 SSH, or reuse the rejected 14-host root-helper design.
 
+When the exporter operator already has access to the rootful Docker daemon, a
+sealed one-time bootstrap image may replace the external console action. Build
+that image only from the reviewed cumulative source with
+`Containerfile.shared-work2-export-bootstrap`, export and hash the exact image,
+and run it by content ID with no command override. The accepted invocation has
+no network, a read-only container root, no new privileges, and only
+`CHOWN`, `DAC_OVERRIDE`, and `FOWNER`; it binds the bundle read-only and the
+four necessary host parent directories with recursive bind propagation
+disabled. Those parent binds are required because the exact authority
+directories are initially absent and must remain inside one rollback domain.
+The fixed Python entrypoint validates its capability, mount, usable-network,
+bundle, and sealed-source identities before any mutation. An interactive entrypoint,
+`--privileged`, a writable host-root bind, a recursive `/var/lib` bind, or a
+different image/argv/environment is not an accepted bootstrap channel.
+
 ## Health And Scheduling Gates
 
 The broker's environment-state and release-gate artifacts are authoritative.

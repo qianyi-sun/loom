@@ -115,6 +115,18 @@ directories and files created by that attempt in reverse order. This explicit
 external authority requirement must not be replaced with a password request,
 root SSH, a sudo wildcard, or the abandoned multi-host root-helper design.
 
+An operator who already controls the rootful Docker daemon may satisfy the
+same one-time boundary with the content-addressed exporter-bootstrap image.
+That path grants no new authority: the image has a fixed Python entrypoint,
+network disabled, a read-only root filesystem, no-new-privileges, and only the
+three filesystem capabilities required to publish root-owned exact assets. It
+binds the sealed bundle read-only and the four required host parents with
+recursive bind propagation disabled. The entrypoint proves the mount roots,
+capability mask, bundle digest, source identity, detached checkout, and
+bootstrap result, and rolls back a newly published source if bootstrap fails.
+Privileged containers, writable host-root binds, interactive entrypoints, and
+recursive exposure of Docker state are outside the accepted authority model.
+
 Candidate-bound authenticated staging browser acceptance follows the same
 authority. Only a broker-owned rollout step may exchange the singleton admin
 bearer, and its sanitized report must bind the request/attempt envelope's
