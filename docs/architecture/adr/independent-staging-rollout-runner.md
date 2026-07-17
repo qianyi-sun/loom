@@ -85,6 +85,27 @@ Git-object injection, alternate source paths, and implicit fallback to merged
 or cached refs remain unsupported. After the accepted rollout, the accumulated
 changes return through the normal reviewed PR and protected-gate process.
 
+The exporter does not gain general remote-root authority from this amendment.
+Its coordinator account may invoke only two exact `NOSETENV` sudo commands:
+the fixed root wrapper's `install` and read-only `check` verbs. The wrapper
+accepts no SHA, path, network, environment, or arbitrary argument. It reloads a
+root-owned policy, verifies its own bytes and sudoers bytes, revalidates the
+fixed root-owned detached checkout against the exact cumulative commit, tree,
+and approved base, and only then invokes the one fixed export helper with those
+policy values. The helper itself revalidates the same source and exact export
+fragment before mutation. Install is serialized and journaled; check takes a
+shared read-only lock and writes no evidence file.
+
+The exporter currently has no supported noninteractive root bootstrap channel.
+Therefore a one-time external administrator must provision the fixed sealed
+checkout and run the reviewed bootstrap entrypoint locally as root. Bootstrap
+validates the sealed checkout and sudoers asset before mutation, installs the
+root-owned wrapper, validator, policy, lock, journal, and exact command-only
+sudoers rule with sudoers last, and rolls back files it created if publication
+or validation fails. This explicit external authority requirement must not be
+replaced with a password request, root SSH, a sudo wildcard, or the abandoned
+multi-host root-helper design.
+
 Candidate-bound authenticated staging browser acceptance follows the same
 authority. Only a broker-owned rollout step may exchange the singleton admin
 bearer, and its sanitized report must bind the request/attempt envelope's

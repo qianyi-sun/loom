@@ -81,6 +81,7 @@ def _default_run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
         },
     )
 

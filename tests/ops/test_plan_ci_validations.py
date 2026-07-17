@@ -321,12 +321,14 @@ def test_planner_change_selects_every_heavy_gate() -> None:
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
         "deploy/worker-pools/gb10/known_hosts",
         "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports",
+        "deploy/worker-pools/gb10/loom-staging-rollout-shared-work2-export-authority.sudoers",
         "deploy/worker-pools/gb10/ssh_config",
         "scripts/ops/staging_rollout_host.py",
         "scripts/ops/staging_rollout_sealed_source.py",
         "scripts/ops/staging_rollout_shared_repo.py",
         "scripts/ops/staging_rollout_shared_work2.py",
         "scripts/ops/staging_rollout_shared_work2_export.py",
+        "scripts/ops/staging_rollout_shared_work2_export_authority.py",
         "scripts/ops/staging_rollout_shared_repo_consumer.py",
         "scripts/ops/verify_staging_rollout_secret_boundary.py",
         "src/loom_cli/rollout/operator/broker.py",
@@ -342,6 +344,7 @@ def test_planner_change_selects_every_heavy_gate() -> None:
         "tests/ops/test_staging_rollout_shared_repo_consumer.py",
         "tests/ops/test_staging_rollout_shared_work2.py",
         "tests/ops/test_staging_rollout_shared_work2_export.py",
+        "tests/ops/test_staging_rollout_shared_work2_export_authority.py",
     ],
 )
 def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> None:

@@ -1,0 +1,2 @@
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority install
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority check

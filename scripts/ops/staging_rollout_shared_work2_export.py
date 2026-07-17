@@ -14,19 +14,27 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-try:
+if TYPE_CHECKING:
     from scripts.ops.staging_rollout_sealed_source import (
         SealedSource,
         SealedSourceError,
         validate_sealed_source,
     )
-except ModuleNotFoundError:  # direct execution from scripts/ops
-    from staging_rollout_sealed_source import (
-        SealedSource,
-        SealedSourceError,
-        validate_sealed_source,
-    )  # type: ignore[import-not-found, no-redef]
+else:
+    try:
+        from scripts.ops.staging_rollout_sealed_source import (
+            SealedSource,
+            SealedSourceError,
+            validate_sealed_source,
+        )
+    except ModuleNotFoundError:  # direct execution from scripts/ops
+        from staging_rollout_sealed_source import (
+            SealedSource,
+            SealedSourceError,
+            validate_sealed_source,
+        )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPORT_ROOT = Path("/shared_work2")
@@ -193,11 +201,25 @@ def _export_is_active(run: CommandRunner) -> bool:
     if result.returncode != 0:
         return False
     normalized = " ".join(result.stdout.split())
-    match = re.search(
+    matches = re.findall(
         r"(?:^| )/shared_work2\s+192[.]168[.]50[.]103/32\(([^()]*)\)",
         normalized,
     )
-    return bool(match is not None and EXPECTED_OPTIONS.issubset(match.group(1).split(",")))
+    return len(matches) == 1 and frozenset(matches[0].split(",")) == EXPECTED_OPTIONS
+
+
+def _remove_exact_file(payload: bytes) -> None:
+    """Roll back only the fragment this invocation proved exact."""
+    if not _file_is_exact(payload):  # pragma: no cover - guarded by the caller
+        raise ExportError("platform-dev export allowance rollback refused drift")
+    directory_fd = _validate_directory(EXPORTS_DIRECTORY)
+    try:
+        os.unlink(EXPORTS_PATH.name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise ExportError("platform-dev export allowance rollback failed safely") from exc
+    finally:
+        os.close(directory_fd)
 
 
 def converge(*, install: bool, run: CommandRunner = _run) -> bool:
@@ -208,6 +230,11 @@ def converge(*, install: bool, run: CommandRunner = _run) -> bool:
         changed = _install_file(payload)
         refreshed = run([str(EXPORTFS), "-ra"])
         if refreshed.returncode != 0:
+            if changed:
+                _remove_exact_file(payload)
+                rollback = run([str(EXPORTFS), "-ra"])
+                if rollback.returncode != 0:
+                    raise ExportError("NFS export refresh and rollback failed safely")
             raise ExportError("NFS export refresh failed safely")
     else:
         if not _file_is_exact(payload):

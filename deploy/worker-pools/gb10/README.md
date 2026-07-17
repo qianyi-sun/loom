@@ -258,6 +258,27 @@ Postgres, MinIO backend data, kind volumes, or Kubernetes PV data on
 checkout staging or evidence transfer, not high-churn runtime state. Trial
 artifacts return through Loom's artifact/trajectory object-store path.
 
+The exporter account has no general noninteractive root authority. A reviewed
+sealed-cumulative repair uses the repository-owned
+`staging_rollout_shared_work2_export_authority.py` boundary instead. An
+external administrator first provisions the exact detached root-owned checkout
+at `/opt/loom-staging-exporter-authority/source` and runs its `bootstrap` verb
+locally as root with the independently reviewed commit and tree. Bootstrap is
+not present in the operator sudoers rule. It installs only two exact commands
+for `qianyi`:
+
+```text
+sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority install
+sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority check
+```
+
+The commands accept no further arguments. Root reloads the fixed sealed policy,
+validates wrapper/sudoers/source identity, and invokes only the exact export
+fragment helper. `check` is read-only; `install` is locked, journaled, atomic,
+idempotent, and rolls back a newly created fragment if `exportfs -ra` fails.
+Do not request a sudo password, allow a shell or wildcard command, enable root
+SSH, or reuse the rejected 14-host root-helper design.
+
 ## Health And Scheduling Gates
 
 The broker's environment-state and release-gate artifacts are authoritative.

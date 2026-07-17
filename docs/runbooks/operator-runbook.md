@@ -1903,14 +1903,53 @@ and redacted worker-token fingerprint only. Profiles that do not opt in to
 before rerunning step 11.
 
 For staging GB10, `repo_dir` is an exact image-tagged direct child of
-`/shared_work2/qianyi/.loom-staging-rollout/worker-repos`. First run the
-checked-in `staging_rollout_shared_work2_export.py install` helper as root on
-the `trt-gb10-2` exporter. In sealed cumulative mode it requires the same
+`/shared_work2/qianyi/.loom-staging-rollout/worker-repos`. First establish the
+checked-in exporter authority boundary on `trt-gb10-2`. The exporter has no
+existing noninteractive root path, so this requires one explicit external
+administrator bootstrap. Provision a standalone root-owned mode-`0700`, clean,
+detached checkout at the fixed path below from the independently reviewed
+sealed bundle. Then the external administrator runs exactly:
+
+```bash
+EXPORTER_SOURCE=/opt/loom-staging-exporter-authority/source
+SEALED_SHA=<reviewed-40-character-cumulative-commit>
+SEALED_TREE=<reviewed-40-character-tree>
+
+/usr/bin/python3 \
+  "$EXPORTER_SOURCE/scripts/ops/staging_rollout_shared_work2_export_authority.py" \
+  bootstrap --source-sha "$SEALED_SHA" --source-tree-sha "$SEALED_TREE"
+```
+
+Do not run that command through the coordinator's sudo identity: bootstrap
+intentionally requires a direct external root administrator and is absent from
+the installed sudoers rule. The fixed approved merged base is embedded in the
+reviewed boundary. Bootstrap validates the checkout and sudoers before
+publication, installs sudoers last, and rolls back only files it created if a
+later validation fails. It does not create a general root command channel.
+
+After bootstrap, the coordinator may run only:
+
+```bash
+sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority install
+sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority check
+```
+
+Neither verb accepts additional arguments, environment overrides, source
+paths, refs, hosts, clients, networks, or fragment content. Root reloads the
+mode-`0600` policy and revalidates the fixed checkout, wrapper, validator, and
+sudoers identities before running the exact helper. The `check` verb uses a
+shared read-only lock and does not append to the journal. The locked `install`
+verb appends only sanitized SHA/tree/base evidence after success.
+
+In sealed cumulative mode the underlying helper requires the same
 `--sealed-source-sha`, `--sealed-source-tree`, and
 `--sealed-approved-base-sha` binding as the host installer and validates that
 fixed script checkout before changing the export. It installs only the exact
-`192.168.50.103/32` allowance and fails rather than widening or overwriting a
-drifted fragment. The platform-dev root installer then installs and starts the
+`192.168.50.103/32` allowance, requires the exact effective export options, and
+fails rather than widening or overwriting a drifted fragment. A newly created
+fragment is removed and export state refreshed if the first `exportfs -ra`
+fails; pre-existing exact state is never removed. The platform-dev root
+installer then installs and starts the
 fixed `shared_work2.mount` unit and rejects any source other than
 `192.168.20.12:/shared_work2` over NFSv4.2 with the declared hard/TCP and
 `nosuid,nodev,noexec` options. A directory with no matching mountinfo entry is
@@ -1921,7 +1960,8 @@ GID values, and verifies effective access: the service owns and writes only
 the dedicated root; the Slurm submitter reads/searches but cannot write it.
 Do not add `loom-rollout` to `sharedwork`, widen the host-only export, or move
 the private mode-`0600` token/env authority from platform-dev into shared
-storage.
+storage. Do not request or store the exporter sudo password, enable root SSH,
+add wildcard sudo arguments, or revive the abandoned 14-host authority design.
 
 Repository materialization always clones with `--no-hardlinks` inside a
 service-created unpredictable temp container that inherited the sharedwork

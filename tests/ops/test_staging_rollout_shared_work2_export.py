@@ -39,6 +39,12 @@ def test_export_check_requires_exact_active_client_and_options(
             run=lambda _argv: Result(0, _active_export().replace("/32", "/24")),
         )
 
+    with pytest.raises(helper.ExportError, match="not active"):
+        helper.converge(
+            install=False,
+            run=lambda _argv: Result(0, _active_export().replace("sec=sys", "sec=sys,insecure")),
+        )
+
 
 def test_export_check_requires_exact_installed_fragment(
     monkeypatch: pytest.MonkeyPatch,
@@ -65,6 +71,21 @@ def test_export_install_is_idempotent_and_refreshes_before_readback(
     assert helper.converge(install=True, run=run) is False
     assert calls.count((str(helper.EXPORTFS), "-ra")) == 2
     assert calls.count((str(helper.EXPORTFS), "-v")) == 2
+
+
+def test_new_fragment_rolls_back_if_export_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    removed: list[bytes] = []
+    results = iter((Result(1), Result(0)))
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(helper, "_install_file", lambda _payload: True)
+    monkeypatch.setattr(helper, "_remove_exact_file", removed.append)
+
+    with pytest.raises(helper.ExportError, match="refresh failed safely"):
+        helper.converge(install=True, run=lambda _argv: next(results))
+
+    assert removed == [helper._asset_payload()]
 
 
 def test_export_asset_rejects_any_path_or_client_drift(
