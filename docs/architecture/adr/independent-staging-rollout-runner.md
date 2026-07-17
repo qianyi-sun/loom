@@ -231,6 +231,10 @@ removes or takes over an ambient path. Install/check also performs a bounded,
 self-cleaning private-claim/access-gate/publish/collision probe as the service
 identity. The protocol requires only NFSv4 `mkdir` and mode semantics and does
 not assume optional Linux `RENAME_NOREPLACE` support from the NFS server.
+When a sealed cumulative source refreshes the service-owned local candidate,
+the fixed local fetch uses an exact `git upload-pack` command whose sole
+`safe.directory` value is the root-owned install source's `.git` directory.
+It does not persist a wildcard or user-controlled Git safety exception.
 
 The broker preflight verifies the fixed 14 active GB10 nodes can consume the
 shared root as `qianyi` without writing it. The 13 NFS clients must report the

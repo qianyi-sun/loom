@@ -93,6 +93,9 @@ SYSTEM_PYTHON = Path("/usr/bin/python3")
 UV_BINARY = Path("/usr/local/bin/uv")
 SYSTEM_SHELL = Path("/bin/sh")
 SYSTEM_GIT = Path("/usr/bin/git")
+SEALED_SOURCE_UPLOAD_PACK = (
+    f"{SYSTEM_GIT} -c safe.directory={INSTALL_SOURCE / '.git'} upload-pack"
+)
 
 PROTECTED_INPUTS = (
     Path("/shared_work/qianyi/loom-worker-capacity/staging-admin-token"),
@@ -2105,13 +2108,12 @@ class HostSystem:
         if refresh or head != expected_sha:
             if sealed:
                 self._service_git(
-                    "-c",
-                    f"safe.directory={INSTALL_SOURCE}",
                     "-C",
                     str(CANDIDATE_REPO),
                     "fetch",
                     "--no-tags",
                     "--no-recurse-submodules",
+                    f"--upload-pack={SEALED_SOURCE_UPLOAD_PACK}",
                     str(INSTALL_SOURCE),
                     expected_sha,
                 )

@@ -2034,6 +2034,10 @@ bounded, randomized, self-cleaning probe under the service identity before
 declaring the NFS authority ready. This avoids assuming optional
 `RENAME_NOREPLACE` support from the NFS server while retaining atomic name
 reservation and fail-closed consumer visibility.
+The platform installer refreshes its service-owned local candidate from the
+root-owned sealed install source through a fixed local `git upload-pack`
+command bound to that source's exact `.git` safe-directory exception. It never
+adds a persistent or wildcard Git safety exception.
 
 Before request creation the broker also checks the exact 14 active GB10 SSH
 targets as `qianyi`: the 13 clients must expose the exact NFSv4 source and

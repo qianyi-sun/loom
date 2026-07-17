@@ -4441,6 +4441,83 @@ def test_candidate_convergence_hardens_existing_checkout_and_uses_fixed_umask(
         for call in runner.calls
         if "/usr/bin/git" in call
     )
+
+
+def test_sealed_candidate_fetch_uses_fixed_install_source_upload_pack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid, gid = os.geteuid(), os.getegid()
+    sha = "a" * 40
+    tree = "b" * 40
+    base = "c" * 40
+    candidate = tmp_path / "repo"
+    (candidate / ".git").mkdir(parents=True)
+
+    class SealedCandidateRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            self.calls.append(call)
+            service_identity = _service_identity_result(call, uid=uid, gid=gid)
+            if service_identity is not None:
+                return service_identity
+            if call[:2] == ["test", "-d"]:
+                return host.CommandResult(0)
+            git_index = call.index("/usr/bin/git")
+            arguments = call[git_index + 1 :]
+            if arguments[-1:] == ["remote"]:
+                return host.CommandResult(0, "origin\n")
+            if arguments[-1:] == ["remote.origin.url"]:
+                return host.CommandResult(0, host.REMOTE_URL + "\n")
+            if arguments[-1:] == ["remote.origin.pushurl"]:
+                return host.CommandResult(1)
+            if "status" in arguments or "checkout" in arguments or "fetch" in arguments:
+                return host.CommandResult(0)
+            if arguments[-2:] == ["rev-parse", "HEAD"]:
+                return host.CommandResult(0, sha + "\n")
+            if arguments[-2:] == ["rev-parse", f"{sha}^{{tree}}"]:
+                return host.CommandResult(0, tree + "\n")
+            if "merge-base" in arguments:
+                return host.CommandResult(0, base + "\n")
+            if "rev-list" in arguments:
+                return host.CommandResult(0, f"{sha} {base}\n")
+            raise AssertionError(f"unexpected command: {call}")
+
+    monkeypatch.setattr(host, "CANDIDATE_REPO", candidate)
+    monkeypatch.setattr(host, "_validate_git_checkout_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(host, "_harden_owned_tree", lambda *_args, **_kwargs: False)
+    runner = SealedCandidateRunner()
+
+    assert (
+        host.HostSystem(runner).ensure_candidate(
+            sha,
+            refresh=True,
+            source_tree_sha=tree,
+            source_base_sha=base,
+        )
+        is True
+    )
+    fetch = next(call for call in runner.calls if "fetch" in call)
+    git_index = fetch.index("/usr/bin/git")
+    arguments = fetch[git_index + 1 :]
+    assert arguments == [
+        "-C",
+        str(candidate),
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        f"--upload-pack={host.SEALED_SOURCE_UPLOAD_PACK}",
+        str(host.INSTALL_SOURCE),
+        sha,
+    ]
+    assert host.SEALED_SOURCE_UPLOAD_PACK == (
+        "/usr/bin/git -c "
+        "safe.directory=/opt/loom-staging-runner/source/.git upload-pack"
+    )
     assert all(
         call[call.index("/bin/sh") : call.index("/usr/bin/git") + 1]
         == [
