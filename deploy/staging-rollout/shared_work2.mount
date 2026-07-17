@@ -1,0 +1,13 @@
+[Unit]
+Description=Loom staging GB10 shared repository storage
+Wants=network-online.target
+After=network-online.target
+
+[Mount]
+What=192.168.20.12:/shared_work2
+Where=/shared_work2
+Type=nfs4
+Options=rw,hard,vers=4.2,proto=tcp,timeo=600,retrans=2,sec=sys,nosuid,nodev,noexec,_netdev
+
+[Install]
+WantedBy=multi-user.target

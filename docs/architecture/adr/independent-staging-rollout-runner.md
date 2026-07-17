@@ -120,15 +120,24 @@ a safe private template nor a safe legacy bootstrap source exists. Runtime
 materialization likewise rejects symlinked, hard-linked, non-regular, oversized,
 or non-`0600` private env sources before reading them.
 
-Shared GB10 worker checkouts use a separate authority instead of the
-operator-owned `/shared_work/qianyi` root. During an inactive,
-admission-closed transaction, the installer creates
-`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+Shared GB10 worker checkouts use the GB10 NFS export mounted at
+`/shared_work2`, not the separate OLDLAB/token storage at `/shared_work`.
+The exporter allowance is a repository-managed exact
+`192.168.50.103/32` entry with the existing `/shared_work2` export options;
+the platform-dev installer owns a fixed `shared_work2.mount` unit for exact
+source `192.168.20.12:/shared_work2`, NFSv4.2, hard TCP mounts, and
+`nosuid,nodev,noexec`. Both installer and broker verify the exact mountinfo
+source, mountpoint, filesystem type, options, and device identity so a local
+empty directory cannot satisfy readiness. During an inactive,
+admission-closed transaction, the installer creates the previously absent
+`/shared_work2/qianyi` parent as `qianyi:sharedwork` mode `2775`, then creates
+`/shared_work2/qianyi/.loom-staging-rollout/worker-repos` as
 `loom-rollout:sharedwork` mode `2750` and records the resolved owner and
 consumer UID/GID values. It does not add the service to `sharedwork` or grant
 write on the operator parent. Runtime checks prove the service can write/search
 the dedicated root and the `qianyi` Slurm submitter can read/search but not
-write it.
+write it. Secret/token env files remain private mode `0600` platform-dev-local
+state and are never materialized into `/shared_work2`.
 
 Candidate checkout publication is a single-writer lifecycle. Step 11 accepts
 only the exact image-tagged direct child, verifies every authority path with
@@ -142,10 +151,14 @@ existing exact checkout is reused only after full index/physical-tree
 validation, while any different HEAD, mode/content drift, or extra directory
 fails without replacement. Materialization cleans only the unchanged inode it
 created for its own temp container and never removes or takes over an ambient
-path.
+path. Install/check also performs a bounded, self-cleaning publication probe
+as the service identity so an NFS server that does not honor the required
+no-replace contract fails before rollout admission is restored.
 
 The broker preflight verifies the fixed 14 active GB10 nodes can consume the
-shared root as `qianyi` without writing it. After publication and before
+shared root as `qianyi` without writing it. The 13 NFS clients must report the
+exact source and NFSv4 mount identity; `trt-gb10-2` must report the ext4 export
+backend at the same mountpoint. After publication and before
 environment-state mutation, step 11 streams verifier bytes from the trusted
 candidate worktree over the protected SSH stdin path. It does not execute code
 from the checkout under verification. Exact HEAD/status/index/mode/readability

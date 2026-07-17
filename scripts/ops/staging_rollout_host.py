@@ -41,11 +41,15 @@ OPERATOR_GROUP = "loom-staging-operators"
 OPERATORS = ("qianyi", "hongjian", "devansh")
 SHARED_WORK_CONSUMER = "qianyi"
 SHARED_WORK_GROUP = "sharedwork"
-SHARED_WORKER_AUTHORITY_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout")
+SHARED_WORK2_MOUNT_POINT = Path("/shared_work2")
+SHARED_WORK2_MOUNT_UNIT = "shared_work2.mount"
+SHARED_WORK2_MOUNT_UNIT_PATH = Path("/etc/systemd/system") / SHARED_WORK2_MOUNT_UNIT
+SHARED_WORKER_AUTHORITY_ROOT = SHARED_WORK2_MOUNT_POINT / "qianyi/.loom-staging-rollout"
 SHARED_WORKER_REPO_ROOT = SHARED_WORKER_AUTHORITY_ROOT / "worker-repos"
 
 RUNNER_ROOT = Path("/opt/loom-staging-runner")
 INSTALL_SOURCE = RUNNER_ROOT / "source"
+SHARED_WORK2_MOUNT_HELPER = INSTALL_SOURCE / "scripts/ops/staging_rollout_shared_work2.py"
 SHARED_WORKER_REPO_HELPER = INSTALL_SOURCE / "scripts/ops/staging_rollout_shared_repo.py"
 CANDIDATE_REPO = RUNNER_ROOT / "repo"
 VENV = RUNNER_ROOT / "venv"
@@ -1396,6 +1400,7 @@ class HostSystem:
                     "loom-staging-rollout",
                     "loom-staging-rollout-broker",
                     "loom-staging-rollout.sudoers",
+                    SHARED_WORK2_MOUNT_UNIT,
                 )
             }
             for name, payload in assets.items():
@@ -1408,10 +1413,28 @@ class HostSystem:
                     "scripts/ops/staging_rollout_shared_repo.py",
                 )
             )
+            shared_work2_helper = directory / "staging_rollout_shared_work2.py"
+            shared_work2_helper.write_bytes(
+                self.source_file(
+                    source_root,
+                    source_sha,
+                    "scripts/ops/staging_rollout_shared_work2.py",
+                )
+            )
+            export_helper = directory / "staging_rollout_shared_work2_export.py"
+            export_helper.write_bytes(
+                self.source_file(
+                    source_root,
+                    source_sha,
+                    "scripts/ops/staging_rollout_shared_work2_export.py",
+                )
+            )
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-broker")])
             self.runner.run(["visudo", "-cf", str(directory / "loom-staging-rollout.sudoers")])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_repo_helper)])
+            self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_work2_helper)])
+            self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(export_helper)])
 
     def source_file(self, source_root: Path, source_sha: str, relative_path: str) -> bytes:
         if source_root != INSTALL_SOURCE or _SHA_RE.fullmatch(source_sha) is None:
@@ -1585,6 +1608,64 @@ class HostSystem:
         return report
 
     @staticmethod
+    def _validate_shared_work2_mount_report(payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise InstallError("shared_work2 mount helper report is invalid")
+        expected: dict[str, object] = {
+            "schema_version": 1,
+            "mount_point": str(SHARED_WORK2_MOUNT_POINT),
+            "source": "192.168.20.12:/shared_work2",
+            "filesystem_type": "nfs4",
+            "mount_options": ["nodev", "noexec", "nosuid", "rw"],
+            "super_options": [
+                "hard",
+                "proto=tcp",
+                "retrans=2",
+                "rw",
+                "sec=sys",
+                "timeo=600",
+                "vers=4.2",
+            ],
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise InstallError("shared_work2 mount helper report is invalid")
+        for key in ("mount_id", "parent_id", "device_major", "device_minor"):
+            if type(payload.get(key)) is not int or int(payload[key]) < 0:
+                raise InstallError("shared_work2 mount helper report is invalid")
+        return dict(payload)
+
+    def shared_work2_mount_identity(self) -> dict[str, object]:
+        result = self._probe([str(SYSTEM_PYTHON), str(SHARED_WORK2_MOUNT_HELPER), "check"])
+        if result.returncode != 0:
+            raise InstallError("shared_work2 mount helper failed safely")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, ValueError) as exc:
+            raise InstallError("shared_work2 mount helper report is invalid") from exc
+        return self._validate_shared_work2_mount_report(payload)
+
+    def shared_work2_mount_ready(self) -> bool:
+        try:
+            self.shared_work2_mount_identity()
+        except InstallError:
+            return False
+        return True
+
+    def ensure_shared_work2_mount(self) -> bool:
+        if self.shared_work2_mount_ready():
+            return False
+        self.runner.run(["systemctl", "daemon-reload"])
+        self.runner.run(["systemctl", "enable", "--now", SHARED_WORK2_MOUNT_UNIT])
+        self.shared_work2_mount_identity()
+        return True
+
+    def disable_shared_work2_mount(self) -> None:
+        self.runner.run(["systemctl", "disable", "--now", SHARED_WORK2_MOUNT_UNIT])
+
+    def reload_systemd(self) -> None:
+        self.runner.run(["systemctl", "daemon-reload"])
+
+    @staticmethod
     def _validate_shared_worker_repo_report(payload: object) -> dict[str, object]:
         if not isinstance(payload, dict):
             raise InstallError("shared worker repository helper report is invalid")
@@ -1599,6 +1680,7 @@ class HostSystem:
             "repository_mode": "2750",
             "service_capability": "parent-not-writable;repository-writable-searchable",
             "consumer_capability": "repository-readable-searchable-not-writable",
+            "publication_capability": "rename-noreplace-verified",
         }
         expected_integers = {
             "service_uid",
@@ -1623,11 +1705,28 @@ class HostSystem:
         created = payload.get("created")
         if (
             not isinstance(created, list)
-            or any(value not in {"authority-root", "repository-root"} for value in created)
+            or any(
+                value not in {"consumer-parent", "authority-root", "repository-root"}
+                for value in created
+            )
             or len(set(created)) != len(created)
         ):
             raise InstallError("shared worker repository helper report is invalid")
-        return dict(payload)
+        mount = payload.get("mount")
+        self_mount = HostSystem._validate_shared_work2_mount_report(mount)
+        payload = dict(payload)
+        payload["mount"] = {
+            key: self_mount[key]
+            for key in (
+                "schema_version",
+                "mount_point",
+                "source",
+                "filesystem_type",
+                "mount_options",
+                "super_options",
+            )
+        }
+        return payload
 
     def _shared_worker_repo_helper(self, command: str) -> dict[str, object] | None:
         if command not in {"check", "ensure"}:
@@ -2779,6 +2878,8 @@ class HostSystem:
         service_groups = set(self._probe(["id", "-nG", SERVICE_USER]).stdout.split())
         if service_groups != {SERVICE_USER, "docker"}:
             failures.append("service-groups")
+        if not self.shared_work2_mount_ready():
+            failures.append("shared-work2-mount")
         try:
             if not self.shared_worker_repo_root_ready():
                 failures.append("shared-worker-repo-root")
@@ -2833,6 +2934,7 @@ class HostSystem:
             TRUST_REVOCATION_LEDGER: "regular file:root:root:600",
             TRUST_TOOL_PATH: "regular file:root:root:755",
             KNOWN_HOSTS_PATH: "regular file:root:root:644",
+            SHARED_WORK2_MOUNT_UNIT_PATH: "regular file:root:root:644",
             KUBECONFIG_PATH: "regular file:loom-rollout:loom-rollout:600",
             RUNTIME_ROOT: "directory:loom-rollout:loom-rollout:700",
             Path("/etc/loom"): "directory:root:root:755",
@@ -2841,6 +2943,7 @@ class HostSystem:
             Path("/usr/local/bin"): "directory:root:root:755",
             SUDOERS_PATH.parent: "directory:root:root:755",
             TMPFILES_PATH.parent: "directory:root:root:755",
+            SHARED_WORK2_MOUNT_UNIT_PATH.parent: "directory:root:root:755",
         }
         for path, expected in authority.items():
             actual = self._probe(["stat", "-c", "%F:%U:%G:%a", str(path)])
@@ -3306,6 +3409,8 @@ class HostInstaller:
             "shared_worker_repo_root": str(SHARED_WORKER_REPO_ROOT),
             "shared_worker_repo_consumer": SHARED_WORK_CONSUMER,
             "shared_worker_repo_group": SHARED_WORK_GROUP,
+            "shared_work2_mount_point": str(SHARED_WORK2_MOUNT_POINT),
+            "shared_work2_mount_source": "192.168.20.12:/shared_work2",
             "protected_inputs": [str(path) for path in PROTECTED_INPUTS],
             "data_directories": [str(path) for path in DATA_DIRECTORIES],
             "preserves": [str(STATE_ROOT), "/data/loom-staging/rollouts"],
@@ -3337,6 +3442,7 @@ class HostInstaller:
             Path("/usr/local/bin"),
             SUDOERS_PATH.parent,
             TMPFILES_PATH.parent,
+            SHARED_WORK2_MOUNT_UNIT_PATH.parent,
         )
         for directory in root_directories:
             if self.system.ensure_root_directory(directory, mode=0o755):
@@ -3401,6 +3507,13 @@ class HostInstaller:
             (
                 KNOWN_HOSTS_PATH,
                 self._source_file("deploy/worker-pools/gb10/known_hosts"),
+                0o644,
+                "root",
+                "root",
+            ),
+            (
+                SHARED_WORK2_MOUNT_UNIT_PATH,
+                self._asset(SHARED_WORK2_MOUNT_UNIT),
                 0o644,
                 "root",
                 "root",
@@ -3498,8 +3611,11 @@ class HostInstaller:
         )
         group_missing = not self.system.group_present(OPERATOR_GROUP)
         service_user_missing = not self.system.service_user_present()
+        shared_work2_mount_ready = self.system.shared_work2_mount_ready()
         shared_worker_repo_identity = (
-            None if service_user_missing else self.system.shared_worker_repo_identity()
+            None
+            if service_user_missing or not shared_work2_mount_ready
+            else self.system.shared_worker_repo_identity()
         )
 
         def record_value(
@@ -3576,7 +3692,9 @@ class HostInstaller:
         )
         candidate_ready = service_directories_ready and self.system.candidate_ready(source_sha)
         shared_worker_repo_ready = (
-            not service_user_missing and self.system.shared_worker_repo_root_ready()
+            not service_user_missing
+            and shared_work2_mount_ready
+            and self.system.shared_worker_repo_root_ready()
         )
         venv_lock_requires_hardening = self.system.venv_lock_requires_hardening()
         venv_ready = not venv_lock_requires_hardening and self.system.venv_ready()
@@ -3648,6 +3766,7 @@ class HostInstaller:
             or service_key_missing
             or acl_plans
             or not service_directories_ready
+            or not shared_work2_mount_ready
             or not shared_worker_repo_ready
             or generated_env_error is not None
             or not generated_env_templates_ready
@@ -3698,7 +3817,6 @@ class HostInstaller:
             changes.append(f"group:{OPERATOR_GROUP}")
         if self.system.ensure_service_user():
             changes.append(f"user:{SERVICE_USER}")
-        shared_worker_repo_identity = self.system.shared_worker_repo_identity()
         for username in OPERATORS:
             if self.system.ensure_operator_membership(username):
                 added_operator_memberships.add(username)
@@ -3706,6 +3824,18 @@ class HostInstaller:
         if self.system.ensure_docker_membership():
             added_docker_membership = True
             changes.append("service-group:docker")
+
+        if not self.system.shared_work2_mount_ready():
+            if self.system.ensure_root_directory(SHARED_WORK2_MOUNT_POINT, mode=0o755):
+                changes.append(f"directory:{SHARED_WORK2_MOUNT_POINT}")
+        mount_payload = self._asset(SHARED_WORK2_MOUNT_UNIT)
+        if self.filesystem.atomic_write(SHARED_WORK2_MOUNT_UNIT_PATH, mount_payload, 0o644):
+            changes.append(f"file:{SHARED_WORK2_MOUNT_UNIT_PATH}")
+        if self.system.install_owner(SHARED_WORK2_MOUNT_UNIT_PATH, "root", 0o644, group="root"):
+            changes.append(f"ownership:{SHARED_WORK2_MOUNT_UNIT_PATH}")
+        if self.system.ensure_shared_work2_mount():
+            changes.append(f"mount:{SHARED_WORK2_MOUNT_POINT}")
+        shared_work2_mount_ready = True
 
         if self.system.ensure_shared_worker_repo_root():
             changes.append(f"directory:{SHARED_WORKER_REPO_ROOT}")
@@ -3901,6 +4031,11 @@ class HostInstaller:
             (
                 KNOWN_HOSTS_PATH,
                 self._source_file("deploy/worker-pools/gb10/known_hosts"),
+                0o644,
+            ),
+            (
+                SHARED_WORK2_MOUNT_UNIT_PATH,
+                self._asset(SHARED_WORK2_MOUNT_UNIT),
                 0o644,
             ),
         )
@@ -4109,6 +4244,9 @@ class HostInstaller:
             self.system.remove_operator_membership(username)
         if added_docker_membership:
             self.system.remove_docker_membership()
+        mount_unit_present = self.filesystem.exists(SHARED_WORK2_MOUNT_UNIT_PATH)
+        if mount_unit_present:
+            self.system.disable_shared_work2_mount()
         removable_files = [
             CLIENT_PATH,
             BROKER_PATH,
@@ -4117,12 +4255,15 @@ class HostInstaller:
             KUBECONFIG_PATH,
             TMPFILES_PATH,
             KNOWN_HOSTS_PATH,
+            SHARED_WORK2_MOUNT_UNIT_PATH,
         ]
         if created_service_key:
             removable_files.extend((SERVICE_KEY, Path(str(SERVICE_KEY) + ".pub")))
         for path in removable_files:
             if self.filesystem.remove(path):
                 removed.append(str(path))
+        if mount_unit_present:
+            self.system.reload_systemd()
         if self.filesystem.remove_tree(GENERATED_ROOT):
             removed.append(str(GENERATED_ROOT))
         if self.filesystem.remove_tree(RUNTIME_ROOT):

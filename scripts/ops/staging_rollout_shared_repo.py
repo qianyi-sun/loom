@@ -23,11 +23,16 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from scripts.ops.staging_rollout_shared_work2 import MountError, mount_identity
+except ModuleNotFoundError:  # installed helper executes directly from scripts/ops
+    from staging_rollout_shared_work2 import MountError, mount_identity
+
 SERVICE_USER = "loom-rollout"
 SERVICE_GROUP = "loom-rollout"
 CONSUMER_USER = "qianyi"
 SHARED_GROUP = "sharedwork"
-CONSUMER_PARENT = Path("/shared_work/qianyi")
+CONSUMER_PARENT = Path("/shared_work2/qianyi")
 AUTHORITY_ROOT = CONSUMER_PARENT / ".loom-staging-rollout"
 REPOSITORY_ROOT = AUTHORITY_ROOT / "worker-repos"
 
@@ -262,6 +267,72 @@ def _probe_identity(identity: Identity, checks: tuple[tuple[int, int, bool], ...
     return status == 0 and payload == b"1"
 
 
+def _probe_atomic_publication(identity: Identity, repository: BoundDirectory) -> bool:
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:  # pragma: no cover - result is asserted by the parent
+        source = f".rename-source-{secrets.token_hex(16)}"
+        collision = f".rename-collision-{secrets.token_hex(16)}"
+        destination = f".rename-destination-{secrets.token_hex(16)}"
+        try:
+            os.close(read_fd)
+            os.setgroups(list(identity.groups))
+            os.setgid(identity.gid)
+            os.setuid(identity.uid)
+            os.mkdir(source, 0o700, dir_fd=repository.fd)
+            source_metadata = os.stat(source, dir_fd=repository.fd, follow_symlinks=False)
+            _rename_noreplace(repository.fd, source, repository.fd, destination)
+            destination_metadata = os.stat(
+                destination,
+                dir_fd=repository.fd,
+                follow_symlinks=False,
+            )
+            if (source_metadata.st_dev, source_metadata.st_ino) != (
+                destination_metadata.st_dev,
+                destination_metadata.st_ino,
+            ):
+                raise AuthorityError("atomic publication changed the source identity")
+            os.mkdir(collision, 0o700, dir_fd=repository.fd)
+            try:
+                _rename_noreplace(repository.fd, collision, repository.fd, destination)
+            except FileExistsError:
+                pass
+            else:
+                raise AuthorityError("atomic publication replaced an existing destination")
+            after_collision = os.stat(
+                destination,
+                dir_fd=repository.fd,
+                follow_symlinks=False,
+            )
+            if (after_collision.st_dev, after_collision.st_ino) != (
+                destination_metadata.st_dev,
+                destination_metadata.st_ino,
+            ):
+                raise AuthorityError("atomic publication destination changed")
+            os.rmdir(collision, dir_fd=repository.fd)
+            os.rmdir(destination, dir_fd=repository.fd)
+            os.write(write_fd, b"1")
+        except BaseException:
+            for name in (source, collision, destination):
+                try:
+                    os.rmdir(name, dir_fd=repository.fd)
+                except OSError:
+                    pass
+            try:
+                os.write(write_fd, b"0")
+            except OSError:
+                pass
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    try:
+        payload = os.read(read_fd, 2)
+    finally:
+        os.close(read_fd)
+    _, status = os.waitpid(child, 0)
+    return status == 0 and payload == b"1"
+
+
 def converge(*, ensure: bool) -> dict[str, object]:
     if os.geteuid() != 0:
         raise AuthorityError("shared repository helper requires root")
@@ -274,11 +345,30 @@ def converge(*, ensure: bool) -> dict[str, object]:
     if shared_gid not in consumer.groups or shared_gid in service.groups:
         raise AuthorityError("shared repository group membership is invalid")
 
-    parent = _open_absolute(CONSUMER_PARENT)
+    try:
+        mount_report = mount_identity()
+    except MountError as exc:
+        raise AuthorityError("shared repository mount identity is invalid") from exc
+    mount = _open_absolute(CONSUMER_PARENT.parent)
+    parent: BoundDirectory | None = None
     authority: BoundDirectory | None = None
     repository: BoundDirectory | None = None
     created: list[str] = []
     try:
+        if ensure:
+            parent, parent_created = _ensure_child(
+                mount,
+                CONSUMER_PARENT.name,
+                uid=consumer.uid,
+                gid=shared_gid,
+                mode=0o2775,
+            )
+            if parent_created:
+                created.append("consumer-parent")
+        else:
+            parent = _open_child(mount, CONSUMER_PARENT.name)
+        if parent is None:  # pragma: no cover - invariant
+            raise AuthorityError("shared repository consumer parent is unavailable")
         parent_metadata = _validate_directory(
             parent,
             uid=consumer.uid,
@@ -340,6 +430,8 @@ def converge(*, ensure: bool) -> dict[str, object]:
         )
         if not service_ok or not consumer_ok:
             raise AuthorityError("shared repository capability contract is invalid")
+        if not _probe_atomic_publication(service, repository):
+            raise AuthorityError("shared repository atomic publication contract is invalid")
         return {
             "schema_version": 1,
             "root": str(REPOSITORY_ROOT),
@@ -362,6 +454,8 @@ def converge(*, ensure: bool) -> dict[str, object]:
             "repository_inode": repository_metadata.st_ino,
             "service_capability": "parent-not-writable;repository-writable-searchable",
             "consumer_capability": "repository-readable-searchable-not-writable",
+            "publication_capability": "rename-noreplace-verified",
+            "mount": mount_report,
             "created": created,
         }
     finally:
@@ -369,7 +463,9 @@ def converge(*, ensure: bool) -> dict[str, object]:
             os.close(repository.fd)
         if authority is not None:
             os.close(authority.fd)
-        os.close(parent.fd)
+        if parent is not None:
+            os.close(parent.fd)
+        os.close(mount.fd)
 
 
 def _converge_service_owned(

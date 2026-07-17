@@ -1864,13 +1864,22 @@ and redacted worker-token fingerprint only. Profiles that do not opt in to
 before rerunning step 11.
 
 For staging GB10, `repo_dir` is an exact image-tagged direct child of
-`/shared_work/qianyi/.loom-staging-rollout/worker-repos`. The root installer
+`/shared_work2/qianyi/.loom-staging-rollout/worker-repos`. First run the
+checked-in `staging_rollout_shared_work2_export.py install` helper as root on
+the `trt-gb10-2` exporter; it installs only the exact
+`192.168.50.103/32` allowance and fails rather than widening or overwriting a
+drifted fragment. The platform-dev root installer then installs and starts the
+fixed `shared_work2.mount` unit and rejects any source other than
+`192.168.20.12:/shared_work2` over NFSv4.2 with the declared hard/TCP and
+`nosuid,nodev,noexec` options. A directory with no matching mountinfo entry is
+not accepted. The root installer
 converges that authority only with admission closed and the service inactive,
 records the resolved `loom-rollout` and `qianyi` UID plus service/sharedwork
 GID values, and verifies effective access: the service owns and writes only
 the dedicated root; the Slurm submitter reads/searches but cannot write it.
-Do not add `loom-rollout` to `sharedwork` or widen the existing traverse-only
-ACL on `/shared_work/qianyi`.
+Do not add `loom-rollout` to `sharedwork`, widen the host-only export, or move
+the private mode-`0600` token/env authority from platform-dev into shared
+storage.
 
 Repository materialization always clones with `--no-hardlinks` inside a
 service-created unpredictable temp container that inherited the sharedwork
@@ -1881,9 +1890,14 @@ allowing tracked git symlinks. Publication uses Linux
 `renameat2(RENAME_NOREPLACE)`: an existing exact target is reused only after a
 complete immutable-tree validation, while any drift or different HEAD fails
 closed without replacement, cleanup, or takeover.
+The installer runs the same no-replace syscall in a bounded, randomized,
+self-cleaning probe under the service identity before declaring the NFS
+authority ready.
 
 Before request creation the broker also checks the exact 14 active GB10 SSH
-targets as `qianyi`: the shared root must have the fixed owner/group/mode and
+targets as `qianyi`: the 13 clients must expose the exact NFSv4 source and
+mount identity, `trt-gb10-2` must expose the ext4 backend, and the shared root
+must have the fixed owner/group/mode and
 be readable/searchable but not writable. Immediately after the one-time
 checkout publish, and before environment-state apply, step 11 streams trusted
 candidate verifier bytes over the protected SSH stdin path to
@@ -1892,8 +1906,7 @@ All 14 nodes must independently observe the exact HEAD, a zero status including
 ignored and untracked entries, the complete index-derived file/directory modes,
 a readable deterministically selected tracked file, and non-writable
 root/target. Content digests and tracked-entry counts must agree across nodes.
-NFS device/inode
-values are recorded per node only and are not compared across nodes.
+mount/device/inode values are bound into sanitized per-node evidence.
 
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.

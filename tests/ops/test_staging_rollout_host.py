@@ -62,6 +62,7 @@ class FakeSystem:
         self.install_source_sha: str | None = None
         self.install_owner_calls: list[tuple[Path, str, str, int]] = []
         self.shared_worker_identity_ready = True
+        self.shared_work2_mounted = False
 
     def validate_prerequisites(self) -> None:
         self.validated += 1
@@ -151,7 +152,11 @@ class FakeSystem:
         return self.docker
 
     def shared_worker_repo_identity(self) -> dict[str, object]:
-        if not self.service_user or not self.shared_worker_identity_ready:
+        if (
+            not self.service_user
+            or not self.shared_worker_identity_ready
+            or not self.shared_work2_mounted
+        ):
             raise host.InstallError("shared worker repository identity is unavailable")
         identity: dict[str, object] = {
             "root": str(host.SHARED_WORKER_REPO_ROOT),
@@ -185,6 +190,12 @@ class FakeSystem:
                     "repository_inode": repository_metadata.st_ino,
                     "service_capability": ("parent-not-writable;repository-writable-searchable"),
                     "consumer_capability": "repository-readable-searchable-not-writable",
+                    "publication_capability": "rename-noreplace-verified",
+                    "mount": {
+                        key: value
+                        for key, value in self.shared_work2_mount_identity().items()
+                        if key not in {"mount_id", "parent_id", "device_major", "device_minor"}
+                    },
                     "created": [],
                 }
             )
@@ -202,9 +213,52 @@ class FakeSystem:
     def ensure_shared_worker_repo_root(self) -> bool:
         self.shared_worker_repo_identity()
         changed = False
+        changed = (
+            self.filesystem.ensure_directory(host.SHARED_WORKER_AUTHORITY_ROOT.parent, 0o2775)
+            or changed
+        )
         for path in (host.SHARED_WORKER_AUTHORITY_ROOT, host.SHARED_WORKER_REPO_ROOT):
             changed = self.filesystem.ensure_directory(path, 0o2750) or changed
         return changed
+
+    def shared_work2_mount_identity(self) -> dict[str, object]:
+        if not self.shared_work2_mounted:
+            raise host.InstallError("shared_work2 mount helper failed safely")
+        return {
+            "schema_version": 1,
+            "mount_point": str(host.SHARED_WORK2_MOUNT_POINT),
+            "source": "192.168.20.12:/shared_work2",
+            "filesystem_type": "nfs4",
+            "mount_id": 42,
+            "parent_id": 1,
+            "device_major": 0,
+            "device_minor": 99,
+            "mount_options": ["nodev", "noexec", "nosuid", "rw"],
+            "super_options": [
+                "hard",
+                "proto=tcp",
+                "retrans=2",
+                "rw",
+                "sec=sys",
+                "timeo=600",
+                "vers=4.2",
+            ],
+        }
+
+    def shared_work2_mount_ready(self) -> bool:
+        return self.shared_work2_mounted
+
+    def ensure_shared_work2_mount(self) -> bool:
+        changed = not self.shared_work2_mounted
+        self.shared_work2_mounted = True
+        self.filesystem.ensure_directory(host.SHARED_WORK2_MOUNT_POINT, 0o755)
+        return changed
+
+    def disable_shared_work2_mount(self) -> None:
+        self.shared_work2_mounted = False
+
+    def reload_systemd(self) -> None:
+        return None
 
     def ensure_owned_directory(self, path: Path, *, owner: str, mode: int) -> bool:
         assert owner == host.SERVICE_USER
@@ -420,6 +474,8 @@ class FakeSystem:
 
     def check_runtime(self, expected_sha: str) -> list[str]:
         failures = [] if self.candidate_sha == expected_sha else ["candidate-checkout"]
+        if not self.shared_work2_mount_ready():
+            failures.append("shared-work2-mount")
         if not self.shared_worker_repo_root_ready():
             failures.append("shared-worker-repo-root")
         return failures
@@ -683,6 +739,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/staging-rollout/loom-staging-rollout-broker",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
         "deploy/staging-rollout/loom-staging-rollout.tmpfiles",
+        "deploy/staging-rollout/shared_work2.mount",
         "deploy/staging-rollout/staging-rollout.toml",
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
@@ -724,6 +781,28 @@ class SharedWorkerRepoRunner:
     def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
         del kwargs
         call = list(argv)
+        mount_report = {
+            "schema_version": 1,
+            "mount_point": str(host.SHARED_WORK2_MOUNT_POINT),
+            "source": "192.168.20.12:/shared_work2",
+            "filesystem_type": "nfs4",
+            "mount_id": 42,
+            "parent_id": 1,
+            "device_major": 0,
+            "device_minor": 99,
+            "mount_options": ["nodev", "noexec", "nosuid", "rw"],
+            "super_options": [
+                "hard",
+                "proto=tcp",
+                "retrans=2",
+                "rw",
+                "sec=sys",
+                "timeo=600",
+                "vers=4.2",
+            ],
+        }
+        if call == [str(host.SYSTEM_PYTHON), str(host.SHARED_WORK2_MOUNT_HELPER), "check"]:
+            return host.CommandResult(0, json.dumps(mount_report) + "\n")
         if call[:2] == [str(host.SYSTEM_PYTHON), str(host.SHARED_WORKER_REPO_HELPER)]:
             if len(call) != 3 or call[2] not in {"check", "ensure"}:
                 raise AssertionError(f"unexpected command: {call}")
@@ -770,6 +849,8 @@ class SharedWorkerRepoRunner:
                             "parent-not-writable;repository-writable-searchable"
                         ),
                         "consumer_capability": ("repository-readable-searchable-not-writable"),
+                        "publication_capability": "rename-noreplace-verified",
+                        "mount": mount_report,
                         "created": [],
                     }
                 )
@@ -1841,6 +1922,7 @@ def test_uninstall_refuses_active_request_and_retains_ledger(tmp_path: Path) -> 
     assert not installer.filesystem.exists(host.INSTALL_RECORD)
     assert not installer.filesystem.exists(host.TRUST_REVOCATION_LEDGER)
     assert not installer.filesystem.exists(host.KNOWN_HOSTS_PATH)
+    assert system.shared_work2_mounted is False
     assert result["removed"][-2:] == [
         str(host.TRUST_REVOCATION_LEDGER),
         str(host.INSTALL_RECORD),

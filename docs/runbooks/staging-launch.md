@@ -604,9 +604,13 @@ the rollout step never falls back to an arbitrary path. A missing template or
 any symlink, hard link, wrong mode, oversized file, malformed dotenv entry, or
 missing required endpoint/credential key fails before environment-state apply.
 The same installer creates the external-runner checkout authority at
-`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+`/shared_work2/qianyi/.loom-staging-rollout/worker-repos` as
 `loom-rollout:sharedwork` mode `2750`, without granting the service write
-access to `/shared_work/qianyi`. Runtime readiness proves that `loom-rollout`
+access to its `qianyi:sharedwork` mode-`2775` parent. Before creating this
+authority, apply the checked-in exact-host export allowance on `trt-gb10-2`;
+the platform-dev installer installs `shared_work2.mount` and verifies exact
+NFS source, mountpoint, NFSv4.2 options, and device identity. A local directory
+at `/shared_work2` fails closed. Runtime readiness proves that `loom-rollout`
 can write/search the dedicated root and that the `qianyi` Slurm submitter can
 read/search but not write it. Step 11 publishes only the exact image-tagged
 direct child through a private setgid temp container and same-root rename;
@@ -619,8 +623,9 @@ but not write the root. After publish and before environment-state apply, step
 11 streams trusted verifier bytes over protected SSH stdin (never from the
 target) and requires all 14 nodes to agree on exact HEAD, clean status,
 index/modes, deterministic tracked-file readability, and content identity.
-Per-node NFS device/inode values are evidence only, not cross-node equality
-constraints.
+The 13 clients must report the exact NFSv4 source and `trt-gb10-2` the ext4
+backend; mount/device/inode values remain sanitized evidence. Private worker
+env and token sources stay platform-dev-local mode `0600` files.
 The external Slurm autoscaler also treats release-state drift as a fail-closed
 decision. This includes a pending/running job whose node is no longer in the
 policy's `allowed_nodes`; such jobs are neither healthy warm capacity nor part

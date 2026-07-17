@@ -59,20 +59,37 @@ ACTIVE_GB10_HOSTS = tuple(
     host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_GB10_HOSTS
 )
 EXPECTED_GB10_SSH_CONFIG_SHA256 = "7ac3cbe20670762590b9efe4daea46126caa823f192e060be109b96350e82b4e"
-_SHARED_REPOSITORY_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2"
+_MOUNTINFO = Path("/proc/self/mountinfo")
 _GB10_KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
 _REMOTE_SHARED_REPOSITORY_PROBE = """
 import os
 import stat
 
 paths = (
-    "/shared_work/qianyi",
-    "/shared_work/qianyi/.loom-staging-rollout",
-    "/shared_work/qianyi/.loom-staging-rollout/worker-repos",
+    "/shared_work2/qianyi",
+    "/shared_work2/qianyi/.loom-staging-rollout",
+    "/shared_work2/qianyi/.loom-staging-rollout/worker-repos",
 )
 entries = [os.lstat(path) for path in paths]
 safe = all(stat.S_ISDIR(item.st_mode) and not stat.S_ISLNK(item.st_mode) for item in entries)
 safe = safe and os.access(paths[-1], os.R_OK | os.X_OK) and not os.access(paths[-1], os.W_OK)
+mount = None
+with open("/proc/self/mountinfo", encoding="utf-8") as stream:
+    for line in stream:
+        left, separator, right = line.partition(" - ")
+        if not separator:
+            continue
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) >= 6 and len(right_fields) == 3 and left_fields[4] == "/shared_work2":
+            device = left_fields[2].split(":", 1)
+            if len(device) == 2:
+                mount = (right_fields[0], right_fields[1], int(device[0]), int(device[1]))
+            break
+mount_stat = os.lstat("/shared_work2")
+safe = safe and mount is not None and (os.major(mount_stat.st_dev), os.minor(mount_stat.st_dev)) == mount[2:]
 groups = set(os.getgroups())
 groups.add(os.getegid())
 fields = [str(os.getuid()), ",".join(str(value) for value in sorted(groups))]
@@ -86,6 +103,8 @@ for item in entries:
             str(item.st_ino),
         )
     )
+if mount is not None:
+    fields.extend((mount[0], mount[1], str(mount[2]), str(mount[3])))
 print(";".join(fields))
 raise SystemExit(0 if safe else 1)
 """.strip()
@@ -441,6 +460,7 @@ def _shared_repository_binding(
     *,
     service_uid: int,
     root: Path = _SHARED_REPOSITORY_ROOT,
+    mountinfo: Path = _MOUNTINFO,
 ) -> dict[str, int] | None:
     try:
         service = pwd.getpwnam("loom-rollout")
@@ -460,6 +480,52 @@ def _shared_repository_binding(
         or consumer.pw_uid <= 0
         or shared_group.gr_gid <= 0
         or not root.is_absolute()
+    ):
+        return None
+
+    mount_point = root.parents[2]
+    try:
+        mount_payload = mountinfo.read_text(encoding="utf-8")
+        mount_metadata = os.lstat(mount_point)
+    except OSError:
+        return None
+    mount_matches: list[tuple[int, int]] = []
+    for raw_line in mount_payload.splitlines():
+        left, separator, right = raw_line.partition(" - ")
+        left_fields = left.split()
+        right_fields = right.split()
+        if not separator or len(left_fields) < 6 or len(right_fields) != 3:
+            continue
+        if left_fields[4] != str(mount_point):
+            continue
+        device = left_fields[2].split(":", 1)
+        try:
+            major, minor = int(device[0]), int(device[1])
+        except (IndexError, ValueError):
+            return None
+        mount_options = set(left_fields[5].split(","))
+        super_options = set(right_fields[2].split(","))
+        if (
+            right_fields[0] != "nfs4"
+            or right_fields[1] != _SHARED_REPOSITORY_SOURCE
+            or not {"rw", "nosuid", "nodev", "noexec"}.issubset(mount_options)
+            or not {
+                "rw",
+                "hard",
+                "vers=4.2",
+                "proto=tcp",
+                "sec=sys",
+                "timeo=600",
+                "retrans=2",
+            }.issubset(super_options)
+        ):
+            return None
+        mount_matches.append((major, minor))
+    if (
+        len(mount_matches) != 1
+        or not stat.S_ISDIR(mount_metadata.st_mode)
+        or stat.S_ISLNK(mount_metadata.st_mode)
+        or mount_matches[0] != (os.major(mount_metadata.st_dev), os.minor(mount_metadata.st_dev))
     ):
         return None
 
@@ -586,7 +652,7 @@ def _gb10_shared_repository_probe(
         if output is None:
             return None
         fields = output.strip().split(";")
-        if len(fields) != 17 or any(not field for field in fields):
+        if len(fields) != 21 or any(not field for field in fields):
             return None
         try:
             remote_uid = int(fields[0])
@@ -602,6 +668,9 @@ def _gb10_shared_repository_probe(
                         int(fields[offset + 4]),
                     )
                 )
+            mount_type = fields[17]
+            mount_source = fields[18]
+            mount_device = (int(fields[19]), int(fields[20]))
         except ValueError:
             return None
         parent = values[0:5]
@@ -614,6 +683,15 @@ def _gb10_shared_repository_probe(
             or authority[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
             or repository[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
             or any(value <= 0 for value in (*parent[3:], *authority[3:], *repository[3:]))
+            or mount_device != tuple(repository[3:5])
+            or (
+                host == "trt-gb10-2"
+                and (mount_type != "ext4" or mount_source == _SHARED_REPOSITORY_SOURCE)
+            )
+            or (
+                host != "trt-gb10-2"
+                and (mount_type != "nfs4" or mount_source != _SHARED_REPOSITORY_SOURCE)
+            )
         ):
             return None
         evidence.update(host.encode("ascii"))

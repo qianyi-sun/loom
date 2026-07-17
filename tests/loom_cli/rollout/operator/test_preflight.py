@@ -195,10 +195,17 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
     elif argv[-2:] == ["config", "current-context"]:
         stdout = "kind-loom-staging\n"
     elif argv[:1] == ["ssh"] and argv[-1] != "true":
+        mount_type = "ext4" if argv[-2] == "trt-gb10-2" else "nfs4"
+        mount_source = (
+            "/dev/mapper/shared-work2"
+            if argv[-2] == "trt-gb10-2"
+            else "192.168.20.12:/shared_work2"
+        )
         stdout = (
             "2005;2005,2007;2005;2007;2775;101;201;"
             f"{os.geteuid()};2007;2750;102;202;"
-            f"{os.geteuid()};2007;2750;103;203\n"
+            f"{os.geteuid()};2007;2750;103;203;"
+            f"{mount_type};{mount_source};103;203\n"
         )
     return subprocess.CompletedProcess(argv, 0, stdout, "")
 
@@ -313,8 +320,20 @@ def test_shared_repository_binding_uses_nss_and_held_directories_not_install_rec
             AssertionError("install record must not be read")
         ),
     )
+    mountinfo = tmp_path / "mountinfo"
+    metadata = tmp_path.stat()
+    mountinfo.write_text(
+        f"42 1 {os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)} / {tmp_path} "
+        "rw,nosuid,nodev,noexec - nfs4 192.168.20.12:/shared_work2 "
+        "rw,hard,vers=4.2,proto=tcp,sec=sys,timeo=600,retrans=2\n",
+        encoding="utf-8",
+    )
 
-    binding = REAL_SHARED_REPOSITORY_BINDING(service_uid=uid, root=repository)
+    binding = REAL_SHARED_REPOSITORY_BINDING(
+        service_uid=uid,
+        root=repository,
+        mountinfo=mountinfo,
+    )
 
     assert binding is not None
     assert binding["service_uid"] == uid
@@ -341,6 +360,49 @@ def test_collect_preflight_rejects_shared_repository_identity_membership_or_mode
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         if argv[:1] == ["ssh"] and argv[-1] != "true":
+            return subprocess.CompletedProcess(argv, 0, remote_output, "")
+        return successful_command(argv)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=run,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    shared = next(check for check in report.checks if check.name == "gb10-shared-repository")
+    assert shared.passed is False
+    assert shared.evidence is None
+
+
+@pytest.mark.parametrize(
+    ("target", "mount_type", "mount_source", "mount_major", "mount_minor"),
+    [
+        ("trt-gb10-8", "nfs4", "192.168.20.99:/shared_work2", 103, 203),
+        ("trt-gb10-8", "ext4", "/dev/mapper/local", 103, 203),
+        ("trt-gb10-8", "nfs4", "192.168.20.12:/shared_work2", 104, 204),
+        ("trt-gb10-2", "nfs4", "192.168.20.12:/shared_work2", 103, 203),
+    ],
+)
+def test_collect_preflight_rejects_shared_repository_mount_drift(
+    tmp_path: Path,
+    target: str,
+    mount_type: str,
+    mount_source: str,
+    mount_major: int,
+    mount_minor: int,
+) -> None:
+    config = make_config(tmp_path)
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[:1] == ["ssh"] and argv[-2] == target and argv[-1] != "true":
+            remote_output = (
+                "2005;2005,2007;2005;2007;2775;101;201;"
+                f"{os.geteuid()};2007;2750;102;202;"
+                f"{os.geteuid()};2007;2750;103;203;"
+                f"{mount_type};{mount_source};{mount_major};{mount_minor}\n"
+            )
             return subprocess.CompletedProcess(argv, 0, remote_output, "")
         return successful_command(argv)
 
