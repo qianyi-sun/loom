@@ -40,7 +40,11 @@ from loom_cli.rollout.steps.s06_audit import AuditStep
 from loom_cli.rollout.steps.s07_render import RenderStep
 from loom_cli.rollout.steps.s08_preflight import PreflightStep
 from loom_cli.rollout.steps.s09_migrate import MigrateStep
-from loom_cli.rollout.steps.s10_env_state import EnvStateStep, _profile_path_for
+from loom_cli.rollout.steps.s10_env_state import (
+    EnvStateStep,
+    _materialize_rollout_root_profile,
+    _profile_path_for,
+)
 from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
 from loom_cli.rollout.steps.s12_production_defaults import ProductionDefaultsStep
 from loom_cli.rollout.steps.s12_release_gate import (
@@ -837,6 +841,116 @@ def test_env_state_materializes_current_profile_under_rollout_root(
     assert evidence["target_path"] == str(physical_profile)
     assert evidence["source_sha256"] == evidence["target_sha256"]
     assert evidence["mode"] == "0o600"
+
+
+def test_env_state_replaces_unreadable_operator_owned_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(11, "env-state")
+    source_profile = tmp_path / "candidate" / "deploy" / "environment-state" / "staging.toml"
+    source_profile.parent.mkdir(parents=True)
+    source_profile.write_text(
+        'environment = "staging"\n\n[catalog_provisioning]\nrequired = false\n',
+        encoding="utf-8",
+    )
+    physical_profile = tmp_path / "environment-state" / "staging.toml"
+    physical_profile.parent.mkdir()
+    physical_profile.write_text('environment = "operator-owned"\n', encoding="utf-8")
+    physical_profile.chmod(0o000)
+
+    def fake_run(argv, **kwargs):
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=0,
+            stdout=json.dumps({"ok": True, "drift": []}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(source_profile),
+    )
+    monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert physical_profile.read_bytes() == source_profile.read_bytes()
+    assert oct(physical_profile.stat().st_mode & 0o777) == "0o600"
+    evidence = json.loads(
+        step_dir.artifact_path("environment-state-profile-materialization.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert evidence["changed"] is True
+    assert evidence["existing_profile_readable"] is False
+    assert evidence["source_sha256"] == evidence["target_sha256"]
+
+
+def test_env_state_rejects_symlink_profile_without_mutating_referent(tmp_path: Path) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(11, "env-state")
+    source_profile = tmp_path / "candidate-staging.toml"
+    source_profile.write_text('environment = "staging"\n', encoding="utf-8")
+    target = tmp_path / "environment-state" / "staging.toml"
+    target.parent.mkdir()
+    referent = tmp_path / "outside.toml"
+    referent.write_bytes(source_profile.read_bytes())
+    referent.chmod(0o644)
+    target.symlink_to(referent)
+
+    with pytest.raises(
+        candidate_source.CandidateToolingError,
+        match="must be a regular file",
+    ):
+        _materialize_rollout_root_profile(
+            ctx,
+            source_profile=source_profile,
+            step_dir=step_dir,
+        )
+
+    assert target.is_symlink()
+    assert referent.read_bytes() == source_profile.read_bytes()
+    assert oct(referent.stat().st_mode & 0o777) == "0o644"
+    assert not step_dir.artifact_path(
+        "environment-state-profile-materialization.json"
+    ).exists()
+
+
+def test_env_state_rejects_nonregular_profile_without_replacing_it(tmp_path: Path) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(11, "env-state")
+    source_profile = tmp_path / "candidate-staging.toml"
+    source_profile.write_text('environment = "staging"\n', encoding="utf-8")
+    target = tmp_path / "environment-state" / "staging.toml"
+    target.mkdir(parents=True)
+    marker = target / "preserved"
+    marker.write_text("do not replace\n", encoding="utf-8")
+
+    with pytest.raises(
+        candidate_source.CandidateToolingError,
+        match="must be a regular file",
+    ):
+        _materialize_rollout_root_profile(
+            ctx,
+            source_profile=source_profile,
+            step_dir=step_dir,
+        )
+
+    assert target.is_dir()
+    assert marker.read_text(encoding="utf-8") == "do not replace\n"
+    assert not step_dir.artifact_path(
+        "environment-state-profile-materialization.json"
+    ).exists()
 
 
 def test_env_state_runs_catalog_provisioning_between_apply_and_check(

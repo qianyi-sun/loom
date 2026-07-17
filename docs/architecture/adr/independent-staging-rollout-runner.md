@@ -149,6 +149,15 @@ make secrets inaccessible to the already
 root-equivalent administrators; a stronger boundary would require a separate
 runner host and credential rotation.
 
+The directory ACL is also the migration boundary for legacy environment-state
+profiles. A pre-existing operator-owned mode-`0600` leaf is not made readable
+to the service account. Candidate materialization treats an unreadable legacy
+leaf as stale and atomically replaces it with a service-owned mode-`0600`
+candidate copy, rather than widening the old leaf ACL or consuming its bytes.
+The destination is inspected with no-follow metadata first: a symlink or any
+other non-regular entry fails closed before read, chmod, or replacement, so an
+external referent cannot become part of the materialization authority.
+
 ACL convergence is fail-closed. The installer computes the smallest explicit
 mask expansion needed by the service entry and compares the complete effective
 ACL before and after. Only the declared human operators may gain permissions

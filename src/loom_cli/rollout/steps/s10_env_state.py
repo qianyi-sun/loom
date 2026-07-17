@@ -408,8 +408,31 @@ def _materialize_rollout_root_profile(
     source_bytes = source_profile.read_bytes()
     target.parent.mkdir(parents=True, exist_ok=True)
     changed = True
-    if target.is_file():
-        changed = target.read_bytes() != source_bytes
+    existing_profile_readable: bool | None = None
+    try:
+        target_metadata = target.lstat()
+    except FileNotFoundError:
+        target_metadata = None
+    except OSError as exc:
+        raise CandidateToolingError(
+            "rollout-root environment-state profile cannot be inspected safely"
+        ) from exc
+    if target_metadata is not None:
+        if not stat.S_ISREG(target_metadata.st_mode):
+            raise CandidateToolingError(
+                "rollout-root environment-state profile must be a regular file, "
+                "not a symlink or other non-regular entry"
+            )
+        try:
+            changed = target.read_bytes() != source_bytes
+        except PermissionError:
+            # A pre-broker operator-owned 0600 leaf may be unreadable even
+            # though the reviewed directory ACL permits this service account
+            # to create and atomically replace entries. Treat that legacy leaf
+            # as stale; do not broaden its ACL or skip candidate materialization.
+            existing_profile_readable = False
+        else:
+            existing_profile_readable = True
     if changed:
         tmp = target.with_name(f".{target.name}.tmp")
         tmp.write_bytes(source_bytes)
@@ -419,6 +442,7 @@ def _materialize_rollout_root_profile(
         target.chmod(0o600)
     evidence = {
         "changed": changed,
+        "existing_profile_readable": existing_profile_readable,
         "mode": oct(target.stat().st_mode & 0o777),
         "source_path": str(source_profile),
         "source_sha256": _sha256_bytes(source_bytes),
