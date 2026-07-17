@@ -212,7 +212,7 @@ class FakeSystem:
                     "repository_inode": repository_metadata.st_ino,
                     "service_capability": ("parent-not-writable;repository-writable-searchable"),
                     "consumer_capability": "repository-readable-searchable-not-writable",
-                    "publication_capability": "rename-noreplace-verified",
+                    "publication_capability": "private-mkdir-publish-verified",
                     "mount": {
                         key: value
                         for key, value in self.shared_work2_mount_identity().items()
@@ -945,7 +945,7 @@ class SharedWorkerRepoRunner:
                             "parent-not-writable;repository-writable-searchable"
                         ),
                         "consumer_capability": ("repository-readable-searchable-not-writable"),
-                        "publication_capability": "rename-noreplace-verified",
+                        "publication_capability": "private-mkdir-publish-verified",
                         "mount": mount_report,
                         "created": [],
                     }

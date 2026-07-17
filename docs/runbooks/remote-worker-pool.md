@@ -1451,16 +1451,18 @@ Token and worker-env files remain private mode-`0600` local files; only the
 immutable candidate checkout uses `/shared_work2`.
 
 Step 11 accepts only the candidate-named direct child of that exact root. It
-clones with `--no-hardlinks` into a private, unpredictable setgid-root temp
-container, normalizes the completed tree to shared-group read/execute without
-group or other write, and then publishes with same-root
-`renameat2(RENAME_NOREPLACE)`. Tracked repository symlinks remain valid;
+claims that final child with an atomic no-replace `mkdir` at private mode
+`2700`, clones into it with `--no-hardlinks`, and normalizes the completed tree
+without exposing it to the shared group. It then publishes with an inode-bound
+publication mode transition to consumer-readable `0750` only after complete
+validation. Tracked repository symlinks remain valid;
 authority symlinks, foreign ownership, hard-linked or special files, extra
 directories, wrong modes, and SHA drift fail closed. Existing targets are
 immutable: only an exact fully validated target is reused, and rollout never
 replaces, cleans, or takes over drifted or ambient directories.
-Install/check runs a bounded, self-cleaning no-replace probe as the service
-identity before accepting the NFS publication contract.
+Install/check runs a bounded, self-cleaning private-claim/access-gate/publish/
+collision probe as the service identity before accepting the NFS publication
+contract.
 
 Broker preflight checks the fixed 14 active GB10 nodes against the root as the
 `qianyi` consumer. The 13 NFS clients must report the exact source and NFSv4

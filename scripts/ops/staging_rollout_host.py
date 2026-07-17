@@ -1825,7 +1825,7 @@ class HostSystem:
             "repository_mode": "2750",
             "service_capability": "parent-not-writable;repository-writable-searchable",
             "consumer_capability": "repository-readable-searchable-not-writable",
-            "publication_capability": "rename-noreplace-verified",
+            "publication_capability": "private-mkdir-publish-verified",
         }
         expected_integers = {
             "service_uid",

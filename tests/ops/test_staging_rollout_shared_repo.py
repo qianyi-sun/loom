@@ -267,3 +267,27 @@ def test_atomic_publish_fails_closed_on_existing_target(tmp_path: Path) -> None:
                 helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
     finally:
         os.close(parent_fd)
+
+
+def test_ensure_child_removes_only_its_exact_failed_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = helper._open_absolute(tmp_path)
+    monkeypatch.setattr(
+        helper.os,
+        "fchown",
+        lambda *_args: (_ for _ in ()).throw(OSError("injected owner failure")),
+    )
+    try:
+        with pytest.raises(OSError, match="injected owner failure"):
+            helper._ensure_child(
+                parent,
+                "worker-repos",
+                uid=os.geteuid(),
+                gid=os.getegid(),
+                mode=0o750,
+            )
+        assert not (tmp_path / "worker-repos").exists()
+    finally:
+        os.close(parent.fd)

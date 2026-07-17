@@ -2017,18 +2017,23 @@ the private mode-`0600` token/env authority from platform-dev into shared
 storage. Do not request or store the exporter sudo password, enable root SSH,
 add wildcard sudo arguments, or revive the abandoned 14-host authority design.
 
-Repository materialization always clones with `--no-hardlinks` inside a
-service-created unpredictable temp container that inherited the sharedwork
-group and setgid bit from the dedicated root. Before atomic publication it
-rejects authority symlinks, foreign ownership, group/other write, hard-linked
-or special files, extra directories, and non-exact candidate HEADs while
-allowing tracked git symlinks. Publication uses Linux
-`renameat2(RENAME_NOREPLACE)`: an existing exact target is reused only after a
-complete immutable-tree validation, while any drift or different HEAD fails
-closed without replacement, cleanup, or takeover.
-The installer runs the same no-replace syscall in a bounded, randomized,
-self-cleaning probe under the service identity before declaring the NFS
-authority ready.
+Repository materialization always claims the final candidate directory with
+one atomic no-replace `mkdir`, initially mode `2700`, with the sharedwork group
+and setgid bit inherited from the dedicated root. It clones with
+`--no-hardlinks` while the consumer cannot search or read that private
+directory. Before publication it rejects authority symlinks, foreign
+ownership, group/other write, hard-linked or special files, extra directories,
+and non-exact candidate HEADs while
+allowing tracked git symlinks. Publication is the inode-bound final-directory
+mode transition from private `2700` to immutable consumer-readable `0750` after
+a complete tree validation. An existing exact target is reused only after a
+complete immutable-tree validation, while any private, drifted, or different
+HEAD fails closed without replacement, cleanup, or takeover. The installer
+runs the same private-claim, access-gate, publish, and collision sequence in a
+bounded, randomized, self-cleaning probe under the service identity before
+declaring the NFS authority ready. This avoids assuming optional
+`RENAME_NOREPLACE` support from the NFS server while retaining atomic name
+reservation and fail-closed consumer visibility.
 
 Before request creation the broker also checks the exact 14 active GB10 SSH
 targets as `qianyi`: the 13 clients must expose the exact NFSv4 source and

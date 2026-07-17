@@ -613,8 +613,9 @@ NFS source, mountpoint, NFSv4.2 options, and device identity. A local directory
 at `/shared_work2` fails closed. Runtime readiness proves that `loom-rollout`
 can write/search the dedicated root and that the `qianyi` Slurm submitter can
 read/search but not write it. Step 11 publishes only the exact image-tagged
-direct child through a private setgid temp container and same-root rename;
-authority symlinks, wrong owner/group/mode, hardlinks, special files, or a
+direct child through a private final-name claim and inode-bound publication
+mode transition. Authority symlinks, wrong owner/group/mode, hardlinks,
+special files, or a
 non-exact resolved SHA fail closed. Publication is no-replace and immutable:
 an exact existing target is accepted only after full index/physical-tree
 validation, and drift is never replaced or implicitly cleaned during rollout

@@ -216,19 +216,21 @@ authority with install evidence.
 
 Candidate checkout publication is a single-writer lifecycle. Step 11 accepts
 only the exact image-tagged direct child, verifies every authority path with
-no-follow metadata, and clones with `--no-hardlinks` inside an unpredictable
-private temp directory that inherited sharedwork/setgid from the authority
-root. It permits tracked git symlinks but rejects authority symlinks, foreign
-ownership, group/other write, hard-linked or special files, and a non-exact
-resolved HEAD. After permission normalization it uses a same-root atomic
-Linux `renameat2(RENAME_NOREPLACE)`. The candidate path is immutable: an
-existing exact checkout is reused only after full index/physical-tree
-validation, while any different HEAD, mode/content drift, or extra directory
-fails without replacement. Materialization cleans only the unchanged inode it
-created for its own temp container and never removes or takes over an ambient
-path. Install/check also performs a bounded, self-cleaning publication probe
-as the service identity so an NFS server that does not honor the required
-no-replace contract fails before rollout admission is restored.
+no-follow metadata, and atomically claims that final child with no-replace
+`mkdir` at private mode `2700`, inheriting sharedwork/setgid from the authority
+root. It clones with `--no-hardlinks` while consumers cannot search the claimed
+directory. It permits tracked git symlinks but rejects authority symlinks,
+foreign ownership, group/other write, hard-linked or special files, and a
+non-exact resolved HEAD. After complete validation, an inode-bound `fchmod`
+from `2700` to immutable consumer-readable `0750` is the publication point.
+The candidate path is immutable: an existing exact checkout is reused only
+after full index/physical-tree validation, while any private, different HEAD,
+mode/content drift, or extra directory fails without replacement.
+Materialization cleans only the unchanged private inode it created and never
+removes or takes over an ambient path. Install/check also performs a bounded,
+self-cleaning private-claim/access-gate/publish/collision probe as the service
+identity. The protocol requires only NFSv4 `mkdir` and mode semantics and does
+not assume optional Linux `RENAME_NOREPLACE` support from the NFS server.
 
 The broker preflight verifies the fixed 14 active GB10 nodes can consume the
 shared root as `qianyi` without writing it. The 13 NFS clients must report the

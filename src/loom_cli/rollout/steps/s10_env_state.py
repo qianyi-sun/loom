@@ -10,8 +10,6 @@ active=false) actually stop and disable supervisors.
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import glob
 import grp
 import hashlib
@@ -20,17 +18,15 @@ import json
 import os
 import pwd
 import re
-import secrets
 import shlex
 import socket
 import stat
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -89,7 +85,6 @@ _CANONICAL_SHARED_REPO_GIT_CONFIG = (
     b"\tbare = false\n"
     b"\tlogallrefupdates = true\n"
 )
-_TEST_RENAME_NOREPLACE_BACKEND: Callable[[int, str, int, str], None] | None = None
 _OVERSIZED_PORT_FORWARD_OUTPUT = "[REDACTED:oversized-port-forward-output]\n"
 _PORT_FORWARD_ENV_KEYS = frozenset(
     {
@@ -2090,6 +2085,7 @@ def _validate_repo_tree(
     *,
     root: _BoundDirectory,
     resolved_sha: str,
+    top_mode: int = 0o750,
 ) -> None:
     root.assert_stable()
     try:
@@ -2101,7 +2097,7 @@ def _validate_repo_tree(
         if (
             top.st_uid != os.geteuid()
             or top.st_gid != root.identity.st_gid
-            or stat.S_IMODE(top.st_mode) != 0o750
+            or stat.S_IMODE(top.st_mode) != top_mode
         ):
             raise ExternalSlurmPrereqMaterializationError(
                 "existing external runner repository has unsafe authority",
@@ -2208,6 +2204,7 @@ def _normalize_repo_tree(
     *,
     root: _BoundDirectory,
     resolved_sha: str,
+    publish: bool = True,
 ) -> None:
     root.assert_stable()
     repo_fd = _open_child_directory(root.fd, repo_dir.name)
@@ -2260,14 +2257,24 @@ def _normalize_repo_tree(
             uid=os.geteuid(),
             gid=root.identity.st_gid,
         )
-        os.fchmod(repo_fd, 0o750)
+        if publish:
+            os.fchmod(repo_fd, 0o750)
+        elif stat.S_IMODE(os.fstat(repo_fd).st_mode) != 0o2700:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner private checkout lost its setgid access gate",
+            )
         if materialized != set(index_modes) or directories != expected_directories:
             raise ExternalSlurmPrereqMaterializationError(
                 "fresh external runner checkout does not match its exact index",
             )
     finally:
         os.close(repo_fd)
-    _validate_repo_tree(repo_dir, root=root, resolved_sha=resolved_sha)
+    _validate_repo_tree(
+        repo_dir,
+        root=root,
+        resolved_sha=resolved_sha,
+        top_mode=0o750 if publish else 0o2700,
+    )
 
 
 def _repo_matches(
@@ -2324,34 +2331,34 @@ def _clone_repo_checkout(
     )
 
 
-def _prepare_temp_root(
-    temp_root: Path,
+def _prepare_private_claim(
+    claim_root: Path,
     *,
     root: _BoundDirectory,
 ) -> os.stat_result:
-    temp_identity = temp_root.lstat()
+    claim_identity = claim_root.lstat()
     if (
-        temp_identity.st_gid != root.identity.st_gid
-        or temp_identity.st_uid != os.geteuid()
-        or not stat.S_ISDIR(temp_identity.st_mode)
-        or stat.S_ISLNK(temp_identity.st_mode)
+        claim_identity.st_gid != root.identity.st_gid
+        or claim_identity.st_uid != os.geteuid()
+        or not stat.S_ISDIR(claim_identity.st_mode)
+        or stat.S_ISLNK(claim_identity.st_mode)
     ):
         raise ExternalSlurmPrereqMaterializationError(
-            "external runner temporary checkout did not inherit root authority",
+            "external runner private checkout did not inherit root authority",
         )
-    if not temp_identity.st_mode & stat.S_ISGID:
+    if not claim_identity.st_mode & stat.S_ISGID:
         process_groups = {*os.getgroups(), os.getgid()}
         if root.identity.st_gid not in process_groups:
             raise ExternalSlurmPrereqMaterializationError(
-                "external runner temporary checkout did not inherit setgid authority",
+                "external runner private checkout did not inherit setgid authority",
             )
-        os.chmod(temp_root, 0o2700)
-        temp_identity = temp_root.lstat()
-    if stat.S_IMODE(temp_identity.st_mode) != 0o2700:
+        os.chmod(claim_root, 0o2700)
+        claim_identity = claim_root.lstat()
+    if stat.S_IMODE(claim_identity.st_mode) != 0o2700:
         raise ExternalSlurmPrereqMaterializationError(
-            "external runner temporary checkout mode is unsafe",
+            "external runner private checkout mode is unsafe",
         )
-    return temp_identity
+    return claim_identity
 
 
 def _remove_directory_at(parent_fd: int, name: str, *, expected: os.stat_result) -> None:
@@ -2360,7 +2367,7 @@ def _remove_directory_at(parent_fd: int, name: str, *, expected: os.stat_result)
         current = os.fstat(directory_fd)
         if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
             raise ExternalSlurmPrereqMaterializationError(
-                "external runner temporary checkout authority changed during materialization",
+                "external runner private checkout authority changed during materialization",
             )
         for child in os.listdir(directory_fd):
             metadata = os.stat(child, dir_fd=directory_fd, follow_symlinks=False)
@@ -2373,69 +2380,6 @@ def _remove_directory_at(parent_fd: int, name: str, *, expected: os.stat_result)
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _entry_exists(directory_fd: int, name: str) -> bool:
-    try:
-        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    return True
-
-
-def _rename_directory_noreplace(
-    source_fd: int,
-    source_name: str,
-    destination_fd: int,
-    destination_name: str,
-) -> None:
-    """Publish exactly once without a check-then-replace race."""
-    if _TEST_RENAME_NOREPLACE_BACKEND is not None:
-        _TEST_RENAME_NOREPLACE_BACKEND(
-            source_fd,
-            source_name,
-            destination_fd,
-            destination_name,
-        )
-        return
-    if not sys.platform.startswith("linux"):
-        raise ExternalSlurmPrereqMaterializationError(
-            "atomic external runner repository publication is unavailable",
-        )
-    libc = ctypes.CDLL(None, use_errno=True)
-    encoded_source = os.fsencode(source_name)
-    encoded_destination = os.fsencode(destination_name)
-    try:
-        rename = libc.renameat2
-    except AttributeError as exc:
-        raise ExternalSlurmPrereqMaterializationError(
-            "atomic external runner repository publication is unavailable",
-        ) from exc
-    rename.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    rename.restype = ctypes.c_int
-    result = rename(
-        source_fd,
-        encoded_source,
-        destination_fd,
-        encoded_destination,
-        1,  # RENAME_NOREPLACE
-    )
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-        raise ExternalSlurmPrereqMaterializationError(
-            "external runner repository destination appeared during materialization",
-        )
-    raise ExternalSlurmPrereqMaterializationError(
-        "atomic external runner repository publication failed safely",
-    )
-
-
 def _materialize_repo_dir(
     *,
     repo_dir: Path,
@@ -2444,8 +2388,8 @@ def _materialize_repo_dir(
     expected_ref: str,
 ) -> dict[str, Any]:
     root = _validate_repo_root(repo_dir, expected_ref)
-    temp_name: str | None = None
-    temp_identity: os.stat_result | None = None
+    claim_identity: os.stat_result | None = None
+    published = False
     try:
         try:
             matched = _repo_matches(repo_dir, resolved_sha, root=root)
@@ -2453,42 +2397,62 @@ def _materialize_repo_dir(
             matched = None
         if matched is not None:
             return matched
-        if _entry_exists(root.fd, repo_dir.name):
+        try:
+            os.mkdir(repo_dir.name, 0o700, dir_fd=root.fd)
+        except FileExistsError:
             raise ExternalSlurmPrereqMaterializationError(
                 "existing external runner repository does not exactly match the candidate",
-            )
-
-        temp_name = f".{repo_dir.name}.tmp-{secrets.token_hex(16)}"
-        os.mkdir(temp_name, 0o700, dir_fd=root.fd)
-        temp_root = repo_dir.parent / temp_name
-        temp_identity = os.stat(temp_name, dir_fd=root.fd, follow_symlinks=False)
-        checkout = temp_root / "checkout"
-        temp_fd = _open_child_directory(root.fd, temp_name)
+            ) from None
+        claim_identity = os.stat(repo_dir.name, dir_fd=root.fd, follow_symlinks=False)
+        repo_fd = _open_child_directory(root.fd, repo_dir.name)
         try:
-            temp_identity = _prepare_temp_root(temp_root, root=root)
+            claim_identity = _prepare_private_claim(repo_dir, root=root)
+            opened_claim = os.fstat(repo_fd)
+            if (opened_claim.st_dev, opened_claim.st_ino) != (
+                claim_identity.st_dev,
+                claim_identity.st_ino,
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner private checkout authority changed before materialization",
+                )
             root.assert_stable()
             _clone_repo_checkout(
                 source_repo=source_repo,
-                tmp_dir=checkout,
+                tmp_dir=repo_dir,
                 resolved_sha=resolved_sha,
             )
             root.assert_stable()
-            temp_current = os.fstat(temp_fd)
-            if (temp_current.st_dev, temp_current.st_ino) != (
-                temp_identity.st_dev,
-                temp_identity.st_ino,
+            claim_current = os.fstat(repo_fd)
+            if (claim_current.st_dev, claim_current.st_ino) != (
+                claim_identity.st_dev,
+                claim_identity.st_ino,
             ):
                 raise ExternalSlurmPrereqMaterializationError(
-                    "external runner temporary checkout authority changed during materialization",
+                    "external runner private checkout authority changed during materialization",
                 )
             _normalize_repo_tree(
-                checkout,
-                root=_BoundDirectory(temp_root, temp_fd, temp_identity),
+                repo_dir,
+                root=root,
                 resolved_sha=resolved_sha,
+                publish=False,
             )
-            _rename_directory_noreplace(temp_fd, "checkout", root.fd, repo_dir.name)
+            root.assert_stable()
+            lexical = os.stat(repo_dir.name, dir_fd=root.fd, follow_symlinks=False)
+            current = os.fstat(repo_fd)
+            if (
+                (lexical.st_dev, lexical.st_ino)
+                != (claim_identity.st_dev, claim_identity.st_ino)
+                or (current.st_dev, current.st_ino)
+                != (claim_identity.st_dev, claim_identity.st_ino)
+                or stat.S_IMODE(current.st_mode) != 0o2700
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner private checkout authority changed before publication",
+                )
+            os.fchmod(repo_fd, 0o750)
+            published = True
         finally:
-            os.close(temp_fd)
+            os.close(repo_fd)
 
         _validate_repo_tree(repo_dir, root=root, resolved_sha=resolved_sha)
         return {
@@ -2501,13 +2465,18 @@ def _materialize_repo_dir(
         }
     finally:
         try:
-            if temp_name is not None and temp_identity is not None:
+            if not published and claim_identity is not None:
+                cleanup_current: os.stat_result | None
                 try:
-                    current = os.stat(temp_name, dir_fd=root.fd, follow_symlinks=False)
+                    cleanup_current = os.stat(
+                        repo_dir.name,
+                        dir_fd=root.fd,
+                        follow_symlinks=False,
+                    )
                 except FileNotFoundError:
-                    current = None
-                if current is not None:
-                    _remove_directory_at(root.fd, temp_name, expected=temp_identity)
+                    cleanup_current = None
+                if cleanup_current is not None:
+                    _remove_directory_at(root.fd, repo_dir.name, expected=claim_identity)
         finally:
             os.close(root.fd)
 
