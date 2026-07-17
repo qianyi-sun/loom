@@ -34,7 +34,12 @@ INSTALLED_STATE_ROOT: Final = Path("/var/lib/loom-staging-exporter-authority")
 INSTALLED_LOCK: Final = INSTALLED_STATE_ROOT / "authority.lock"
 INSTALLED_JOURNAL: Final = INSTALLED_STATE_ROOT / "journal.jsonl"
 EXPORT_FRAGMENT: Final = Path("/etc/exports.d/loom-staging-rollout-platform-dev.exports")
+NFS_STATE_DIRECTORY: Final = Path("/var/lib/nfs")
+NFS_ETAB: Final = NFS_STATE_DIRECTORY / "etab"
 AUTHORITY_RELATIVE: Final = Path("scripts/ops/staging_rollout_shared_work2_export_authority.py")
+EXPORT_ASSET_RELATIVE: Final = Path(
+    "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports"
+)
 VALIDATOR_RELATIVE: Final = Path("scripts/ops/staging_rollout_sealed_source.py")
 MOUNTINFO: Final = Path("/proc/self/mountinfo")
 STATUS: Final = Path("/proc/self/status")
@@ -345,6 +350,45 @@ def _load_installed_authority() -> ModuleType:
     return module
 
 
+def _validate_unused_export_state() -> bool:
+    try:
+        os.lstat(EXPORT_FRAGMENT)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise DockerBootstrapError("export fragment state is unavailable") from exc
+    try:
+        expected_fragment = _safe_root_regular(SOURCE / EXPORT_ASSET_RELATIVE, mode=0o644)
+        asset_line = expected_fragment.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise DockerBootstrapError("installed export asset is invalid") from exc
+    asset_match = re.fullmatch(
+        r"/shared_work2 192[.]168[.]50[.]103/32\(([^()]*)\)",
+        asset_line,
+    )
+    if asset_match is None:
+        raise DockerBootstrapError("installed export asset is invalid")
+    expected_options = frozenset(asset_match.group(1).split(","))
+    if _safe_root_regular(EXPORT_FRAGMENT, mode=0o644) != expected_fragment:
+        raise DockerBootstrapError("partial exporter authority cannot be upgraded")
+    _safe_root_directory(NFS_STATE_DIRECTORY, 0o755)
+    try:
+        etab = _safe_root_regular(NFS_ETAB, mode=0o644).decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise DockerBootstrapError("NFS active export table is invalid") from exc
+    matches: list[frozenset[str]] = []
+    for line in etab.splitlines():
+        match = re.fullmatch(
+            r"/shared_work2\s+192[.]168[.]50[.]103/32\(([^()]*)\)",
+            line,
+        )
+        if match is not None:
+            matches.append(frozenset(match.group(1).split(",")))
+    if len(matches) != 1 or matches[0] != expected_options:
+        raise DockerBootstrapError("partial exporter authority cannot be upgraded")
+    return True
+
+
 def _lock_unused_installed_identity() -> tuple[InstalledIdentity, int]:
     authority = _load_installed_authority()
     try:
@@ -364,15 +408,10 @@ def _lock_unused_installed_identity() -> tuple[InstalledIdentity, int]:
         os.close(descriptor)
         raise DockerBootstrapError("used exporter authority cannot be upgraded")
     try:
-        os.lstat(EXPORT_FRAGMENT)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
+        _validate_unused_export_state()
+    except DockerBootstrapError:
         os.close(descriptor)
-        raise DockerBootstrapError("export fragment state is unavailable") from exc
-    else:
-        os.close(descriptor)
-        raise DockerBootstrapError("used exporter authority cannot be upgraded")
+        raise
     identity = InstalledIdentity(
         source_sha=policy.source_sha,
         source_tree_sha=policy.source_tree_sha,

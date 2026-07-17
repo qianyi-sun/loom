@@ -306,8 +306,10 @@ If bootstrap completed but the fixed `install` verb never succeeded, a later
 reviewed cumulative image may replace that unused authority without reopening
 a general root channel. The launcher takes the old authority's exclusive lock,
 revalidates its exact policy/assets/source, requires an empty install journal
-and absent export fragment, and proves the new sealed commit is a descendant on
-the same approved base. It disables sudoers first, moves only the six fixed
+and either an absent export fragment or the exact old fragment already present
+as the single exact canonical `/var/lib/nfs/etab` client/options record, and
+proves the new sealed commit is a descendant on the same approved base. It
+disables sudoers first, moves only the six fixed
 authority assets and source to same-directory no-replace backups, publishes the
 new exact source, and invokes the normal atomic bootstrap. Failure removes the
 new source and restores the old source/assets with sudoers last; success

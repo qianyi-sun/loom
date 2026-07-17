@@ -206,8 +206,9 @@ state and are never materialized into `/shared_work2`.
 
 The constrained Docker bootstrap may transactionally advance an exporter
 authority only before its first successful install. It holds the old exclusive
-authority lock, requires an empty journal and absent export fragment, proves a
-same-base descendant sealed commit, disables sudoers first, and keeps rollback
+authority lock, requires an empty journal and either no export fragment or the
+exact old fragment bound to the single exact canonical NFS `etab` record,
+proves a same-base descendant sealed commit, disables sudoers first, and keeps rollback
 copies beside the fixed files. New bootstrap failure restores the old exact
 identity with sudoers last; success removes the copies only after new identity
 validation. This is not a general authority-upgrade mechanism and refuses any

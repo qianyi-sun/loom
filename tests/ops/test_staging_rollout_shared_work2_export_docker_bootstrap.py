@@ -250,7 +250,7 @@ def test_provision_source_rolls_back_after_published_validation_failure(
     assert not parent.exists()
 
 
-def test_unused_authority_requires_an_empty_journal_and_absent_fragment(
+def test_unused_authority_requires_an_empty_journal_and_valid_export_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     policy = SimpleNamespace(
@@ -267,16 +267,70 @@ def test_unused_authority_requires_an_empty_journal_and_absent_fragment(
         _regular_root_file=lambda _path, *, mode: b"used\n",
     )
     monkeypatch.setattr(bootstrap, "_load_installed_authority", lambda: authority)
-    monkeypatch.setattr(bootstrap, "_safe_root_regular", lambda *_args, **_kwargs: b"")
-    monkeypatch.setattr(bootstrap, "EXPORT_FRAGMENT", tmp_path / "fragment")
+    monkeypatch.setattr(bootstrap, "_validate_unused_export_state", lambda: False)
 
     with pytest.raises(bootstrap.DockerBootstrapError, match="cannot be upgraded"):
         bootstrap._read_unused_installed_identity()
 
     authority._regular_root_file = lambda _path, *, mode: b""
-    (tmp_path / "fragment").write_text("export\n", encoding="ascii")
-    with pytest.raises(bootstrap.DockerBootstrapError, match="cannot be upgraded"):
-        bootstrap._read_unused_installed_identity()
+    assert bootstrap._read_unused_installed_identity() == bootstrap.InstalledIdentity(
+        policy.source_sha,
+        policy.source_tree_sha,
+        policy.source_base_sha,
+    )
+
+
+def test_unused_authority_accepts_only_exact_active_partial_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fragment = tmp_path / "fragment"
+    nfs_state = tmp_path / "nfs"
+    etab = nfs_state / "etab"
+    nfs_state.mkdir()
+    expected_options = frozenset({"rw", "sync", "sec=sys", "no_root_squash"})
+    source = tmp_path / "source"
+    source.mkdir()
+    asset = source / "asset"
+    asset.write_text(
+        f"/shared_work2 192.168.50.103/32({','.join(sorted(expected_options))})\n",
+        encoding="ascii",
+    )
+    monkeypatch.setattr(bootstrap, "EXPORT_FRAGMENT", fragment)
+    monkeypatch.setattr(bootstrap, "NFS_STATE_DIRECTORY", nfs_state)
+    monkeypatch.setattr(bootstrap, "NFS_ETAB", etab)
+    monkeypatch.setattr(bootstrap, "SOURCE", source)
+    monkeypatch.setattr(bootstrap, "EXPORT_ASSET_RELATIVE", Path("asset"))
+    monkeypatch.setattr(bootstrap, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_safe_root_regular",
+        lambda path, *, mode: path.read_bytes(),
+    )
+
+    assert bootstrap._validate_unused_export_state() is False
+
+    fragment.write_bytes(asset.read_bytes())
+    options = ",".join(sorted(expected_options))
+    etab.write_text(
+        f"/shared_work2\t192.168.50.103/32({options},rw)\n",
+        encoding="ascii",
+    )
+    assert bootstrap._validate_unused_export_state() is True
+
+    etab.write_text(
+        f"/shared_work2\t192.168.50.103/32({options},insecure)\n",
+        encoding="ascii",
+    )
+    with pytest.raises(bootstrap.DockerBootstrapError, match="partial exporter"):
+        bootstrap._validate_unused_export_state()
+
+    etab.write_text(
+        f"/shared_work2\t192.168.50.103/32({options},rw)\n",
+        encoding="ascii",
+    )
+    fragment.write_text("drift\n", encoding="ascii")
+    with pytest.raises(bootstrap.DockerBootstrapError, match="partial exporter"):
+        bootstrap._validate_unused_export_state()
 
 
 def test_move_unused_authority_restores_every_asset_after_partial_failure(

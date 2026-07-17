@@ -1950,9 +1950,12 @@ build and runtime reject any non-ARM64 target.
 
 A reviewed cumulative replacement is permitted only when the installed
 authority is provably unused: its exclusive lock is held, its exact old sealed
-identity and assets validate, its install journal is empty, and its export
-fragment is absent. The new commit must be a descendant of that old commit on
-the same approved base. The Docker launcher removes sudo authority first,
+identity and assets validate, and its install journal is empty. Its export
+fragment must either be absent or exactly match the old sealed asset and the
+single canonical `/var/lib/nfs/etab` client/options record. This second state
+captures only a failed post-refresh verification before any install journal
+was written. The new commit must be a descendant of that old commit on the same
+approved base. The Docker launcher removes sudo authority first,
 moves only fixed assets to same-directory no-replace backups, and either
 atomically bootstraps the new identity or restores the old identity with
 sudoers last. Do not use this path after any successful `install`; such an
@@ -1994,7 +1997,10 @@ In sealed cumulative mode the underlying helper requires the same
 `--sealed-approved-base-sha` binding as the host installer and validates that
 fixed script checkout before changing the export. It installs only the exact
 `192.168.50.103/32` allowance, requires the exact effective export options, and
-fails rather than widening or overwriting a drifted fragment. A newly created
+fails rather than widening or overwriting a drifted fragment. Human-oriented
+`exportfs -v` output proves the exact client is visible but is not an option
+authority because it omits default options; the root-owned, bounded canonical
+`/var/lib/nfs/etab` entry is the exact effective-options authority. A newly created
 fragment is removed and export state refreshed if the first `exportfs -ra`
 fails; pre-existing exact state is never removed. The platform-dev root
 installer then installs and starts the
