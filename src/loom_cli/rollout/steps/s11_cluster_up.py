@@ -7,6 +7,7 @@ from pathlib import Path
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.steps.backup_limits import backup_traversal_limit_argv
 from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_argv,
     candidate_loom_cwd,
@@ -37,6 +38,7 @@ class ClusterUpStep(SubcommandStep):
             "--sandbox-deadline-max-pods",
             "4",
         )
+        argv.extend(backup_traversal_limit_argv(ctx))
         if ctx.request_envelope_path is not None:
             argv.extend(
                 [

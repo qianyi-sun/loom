@@ -1238,6 +1238,17 @@ def test_envelope_mode_constructs_context_without_git_or_evidence_discovery(
     assert ctx.attempt_operator == "hongjian"
     assert ctx.attempt_uid == 2002
     assert ctx.request_envelope_path == path
+    limits = operator_backup_traversal_limits(config)
+    assert ctx.backup_traversal_limits() == (
+        limits.max_files,
+        limits.max_entries,
+        limits.max_total_bytes,
+    )
+    assert ctx.to_inputs_dict()["backup_manifest_traversal_limits"] == {
+        "max_files": limits.max_files,
+        "max_entries": limits.max_entries,
+        "max_total_bytes": limits.max_total_bytes,
+    }
     assert captured["evidence"].rollout_id == envelope.rollout_id
 
 
