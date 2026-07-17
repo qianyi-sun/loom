@@ -17,6 +17,29 @@ def test_identity_requires_exact_approved_base(monkeypatch: pytest.MonkeyPatch) 
         bootstrap.Identity.from_environ()
 
 
+def test_runtime_rejects_a_non_gb10_architecture(monkeypatch: pytest.MonkeyPatch) -> None:
+    machine = os.uname()
+    monkeypatch.setattr(
+        bootstrap.os,
+        "uname",
+        lambda: machine.__class__(
+            (
+                machine.sysname,
+                machine.nodename,
+                machine.release,
+                machine.version,
+                "x86_64",
+            )
+        ),
+    )
+    monkeypatch.setattr(bootstrap.sys, "argv", [bootstrap.sys.argv[0]])
+    monkeypatch.setattr(bootstrap.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bootstrap.os, "getegid", lambda: 0)
+
+    with pytest.raises(bootstrap.DockerBootstrapError, match="architecture is invalid"):
+        bootstrap._validate_runtime()
+
+
 def test_mountinfo_parser_decodes_and_preserves_bind_identity() -> None:
     records = bootstrap._parse_mountinfo(
         "42 41 8:1 /usr/local /usr/local rw,relatime - ext4 /dev/root rw\n"

@@ -31,6 +31,7 @@ NETWORK_CLASS: Final = Path("/sys/class/net")
 IPV4_ROUTES: Final = Path("/proc/net/route")
 IPV6_ROUTES: Final = Path("/proc/net/ipv6_route")
 EXPECTED_CAPABILITY_MASK: Final = (1 << 0) | (1 << 1) | (1 << 3)
+EXPECTED_MACHINE: Final = "aarch64"
 EXPECTED_WRITABLE_BINDS: Final = (Path("/opt"), Path("/usr/local"), Path("/etc"), Path("/var/lib"))
 SHA_RE: Final = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
@@ -138,6 +139,8 @@ def _validate_network_boundary() -> None:
 def _validate_runtime() -> None:
     if sys.argv != [sys.argv[0]] or os.geteuid() != 0 or os.getegid() != 0:
         raise DockerBootstrapError("Docker bootstrap invocation is not fixed root")
+    if os.uname().machine != EXPECTED_MACHINE:
+        raise DockerBootstrapError("Docker bootstrap host architecture is invalid")
     if any(key.startswith("SUDO_") for key in os.environ):
         raise DockerBootstrapError("Docker bootstrap rejects a sudo-derived process")
     try:

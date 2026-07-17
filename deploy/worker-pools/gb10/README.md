@@ -285,7 +285,7 @@ SSH, or reuse the rejected 14-host root-helper design.
 
 When the exporter operator already has access to the rootful Docker daemon, a
 sealed one-time bootstrap image may replace the external console action. Build
-that image only from the reviewed cumulative source with
+that ARM64 image only from the reviewed cumulative source with
 `Containerfile.shared-work2-export-bootstrap`, export and hash the exact image,
 and run it by content ID with no command override. The accepted invocation has
 no network, a read-only container root, no new privileges, and only
@@ -297,6 +297,8 @@ The fixed Python entrypoint validates its capability, mount, usable-network,
 bundle, and sealed-source identities before any mutation. An interactive entrypoint,
 `--privileged`, a writable host-root bind, a recursive `/var/lib` bind, or a
 different image/argv/environment is not an accepted bootstrap channel.
+The build and entrypoint both reject a non-ARM64 target so an AMD64 artifact
+cannot depend on optional host emulation.
 
 ## Health And Scheduling Gates
 

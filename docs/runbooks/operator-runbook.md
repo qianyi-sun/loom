@@ -1932,7 +1932,7 @@ does not create a general root command channel.
 
 If `qianyi` already has access to the exporter's rootful Docker daemon, the
 reviewed Docker bootstrap handoff is an equivalent one-time administrator
-channel. It uses the exact content-addressed image built from
+channel. It uses the exact ARM64 content-addressed image built from
 `deploy/worker-pools/gb10/Containerfile.shared-work2-export-bootstrap`; its only
 entrypoint is the reviewed Python bootstrap launcher. The container must run
 with `--network none`, `--read-only`, `no-new-privileges`, an exact capability
@@ -1945,6 +1945,8 @@ state and is forbidden. The launcher refuses wrong mount roots/options,
 usable non-loopback devices or routes, a writable container root, capability drift,
 bundle drift, source drift, or non-atomic source publication. Do not substitute
 an interactive shell, `--privileged`, or a writable `/` bind.
+Do not substitute an AMD64 image or rely on optional binfmt emulation; the
+build and runtime reject any non-ARM64 target.
 
 The sealed checkout may contain a reviewed Git symlink such as
 `deploy/.env -> ../.env`, but validation never follows it. An allowed link must
