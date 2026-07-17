@@ -72,6 +72,28 @@ def _commit_symlink(source: sealed.SealedSource, path: str, target: str) -> seal
     return sealed.SealedSource(source.path, commit, tree, source.base_sha)
 
 
+def _standalone_checkout(source: sealed.SealedSource, destination: Path) -> sealed.SealedSource:
+    subprocess.run(
+        ["git", "clone", "--no-hardlinks", str(source.path), str(destination)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _git(destination, "remote", "set-url", "origin", sealed.APPROVED_REMOTE_URL)
+    _git(destination, "checkout", "--detach", source.commit_sha)
+    return sealed.SealedSource(
+        destination,
+        source.commit_sha,
+        source.tree_sha,
+        source.base_sha,
+    )
+
+
+def _assert_exact_tracked_symlink(source: sealed.SealedSource, path: str) -> None:
+    assert _git(source.path, "ls-tree", source.tree_sha, "--", path).startswith("120000 blob ")
+    assert _git(source.path, "ls-files", "--stage", "--", path).startswith("120000 ")
+
+
 def test_sealed_source_accepts_only_exact_clean_linear_detached_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -226,3 +248,52 @@ def test_real_checkout_rejects_exact_tracked_symlink_loop(
 
     with pytest.raises(sealed.SealedSourceError, match="target is unsafe"):
         _validate_real_checkout(source)
+
+
+@pytest.mark.parametrize(
+    ("path", "target"),
+    (
+        ("git-root", ".git"),
+        ("git-config", ".git/config"),
+        ("deploy/git-config", "../.git/config"),
+        ("normalized-git-config", "deploy/../.git/./config"),
+        ("deploy/normalized-git-config", "../deploy/../.git//config"),
+    ),
+)
+def test_standalone_checkout_rejects_exact_tracked_git_admin_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    target: str,
+) -> None:
+    source = _commit_symlink(_source(tmp_path / "origin"), path, target)
+    standalone = _standalone_checkout(source, tmp_path / "standalone")
+    _trust_tmp_parents(monkeypatch)
+
+    _assert_exact_tracked_symlink(standalone, path)
+    with pytest.raises(sealed.SealedSourceError, match="target is unsafe"):
+        _validate_real_checkout(standalone)
+
+
+def test_standalone_checkout_accepts_exact_deploy_env_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path / "origin")
+    standalone = _standalone_checkout(source, tmp_path / "standalone")
+    _trust_tmp_parents(monkeypatch)
+
+    _assert_exact_tracked_symlink(standalone, "deploy/.env")
+    assert os.readlink(standalone.path / "deploy/.env") == "../.env"
+    _validate_real_checkout(standalone)
+
+
+def test_standalone_checkout_treats_git_admin_target_case_sensitively(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _commit_symlink(_source(tmp_path / "origin"), "git-case-link", ".Git/config")
+    standalone = _standalone_checkout(source, tmp_path / "standalone")
+    _trust_tmp_parents(monkeypatch)
+
+    _validate_real_checkout(standalone)

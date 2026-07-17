@@ -1932,9 +1932,11 @@ The sealed checkout may contain a reviewed Git symlink such as
 be mode `120000` in both the exact tree and stage-zero index, retain the
 expected no-follow owner and single link count, stay lexically within the
 checkout, avoid tracked directories or other symlinks, and hash from its
-literal `readlink` payload to the exact tree blob. Absolute, escaping,
-untracked, `.git`, retargeted, type-changed, or dirty links fail before
-bootstrap or install.
+literal `readlink` payload to the exact tree blob. After lexical normalization,
+the resolved target must not have the literal, case-sensitive `.git` name as
+its first path component. Absolute, escaping, untracked,
+Git-administration-targeting, retargeted, type-changed, or dirty links fail
+before bootstrap or install.
 
 After bootstrap, the coordinator may run only:
 

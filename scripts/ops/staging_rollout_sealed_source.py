@@ -273,6 +273,8 @@ def _validate_tracked_symlink(
     except OSError as exc:
         raise SealedSourceError("sealed source tracked symlink is unavailable") from exc
     resolved = _contained_target(relative, target)
+    if PurePosixPath(resolved).parts[0] == ".git":
+        raise SealedSourceError("sealed source tracked symlink target is unsafe")
     if resolved in tracked_symlinks or resolved in tracked_directories:
         raise SealedSourceError("sealed source tracked symlink target is unsafe")
     payload = os.fsencode(target)
