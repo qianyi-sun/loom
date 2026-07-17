@@ -1927,6 +1927,15 @@ reviewed boundary. Bootstrap validates the checkout and sudoers before
 publication, installs sudoers last, and rolls back only files it created if a
 later validation fails. It does not create a general root command channel.
 
+The sealed checkout may contain a reviewed Git symlink such as
+`deploy/.env -> ../.env`, but validation never follows it. An allowed link must
+be mode `120000` in both the exact tree and stage-zero index, retain the
+expected no-follow owner and single link count, stay lexically within the
+checkout, avoid tracked directories or other symlinks, and hash from its
+literal `readlink` payload to the exact tree blob. Absolute, escaping,
+untracked, `.git`, retargeted, type-changed, or dirty links fail before
+bootstrap or install.
+
 After bootstrap, the coordinator may run only:
 
 ```bash

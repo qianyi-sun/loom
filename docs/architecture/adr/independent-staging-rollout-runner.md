@@ -75,6 +75,13 @@ checkout, rejects Git indirection and non-linear or over-32-commit history,
 and copies only that exact commit into the root install source and service
 candidate without fetching or resolving `origin/dev`.
 
+The checkout validator does not follow repository symlinks. It permits only
+mode-`120000` paths that agree between the exact sealed tree and stage-zero
+index, whose no-follow ownership and link count are safe, and whose literal
+`readlink` payload hashes to the exact tree blob. Absolute, escaping, chained,
+directory-targeting, untracked, type-drifted, `.git`, or otherwise dirty
+symlinks remain fail-closed.
+
 The shared-work2 exporter consumes the same exact source validator before its
 first mutation. The install ledger and protected config record the source mode,
 commit, tree, and base; immutable requests and attempt envelopes carry and
