@@ -10,6 +10,8 @@ active=false) actually stop and disable supervisors.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import glob
 import grp
 import hashlib
@@ -19,19 +21,18 @@ import os
 import re
 import secrets
 import shlex
-import shutil
 import socket
 import stat
 import subprocess
-import tempfile
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO, Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -76,9 +77,8 @@ _CONTROL_PLANE_READY_TIMEOUT_SECONDS = 60.0
 _CONTROL_PLANE_READY_INTERVAL_SECONDS = 0.5
 _MAX_CATALOG_SOURCE_BYTES = 1024 * 1024
 _MAX_PORT_FORWARD_LOG_CHARS = 64 * 1024
-_SHARED_WORKER_REPO_ROOT = Path(
-    "/shared_work/qianyi/.loom-staging-rollout/worker-repos"
-)
+_SHARED_WORKER_REPO_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout/worker-repos")
+_TEST_RENAME_NOREPLACE_BACKEND: Callable[[int, str, int, str], None] | None = None
 _OVERSIZED_PORT_FORWARD_OUTPUT = "[REDACTED:oversized-port-forward-output]\n"
 _PORT_FORWARD_ENV_KEYS = frozenset(
     {
@@ -1450,7 +1450,59 @@ def _git_stdout(argv: list[str]) -> str:
     return result.stdout.strip()
 
 
-def _validate_repo_root(repo_dir: Path, expected_ref: str) -> os.stat_result:
+@dataclass(frozen=True)
+class _BoundDirectory:
+    """An opened directory whose identity must remain stable for one operation."""
+
+    path: Path
+    fd: int
+    identity: os.stat_result
+
+    def assert_stable(self) -> None:
+        current = os.fstat(self.fd)
+        try:
+            lexical = self.path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository authority changed during materialization",
+            ) from exc
+        expected = (self.identity.st_dev, self.identity.st_ino)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or not stat.S_ISDIR(lexical.st_mode)
+            or (current.st_dev, current.st_ino) != expected
+            or (lexical.st_dev, lexical.st_ino) != expected
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository authority changed during materialization",
+            )
+
+
+def _open_bound_directory(path: Path) -> _BoundDirectory:
+    if not path.is_absolute() or ".." in path.parts:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository authority path is unsafe",
+        )
+    flags = (
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = os.open("/", flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        identity = os.fstat(fd)
+        binding = _BoundDirectory(path=path, fd=fd, identity=identity)
+        binding.assert_stable()
+        return binding
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _validate_repo_root(repo_dir: Path, expected_ref: str) -> _BoundDirectory:
     expected_name = f"loom-remote-worker-{expected_ref.strip()}"
     if (
         not repo_dir.is_absolute()
@@ -1462,115 +1514,355 @@ def _validate_repo_root(repo_dir: Path, expected_ref: str) -> os.stat_result:
             "external runner repository destination is outside its candidate-bound root",
         )
 
-    current = Path("/")
-    for component in repo_dir.parent.parts[1:]:
-        current /= component
-        try:
-            metadata = current.lstat()
-        except OSError as exc:
-            raise ExternalSlurmPrereqMaterializationError(
-                f"external runner repository authority is unavailable: {current}",
-            ) from exc
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise ExternalSlurmPrereqMaterializationError(
-                f"external runner repository authority is not a real directory: {current}",
-            )
-
-    root = repo_dir.parent.lstat()
-    mode = stat.S_IMODE(root.st_mode)
+    try:
+        root = _open_bound_directory(repo_dir.parent)
+    except OSError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository authority is unavailable",
+        ) from exc
+    mode = stat.S_IMODE(root.identity.st_mode)
     try:
         shared_work_gid = grp.getgrnam("sharedwork").gr_gid
     except KeyError as exc:
+        os.close(root.fd)
         raise ExternalSlurmPrereqMaterializationError(
             "sharedwork group is unavailable for external runner materialization",
         ) from exc
     if (
-        root.st_uid != os.geteuid()
-        or root.st_gid != shared_work_gid
+        root.identity.st_uid != os.geteuid()
+        or root.identity.st_gid != shared_work_gid
         or mode != 0o2750
     ):
+        os.close(root.fd)
         raise ExternalSlurmPrereqMaterializationError(
             "external runner repository root has unsafe owner or mode",
         )
     return root
 
 
-def _validate_repo_tree(repo_dir: Path, *, root: os.stat_result) -> None:
-    try:
-        top = repo_dir.lstat()
-    except FileNotFoundError:
-        return
-    if (
-        stat.S_ISLNK(top.st_mode)
-        or not stat.S_ISDIR(top.st_mode)
-        or top.st_uid != os.geteuid()
-        or top.st_gid != root.st_gid
-        or stat.S_IMODE(top.st_mode) != 0o750
-    ):
-        raise ExternalSlurmPrereqMaterializationError(
-            "existing external runner repository has unsafe authority",
-        )
-    for directory, names, files in os.walk(repo_dir, followlinks=False):
-        for name in [*names, *files]:
-            path = Path(directory, name)
-            metadata = path.lstat()
-            if metadata.st_uid != os.geteuid() or metadata.st_gid != root.st_gid:
+def _open_child_directory(parent_fd: int, name: str) -> int:
+    return os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+
+
+def _index_modes(repo_dir: Path) -> dict[str, str]:
+    raw = _git_stdout(["git", "-C", str(repo_dir), "ls-files", "--stage", "-z"])
+    modes: dict[str, str] = {}
+    for raw_entry in raw.split("\0"):
+        if not raw_entry:
+            continue
+        metadata, separator, relative = raw_entry.partition("\t")
+        fields = metadata.split()
+        if separator != "\t" or len(fields) != 3 or fields[2] != "0":
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index is invalid",
+            )
+        mode = fields[0]
+        relative_path = PurePosixPath(relative)
+        if (
+            mode not in {"100644", "100755", "120000"}
+            or not relative
+            or relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or relative_path.parts[0] == ".git"
+            or relative in modes
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index contains an unsupported entry",
+            )
+        modes[relative] = mode
+    return modes
+
+
+def _normalize_git_metadata(directory_fd: int, *, uid: int, gid: int) -> None:
+    for name in os.listdir(directory_fd):
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if metadata.st_uid != uid or metadata.st_gid != gid:
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout contains foreign-owned git metadata",
+            )
+        if stat.S_ISLNK(metadata.st_mode) or not (
+            stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout contains unsafe git metadata",
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            child_fd = _open_child_directory(directory_fd, name)
+            try:
+                _normalize_git_metadata(child_fd, uid=uid, gid=gid)
+                os.fchmod(child_fd, 0o750)
+            finally:
+                os.close(child_fd)
+        else:
+            if metadata.st_nlink != 1:
                 raise ExternalSlurmPrereqMaterializationError(
-                    "external runner repository contains foreign-owned content",
+                    "fresh external runner checkout contains linked git metadata",
                 )
-            if stat.S_ISLNK(metadata.st_mode):
-                continue
-            if stat.S_ISDIR(metadata.st_mode):
-                if stat.S_IMODE(metadata.st_mode) & 0o022:
-                    raise ExternalSlurmPrereqMaterializationError(
-                        "external runner repository contains a writable directory",
+            os.chmod(name, 0o640, dir_fd=directory_fd, follow_symlinks=False)
+
+
+def _normalize_worktree(
+    directory_fd: int,
+    *,
+    index_modes: dict[str, str],
+    uid: int,
+    gid: int,
+    prefix: str = "",
+) -> set[str]:
+    materialized: set[str] = set()
+    for name in os.listdir(directory_fd):
+        if not prefix and name == ".git":
+            continue
+        relative = f"{prefix}/{name}" if prefix else name
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if metadata.st_uid != uid or metadata.st_gid != gid:
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout contains foreign-owned content",
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            child_fd = _open_child_directory(directory_fd, name)
+            try:
+                materialized.update(
+                    _normalize_worktree(
+                        child_fd,
+                        index_modes=index_modes,
+                        uid=uid,
+                        gid=gid,
+                        prefix=relative,
                     )
-                continue
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                raise ExternalSlurmPrereqMaterializationError(
-                    "external runner repository contains an unsafe file",
                 )
-            if stat.S_IMODE(metadata.st_mode) & 0o022:
+                os.fchmod(child_fd, 0o750)
+            finally:
+                os.close(child_fd)
+            continue
+        expected = index_modes.get(relative)
+        if stat.S_ISLNK(metadata.st_mode):
+            if expected != "120000":
                 raise ExternalSlurmPrereqMaterializationError(
-                    "external runner repository contains a writable file",
+                    "fresh external runner checkout contains an untracked symlink",
                 )
-
-
-def _normalize_repo_tree(repo_dir: Path, *, root: os.stat_result) -> None:
-    for directory, names, files in os.walk(repo_dir, topdown=False, followlinks=False):
-        for name in files:
-            path = Path(directory, name)
-            metadata = path.lstat()
-            if stat.S_ISLNK(metadata.st_mode):
-                continue
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        elif stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1 or expected not in {"100644", "100755"}:
                 raise ExternalSlurmPrereqMaterializationError(
                     "fresh external runner checkout contains an unsafe file",
                 )
-            os.chmod(path, 0o750 if metadata.st_mode & stat.S_IXUSR else 0o640)
-        for name in names:
-            path = Path(directory, name)
-            metadata = path.lstat()
-            if stat.S_ISLNK(metadata.st_mode):
-                continue
-            if not stat.S_ISDIR(metadata.st_mode):
+            os.chmod(
+                name,
+                0o750 if expected == "100755" else 0o640,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        else:
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout contains an unsafe entry",
+            )
+        materialized.add(relative)
+    return materialized
+
+
+def _validate_git_metadata(directory_fd: int, *, uid: int, gid: int) -> None:
+    for name in os.listdir(directory_fd):
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if metadata.st_uid != uid or metadata.st_gid != gid:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository contains foreign-owned git metadata",
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            if stat.S_IMODE(metadata.st_mode) & 0o022:
                 raise ExternalSlurmPrereqMaterializationError(
-                    "fresh external runner checkout contains an unsafe entry",
+                    "external runner repository git metadata mode drifted",
                 )
-            os.chmod(path, 0o750)
-        os.chmod(directory, 0o750)
+            child_fd = _open_child_directory(directory_fd, name)
+            try:
+                _validate_git_metadata(child_fd, uid=uid, gid=gid)
+            finally:
+                os.close(child_fd)
+        elif stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) & 0o022:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository git metadata is unsafe",
+                )
+        else:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository contains unsafe git metadata",
+            )
+
+
+def _validate_worktree(
+    directory_fd: int,
+    *,
+    index_modes: dict[str, str],
+    uid: int,
+    gid: int,
+    prefix: str = "",
+) -> set[str]:
+    materialized: set[str] = set()
+    for name in os.listdir(directory_fd):
+        if not prefix and name == ".git":
+            continue
+        relative = f"{prefix}/{name}" if prefix else name
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if metadata.st_uid != uid or metadata.st_gid != gid:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository contains foreign-owned content",
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            if stat.S_IMODE(metadata.st_mode) != 0o750:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository directory mode drifted",
+                )
+            child_fd = _open_child_directory(directory_fd, name)
+            try:
+                materialized.update(
+                    _validate_worktree(
+                        child_fd,
+                        index_modes=index_modes,
+                        uid=uid,
+                        gid=gid,
+                        prefix=relative,
+                    )
+                )
+            finally:
+                os.close(child_fd)
+            continue
+        expected = index_modes.get(relative)
+        if stat.S_ISLNK(metadata.st_mode):
+            if expected != "120000":
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository contains an untracked symlink",
+                )
+        elif stat.S_ISREG(metadata.st_mode):
+            expected_mode = 0o750 if expected == "100755" else 0o640
+            if (
+                expected not in {"100644", "100755"}
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != expected_mode
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository file mode drifted",
+                )
+        else:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository contains an unsafe entry",
+            )
+        materialized.add(relative)
+    return materialized
+
+
+def _validate_repo_tree(repo_dir: Path, *, root: _BoundDirectory) -> None:
+    root.assert_stable()
+    try:
+        repo_fd = _open_child_directory(root.fd, repo_dir.name)
+    except FileNotFoundError:
+        raise
+    try:
+        top = os.fstat(repo_fd)
+        if (
+            top.st_uid != os.geteuid()
+            or top.st_gid != root.identity.st_gid
+            or stat.S_IMODE(top.st_mode) != 0o750
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "existing external runner repository has unsafe authority",
+            )
+        index_modes = _index_modes(repo_dir)
+        status = _git_stdout(
+            [
+                "git",
+                "-C",
+                str(repo_dir),
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ]
+        )
+        if status:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository contains untracked, ignored, or modified content",
+            )
+        git_fd = _open_child_directory(repo_fd, ".git")
+        try:
+            git_top = os.fstat(git_fd)
+            if (
+                git_top.st_uid != os.geteuid()
+                or git_top.st_gid != root.identity.st_gid
+                or stat.S_IMODE(git_top.st_mode) & 0o022
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository git metadata authority drifted",
+                )
+            _validate_git_metadata(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+        finally:
+            os.close(git_fd)
+        materialized = _validate_worktree(
+            repo_fd,
+            index_modes=index_modes,
+            uid=os.geteuid(),
+            gid=root.identity.st_gid,
+        )
+        if materialized != set(index_modes):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository does not match its exact index",
+            )
+    finally:
+        os.close(repo_fd)
+    root.assert_stable()
+
+
+def _normalize_repo_tree(repo_dir: Path, *, root: _BoundDirectory) -> None:
+    root.assert_stable()
+    repo_fd = _open_child_directory(root.fd, repo_dir.name)
+    try:
+        index_modes = _index_modes(repo_dir)
+        git_fd = _open_child_directory(repo_fd, ".git")
+        try:
+            _normalize_git_metadata(
+                git_fd,
+                uid=os.geteuid(),
+                gid=root.identity.st_gid,
+            )
+            os.fchmod(git_fd, 0o750)
+        finally:
+            os.close(git_fd)
+        materialized = _normalize_worktree(
+            repo_fd,
+            index_modes=index_modes,
+            uid=os.geteuid(),
+            gid=root.identity.st_gid,
+        )
+        os.fchmod(repo_fd, 0o750)
+        if materialized != set(index_modes):
+            raise ExternalSlurmPrereqMaterializationError(
+                "fresh external runner checkout does not match its exact index",
+            )
+    finally:
+        os.close(repo_fd)
     _validate_repo_tree(repo_dir, root=root)
 
 
 def _repo_status(
     repo_dir: Path,
     *,
-    root: os.stat_result,
+    root: _BoundDirectory,
 ) -> tuple[str, str] | None:
     try:
         _validate_repo_tree(repo_dir, root=root)
     except FileNotFoundError:
         return None
+    except (OSError, ExternalSlurmPrereqMaterializationError):
+        raise ExternalSlurmPrereqMaterializationError(
+            "existing external runner repository has unsafe authority",
+        ) from None
     git_dir = repo_dir / ".git"
     try:
         git_metadata = git_dir.lstat()
@@ -1586,8 +1878,10 @@ def _repo_status(
                 "-C",
                 str(repo_dir),
                 "status",
-                "--short",
-                "--untracked-files=no",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
             ]
         )
     except ExternalSlurmPrereqMaterializationError:
@@ -1599,7 +1893,7 @@ def _repo_matches(
     repo_dir: Path,
     resolved_sha: str,
     *,
-    root: os.stat_result,
+    root: _BoundDirectory,
 ) -> dict[str, Any] | None:
     status = _repo_status(repo_dir, root=root)
     if status is None:
@@ -1614,7 +1908,7 @@ def _repo_matches(
         "repo_action": "matched",
         "repo_head": head,
         "repo_status": "clean",
-        "repo_group_id": root.st_gid,
+        "repo_group_id": root.identity.st_gid,
         "repo_mode": "0750",
     }
 
@@ -1640,33 +1934,28 @@ def _clone_repo_checkout(
         if origin_result.returncode == 0 and origin_result.stdout.strip()
         else str(source_repo)
     )
-    try:
-        _git_stdout(
-            ["git", "clone", "--quiet", "--no-hardlinks", source_url, str(tmp_dir)]
-        )
-        _git_stdout(["git", "-C", str(tmp_dir), "checkout", "--detach", resolved_sha])
-    except ExternalSlurmPrereqMaterializationError:
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
-        _git_stdout(
-            [
-                "git",
-                "clone",
-                "--quiet",
-                "--no-hardlinks",
-                str(source_repo),
-                str(tmp_dir),
-            ]
-        )
-        _git_stdout(["git", "-C", str(tmp_dir), "checkout", "--detach", resolved_sha])
+    _git_stdout(
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            str(source_repo),
+            str(tmp_dir),
+        ]
+    )
+    _git_stdout(["git", "-C", str(tmp_dir), "remote", "set-url", "origin", source_url])
+    _git_stdout(["git", "-C", str(tmp_dir), "checkout", "--detach", resolved_sha])
     dirty = _git_stdout(
         [
             "git",
             "-C",
             str(tmp_dir),
             "status",
-            "--short",
-            "--untracked-files=no",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
         ]
     )
     if dirty:
@@ -1678,11 +1967,11 @@ def _clone_repo_checkout(
 def _prepare_temp_root(
     temp_root: Path,
     *,
-    root: os.stat_result,
+    root: _BoundDirectory,
 ) -> os.stat_result:
     temp_identity = temp_root.lstat()
     if (
-        temp_identity.st_gid != root.st_gid
+        temp_identity.st_gid != root.identity.st_gid
         or temp_identity.st_uid != os.geteuid()
         or not stat.S_ISDIR(temp_identity.st_mode)
         or stat.S_ISLNK(temp_identity.st_mode)
@@ -1692,7 +1981,7 @@ def _prepare_temp_root(
         )
     if not temp_identity.st_mode & stat.S_ISGID:
         process_groups = {*os.getgroups(), os.getgid()}
-        if root.st_gid not in process_groups:
+        if root.identity.st_gid not in process_groups:
             raise ExternalSlurmPrereqMaterializationError(
                 "external runner temporary checkout did not inherit setgid authority",
             )
@@ -1705,6 +1994,88 @@ def _prepare_temp_root(
     return temp_identity
 
 
+def _remove_directory_at(parent_fd: int, name: str, *, expected: os.stat_result) -> None:
+    directory_fd = _open_child_directory(parent_fd, name)
+    try:
+        current = os.fstat(directory_fd)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner temporary checkout authority changed during materialization",
+            )
+        for child in os.listdir(directory_fd):
+            metadata = os.stat(child, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(metadata.st_mode):
+                _remove_directory_at(directory_fd, child, expected=metadata)
+            else:
+                os.unlink(child, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _entry_exists(directory_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _rename_directory_noreplace(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+) -> None:
+    """Publish exactly once without a check-then-replace race."""
+    if _TEST_RENAME_NOREPLACE_BACKEND is not None:
+        _TEST_RENAME_NOREPLACE_BACKEND(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+        return
+    if not sys.platform.startswith("linux"):
+        raise ExternalSlurmPrereqMaterializationError(
+            "atomic external runner repository publication is unavailable",
+        )
+    libc = ctypes.CDLL(None, use_errno=True)
+    encoded_source = os.fsencode(source_name)
+    encoded_destination = os.fsencode(destination_name)
+    try:
+        rename = libc.renameat2
+    except AttributeError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "atomic external runner repository publication is unavailable",
+        ) from exc
+    rename.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    rename.restype = ctypes.c_int
+    result = rename(
+        source_fd,
+        encoded_source,
+        destination_fd,
+        encoded_destination,
+        1,  # RENAME_NOREPLACE
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository destination appeared during materialization",
+        )
+    raise ExternalSlurmPrereqMaterializationError(
+        "atomic external runner repository publication failed safely",
+    )
+
+
 def _materialize_repo_dir(
     *,
     repo_dir: Path,
@@ -1713,72 +2084,73 @@ def _materialize_repo_dir(
     expected_ref: str,
 ) -> dict[str, Any]:
     root = _validate_repo_root(repo_dir, expected_ref)
-    matched = _repo_matches(repo_dir, resolved_sha, root=root)
-    if matched is not None:
-        return matched
-
-    temp_root = Path(
-        tempfile.mkdtemp(prefix=f".{repo_dir.name}.tmp-", dir=repo_dir.parent)
-    )
-    temp_identity = temp_root.lstat()
-    checkout = temp_root / "checkout"
+    temp_name: str | None = None
+    temp_identity: os.stat_result | None = None
     try:
-        temp_identity = _prepare_temp_root(temp_root, root=root)
-        _clone_repo_checkout(
-            source_repo=source_repo,
-            tmp_dir=checkout,
-            resolved_sha=resolved_sha,
-        )
-        _normalize_repo_tree(checkout, root=root)
-
-        action = "created"
-        previous: Path | None = None
-        if repo_dir.exists() or repo_dir.is_symlink():
-            _validate_repo_tree(repo_dir, root=root)
-            previous = repo_dir.with_name(
-                f".{repo_dir.name}.previous-{secrets.token_hex(16)}",
+        try:
+            matched = _repo_matches(repo_dir, resolved_sha, root=root)
+        except FileNotFoundError:
+            matched = None
+        if matched is not None:
+            return matched
+        if _entry_exists(root.fd, repo_dir.name):
+            raise ExternalSlurmPrereqMaterializationError(
+                "existing external runner repository does not exactly match the candidate",
             )
-            if previous.exists() or previous.is_symlink():
+
+        temp_name = f".{repo_dir.name}.tmp-{secrets.token_hex(16)}"
+        os.mkdir(temp_name, 0o700, dir_fd=root.fd)
+        temp_root = repo_dir.parent / temp_name
+        temp_identity = os.stat(temp_name, dir_fd=root.fd, follow_symlinks=False)
+        checkout = temp_root / "checkout"
+        temp_fd = _open_child_directory(root.fd, temp_name)
+        try:
+            temp_identity = _prepare_temp_root(temp_root, root=root)
+            root.assert_stable()
+            _clone_repo_checkout(
+                source_repo=source_repo,
+                tmp_dir=checkout,
+                resolved_sha=resolved_sha,
+            )
+            root.assert_stable()
+            temp_current = os.fstat(temp_fd)
+            if (temp_current.st_dev, temp_current.st_ino) != (
+                temp_identity.st_dev,
+                temp_identity.st_ino,
+            ):
                 raise ExternalSlurmPrereqMaterializationError(
-                    "external runner previous-checkout destination already exists",
+                    "external runner temporary checkout authority changed during materialization",
                 )
-            repo_dir.rename(previous)
-            action = "replaced"
-        checkout.rename(repo_dir)
+            _normalize_repo_tree(checkout, root=_BoundDirectory(temp_root, temp_fd, temp_identity))
+            _rename_directory_noreplace(temp_fd, "checkout", root.fd, repo_dir.name)
+        finally:
+            os.close(temp_fd)
+
         _validate_repo_tree(repo_dir, root=root)
         head = _git_stdout(["git", "-C", str(repo_dir), "rev-parse", "HEAD"])
         if head != resolved_sha:
             raise ExternalSlurmPrereqMaterializationError(
                 "published external runner checkout does not match the resolved candidate",
             )
-        result = {
+        return {
             "repo_dir": str(repo_dir),
-            "repo_action": action,
+            "repo_action": "created",
             "repo_head": head,
             "repo_status": "clean",
-            "repo_group_id": root.st_gid,
+            "repo_group_id": root.identity.st_gid,
             "repo_mode": "0750",
         }
-        if previous is not None:
-            result["repo_previous"] = str(previous)
-        return result
     finally:
         try:
-            current = temp_root.lstat()
-        except FileNotFoundError:
-            current = None
-        if current is not None:
-            if (
-                not stat.S_ISDIR(current.st_mode)
-                or stat.S_ISLNK(current.st_mode)
-                or current.st_uid != os.geteuid()
-                or current.st_dev != temp_identity.st_dev
-                or current.st_ino != temp_identity.st_ino
-            ):
-                raise ExternalSlurmPrereqMaterializationError(
-                    "external runner temporary checkout authority changed during materialization",
-                )
-            shutil.rmtree(temp_root)
+            if temp_name is not None and temp_identity is not None:
+                try:
+                    current = os.stat(temp_name, dir_fd=root.fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    current = None
+                if current is not None:
+                    _remove_directory_at(root.fd, temp_name, expected=temp_identity)
+        finally:
+            os.close(root.fd)
 
 
 def _materialize_external_slurm_runner_prerequisites(

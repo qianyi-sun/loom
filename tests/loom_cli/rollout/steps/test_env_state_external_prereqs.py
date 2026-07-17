@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,6 +26,39 @@ from loom_cli.rollout.steps.s10_env_state import (
     _wait_for_control_plane,
 )
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
+
+
+@pytest.fixture(autouse=True)
+def _exclusive_rename_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    if sys.platform.startswith("linux"):
+        return
+
+    def rename_noreplace(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+    ) -> None:
+        try:
+            os.stat(destination_name, dir_fd=destination_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository destination appeared during materialization",
+            )
+        os.rename(
+            source_name,
+            destination_name,
+            src_dir_fd=source_fd,
+            dst_dir_fd=destination_fd,
+        )
+
+    monkeypatch.setattr(
+        env_state_module,
+        "_TEST_RENAME_NOREPLACE_BACKEND",
+        rename_noreplace,
+    )
 
 
 def _write_external_prereq_profile(
@@ -576,9 +610,11 @@ def test_wait_for_control_plane_uses_root_healthz_and_records_evidence(
     assert evidence["health_url"] == "http://127.0.0.1:18081/healthz"
 
 
-def test_materialize_repo_dir_replaces_dirty_half_updated_checkout(
+@pytest.mark.parametrize("drift", ("modified", "untracked", "ignored"))
+def test_materialize_repo_dir_rejects_any_worktree_drift_without_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    drift: str,
 ) -> None:
     source_repo = tmp_path / "source"
     source_repo.mkdir()
@@ -592,7 +628,8 @@ def test_materialize_repo_dir_replaces_dirty_half_updated_checkout(
         check=True,
     )
     (source_repo / "README.md").write_text("target\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(source_repo), "add", "README.md"], check=True)
+    (source_repo / ".gitignore").write_text("ignored-output\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(source_repo), "commit", "-m", "init"], check=True)
     head = subprocess.run(
         ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
@@ -619,34 +656,30 @@ def test_materialize_repo_dir_replaces_dirty_half_updated_checkout(
         resolved_sha=head,
         expected_ref="staging-abc123",
     )
-    (repo_dir / "README.md").write_text("dirty half update\n", encoding="utf-8")
-    replaced = _materialize_repo_dir(
-        repo_dir=repo_dir,
-        source_repo=source_repo,
-        resolved_sha=head,
-        expected_ref="staging-abc123",
-    )
+    if drift == "modified":
+        (repo_dir / "README.md").write_text("dirty half update\n", encoding="utf-8")
+    elif drift == "untracked":
+        (repo_dir / "untracked-output").write_text("unexpected\n", encoding="utf-8")
+    else:
+        (repo_dir / "ignored-output").write_text("unexpected\n", encoding="utf-8")
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="unsafe authority",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=source_repo,
+            resolved_sha=head,
+            expected_ref="staging-abc123",
+        )
 
     assert created["repo_action"] == "created"
-    assert replaced["repo_action"] == "replaced"
-    assert (repo_dir / "README.md").read_text(encoding="utf-8") == "target\n"
-    assert (
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_dir),
-                "status",
-                "--short",
-                "--untracked-files=no",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-        == ""
+    assert (repo_dir / "README.md").read_text(encoding="utf-8") == (
+        "dirty half update\n" if drift == "modified" else "target\n"
     )
-    assert list(repo_dir.parent.glob(f".{repo_dir.name}.previous-*"))
+    if drift != "modified":
+        assert (repo_dir / f"{drift}-output").read_text(encoding="utf-8") == "unexpected\n"
+    assert not list(repo_dir.parent.glob(f".{repo_dir.name}.previous-*"))
 
 
 def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
@@ -675,6 +708,8 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     )
     (source_repo / "README.md").write_text("target\n", encoding="utf-8")
     (source_repo / "README.link").symlink_to("README.md")
+    (source_repo / "run.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (source_repo / "run.sh").chmod(0o755)
     subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(source_repo), "commit", "-m", "init"], check=True)
     head = subprocess.run(
@@ -708,8 +743,69 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     assert (repo_dir / "README.link").readlink() == Path("README.md")
     assert (repo_dir / "README.md").stat().st_ino != (source_repo / "README.md").stat().st_ino
     assert stat.S_IMODE((repo_dir / "README.md").stat().st_mode) == 0o640
+    assert stat.S_IMODE((repo_dir / "run.sh").stat().st_mode) == 0o750
     assert clone_commands
     assert all("--no-hardlinks" in command for command in clone_commands)
+
+
+def test_atomic_repo_publish_succeeds_once_and_rejects_existing_targets(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+    destination_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        (source / "checkout").mkdir()
+        env_state_module._rename_directory_noreplace(
+            source_fd,
+            "checkout",
+            destination_fd,
+            "published",
+        )
+        assert (destination / "published").is_dir()
+        assert not (source / "checkout").exists()
+
+        (source / "empty-race").mkdir()
+        (destination / "empty-target").mkdir()
+        with pytest.raises(
+            ExternalSlurmPrereqMaterializationError,
+            match="destination appeared",
+        ):
+            env_state_module._rename_directory_noreplace(
+                source_fd,
+                "empty-race",
+                destination_fd,
+                "empty-target",
+            )
+        assert (source / "empty-race").is_dir()
+        assert (destination / "empty-target").is_dir()
+
+        (source / "nonempty-race").mkdir()
+        (destination / "nonempty-target").mkdir()
+        (destination / "nonempty-target" / "marker").write_text(
+            "preserve\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(
+            ExternalSlurmPrereqMaterializationError,
+            match="destination appeared",
+        ):
+            env_state_module._rename_directory_noreplace(
+                source_fd,
+                "nonempty-race",
+                destination_fd,
+                "nonempty-target",
+            )
+        assert (source / "nonempty-race").is_dir()
+        assert (destination / "nonempty-target" / "marker").read_text(
+            encoding="utf-8"
+        ) == "preserve\n"
+    finally:
+        os.close(source_fd)
+        os.close(destination_fd)
 
 
 def test_materialize_repo_dir_rejects_non_direct_or_symlinked_authority(
@@ -748,7 +844,7 @@ def test_materialize_repo_dir_rejects_non_direct_or_symlinked_authority(
     )
     with pytest.raises(
         ExternalSlurmPrereqMaterializationError,
-        match="real directory",
+        match="authority is unavailable",
     ):
         _materialize_repo_dir(
             repo_dir=linked_root / "loom-remote-worker-staging-abc123",
@@ -836,7 +932,7 @@ def test_temp_root_requires_linux_setgid_inheritance_for_nonmember_shared_group(
         st_uid=995,
         st_mode=stat.S_IFDIR | 0o700,
     )
-    root = SimpleNamespace(st_gid=2007)
+    root = SimpleNamespace(identity=SimpleNamespace(st_gid=2007))
     monkeypatch.setattr(env_state_module.os, "geteuid", lambda: 995)
     monkeypatch.setattr(env_state_module.os, "getgid", lambda: 982)
     monkeypatch.setattr(env_state_module.os, "getgroups", lambda: [])
@@ -848,10 +944,13 @@ def test_temp_root_requires_linux_setgid_inheritance_for_nonmember_shared_group(
         def lstat(self) -> SimpleNamespace:
             return self.metadata
 
-    assert env_state_module._prepare_temp_root(  # type: ignore[arg-type]
-        FakeTempRoot(inherited),
-        root=root,  # type: ignore[arg-type]
-    ) is inherited
+    assert (
+        env_state_module._prepare_temp_root(  # type: ignore[arg-type]
+            FakeTempRoot(inherited),
+            root=root,  # type: ignore[arg-type]
+        )
+        is inherited
+    )
     with pytest.raises(
         ExternalSlurmPrereqMaterializationError,
         match="did not inherit setgid",
@@ -902,36 +1001,53 @@ def test_repo_tree_rejects_unsafe_authority_or_entries(
     repo_root = tmp_path / "worker-repos"
     repo_root.mkdir()
     repo_root.chmod(0o2750)
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "config", "user.email", "x@y"], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "config", "user.name", "x"], check=True)
+    (source_repo / "object").write_text("payload\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "object"], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
     repo_dir = repo_root / "loom-remote-worker-staging-abc123"
-    repo_dir.mkdir(mode=0o750)
-    root = repo_root.lstat()
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
 
     if unsafe == "foreign-owner":
-        original_lstat = Path.lstat
-
-        def foreign_lstat(path: Path) -> os.stat_result:
-            metadata = original_lstat(path)
-            if path == repo_dir:
-                fields = list(metadata)
-                fields[4] = metadata.st_uid + 1
-                return os.stat_result(fields)
-            return metadata
-
-        monkeypatch.setattr(Path, "lstat", foreign_lstat)
+        monkeypatch.setattr(env_state_module.os, "geteuid", lambda: os.getuid() + 1)
     elif unsafe == "top-writable":
         repo_dir.chmod(0o770)
     elif unsafe == "hardlink":
         original = repo_dir / "object"
-        original.write_text("payload\n", encoding="utf-8")
         os.link(original, repo_dir / "object-link")
     else:
         os.mkfifo(repo_dir / "unsafe-fifo")
 
-    with pytest.raises(ExternalSlurmPrereqMaterializationError):
-        env_state_module._validate_repo_tree(repo_dir, root=root)
+    root = env_state_module._open_bound_directory(repo_root)
+    try:
+        with pytest.raises(ExternalSlurmPrereqMaterializationError):
+            env_state_module._validate_repo_tree(repo_dir, root=root)
+    finally:
+        os.close(root.fd)
 
 
-def test_materialize_repo_dir_matches_exact_sha_without_reclone_and_replaces_wrong_sha(
+def test_materialize_repo_dir_matches_exact_sha_without_reclone_and_rejects_wrong_sha(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -995,21 +1111,32 @@ def test_materialize_repo_dir_matches_exact_sha_without_reclone_and_replaces_wro
         resolved_sha=first_sha,
         expected_ref="staging-abc123",
     )
-    replaced = _materialize_repo_dir(
-        repo_dir=repo_dir,
-        source_repo=source_repo,
-        resolved_sha=second_sha,
-        expected_ref="staging-abc123",
-    )
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="exactly match",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=source_repo,
+            resolved_sha=second_sha,
+            expected_ref="staging-abc123",
+        )
 
     assert created["repo_action"] == "created"
     assert matched["repo_action"] == "matched"
-    assert replaced["repo_action"] == "replaced"
-    assert replaced["repo_head"] == second_sha
-    assert clone_calls == 1
+    assert clone_calls == 0
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == first_sha
+    )
 
 
-def test_materialize_repo_dir_preserves_previous_collision_and_cleans_clone_failure(
+def test_materialize_repo_dir_cleans_clone_failure_and_refuses_existing_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1041,19 +1168,9 @@ def test_materialize_repo_dir_preserves_previous_collision_and_cleans_clone_fail
     (repo_dir / ".git").mkdir(mode=0o750)
     (repo_dir / "dirty").write_text("dirty\n", encoding="utf-8")
     (repo_dir / "dirty").chmod(0o640)
-    collision = repo_root / f".{repo_dir.name}.previous-fixed"
-    collision.mkdir(mode=0o750)
-    monkeypatch.setattr(env_state_module.secrets, "token_hex", lambda _size: "fixed")
-    monkeypatch.setattr(env_state_module, "_normalize_repo_tree", lambda *_args, **_kwargs: None)
-
-    def create_checkout(*, tmp_dir: Path, **_: Any) -> None:
-        tmp_dir.mkdir(mode=0o750)
-        (tmp_dir / ".git").mkdir(mode=0o750)
-
-    monkeypatch.setattr(env_state_module, "_clone_repo_checkout", create_checkout)
     with pytest.raises(
         ExternalSlurmPrereqMaterializationError,
-        match="already exists",
+        match=r"unsafe authority|exactly match",
     ):
         _materialize_repo_dir(
             repo_dir=repo_dir,
@@ -1061,4 +1178,5 @@ def test_materialize_repo_dir_preserves_previous_collision_and_cleans_clone_fail
             resolved_sha="a" * 40,
             expected_ref="staging-abc123",
         )
-    assert collision.is_dir()
+    assert (repo_dir / "dirty").read_text(encoding="utf-8") == "dirty\n"
+    assert not list(repo_root.glob(f".{repo_dir.name}.previous-*"))
