@@ -8,11 +8,14 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps.s10_env_state import (
     ControlPlaneReadinessError,
     EnvStateStep,
+    ExternalSlurmPrereqMaterializationError,
     _control_plane_health_url,
     _materialize_external_slurm_runner_prerequisites,
     _materialize_repo_dir,
@@ -58,6 +61,20 @@ env_template_glob = "{template_glob}"
     return profile
 
 
+def _complete_worker_env_text() -> str:
+    return "\n".join(
+        [
+            "LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+            "LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
+            "LOOM_WORKER_TOKEN=old-worker-token",
+            "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            "LOOM_WORKER_MINIO_ACCESS_KEY=keep-access",
+            "LOOM_WORKER_MINIO_SECRET_KEY=keep-secret",
+            "",
+        ]
+    )
+
+
 def test_materializes_external_slurm_env_file_without_secret_evidence(
     tmp_path: Path,
     monkeypatch,
@@ -69,10 +86,15 @@ def test_materializes_external_slurm_env_file_without_secret_evidence(
     template.write_text(
         "\n".join(
             [
+                "LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+                "LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
                 "LOOM_IMAGE_TAG=staging-old",
                 "LOOM_WORKER_ENV_CONFIG_VERSION=staging-old",
-                "LOOM_WORKER_TOKEN=old-worker-token",
+                "LOOM_WORKER_TOKEN=old-worker-token$literal",
+                "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+                "LOOM_WORKER_MINIO_ACCESS_KEY=keep-access",
                 "LOOM_WORKER_MINIO_SECRET_KEY=keep-secret",
+                'LOOM_WORKER_SUBPROCESS_GATEWAY_URL=""',
                 "LOOM_WORKER_MAX_CONCURRENT=1",
                 "LOOM_WORKER_POOL_NAME=old-pool",
                 "",
@@ -80,6 +102,7 @@ def test_materializes_external_slurm_env_file_without_secret_evidence(
         ),
         encoding="utf-8",
     )
+    template.chmod(0o600)
     target_env = template.parent / "staging-gb10-worker-staging-abc123.env"
     target_repo = tmp_path / "repo" / "loom-remote-worker-staging-abc123"
     profile = _write_external_prereq_profile(
@@ -132,6 +155,7 @@ def test_materializes_external_slurm_env_file_without_secret_evidence(
     assert "LOOM_WORKER_ENV_CONFIG_VERSION=staging-abc123" in first_content
     assert f"LOOM_WORKER_TOKEN={worker_token}" in first_content
     assert "LOOM_WORKER_MINIO_SECRET_KEY=keep-secret" in first_content
+    assert 'LOOM_WORKER_SUBPROCESS_GATEWAY_URL=""' in first_content
     assert "LOOM_WORKER_MAX_CONCURRENT=10" in first_content
     assert "LOOM_WORKER_POOL_NAME=gb10-arm64" in first_content
 
@@ -143,6 +167,259 @@ def test_materializes_external_slurm_env_file_without_secret_evidence(
     assert "old-worker-token" not in evidence
     assert "keep-secret" not in evidence
     assert json.loads(evidence)["records"][0]["worker_token"] == "[REDACTED]"
+
+
+def test_materialization_rejects_symlinked_private_env_template(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TEST_WORKER_TOKEN", "sensitive-worker-token")
+    capacity = tmp_path / "capacity"
+    capacity.mkdir()
+    referent = tmp_path / "outside.env"
+    referent.write_text(
+        "LOOM_WORKER_TOKEN=outside-secret\n",
+        encoding="utf-8",
+    )
+    referent.chmod(0o600)
+    template = capacity / "staging-gb10-worker-staging-old.env"
+    template.symlink_to(referent)
+    target_env = capacity / "staging-gb10-worker-staging-abc123.env"
+    profile = _write_external_prereq_profile(
+        tmp_path,
+        env_file=target_env,
+        repo_dir=tmp_path / "repo",
+        template_glob=str(capacity / "staging-gb10-worker-staging-*.env"),
+    )
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        worker_token_source="env:TEST_WORKER_TOKEN",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="template match is unsafe",
+    ):
+        _materialize_external_slurm_runner_prerequisites(
+            ctx,
+            profile,
+            ev.step_dir(11, "env-state"),
+        )
+
+    assert referent.read_text(encoding="utf-8") == "LOOM_WORKER_TOKEN=outside-secret\n"
+    assert not target_env.exists()
+
+
+def test_materialization_rejects_incomplete_private_env_template(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TEST_WORKER_TOKEN", "sensitive-worker-token")
+    template = tmp_path / "staging-gb10-worker-staging-old.env"
+    template.write_text("LOOM_WORKER_TOKEN=old-token\n", encoding="utf-8")
+    template.chmod(0o600)
+    target_env = tmp_path / "staging-gb10-worker-staging-abc123.env"
+    profile = _write_external_prereq_profile(
+        tmp_path,
+        env_file=target_env,
+        repo_dir=tmp_path / "repo",
+        template_glob=str(tmp_path / "staging-gb10-worker-staging-*.env"),
+    )
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        worker_token_source="env:TEST_WORKER_TOKEN",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="missing required settings",
+    ):
+        _materialize_external_slurm_runner_prerequisites(
+            ctx,
+            profile,
+            ev.step_dir(11, "env-state"),
+        )
+
+    assert not target_env.exists()
+
+
+def test_materialization_rejects_symlinked_existing_target_before_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TEST_WORKER_TOKEN", "sensitive-worker-token")
+    template = tmp_path / "staging-gb10-worker-staging-old.env"
+    template.write_text(_complete_worker_env_text(), encoding="utf-8")
+    template.chmod(0o600)
+    referent = tmp_path / "outside.env"
+    referent.write_text(_complete_worker_env_text(), encoding="utf-8")
+    referent.chmod(0o600)
+    target_env = tmp_path / "staging-gb10-worker-staging-abc123.env"
+    target_env.symlink_to(referent)
+    profile = _write_external_prereq_profile(
+        tmp_path,
+        env_file=target_env,
+        repo_dir=tmp_path / "repo",
+        template_glob=str(tmp_path / "staging-gb10-worker-staging-*.env"),
+    )
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        worker_token_source="env:TEST_WORKER_TOKEN",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="env file is unsafe",
+    ):
+        _materialize_external_slurm_runner_prerequisites(
+            ctx,
+            profile,
+            ev.step_dir(11, "env-state"),
+        )
+
+    assert target_env.is_symlink()
+    assert referent.read_text(encoding="utf-8") == _complete_worker_env_text()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "message"),
+    [
+        ("LOOM_WORKER_TOKEN=duplicate-token\n", "invalid key"),
+        ('BROKEN="first\nsecond"\n', "malformed entry"),
+    ],
+)
+def test_materialization_rejects_ambiguous_dotenv_before_target_creation(
+    tmp_path: Path,
+    monkeypatch,
+    suffix: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv("TEST_WORKER_TOKEN", "sensitive-worker-token")
+    template = tmp_path / "staging-gb10-worker-staging-old.env"
+    template.write_text(_complete_worker_env_text() + suffix, encoding="utf-8")
+    template.chmod(0o600)
+    target_env = tmp_path / "staging-gb10-worker-staging-abc123.env"
+    profile = _write_external_prereq_profile(
+        tmp_path,
+        env_file=target_env,
+        repo_dir=tmp_path / "repo",
+        template_glob=str(tmp_path / "staging-gb10-worker-staging-*.env"),
+    )
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        worker_token_source="env:TEST_WORKER_TOKEN",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    with pytest.raises(ExternalSlurmPrereqMaterializationError, match=message) as exc:
+        _materialize_external_slurm_runner_prerequisites(
+            ctx,
+            profile,
+            ev.step_dir(11, "env-state"),
+        )
+
+    assert "duplicate-token" not in str(exc.value)
+    assert "sensitive-worker-token" not in str(exc.value)
+    assert not target_env.exists()
+
+
+@pytest.mark.parametrize("semantic_empty", ('""', "'   '"))
+def test_materialization_rejects_semantically_empty_required_value(
+    tmp_path: Path,
+    monkeypatch,
+    semantic_empty: str,
+) -> None:
+    monkeypatch.setenv("TEST_WORKER_TOKEN", "sensitive-worker-token")
+    template = tmp_path / "staging-gb10-worker-staging-old.env"
+    template.write_text(
+        _complete_worker_env_text().replace(
+            "LOOM_WORKER_TOKEN=old-worker-token",
+            f"LOOM_WORKER_TOKEN={semantic_empty}",
+        ),
+        encoding="utf-8",
+    )
+    template.chmod(0o600)
+    target_env = tmp_path / "staging-gb10-worker-staging-abc123.env"
+    profile = _write_external_prereq_profile(
+        tmp_path,
+        env_file=target_env,
+        repo_dir=tmp_path / "repo",
+        template_glob=str(tmp_path / "staging-gb10-worker-staging-*.env"),
+    )
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        worker_token_source="env:TEST_WORKER_TOKEN",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="empty required value",
+    ) as exc:
+        _materialize_external_slurm_runner_prerequisites(
+            ctx,
+            profile,
+            ev.step_dir(11, "env-state"),
+        )
+
+    assert "sensitive-worker-token" not in str(exc.value)
+    assert not target_env.exists()
+
+
+def test_materialization_rejects_required_interpolation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TEST_WORKER_TOKEN", "sensitive-worker-token")
+    template = tmp_path / "staging-gb10-worker-staging-old.env"
+    template.write_text(
+        _complete_worker_env_text().replace(
+            "LOOM_WORKER_TOKEN=old-worker-token",
+            "LOOM_WORKER_TOKEN=${UNSET}",
+        ),
+        encoding="utf-8",
+    )
+    template.chmod(0o600)
+    target_env = tmp_path / "staging-gb10-worker-staging-abc123.env"
+    profile = _write_external_prereq_profile(
+        tmp_path,
+        env_file=target_env,
+        repo_dir=tmp_path / "repo",
+        template_glob=str(tmp_path / "staging-gb10-worker-staging-*.env"),
+    )
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        worker_token_source="env:TEST_WORKER_TOKEN",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="cannot use interpolation",
+    ) as exc:
+        _materialize_external_slurm_runner_prerequisites(
+            ctx,
+            profile,
+            ev.step_dir(11, "env-state"),
+        )
+
+    assert "sensitive-worker-token" not in str(exc.value)
+    assert not target_env.exists()
 
 
 def test_env_state_materializes_external_prereqs_before_apply_check(

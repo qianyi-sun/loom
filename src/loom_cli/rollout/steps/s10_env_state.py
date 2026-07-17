@@ -1258,9 +1258,9 @@ def _select_env_template(
     template = settings.get("env_template")
     if isinstance(template, str) and template.strip():
         path = Path(template).expanduser()
-        if not path.is_file():
+        if not _env_source_is_safe(path):
             raise ExternalSlurmPrereqMaterializationError(
-                f"external runner env template does not exist: {path}",
+                f"external runner env template is unavailable or unsafe: {path}",
             )
         return path
 
@@ -1270,16 +1270,115 @@ def _select_env_template(
             f"external runner env file {target} is missing and "
             "external_slurm_runner_prerequisites.env_template_glob is not set",
         )
-    candidates = [
-        Path(path)
-        for path in glob.glob(str(Path(pattern).expanduser()))
-        if Path(path).is_file() and Path(path) != target
-    ]
+    matched = [Path(path) for path in glob.glob(str(Path(pattern).expanduser()))]
+    unsafe = [path for path in matched if path != target and not _env_source_is_safe(path)]
+    if unsafe:
+        raise ExternalSlurmPrereqMaterializationError(
+            f"external runner env template match is unsafe: {unsafe[0]}",
+        )
+    candidates = [path for path in matched if path != target]
     if not candidates:
         raise ExternalSlurmPrereqMaterializationError(
             f"external runner env file {target} is missing and no template matched {pattern}",
         )
     return max(candidates, key=lambda path: path.stat().st_mtime_ns)
+
+
+_MAX_EXTERNAL_RUNNER_ENV_BYTES = 1 << 20
+_REQUIRED_EXTERNAL_RUNNER_ENV_KEYS = frozenset(
+    {
+        "LOOM_WORKER_CONTROL_PLANE_URL",
+        "LOOM_WORKER_GATEWAY_URL",
+        "LOOM_WORKER_TOKEN",
+        "LOOM_WORKER_MINIO_ENDPOINT",
+        "LOOM_WORKER_MINIO_ACCESS_KEY",
+        "LOOM_WORKER_MINIO_SECRET_KEY",
+    }
+)
+
+
+def _env_source_is_safe(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return bool(
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+        and metadata.st_nlink == 1
+        and 0 < metadata.st_size <= _MAX_EXTERNAL_RUNNER_ENV_BYTES
+    )
+
+
+def _read_env_source(path: Path) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            f"external runner env source is unavailable: {path}",
+        ) from exc
+    try:
+        metadata = os.fstat(fd)
+        if not (
+            stat.S_ISREG(metadata.st_mode)
+            and stat.S_IMODE(metadata.st_mode) == 0o600
+            and metadata.st_nlink == 1
+            and 0 < metadata.st_size <= _MAX_EXTERNAL_RUNNER_ENV_BYTES
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                f"external runner env source is unsafe: {path}",
+            )
+        payload = os.read(fd, _MAX_EXTERNAL_RUNNER_ENV_BYTES + 1)
+        if len(payload) != metadata.st_size:
+            raise ExternalSlurmPrereqMaterializationError(
+                f"external runner env source changed while it was read: {path}",
+            )
+    finally:
+        os.close(fd)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            f"external runner env source is not UTF-8: {path}",
+        ) from exc
+    keys: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ExternalSlurmPrereqMaterializationError(
+                f"external runner env source contains a malformed entry: {path}",
+            )
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None or key in keys:
+            raise ExternalSlurmPrereqMaterializationError(
+                f"external runner env source contains an invalid key: {path}",
+            )
+        if key in _REQUIRED_EXTERNAL_RUNNER_ENV_KEYS:
+            if "${" in value:
+                raise ExternalSlurmPrereqMaterializationError(
+                    f"external runner env source required values cannot use interpolation: {path}",
+                )
+            try:
+                semantic_parts = shlex.split(value, comments=True, posix=True)
+            except ValueError as exc:
+                raise ExternalSlurmPrereqMaterializationError(
+                    f"external runner env source contains a malformed entry: {path}",
+                ) from exc
+            if not any(part.strip() for part in semantic_parts):
+                raise ExternalSlurmPrereqMaterializationError(
+                    f"external runner env source contains an empty required value: {path}",
+                )
+        keys.add(key)
+    if not _REQUIRED_EXTERNAL_RUNNER_ENV_KEYS.issubset(keys):
+        raise ExternalSlurmPrereqMaterializationError(
+            f"external runner env source is missing required settings: {path}",
+        )
+    return text
 
 
 def _materialize_env_file(
@@ -1292,15 +1391,18 @@ def _materialize_env_file(
     worker_token: str | None,
     worker_token_env_key: str,
 ) -> dict[str, Any]:
-    source = (
-        env_file
-        if env_file.is_file()
-        else _select_env_template(
+    if os.path.lexists(env_file):
+        if not _env_source_is_safe(env_file):
+            raise ExternalSlurmPrereqMaterializationError(
+                f"external runner env file is unsafe: {env_file}",
+            )
+        source = env_file
+    else:
+        source = _select_env_template(
             target=env_file,
             settings=settings,
         )
-    )
-    existing = source.read_text(encoding="utf-8")
+    existing = _read_env_source(source)
     updates = {
         "IMAGE_TAG": image_tag,
         "ENV_CONFIG_VERSION": image_tag,

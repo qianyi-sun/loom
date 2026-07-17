@@ -1659,6 +1659,18 @@ requiring that stale leaf to be readable by the service account. It accepts
 only a real regular destination entry; symlinks and other non-regular entries
 are never followed or replaced.
 
+The service-private `generated/` directory must contain at least one validated
+GB10 worker env template before rollout admission is restored. On first install
+or repair of an empty directory, the installer performs the one-way bootstrap
+from the newest fixed-name legacy file under
+`/shared_work/qianyi/loom-worker-capacity/`. The source must be a bounded,
+single-link regular UTF-8 dotenv file that is not group- or world-writable and contains the complete
+control-plane, Gateway, worker-token, and MinIO key set. The copied bootstrap is
+owned by `loom-rollout`, mode `0600`, and its values are never printed. Existing
+private templates are not refreshed from legacy state. `check` reports
+`generated-gb10-worker-env-template` and installation remains admission-closed
+when no safe template can be proven; do not create an ad-hoc empty env file.
+
 Create the fixed invocation checkout as root with a deterministic umask. On a
 later update, require a clean checkout, fetch `dev`, and detach at the fetched
 remote head. Do not force over local drift:

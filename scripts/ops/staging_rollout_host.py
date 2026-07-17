@@ -12,11 +12,13 @@ import argparse
 import base64
 import binascii
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -45,6 +47,8 @@ VENV = RUNNER_ROOT / "venv"
 STATE_ROOT = Path("/var/lib/loom-staging-rollout")
 ACTIVE_POINTER = STATE_ROOT / "active.json"
 GENERATED_ROOT = STATE_ROOT / "generated"
+GENERATED_GB10_ENV_SEED = GENERATED_ROOT / "staging-gb10-worker-staging-bootstrap.env"
+LEGACY_GB10_ENV_ROOT = Path("/shared_work/qianyi/loom-worker-capacity")
 RUNTIME_ROOT = Path("/run/loom-staging-rollout")
 MAINTENANCE_MARKER = RUNTIME_ROOT / "maintenance"
 CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
@@ -88,6 +92,7 @@ _TEAM_TOKEN = "__SMOKE_ON_BEHALF_TEAM_ID__"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_PROTECTED_INPUT_BYTES = 4 << 20
 _MAX_KUBECONFIG_BYTES = 1 << 20
+_MAX_WORKER_ENV_BYTES = 1 << 20
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-9]*[.]service$")
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
@@ -112,10 +117,55 @@ _ACL_ENTRY_RE = re.compile(
 )
 _ACL_SNAPSHOT_ENTRY_RE = re.compile(r"(user|group|mask|other):([^:]*):([rwx-]{3})")
 _ACL_ENTRY_ORDER = {"user": 0, "group": 1, "mask": 2, "other": 3}
+_GB10_ENV_NAME_RE = re.compile(r"^staging-gb10-worker-staging-[A-Za-z0-9._-]+[.]env$")
+_REQUIRED_GB10_ENV_KEYS = frozenset(
+    {
+        "LOOM_WORKER_CONTROL_PLANE_URL",
+        "LOOM_WORKER_GATEWAY_URL",
+        "LOOM_WORKER_TOKEN",
+        "LOOM_WORKER_MINIO_ENDPOINT",
+        "LOOM_WORKER_MINIO_ACCESS_KEY",
+        "LOOM_WORKER_MINIO_SECRET_KEY",
+    }
+)
 
 
 class InstallError(RuntimeError):
     """Fail-closed installation or convergence error."""
+
+
+def _validate_gb10_env_payload(payload: bytes) -> None:
+    if not payload or len(payload) > _MAX_WORKER_ENV_BYTES:
+        raise InstallError("GB10 worker env template payload is invalid")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InstallError("GB10 worker env template is not UTF-8") from exc
+    keys: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise InstallError("GB10 worker env template contains a malformed entry")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None or key in keys:
+            raise InstallError("GB10 worker env template contains an invalid key")
+        if key in _REQUIRED_GB10_ENV_KEYS:
+            if "${" in value:
+                raise InstallError(
+                    "GB10 worker env template required values cannot use interpolation"
+                )
+            try:
+                semantic_parts = shlex.split(value, comments=True, posix=True)
+            except ValueError as exc:
+                raise InstallError("GB10 worker env template contains a malformed entry") from exc
+            if not any(part.strip() for part in semantic_parts):
+                raise InstallError("GB10 worker env template contains an empty value")
+        keys.add(key)
+    if not _REQUIRED_GB10_ENV_KEYS.issubset(keys):
+        raise InstallError("GB10 worker env template is missing required settings")
 
 
 def _acl_snapshot_map(
@@ -392,6 +442,96 @@ class LocalFilesystem:
             return payload
         finally:
             os.close(fd)
+
+    def _gb10_env_candidates(
+        self,
+        root: Path,
+        *,
+        require_private_mode: bool,
+    ) -> tuple[tuple[Path, os.stat_result, bytes], ...]:
+        directory = self.path(root)
+        if not directory.exists():
+            return ()
+        try:
+            directory_metadata = os.lstat(directory)
+        except OSError as exc:
+            raise InstallError("GB10 worker env template directory is unavailable") from exc
+        if not stat.S_ISDIR(directory_metadata.st_mode) or stat.S_ISLNK(directory_metadata.st_mode):
+            raise InstallError("GB10 worker env template directory is unsafe")
+        candidates: list[tuple[Path, os.stat_result, bytes]] = []
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise InstallError("GB10 worker env template directory is unreadable") from exc
+        for entry in entries:
+            if _GB10_ENV_NAME_RE.fullmatch(entry.name) is None:
+                continue
+            absolute = root / entry.name
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(
+                    os,
+                    "O_NOFOLLOW",
+                    0,
+                )
+            )
+            try:
+                fd = os.open(entry.path, flags)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise InstallError("GB10 worker env template metadata is unsafe") from exc
+                raise InstallError("GB10 worker env template is unavailable") from exc
+            try:
+                metadata = os.fstat(fd)
+                expected_mode = 0o600 if require_private_mode else stat.S_IMODE(metadata.st_mode)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_size <= 0
+                    or metadata.st_size > _MAX_WORKER_ENV_BYTES
+                    or stat.S_IMODE(metadata.st_mode) != expected_mode
+                    or (not require_private_mode and stat.S_IMODE(metadata.st_mode) & 0o022)
+                ):
+                    raise InstallError("GB10 worker env template metadata is unsafe")
+                payload = os.read(fd, _MAX_WORKER_ENV_BYTES + 1)
+                if len(payload) != metadata.st_size:
+                    raise InstallError("GB10 worker env template changed during validation")
+            finally:
+                os.close(fd)
+            _validate_gb10_env_payload(payload)
+            current = os.lstat(entry.path)
+            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+            ):
+                raise InstallError("GB10 worker env template changed during validation")
+            candidates.append((absolute, metadata, payload))
+        return tuple(candidates)
+
+    def generated_gb10_env_templates(self) -> tuple[Path, ...]:
+        return tuple(
+            path
+            for path, _, _ in self._gb10_env_candidates(
+                GENERATED_ROOT,
+                require_private_mode=True,
+            )
+        )
+
+    def legacy_gb10_env_template_payload(self) -> bytes:
+        candidates = self._gb10_env_candidates(
+            LEGACY_GB10_ENV_ROOT,
+            require_private_mode=False,
+        )
+        if not candidates:
+            raise InstallError("legacy GB10 worker env template is unavailable")
+        _, _, payload = max(
+            candidates,
+            key=lambda item: (item[1].st_mtime_ns, item[0].name),
+        )
+        return payload
 
     def ensure_directory(self, absolute: Path, mode: int) -> bool:
         path = self.path(absolute)
@@ -3147,6 +3287,21 @@ class HostInstaller:
         created_service_key = self._record_flag(previous_record, "created_service_key")
         service_key_missing = not self.system.service_key_present()
         created_service_key = created_service_key or service_key_missing
+        generated_env_error: InstallError | None = None
+        try:
+            generated_env_templates = self.filesystem.generated_gb10_env_templates()
+        except InstallError as exc:
+            generated_env_templates = ()
+            generated_env_error = exc
+        generated_env_templates_ready = bool(generated_env_templates) and all(
+            self.system.file_owner_ready(
+                path,
+                owner=SERVICE_USER,
+                mode=0o600,
+                nlink=1,
+            )
+            for path in generated_env_templates
+        )
         raw_acl_plans = [
             plan for path in PROTECTED_INPUTS for plan in self.system.plan_input_acl(path)
         ]
@@ -3347,6 +3502,8 @@ class HostInstaller:
             or service_key_missing
             or acl_plans
             or not service_directories_ready
+            or generated_env_error is not None
+            or not generated_env_templates_ready
             or not candidate_ready
             or venv_lock_requires_hardening
             or not venv_ready
@@ -3409,6 +3566,32 @@ class HostInstaller:
         ):
             if self.system.ensure_owned_directory(directory, owner=SERVICE_USER, mode=mode):
                 changes.append(f"directory:{directory}")
+
+        if generated_env_error is not None:
+            raise generated_env_error
+        if not generated_env_templates:
+            worker_env_payload = self.filesystem.legacy_gb10_env_template_payload()
+            if self.filesystem.atomic_write(
+                GENERATED_GB10_ENV_SEED,
+                worker_env_payload,
+                0o600,
+                expected_nlink=1,
+            ):
+                changes.append(f"worker-env-template:{GENERATED_GB10_ENV_SEED}")
+            generated_env_templates = (GENERATED_GB10_ENV_SEED,)
+        for path in generated_env_templates:
+            if self.system.install_owner(path, SERVICE_USER, 0o600):
+                changes.append(f"ownership:{path}")
+        if not all(
+            self.system.file_owner_ready(
+                path,
+                owner=SERVICE_USER,
+                mode=0o600,
+                nlink=1,
+            )
+            for path in self.filesystem.generated_gb10_env_templates()
+        ):
+            raise InstallError("generated GB10 worker env template authority is unsafe")
 
         if self.system.ensure_candidate(source_sha, refresh=refresh_runtime):
             changes.append("candidate-checkout")
@@ -3591,6 +3774,17 @@ class HostInstaller:
             failures.append(str(KUBECONFIG_PATH))
         if not self.filesystem.exists(SERVICE_KEY):
             failures.append(str(SERVICE_KEY))
+        generated_env_templates = self.filesystem.generated_gb10_env_templates()
+        if not generated_env_templates or not all(
+            self.system.file_owner_ready(
+                path,
+                owner=SERVICE_USER,
+                mode=0o600,
+                nlink=1,
+            )
+            for path in generated_env_templates
+        ):
+            failures.append("generated-gb10-worker-env-template")
         source_sha = record.get("source_sha")
         if not isinstance(source_sha, str):  # _bind_existing_source has already validated this
             raise InstallError("install record source SHA is invalid")
