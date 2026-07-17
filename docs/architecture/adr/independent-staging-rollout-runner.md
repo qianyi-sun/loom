@@ -240,9 +240,10 @@ The broker preflight verifies the fixed 14 active GB10 nodes can consume the
 shared root as `qianyi` without writing it. The 13 NFS clients must report the
 exact source and NFSv4 mount identity; `trt-gb10-2` must report the ext4 export
 backend at the same mountpoint. After publication and before
-environment-state mutation, step 11 streams verifier bytes from the trusted
-candidate worktree over the protected SSH stdin path. It does not execute code
-from the checkout under verification. Exact HEAD/status/index/mode/readability
+environment-state mutation, step 11 captures verifier bytes from the exact
+resolved commit's Git blob and streams them over the protected SSH stdin path.
+It does not execute code from the mutable rollout worktree or checkout under
+verification. Exact HEAD/status/index/mode/readability
 and non-write checks must agree on all nodes; per-node NFS device/inode evidence
 is retained without cross-node equality assumptions.
 

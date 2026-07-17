@@ -1467,10 +1467,11 @@ contract.
 Broker preflight checks the fixed 14 active GB10 nodes against the root as the
 `qianyi` consumer. The 13 NFS clients must report the exact source and NFSv4
 identity, while `trt-gb10-2` must report its ext4 export backend. After
-publication and before environment-state apply, step
-11 streams a trusted candidate verifier to `/usr/bin/python3 -` over the same
-protected SSH config, identity, and known-hosts boundary. The target checkout
-is data only, never verifier authority. Every node must report the exact HEAD,
+publication and before environment-state apply, step 11 reads the verifier
+from the exact resolved commit's Git blob, not the mutable rollout worktree,
+then streams the captured bytes to `/usr/bin/python3 -` over the same protected
+SSH config, identity, and known-hosts boundary. The target checkout is data
+only, never verifier authority. Every node must report the exact HEAD,
 zero modified/untracked/ignored status, exact physical index and modes,
 readability of the deterministic tracked probe file, and no qianyi write
 capability. Content identities must agree 14/14; NFS device/inode evidence is

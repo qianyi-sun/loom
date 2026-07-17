@@ -2044,9 +2044,11 @@ targets as `qianyi`: the 13 clients must expose the exact NFSv4 source and
 mount identity, `trt-gb10-2` must expose the ext4 backend, and the shared root
 must have the fixed owner/group/mode and
 be readable/searchable but not writable. Immediately after the one-time
-checkout publish, and before environment-state apply, step 11 streams trusted
-candidate verifier bytes over the protected SSH stdin path to
-`/usr/bin/python3 -`; verifier code is never loaded from the target under test.
+checkout publish, and before environment-state apply, step 11 reads the
+verifier as a commit-bound blob from the exact resolved SHA and streams those
+captured bytes over the protected SSH stdin path to `/usr/bin/python3 -`.
+Verifier code is never loaded from the mutable rollout worktree or the target
+under test.
 All 14 nodes must independently observe the exact HEAD, a zero status including
 ignored and untracked entries, the complete index-derived file/directory modes,
 a readable deterministically selected tracked file, and non-writable

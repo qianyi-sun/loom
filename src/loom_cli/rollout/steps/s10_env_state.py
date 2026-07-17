@@ -53,7 +53,7 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_env,
     candidate_relative_path,
     candidate_worktree,
-    validate_candidate_loom_source,
+    materialize_candidate_blob,
 )
 from loom_cli.rollout.steps.subprocess_util import run_captured
 from loom_cli.secret_source import SecretSourceError, resolve_secret_source
@@ -2440,8 +2440,7 @@ def _materialize_repo_dir(
             lexical = os.stat(repo_dir.name, dir_fd=root.fd, follow_symlinks=False)
             current = os.fstat(repo_fd)
             if (
-                (lexical.st_dev, lexical.st_ino)
-                != (claim_identity.st_dev, claim_identity.st_ino)
+                (lexical.st_dev, lexical.st_ino) != (claim_identity.st_dev, claim_identity.st_ino)
                 or (current.st_dev, current.st_ino)
                 != (claim_identity.st_dev, claim_identity.st_ino)
                 or stat.S_IMODE(current.st_mode) != 0o2700
@@ -2637,43 +2636,18 @@ def _verify_external_slurm_runner_consumers(
         )
 
     try:
-        candidate_root = validate_candidate_loom_source(step_dir).resolve(strict=True)
-        consumer_script = candidate_root / _SHARED_WORKER_REPO_CONSUMER
-        consumer_script.relative_to(candidate_root)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        verifier_fd = os.open(consumer_script, flags)
-        try:
-            verifier_before = os.fstat(verifier_fd)
-            if (
-                not stat.S_ISREG(verifier_before.st_mode)
-                or verifier_before.st_uid != owner_uid
-                or stat.S_IMODE(verifier_before.st_mode) & 0o022
-                or verifier_before.st_nlink != 1
-                or not 0 < verifier_before.st_size <= 1024 * 1024
-            ):
-                raise ExternalSlurmPrereqMaterializationError(
-                    "external runner consumer verifier is unsafe",
-                )
-            verifier_bytes = os.read(verifier_fd, verifier_before.st_size + 1)
-            verifier_after = os.fstat(verifier_fd)
-            if len(verifier_bytes) != verifier_before.st_size or (
-                verifier_after.st_dev,
-                verifier_after.st_ino,
-                verifier_after.st_mtime_ns,
-                verifier_after.st_size,
-            ) != (
-                verifier_before.st_dev,
-                verifier_before.st_ino,
-                verifier_before.st_mtime_ns,
-                verifier_before.st_size,
-            ):
-                raise ExternalSlurmPrereqMaterializationError(
-                    "external runner consumer verifier changed while read",
-                )
-        finally:
-            os.close(verifier_fd)
+        verifier_blob = materialize_candidate_blob(
+            ctx,
+            Path(_SHARED_WORKER_REPO_CONSUMER),
+            step_dir.artifact_path("external-slurm-runner-consumer.py"),
+        )
+        verifier_bytes = verifier_blob.data
+        if not 0 < len(verifier_bytes) <= 1024 * 1024:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner consumer verifier is unsafe",
+            )
         verifier_text = verifier_bytes.decode("utf-8")
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (CandidateToolingError, OSError, UnicodeError, ValueError) as exc:
         raise ExternalSlurmPrereqMaterializationError(
             "external runner consumer verifier is unavailable",
         ) from exc

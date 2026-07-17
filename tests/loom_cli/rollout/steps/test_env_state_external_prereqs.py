@@ -18,6 +18,7 @@ from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
 from loom_cli.rollout.operator.preflight import ACTIVE_GB10_HOSTS
 from loom_cli.rollout.steps import s10_env_state as env_state_module
+from loom_cli.rollout.steps.candidate_source import MaterializedCandidateBlob
 from loom_cli.rollout.steps.s04_gb10_prep import GB10Host
 from loom_cli.rollout.steps.s10_env_state import (
     ControlPlaneReadinessError,
@@ -97,8 +98,25 @@ def _consumer_verification_fixture(
     marker.write_text("# candidate marker\n", encoding="utf-8")
     verifier = candidate / "scripts" / "ops" / "staging_rollout_shared_repo_consumer.py"
     verifier.parent.mkdir(parents=True)
-    verifier.write_text("# trusted verifier bytes\n", encoding="utf-8")
-    verifier.chmod(0o640)
+    verifier.write_text("# mutable worktree verifier must not be read\n", encoding="utf-8")
+    verifier.chmod(0o660)
+    trusted_verifier = b"# trusted verifier bytes\n"
+
+    def materialize_verifier(
+        _ctx: RolloutContext,
+        repo_path: Path,
+        target: Path,
+    ) -> MaterializedCandidateBlob:
+        assert repo_path == Path("scripts/ops/staging_rollout_shared_repo_consumer.py")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(trusted_verifier)
+        return MaterializedCandidateBlob(data=trusted_verifier, evidence_path=target)
+
+    monkeypatch.setattr(
+        env_state_module,
+        "materialize_candidate_blob",
+        materialize_verifier,
+    )
     shared_root = tmp_path / "worker-repos"
     target = shared_root / "loom-remote-worker-test"
     malicious = target / "scripts" / "ops" / "staging_rollout_shared_repo_consumer.py"
@@ -192,6 +210,7 @@ def test_post_publish_consumer_verification_streams_trusted_verifier_to_exact_14
     assert [host for host, _, _ in calls] == list(ACTIVE_GB10_HOSTS)
     assert all(command.startswith("/usr/bin/python3 - --root ") for _, command, _ in calls)
     assert all(stdin_text == "# trusted verifier bytes\n" for _, _, stdin_text in calls)
+    assert all("mutable worktree verifier" not in stdin_text for _, _, stdin_text in calls)
     assert all("forged" not in stdin_text for _, _, stdin_text in calls)
     persisted = json.loads(
         step_dir.artifact_path("external-slurm-runner-consumer-verification.json").read_text(
@@ -239,6 +258,50 @@ def test_post_publish_consumer_verification_rejects_divergent_host_content_ident
     )
     assert persisted["passed"] is False
     assert persisted["host_count"] == 13
+
+
+def test_post_publish_consumer_verification_rejects_oversized_commit_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, _calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        env_state_module,
+        "materialize_candidate_blob",
+        lambda _ctx, _path, target: MaterializedCandidateBlob(
+            data=b"x" * (1024 * 1024 + 1),
+            evidence_path=target,
+        ),
+    )
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="verifier is unsafe",
+    ):
+        _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+
+def test_post_publish_consumer_verification_rejects_non_utf8_commit_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, _calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        env_state_module,
+        "materialize_candidate_blob",
+        lambda _ctx, _path, target: MaterializedCandidateBlob(
+            data=b"\xff",
+            evidence_path=target,
+        ),
+    )
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="verifier is unavailable",
+    ):
+        _verify_external_slurm_runner_consumers(ctx, step_dir, records)
 
 
 def test_materializes_external_slurm_env_file_without_secret_evidence(
