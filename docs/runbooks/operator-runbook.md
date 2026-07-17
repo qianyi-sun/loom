@@ -857,7 +857,13 @@ knob you need.
    environment-state profile to
    `/data/loom-staging/environment-state/staging.toml` with mode `0600`,
    recording source/target sha256 evidence, then applies the candidate profile
-   once and retries the immediate check once. Pure
+   once and retries the immediate check once. A legacy operator-owned `0600`
+   leaf can be unreadable by `loom-rollout` even when the directory's reviewed
+   access/default ACL grants atomic replacement. Step 11 treats that leaf as
+   stale and replaces it from the candidate; it does not broaden the legacy
+   leaf ACL or use it as rollout input. Before comparison it inspects the
+   destination entry without following links; symlinks and all other
+   non-regular entries fail closed before read, chmod, or replacement. Pure
    `gb10_worker_node_status[...]` drift is recorded but deferred because step
    12 has not started the host-local node-agent yet; mixed drift, such as
    OLDLAB jobs or missing external-runner prerequisites, still fails before
@@ -1647,7 +1653,11 @@ the declared rollout, Postgres, MinIO, backup, and pre-existing
 `environment-state` subdirectories. Each receives access/default `rwx`; the
 staging root remains read/traverse-only. This explicit environment-state grant
 is required because a new parent default ACL does not retrofit an existing
-directory, and step 10 atomically replaces `environment-state/staging.toml`.
+directory. It also does not retrofit a pre-existing operator-owned leaf, so
+step 11 must atomically replace `environment-state/staging.toml` without
+requiring that stale leaf to be readable by the service account. It accepts
+only a real regular destination entry; symlinks and other non-regular entries
+are never followed or replaced.
 
 Create the fixed invocation checkout as root with a deterministic umask. On a
 later update, require a clean checkout, fetch `dev`, and detach at the fetched
