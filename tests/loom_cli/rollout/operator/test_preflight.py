@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -308,6 +309,81 @@ def test_collect_preflight_decodes_repository_st_dev_before_mount_comparison(
     shared = next(check for check in report.checks if check.name == "gb10-shared-repository")
     assert shared.passed is True
     assert shared.evidence is not None
+
+
+def test_remote_shared_repository_probe_selects_containing_exporter_mount(
+    tmp_path: Path,
+) -> None:
+    shared_root = tmp_path / "shared_work2"
+    repository = shared_root / "qianyi/.loom-staging-rollout/worker-repos"
+    repository.mkdir(parents=True)
+    repository.chmod(0o550)
+    metadata = shared_root.stat()
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"42 1 {os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)} / / rw "
+        "- ext4 /dev/nvme-test rw\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            preflight_module._render_remote_shared_repository_probe(
+                shared_root=shared_root,
+                mountinfo=mountinfo,
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    fields = result.stdout.strip().split(";")
+    assert len(fields) == 21
+    assert fields[17:19] == ["ext4", "/dev/nvme-test"]
+    assert fields[19:21] == [
+        str(os.major(metadata.st_dev)),
+        str(os.minor(metadata.st_dev)),
+    ]
+
+
+def test_remote_shared_repository_probe_prefers_exact_client_mount(
+    tmp_path: Path,
+) -> None:
+    shared_root = tmp_path / "shared_work2"
+    repository = shared_root / "qianyi/.loom-staging-rollout/worker-repos"
+    repository.mkdir(parents=True)
+    repository.chmod(0o550)
+    metadata = shared_root.stat()
+    device = f"{os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)}"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"41 1 {device} / / rw - ext4 /dev/root rw\n"
+        f"42 41 {device} / {shared_root} rw - nfs4 "
+        "192.168.20.12:/shared_work2 rw\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            preflight_module._render_remote_shared_repository_probe(
+                shared_root=shared_root,
+                mountinfo=mountinfo,
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    fields = result.stdout.strip().split(";")
+    assert fields[17:19] == ["nfs4", "192.168.20.12:/shared_work2"]
 
 
 def test_shared_repository_binding_uses_nss_and_held_directories_not_install_record(

@@ -63,32 +63,64 @@ _SHARED_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worke
 _SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2"
 _MOUNTINFO = Path("/proc/self/mountinfo")
 _GB10_KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
-_REMOTE_SHARED_REPOSITORY_PROBE = """
+
+
+def _render_remote_shared_repository_probe(
+    *,
+    shared_root: Path = Path("/shared_work2"),
+    mountinfo: Path = Path("/proc/self/mountinfo"),
+) -> str:
+    parent = shared_root / "qianyi"
+    authority = parent / ".loom-staging-rollout"
+    repository = authority / "worker-repos"
+    return f"""
 import os
 import stat
 
 paths = (
-    "/shared_work2/qianyi",
-    "/shared_work2/qianyi/.loom-staging-rollout",
-    "/shared_work2/qianyi/.loom-staging-rollout/worker-repos",
+    {str(parent)!r},
+    {str(authority)!r},
+    {str(repository)!r},
 )
 entries = [os.lstat(path) for path in paths]
 safe = all(stat.S_ISDIR(item.st_mode) and not stat.S_ISLNK(item.st_mode) for item in entries)
 safe = safe and os.access(paths[-1], os.R_OK | os.X_OK) and not os.access(paths[-1], os.W_OK)
-mount = None
-with open("/proc/self/mountinfo", encoding="utf-8") as stream:
+mounts = []
+target = {str(shared_root)!r}
+with open({str(mountinfo)!r}, encoding="utf-8") as stream:
     for line in stream:
         left, separator, right = line.partition(" - ")
         if not separator:
             continue
         left_fields = left.split()
         right_fields = right.split()
-        if len(left_fields) >= 6 and len(right_fields) == 3 and left_fields[4] == "/shared_work2":
+        if len(left_fields) >= 6 and len(right_fields) == 3:
+            mount_point = left_fields[4]
+            if not mount_point.startswith("/") or "\\\\" in mount_point:
+                continue
+            contains_target = mount_point == "/" or target == mount_point or target.startswith(
+                mount_point.rstrip("/") + "/"
+            )
+            if not contains_target:
+                continue
             device = left_fields[2].split(":", 1)
             if len(device) == 2:
-                mount = (right_fields[0], right_fields[1], int(device[0]), int(device[1]))
-            break
-mount_stat = os.lstat("/shared_work2")
+                mounts.append(
+                    (
+                        len(mount_point),
+                        right_fields[0],
+                        right_fields[1],
+                        int(device[0]),
+                        int(device[1]),
+                    )
+                )
+mount = None
+if mounts:
+    specificity = max(item[0] for item in mounts)
+    selected = [item for item in mounts if item[0] == specificity]
+    if len(selected) == 1:
+        mount = selected[0][1:]
+mount_stat = os.lstat(target)
 safe = safe and mount is not None and (os.major(mount_stat.st_dev), os.minor(mount_stat.st_dev)) == mount[2:]
 groups = set(os.getgroups())
 groups.add(os.getegid())
@@ -108,6 +140,9 @@ if mount is not None:
 print(";".join(fields))
 raise SystemExit(0 if safe else 1)
 """.strip()
+
+
+_REMOTE_SHARED_REPOSITORY_PROBE = _render_remote_shared_repository_probe()
 
 
 class CommandResult(Protocol):
