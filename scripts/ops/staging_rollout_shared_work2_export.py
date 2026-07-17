@@ -42,6 +42,8 @@ CLIENT = "192.168.50.103/32"
 EXPORTS_DIRECTORY = Path("/etc/exports.d")
 EXPORTS_PATH = EXPORTS_DIRECTORY / "loom-staging-rollout-platform-dev.exports"
 EXPORTFS = Path("/usr/sbin/exportfs")
+NFS_STATE_DIRECTORY = Path("/var/lib/nfs")
+ETAB = NFS_STATE_DIRECTORY / "etab"
 ASSET = REPO_ROOT / "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports"
 EXPECTED_OPTIONS = frozenset(
     {
@@ -65,6 +67,7 @@ EXPECTED_OPTIONS = frozenset(
 _DIRECTORY_FLAGS = (
     os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
+_MAX_ETAB_BYTES = 1024 * 1024
 
 
 class ExportError(RuntimeError):
@@ -253,16 +256,83 @@ def _install_file(payload: bytes) -> tuple[bool, bool]:
         os.close(directory_fd)
 
 
+def _read_exact_etab() -> str:
+    try:
+        directory_fd = os.open(NFS_STATE_DIRECTORY, _DIRECTORY_FLAGS)
+        directory_metadata = os.fstat(directory_fd)
+        directory_lexical = os.lstat(NFS_STATE_DIRECTORY)
+    except OSError as exc:
+        raise ExportError("NFS active export authority is unavailable") from exc
+    if (
+        not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_ISLNK(directory_lexical.st_mode)
+        or directory_metadata.st_uid != 0
+        or directory_metadata.st_gid != 0
+        or stat.S_IMODE(directory_metadata.st_mode) != 0o755
+        or (directory_metadata.st_dev, directory_metadata.st_ino)
+        != (directory_lexical.st_dev, directory_lexical.st_ino)
+    ):
+        os.close(directory_fd)
+        raise ExportError("NFS active export authority is unsafe")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            ETAB.name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o644
+            or metadata.st_nlink != 1
+            or metadata.st_size > _MAX_ETAB_BYTES
+        ):
+            raise ExportError("NFS active export table is unsafe")
+        payload = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(65536, _MAX_ETAB_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if len(payload) > _MAX_ETAB_BYTES:
+                raise ExportError("NFS active export table is unsafe")
+    except OSError as exc:
+        raise ExportError("NFS active export table is unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory_fd)
+    try:
+        return payload.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ExportError("NFS active export table is invalid") from exc
+
+
+def _etab_has_exact_active_export(payload: str) -> bool:
+    matches: list[frozenset[str]] = []
+    for line in payload.splitlines():
+        match = re.fullmatch(
+            r"/shared_work2\s+192[.]168[.]50[.]103/32\(([^()]*)\)",
+            line,
+        )
+        if match is not None:
+            matches.append(frozenset(match.group(1).split(",")))
+    return len(matches) == 1 and matches[0] == EXPECTED_OPTIONS
+
+
 def _export_is_active(run: CommandRunner) -> bool:
     result = run([str(EXPORTFS), "-v"])
     if result.returncode != 0:
         return False
     normalized = " ".join(result.stdout.split())
-    matches = re.findall(
-        r"(?:^| )/shared_work2\s+192[.]168[.]50[.]103/32\(([^()]*)\)",
+    active_clients = re.findall(
+        r"(?:^| )/shared_work2\s+192[.]168[.]50[.]103/32\([^()]*\)",
         normalized,
     )
-    return len(matches) == 1 and frozenset(matches[0].split(",")) == EXPECTED_OPTIONS
+    return len(active_clients) == 1 and _etab_has_exact_active_export(_read_exact_etab())
 
 
 def _remove_exact_file(payload: bytes) -> None:

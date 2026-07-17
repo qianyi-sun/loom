@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts.ops import staging_rollout_shared_work2_export as helper
+
+_REAL_FSTAT = os.fstat
 
 
 class Result:
@@ -14,7 +19,29 @@ class Result:
 
 
 def _active_export() -> str:
-    return f"/shared_work2 192.168.50.103/32({','.join(sorted(helper.EXPECTED_OPTIONS))})\n"
+    return (
+        "/shared_work2 \t192.168.50.103/32("
+        "sync,wdelay,hide,no_subtree_check,sec=sys,rw,no_root_squash,no_all_squash)\n"
+    )
+
+
+def _active_etab() -> str:
+    options = ",".join(sorted(helper.EXPECTED_OPTIONS))
+    return f"/shared_work2\t192.168.50.103/32({options},rw,secure,no_root_squash)\n"
+
+
+def _root_fstat(fd: int, *, file_uid: int = 0) -> SimpleNamespace:
+    metadata = _REAL_FSTAT(fd)
+    is_directory = stat.S_ISDIR(metadata.st_mode)
+    return SimpleNamespace(
+        st_mode=(stat.S_IFDIR | 0o755) if is_directory else (stat.S_IFREG | 0o644),
+        st_uid=0 if is_directory else file_uid,
+        st_gid=0,
+        st_dev=metadata.st_dev,
+        st_ino=metadata.st_ino,
+        st_nlink=1,
+        st_size=metadata.st_size,
+    )
 
 
 def test_checked_in_export_is_exact_host_only_allowance() -> None:
@@ -30,6 +57,7 @@ def test_export_check_requires_exact_active_client_and_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(helper, "_file_is_exact", lambda _payload: True)
+    monkeypatch.setattr(helper, "_read_exact_etab", _active_etab)
 
     assert helper.converge(install=False, run=lambda _argv: Result(0, _active_export())) is False
 
@@ -39,17 +67,74 @@ def test_export_check_requires_exact_active_client_and_options(
             run=lambda _argv: Result(0, _active_export().replace("/32", "/24")),
         )
 
+    monkeypatch.setattr(
+        helper,
+        "_read_exact_etab",
+        lambda: _active_etab().replace("sec=sys", "sec=sys,insecure"),
+    )
     with pytest.raises(helper.ExportError, match="not active"):
-        helper.converge(
-            install=False,
-            run=lambda _argv: Result(0, _active_export().replace("sec=sys", "sec=sys,insecure")),
-        )
+        helper.converge(install=False, run=lambda _argv: Result(0, _active_export()))
+
+
+def test_active_export_uses_canonical_etab_not_exportfs_summary_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper, "_read_exact_etab", _active_etab)
+
+    assert helper._export_is_active(lambda _argv: Result(0, _active_export())) is True
+
+
+@pytest.mark.parametrize(
+    "etab",
+    [
+        "",
+        _active_etab().replace("/32", "/24"),
+        _active_etab().replace("sec=sys", "sec=sys,insecure"),
+        _active_etab() + _active_etab(),
+    ],
+)
+def test_active_export_rejects_missing_drifted_or_duplicate_etab(etab: str) -> None:
+    assert helper._etab_has_exact_active_export(etab) is False
+
+
+def test_etab_reader_requires_bounded_root_owned_exact_state_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nfs_state = tmp_path / "nfs"
+    nfs_state.mkdir(mode=0o755)
+    etab = nfs_state / "etab"
+    etab.write_text(_active_etab(), encoding="ascii")
+    etab.chmod(0o644)
+    monkeypatch.setattr(helper, "NFS_STATE_DIRECTORY", nfs_state)
+    monkeypatch.setattr(helper, "ETAB", etab)
+    monkeypatch.setattr(
+        helper.os,
+        "fstat",
+        lambda fd: _root_fstat(fd),
+    )
+
+    assert helper._read_exact_etab() == _active_etab()
+
+    monkeypatch.setattr(
+        helper.os,
+        "fstat",
+        lambda fd: SimpleNamespace(
+            **{
+                **vars(_root_fstat(fd)),
+                "st_uid": 1000 if stat.S_ISREG(_REAL_FSTAT(fd).st_mode) else 0,
+            }
+        ),
+    )
+    with pytest.raises(helper.ExportError, match="table is unsafe"):
+        helper._read_exact_etab()
 
 
 def test_export_check_requires_exact_installed_fragment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(helper, "_file_is_exact", lambda _payload: False)
+    monkeypatch.setattr(helper, "_read_exact_etab", _active_etab)
 
     with pytest.raises(helper.ExportError, match="not installed"):
         helper.converge(install=False, run=lambda _argv: Result(0, _active_export()))
@@ -62,6 +147,7 @@ def test_export_install_is_idempotent_and_refreshes_before_readback(
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
     monkeypatch.setattr(helper, "_install_file", lambda _payload: next(installs))
+    monkeypatch.setattr(helper, "_read_exact_etab", _active_etab)
 
     def run(argv):  # type: ignore[no-untyped-def]
         calls.append(tuple(argv))
