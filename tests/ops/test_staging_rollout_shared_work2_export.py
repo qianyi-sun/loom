@@ -80,3 +80,43 @@ def test_export_asset_rejects_any_path_or_client_drift(
 
     with pytest.raises(helper.ExportError, match="asset is invalid"):
         helper._asset_payload()
+
+
+def test_export_install_requires_exact_fixed_sealed_source_before_converge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    converged: list[bool] = []
+    validated: list[helper.SealedSource] = []
+    monkeypatch.setattr(
+        helper,
+        "converge",
+        lambda *, install: converged.append(install) or False,
+    )
+    monkeypatch.setattr(helper, "validate_sealed_source", validated.append)
+
+    assert helper.main(["install"]) == 1
+    assert converged == []
+
+    assert (
+        helper.main(
+            [
+                "install",
+                "--sealed-source-sha",
+                "a" * 40,
+                "--sealed-source-tree",
+                "b" * 40,
+                "--sealed-approved-base-sha",
+                "c" * 40,
+            ]
+        )
+        == 0
+    )
+    assert validated == [
+        helper.SealedSource(
+            path=helper.REPO_ROOT,
+            commit_sha="a" * 40,
+            tree_sha="b" * 40,
+            base_sha="c" * 40,
+        )
+    ]
+    assert converged == [True]

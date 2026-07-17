@@ -614,6 +614,9 @@ def _binding_matches(request: RolloutRequest, envelope: DriverEnvelope) -> bool:
         and request.candidate.resolved_sha == envelope.resolved_sha
         and request.candidate.image_tag == envelope.image_tag
         and request.candidate.fetched_at == envelope.fetched_at
+        and request.candidate.source_mode == envelope.source_mode
+        and request.candidate.resolved_tree == envelope.resolved_tree
+        and request.candidate.approved_base_sha == envelope.approved_base_sha
         and request.runner_config_sha256 == envelope.runner_config_sha256
     )
 

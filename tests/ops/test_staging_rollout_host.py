@@ -87,13 +87,25 @@ class FakeSystem:
             self.install_source_sha = self.remote_source_sha
         return host.REPO_ROOT, self.remote_source_sha
 
+    def prepare_sealed_install_source(
+        self,
+        source: host.SealedSource,
+    ) -> tuple[Path, str]:
+        assert source.path == host.REPO_ROOT
+        assert source.commit_sha == "a" * 40
+        assert source.tree_sha == "b" * 40
+        assert source.base_sha == "c" * 40
+        self.validated += 1
+        self.install_source_sha = source.commit_sha
+        return host.INSTALL_SOURCE, source.commit_sha
+
     def validate_invocation_merged(self, invocation_head: str, source_sha: str) -> None:
         assert invocation_head == "a" * 40
         assert source_sha == self.remote_source_sha
         self.validated += 1
 
     def validate_assets(self, source_root: Path, source_sha: str) -> None:
-        assert source_root == host.REPO_ROOT
+        assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
         assert source_sha == self.remote_source_sha
         self.validated += 1
 
@@ -103,8 +115,18 @@ class FakeSystem:
         self.source_reads.append(relative_path)
         return (host.REPO_ROOT / relative_path).read_bytes()
 
-    def validate_installed_source(self, source_sha: str, *, require_checkout: bool) -> None:
+    def validate_installed_source(
+        self,
+        source_sha: str,
+        *,
+        require_checkout: bool,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> None:
         assert source_sha in {"a" * 40, "b" * 40}
+        if source_tree_sha is not None or source_base_sha is not None:
+            assert source_tree_sha == "b" * 40
+            assert source_base_sha == "c" * 40
         if require_checkout:
             assert self.install_source_sha == source_sha
         self.validated += 1
@@ -283,14 +305,33 @@ class FakeSystem:
         mapped = self.filesystem.path(host.RUNTIME_ROOT)
         return mapped.is_dir() and (mapped.stat().st_mode & 0o777) == 0o700
 
-    def ensure_candidate(self, expected_sha: str, *, refresh: bool) -> bool:
+    def ensure_candidate(
+        self,
+        expected_sha: str,
+        *,
+        refresh: bool,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> bool:
+        if source_tree_sha is not None or source_base_sha is not None:
+            assert source_tree_sha == "b" * 40
+            assert source_base_sha == "c" * 40
         changed = refresh or self.candidate_sha != expected_sha
         if changed:
             self.candidate_syncs += 1
             self.candidate_sha = expected_sha
         return changed
 
-    def candidate_ready(self, expected_sha: str) -> bool:
+    def candidate_ready(
+        self,
+        expected_sha: str,
+        *,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> bool:
+        if source_tree_sha is not None or source_base_sha is not None:
+            assert source_tree_sha == "b" * 40
+            assert source_base_sha == "c" * 40
         return self.candidate_sha == expected_sha
 
     def venv_ready(self) -> bool:
@@ -307,7 +348,7 @@ class FakeSystem:
         self.venv_lock_hardenings += 1
 
     def sync_venv(self, source_root: Path) -> None:
-        assert source_root == host.REPO_ROOT
+        assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
         self.sync_safety_snapshots.append(
             (self.maintenance, self.filesystem.exists(host.SUDOERS_PATH))
         )
@@ -410,7 +451,7 @@ class FakeSystem:
         mode: str,
         previous_source_sha: str | None,
     ) -> None:
-        assert source_root == host.REPO_ROOT
+        assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
         assert mode in {"fresh", "legacy", "existing"}
         self.ledger_modes.append(mode)
         self.ledger_previous_source_shas.append(previous_source_sha)
@@ -472,7 +513,16 @@ class FakeSystem:
     def run_post_install_dry_run(self) -> None:
         self.dry_runs += 1
 
-    def check_runtime(self, expected_sha: str) -> list[str]:
+    def check_runtime(
+        self,
+        expected_sha: str,
+        *,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> list[str]:
+        if source_tree_sha is not None or source_base_sha is not None:
+            assert source_tree_sha == "b" * 40
+            assert source_base_sha == "c" * 40
         failures = [] if self.candidate_sha == expected_sha else ["candidate-checkout"]
         if not self.shared_work2_mount_ready():
             failures.append("shared-work2-mount")
@@ -744,6 +794,52 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_sealed_cumulative_install_records_exact_source_and_checks_candidate(
+    tmp_path: Path,
+) -> None:
+    installer, _system = _installer(tmp_path)
+    source = host.SealedSource(
+        path=host.REPO_ROOT,
+        commit_sha="a" * 40,
+        tree_sha="b" * 40,
+        base_sha="c" * 40,
+    )
+
+    result = installer.install(TEAM_ID, sealed_source=source)
+    record = installer.filesystem.load_install_record()
+    rendered = installer.filesystem.path(host.CONFIG_PATH).read_text(encoding="utf-8")
+
+    assert result["ok"] is True
+    assert record is not None
+    assert record["schema_version"] == 4
+    assert record["source_mode"] == "sealed-cumulative"
+    assert record["source_sha"] == source.commit_sha
+    assert record["source_tree_sha"] == source.tree_sha
+    assert record["source_base_sha"] == source.base_sha
+    assert 'schema_version = 2' in rendered
+    assert 'source_mode = "sealed-cumulative"' in rendered
+    assert f'source_commit_sha = "{source.commit_sha}"' in rendered
+    assert installer.check() == {"ok": True, "failures": []}
+
+
+def test_sealed_cumulative_install_rejects_invocation_drift_before_host_mutation(
+    tmp_path: Path,
+) -> None:
+    installer, _system = _installer(tmp_path)
+    source = host.SealedSource(
+        path=host.REPO_ROOT,
+        commit_sha="d" * 40,
+        tree_sha="b" * 40,
+        base_sha="c" * 40,
+    )
+
+    with pytest.raises(host.InstallError, match="installer checkout"):
+        installer.install(TEAM_ID, sealed_source=source)
+
+    assert installer.filesystem.load_install_record() is None
+    assert not installer.filesystem.path(host.CONFIG_PATH).exists()
 
 
 def test_worker_env_validation_allows_empty_optional_value() -> None:
@@ -2207,6 +2303,50 @@ def test_cli_rejects_repository_ref_and_host_overrides() -> None:
         parser.parse_args(["install", "--smoke-on-behalf-team-id", TEAM_ID, "--ref", "dev"])
     with pytest.raises(SystemExit):
         parser.parse_args(["plan", "--host", "example"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "install",
+                "--smoke-on-behalf-team-id",
+                TEAM_ID,
+                "--sealed-source-path",
+                "/tmp/checkout",
+            ]
+        )
+
+
+def test_cli_sealed_mode_requires_complete_binding_and_merged_mode_rejects_it(
+    tmp_path: Path,
+) -> None:
+    installer, _system = _installer(tmp_path)
+
+    assert (
+        host.main(
+            [
+                "install",
+                "--smoke-on-behalf-team-id",
+                TEAM_ID,
+                "--source-mode",
+                "sealed-cumulative",
+            ],
+            installer=installer,
+        )
+        == 1
+    )
+    assert (
+        host.main(
+            [
+                "install",
+                "--smoke-on-behalf-team-id",
+                TEAM_ID,
+                "--sealed-source-sha",
+                "a" * 40,
+            ],
+            installer=installer,
+        )
+        == 1
+    )
+    assert installer.filesystem.load_install_record() is None
 
 
 def test_host_lifecycle_lock_rejects_unsafe_metadata(

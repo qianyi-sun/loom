@@ -13,6 +13,7 @@ APPROVED_FETCH_REF = "refs/heads/dev"
 PINNED_TARGET_REF = "origin/dev"
 
 SchemaVersion = Literal[1]
+CandidateSourceMode = Literal["merged-dev", "sealed-cumulative"]
 RequestCommand = Literal["start"]
 RequestStatus = Literal["pending", "preview"]
 ActiveStatus = Literal["pending", "running"]
@@ -247,6 +248,9 @@ class CandidateBinding:
     image_tag: str
     fetched_at: str
     schema_version: SchemaVersion = 1
+    source_mode: CandidateSourceMode = "merged-dev"
+    resolved_tree: str | None = None
+    approved_base_sha: str | None = None
 
     def __post_init__(self) -> None:
         if self.remote_url != APPROVED_REMOTE_URL:
@@ -257,10 +261,19 @@ class CandidateBinding:
         if self.image_tag != f"staging-{sha[:7]}":
             raise ValueError("image_tag must be staging-<resolved_sha[:7]>")
         _require_string(self.fetched_at, "fetched_at")
+        if self.source_mode not in {"merged-dev", "sealed-cumulative"}:
+            raise ValueError("source_mode is invalid")
+        if self.source_mode == "sealed-cumulative":
+            if self.resolved_tree is None or self.approved_base_sha is None:
+                raise ValueError("sealed candidate source binding is incomplete")
+            _require_sha(self.resolved_tree, "resolved_tree")
+            _require_sha(self.approved_base_sha, "approved_base_sha")
+        elif self.resolved_tree is not None or self.approved_base_sha is not None:
+            raise ValueError("merged candidate must not carry sealed source binding")
         _require_schema(self.schema_version)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "remote_url": self.remote_url,
             "target_ref": self.target_ref,
             "resolved_sha": self.resolved_sha,
@@ -268,6 +281,15 @@ class CandidateBinding:
             "fetched_at": self.fetched_at,
             "schema_version": self.schema_version,
         }
+        if self.source_mode == "sealed-cumulative":
+            value.update(
+                {
+                    "source_mode": self.source_mode,
+                    "resolved_tree": self.resolved_tree,
+                    "approved_base_sha": self.approved_base_sha,
+                }
+            )
+        return value
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CandidateBinding:
@@ -279,6 +301,9 @@ class CandidateBinding:
             "fetched_at",
             "schema_version",
         }
+        sealed = data.get("source_mode") == "sealed-cumulative"
+        if sealed:
+            expected.update({"source_mode", "resolved_tree", "approved_base_sha"})
         _require_exact_keys(data, expected, "candidate binding")
         return cls(
             remote_url=_require_string(data["remote_url"], "remote_url"),
@@ -287,6 +312,15 @@ class CandidateBinding:
             image_tag=_require_string(data["image_tag"], "image_tag"),
             fetched_at=_require_string(data["fetched_at"], "fetched_at"),
             schema_version=_require_schema(data["schema_version"]),
+            source_mode="sealed-cumulative" if sealed else "merged-dev",
+            resolved_tree=(
+                _require_sha(data["resolved_tree"], "resolved_tree") if sealed else None
+            ),
+            approved_base_sha=(
+                _require_sha(data["approved_base_sha"], "approved_base_sha")
+                if sealed
+                else None
+            ),
         )
 
 
@@ -470,6 +504,9 @@ class DriverEnvelope:
     scope: str
     gb10_prep_concurrency: int
     resume: bool
+    source_mode: CandidateSourceMode = "merged-dev"
+    resolved_tree: str | None = None
+    approved_base_sha: str | None = None
 
     def __post_init__(self) -> None:
         _require_schema(self.schema_version)
@@ -487,6 +524,15 @@ class DriverEnvelope:
         sha = _require_sha(self.resolved_sha, "resolved_sha")
         if self.image_tag != f"staging-{sha[:7]}":
             raise ValueError("image_tag must be staging-<resolved_sha[:7]>")
+        if self.source_mode not in {"merged-dev", "sealed-cumulative"}:
+            raise ValueError("source_mode is invalid")
+        if self.source_mode == "sealed-cumulative":
+            if self.resolved_tree is None or self.approved_base_sha is None:
+                raise ValueError("sealed envelope source binding is incomplete")
+            _require_sha(self.resolved_tree, "resolved_tree")
+            _require_sha(self.approved_base_sha, "approved_base_sha")
+        elif self.resolved_tree is not None or self.approved_base_sha is not None:
+            raise ValueError("merged envelope must not carry sealed source binding")
         _require_string(self.fetched_at, "fetched_at")
         _require_absolute_path(self.backup_manifest_path, "backup_manifest_path")
         _require_sha256(self.backup_manifest_sha256, "backup_manifest_sha256")
@@ -519,7 +565,7 @@ class DriverEnvelope:
             raise ValueError("resume must be true after attempt 1")
 
     def rollout_inputs(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "request_id": self.request_id,
             "rollout_id": self.rollout_id,
             "initiating_operator": self.initiating_operator,
@@ -532,13 +578,29 @@ class DriverEnvelope:
             "backup_manifest_sha256": self.backup_manifest_sha256,
             "runner_config_sha256": self.runner_config_sha256,
         }
+        if self.source_mode == "sealed-cumulative":
+            value.update(
+                {
+                    "source_mode": self.source_mode,
+                    "resolved_tree": self.resolved_tree,
+                    "approved_base_sha": self.approved_base_sha,
+                }
+            )
+        return value
 
     def to_dict(self) -> dict[str, object]:
-        return {field.name: getattr(self, field.name) for field in fields(self)}
+        value = {field.name: getattr(self, field.name) for field in fields(self)}
+        if self.source_mode == "merged-dev":
+            for key in ("source_mode", "resolved_tree", "approved_base_sha"):
+                value.pop(key)
+        return value
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> DriverEnvelope:
         expected = {field.name for field in fields(cls)}
+        sealed = data.get("source_mode") == "sealed-cumulative"
+        if not sealed:
+            expected.difference_update({"source_mode", "resolved_tree", "approved_base_sha"})
         _require_exact_keys(data, expected, "driver envelope")
         return cls(
             schema_version=_require_schema(data["schema_version"]),
@@ -597,6 +659,15 @@ class DriverEnvelope:
                 data["gb10_prep_concurrency"], "gb10_prep_concurrency"
             ),
             resume=_require_bool(data["resume"], "resume"),
+            source_mode="sealed-cumulative" if sealed else "merged-dev",
+            resolved_tree=(
+                _require_sha(data["resolved_tree"], "resolved_tree") if sealed else None
+            ),
+            approved_base_sha=(
+                _require_sha(data["approved_base_sha"], "approved_base_sha")
+                if sealed
+                else None
+            ),
         )
 
 

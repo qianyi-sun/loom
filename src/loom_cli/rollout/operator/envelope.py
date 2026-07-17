@@ -197,6 +197,9 @@ def _read_envelope(path: Path, config: OperatorConfig, *, effective_uid: int) ->
         "resolved_sha": request.candidate.resolved_sha,
         "image_tag": request.candidate.image_tag,
         "fetched_at": request.candidate.fetched_at,
+        "source_mode": request.candidate.source_mode,
+        "resolved_tree": request.candidate.resolved_tree,
+        "approved_base_sha": request.candidate.approved_base_sha,
         "runner_config_sha256": request.runner_config_sha256,
     }
     envelope_binding = {
@@ -209,10 +212,21 @@ def _read_envelope(path: Path, config: OperatorConfig, *, effective_uid: int) ->
         "resolved_sha": envelope.resolved_sha,
         "image_tag": envelope.image_tag,
         "fetched_at": envelope.fetched_at,
+        "source_mode": envelope.source_mode,
+        "resolved_tree": envelope.resolved_tree,
+        "approved_base_sha": envelope.approved_base_sha,
         "runner_config_sha256": envelope.runner_config_sha256,
     }
     if request_binding != envelope_binding:
         raise EnvelopeValidationError("driver envelope does not match immutable request binding")
+    if envelope.source_mode != config.source_mode:
+        raise EnvelopeValidationError("driver envelope source mode does not match config")
+    if config.source_mode == "sealed-cumulative" and (
+        envelope.resolved_sha != config.source_commit_sha
+        or envelope.resolved_tree != config.source_tree_sha
+        or envelope.approved_base_sha != config.source_base_sha
+    ):
+        raise EnvelopeValidationError("driver envelope sealed source does not match config")
     if envelope.attempt_number > 1:
         first_directory = config.state_root / "requests" / envelope.request_id / "attempts" / "1"
         _validate_private_directory(

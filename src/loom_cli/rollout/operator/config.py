@@ -29,10 +29,11 @@ ServiceUser = Literal["loom-rollout"]
 OperatorGroup = Literal["loom-staging-operators"]
 Environment = Literal["staging"]
 RolloutScope = Literal["current-gb10"]
+CandidateSourceMode = Literal["merged-dev", "sealed-cumulative"]
 
 _FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{12} len=[1-9][0-9]*$")
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
-_CONFIG_KEYS = frozenset(
+_BASE_CONFIG_KEYS = frozenset(
     {
         "schema_version",
         "service_user",
@@ -61,6 +62,10 @@ _CONFIG_KEYS = frozenset(
         "backup_max_entries",
     }
 )
+_SEALED_CONFIG_KEYS = frozenset(
+    {"source_mode", "source_commit_sha", "source_tree_sha", "source_base_sha"}
+)
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_CONFIG_BYTES = 1 << 20
 
 
@@ -241,6 +246,10 @@ class OperatorConfig:
     backup_max_entries: int = APPROVED_BACKUP_MAX_ENTRIES
     config_path: Path = Path("/etc/loom/staging-rollout.toml")
     config_sha256: str = "0" * 64
+    source_mode: CandidateSourceMode = "merged-dev"
+    source_commit_sha: str | None = None
+    source_tree_sha: str | None = None
+    source_base_sha: str | None = None
 
     @classmethod
     def load(
@@ -289,17 +298,38 @@ class OperatorConfig:
             raise ConfigError("config must be a TOML table")
         raw = cast(dict[str, object], loaded)
 
+        schema_version = raw.get("schema_version")
+        if type(schema_version) is not int or schema_version not in {1, 2}:
+            raise ConfigError("schema_version must be 1 or 2")
+        expected_keys = _BASE_CONFIG_KEYS if schema_version == 1 else _BASE_CONFIG_KEYS | _SEALED_CONFIG_KEYS
         actual_keys = set(raw)
-        unknown = sorted(actual_keys - _CONFIG_KEYS)
-        missing = sorted(_CONFIG_KEYS - actual_keys)
+        unknown = sorted(actual_keys - expected_keys)
+        missing = sorted(expected_keys - actual_keys)
         if unknown:
             raise ConfigError(f"unknown config keys: {unknown}")
         if missing:
             raise ConfigError(f"missing config keys: {missing}")
 
-        schema_version = raw["schema_version"]
-        if type(schema_version) is not int or schema_version != 1:
-            raise ConfigError("schema_version must be 1")
+        source_mode: CandidateSourceMode = "merged-dev"
+        source_commit_sha: str | None = None
+        source_tree_sha: str | None = None
+        source_base_sha: str | None = None
+        if schema_version == 2:
+            if _require_string(raw, "source_mode") != "sealed-cumulative":
+                raise ConfigError("source_mode must be sealed-cumulative")
+            source_mode = "sealed-cumulative"
+            values = {
+                "source_commit_sha": _require_string(raw, "source_commit_sha"),
+                "source_tree_sha": _require_string(raw, "source_tree_sha"),
+                "source_base_sha": _require_string(raw, "source_base_sha"),
+            }
+            if any(_SHA_RE.fullmatch(value) is None for value in values.values()):
+                raise ConfigError("sealed source SHA/tree/base must be exact lowercase Git SHAs")
+            source_commit_sha = values["source_commit_sha"]
+            source_tree_sha = values["source_tree_sha"]
+            source_base_sha = values["source_base_sha"]
+            if len({source_commit_sha, source_tree_sha, source_base_sha}) != 3:
+                raise ConfigError("sealed source SHA/tree/base identities must be distinct")
 
         service_user = _require_literal(raw, "service_user", APPROVED_SERVICE_USER)
         operator_group = _require_literal(raw, "operator_group", APPROVED_OPERATOR_GROUP)
@@ -367,6 +397,10 @@ class OperatorConfig:
             backup_max_entries=backup_max_entries,
             config_path=path,
             config_sha256=hashlib.sha256(payload).hexdigest(),
+            source_mode=source_mode,
+            source_commit_sha=source_commit_sha,
+            source_tree_sha=source_tree_sha,
+            source_base_sha=source_base_sha,
         )
 
 

@@ -63,6 +63,28 @@ image tag, backup, config digest, and rollout ID even when `dev` has advanced.
 Rollback of code is a merged revert on `dev` followed by a new request. Direct
 deployment of an older SHA is not an operational rollback mechanism.
 
+### Coordinator-only sealed cumulative repair amendment
+
+For an explicitly approved replacement-attempt incident, Qianyi may batch
+multiple independently reviewed local fixes and defer the single durable PR
+until staging acceptance succeeds. The default remains merged-only. The root
+installer exposes one explicit `sealed-cumulative` mode that accepts no path or
+ref override and binds the fixed invocation checkout to an exact commit, tree,
+and approved merged base. It requires a standalone root-owned clean detached
+checkout, rejects Git indirection and non-linear or over-32-commit history,
+and copies only that exact commit into the root install source and service
+candidate without fetching or resolving `origin/dev`.
+
+The shared-work2 exporter consumes the same exact source validator before its
+first mutation. The install ledger and protected config record the source mode,
+commit, tree, and base; immutable requests and attempt envelopes carry and
+revalidate the same provenance. While that config is installed, broker
+`start`/`resume` is restricted to Qianyi before preflight or request creation.
+Status and logs remain available to the other operators. Manual file copying,
+Git-object injection, alternate source paths, and implicit fallback to merged
+or cached refs remain unsupported. After the accepted rollout, the accumulated
+changes return through the normal reviewed PR and protected-gate process.
+
 Candidate-bound authenticated staging browser acceptance follows the same
 authority. Only a broker-owned rollout step may exchange the singleton admin
 bearer, and its sanitized report must bind the request/attempt envelope's

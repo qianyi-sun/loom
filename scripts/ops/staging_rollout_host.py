@@ -31,6 +31,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+try:
+    from scripts.ops.staging_rollout_sealed_source import (
+        SealedSource,
+        SealedSourceError,
+        validate_sealed_source,
+    )
+except ModuleNotFoundError:  # direct execution from scripts/ops
+    from staging_rollout_sealed_source import (
+        SealedSource,
+        SealedSourceError,
+        validate_sealed_source,
+    )  # type: ignore[import-not-found, no-redef]
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_ROOT = REPO_ROOT / "deploy" / "staging-rollout"
 REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
@@ -806,7 +819,7 @@ class LocalFilesystem:
                 raise InstallError("install record is invalid")
             record[key] = value
         schema_version = record.get("schema_version")
-        if type(schema_version) is not int or schema_version not in {1, 2, 3}:
+        if type(schema_version) is not int or schema_version not in {1, 2, 3, 4}:
             raise InstallError("install record is invalid")
         return record
 
@@ -1365,6 +1378,86 @@ class HostSystem:
         self._validate_repo_contract(INSTALL_SOURCE, root_owned=True)
         return INSTALL_SOURCE, sha
 
+    def prepare_sealed_install_source(self, source: SealedSource) -> tuple[Path, str]:
+        """Import one validated local commit without resolving any remote ref."""
+        if source.path != REPO_ROOT:
+            raise InstallError("sealed source must be the exact installer checkout")
+        try:
+            validate_sealed_source(source, run=lambda argv: self.runner.run(argv, check=False))
+        except SealedSourceError as exc:
+            raise InstallError(str(exc)) from exc
+        self.ensure_root_directory(RUNNER_ROOT, mode=0o755)
+        if self._probe(["test", "-d", str(INSTALL_SOURCE / ".git")]).returncode != 0:
+            if self._probe(["test", "-e", str(INSTALL_SOURCE)]).returncode == 0:
+                raise InstallError("root installation source path is occupied")
+            self.runner.run(["git", "init", str(INSTALL_SOURCE)])
+            self.runner.run(
+                ["git", "-C", str(INSTALL_SOURCE), "remote", "add", "origin", REMOTE_URL]
+            )
+        self._validate_repo_contract(INSTALL_SOURCE, root_owned=True)
+        object_type = self._probe(
+            ["git", "-C", str(INSTALL_SOURCE), "cat-file", "-t", source.commit_sha]
+        )
+        if object_type.returncode != 0 or object_type.stdout.strip() != "commit":
+            self.runner.run(
+                [
+                    "git",
+                    "-C",
+                    str(INSTALL_SOURCE),
+                    "fetch",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    str(source.path),
+                    source.commit_sha,
+                ]
+            )
+        expected = {"commit": source.commit_sha, "tree": source.tree_sha}
+        observed = {
+            "commit": self.runner.run(
+                ["git", "-C", str(INSTALL_SOURCE), "rev-parse", f"{source.commit_sha}^{{commit}}"]
+            ).stdout.strip(),
+            "tree": self.runner.run(
+                ["git", "-C", str(INSTALL_SOURCE), "rev-parse", f"{source.commit_sha}^{{tree}}"]
+            ).stdout.strip(),
+        }
+        if observed != expected:
+            raise InstallError("imported sealed source identity does not match")
+        merge_base = self.runner.run(
+            [
+                "git",
+                "-C",
+                str(INSTALL_SOURCE),
+                "merge-base",
+                source.base_sha,
+                source.commit_sha,
+            ]
+        ).stdout.strip()
+        history = self.runner.run(
+            [
+                "git",
+                "-C",
+                str(INSTALL_SOURCE),
+                "rev-list",
+                "--reverse",
+                "--parents",
+                f"{source.base_sha}..{source.commit_sha}",
+            ]
+        ).stdout.splitlines()
+        expected_parent = source.base_sha
+        for line in history:
+            fields = line.split()
+            if len(fields) != 2 or fields[1] != expected_parent:
+                raise InstallError("imported sealed source history is not linear")
+            expected_parent = fields[0]
+        if (
+            merge_base != source.base_sha
+            or not 1 <= len(history) <= 32
+            or expected_parent != source.commit_sha
+        ):
+            raise InstallError("imported sealed source history does not match")
+        self._validate_repo_contract(INSTALL_SOURCE, root_owned=True)
+        return INSTALL_SOURCE, source.commit_sha
+
     def install_source_ready(self, expected_sha: str) -> bool:
         if _SHA_RE.fullmatch(expected_sha) is None:
             raise InstallError("root installation source SHA is invalid")
@@ -1429,11 +1522,22 @@ class HostSystem:
                     "scripts/ops/staging_rollout_shared_work2_export.py",
                 )
             )
+            sealed_source_helper = directory / "staging_rollout_sealed_source.py"
+            sealed_source_helper.write_bytes(
+                self.source_file(
+                    source_root,
+                    source_sha,
+                    "scripts/ops/staging_rollout_sealed_source.py",
+                )
+            )
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-broker")])
             self.runner.run(["visudo", "-cf", str(directory / "loom-staging-rollout.sudoers")])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_repo_helper)])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_work2_helper)])
+            self.runner.run(
+                [str(SYSTEM_PYTHON), "-m", "py_compile", str(sealed_source_helper)]
+            )
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(export_helper)])
 
     def source_file(self, source_root: Path, source_sha: str, relative_path: str) -> bytes:
@@ -1446,7 +1550,14 @@ class HostSystem:
         )
         return result.stdout.encode("utf-8")
 
-    def validate_installed_source(self, source_sha: str, *, require_checkout: bool) -> None:
+    def validate_installed_source(
+        self,
+        source_sha: str,
+        *,
+        require_checkout: bool,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> None:
         if _SHA_RE.fullmatch(source_sha) is None:
             raise InstallError("install record source SHA is invalid")
         self._validate_repo_contract(INSTALL_SOURCE, root_owned=True)
@@ -1458,6 +1569,40 @@ class HostSystem:
         ).stdout.strip()
         if require_checkout and head != source_sha:
             raise InstallError("root installation source drifted from the install record")
+        if (source_tree_sha is None) != (source_base_sha is None):
+            raise InstallError("install record sealed source binding is incomplete")
+        if source_tree_sha is not None and source_base_sha is not None:
+            if _SHA_RE.fullmatch(source_tree_sha) is None or _SHA_RE.fullmatch(source_base_sha) is None:
+                raise InstallError("install record sealed source binding is invalid")
+            observed_tree = self.runner.run(
+                ["git", "-C", str(INSTALL_SOURCE), "rev-parse", f"{source_sha}^{{tree}}"]
+            ).stdout.strip()
+            observed_base = self.runner.run(
+                ["git", "-C", str(INSTALL_SOURCE), "merge-base", source_base_sha, source_sha]
+            ).stdout.strip()
+            history = self.runner.run(
+                [
+                    "git",
+                    "-C",
+                    str(INSTALL_SOURCE),
+                    "rev-list",
+                    "--reverse",
+                    "--parents",
+                    f"{source_base_sha}..{source_sha}",
+                ]
+            ).stdout.splitlines()
+            expected_parent = source_base_sha
+            for line in history:
+                fields = line.split()
+                if len(fields) != 2 or fields[1] != expected_parent:
+                    raise InstallError("installed sealed source history is not linear")
+                expected_parent = fields[0]
+            if (
+                (observed_tree, observed_base) != (source_tree_sha, source_base_sha)
+                or not 1 <= len(history) <= 32
+                or expected_parent != source_sha
+            ):
+                raise InstallError("installed sealed source identity drifted")
 
     def ensure_group(self, name: str) -> bool:
         if self.group_present(name):
@@ -1833,13 +1978,83 @@ class HostSystem:
             check=check,
         )
 
-    def ensure_candidate(self, expected_sha: str, *, refresh: bool) -> bool:
+    def _validate_candidate_sealed_identity(
+        self,
+        expected_sha: str,
+        *,
+        source_tree_sha: str,
+        source_base_sha: str,
+    ) -> None:
+        if (
+            _SHA_RE.fullmatch(source_tree_sha) is None
+            or _SHA_RE.fullmatch(source_base_sha) is None
+        ):
+            raise InstallError("candidate sealed source binding is invalid")
+        observed_tree = self._service_git(
+            "-C",
+            str(CANDIDATE_REPO),
+            "rev-parse",
+            f"{expected_sha}^{{tree}}",
+        ).stdout.strip()
+        merge_base = self._service_git(
+            "-C",
+            str(CANDIDATE_REPO),
+            "merge-base",
+            source_base_sha,
+            expected_sha,
+        ).stdout.strip()
+        history = self._service_git(
+            "-C",
+            str(CANDIDATE_REPO),
+            "rev-list",
+            "--reverse",
+            "--parents",
+            f"{source_base_sha}..{expected_sha}",
+        ).stdout.splitlines()
+        expected_parent = source_base_sha
+        for line in history:
+            fields = line.split()
+            if len(fields) != 2 or fields[1] != expected_parent:
+                raise InstallError("candidate sealed source history is not linear")
+            expected_parent = fields[0]
+        if (
+            observed_tree != source_tree_sha
+            or merge_base != source_base_sha
+            or not 1 <= len(history) <= 32
+            or expected_parent != expected_sha
+        ):
+            raise InstallError("candidate sealed source identity does not match")
+
+    def ensure_candidate(
+        self,
+        expected_sha: str,
+        *,
+        refresh: bool,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> bool:
         if _SHA_RE.fullmatch(expected_sha) is None:
             raise InstallError("candidate checkout SHA is invalid")
+        sealed = source_tree_sha is not None or source_base_sha is not None
+        if sealed and (source_tree_sha is None or source_base_sha is None):
+            raise InstallError("candidate sealed source binding is incomplete")
         changed = False
         service_uid, service_gid = self._service_ids()
         if self._probe(["test", "-d", str(CANDIDATE_REPO / ".git")]).returncode != 0:
-            self._service_git("clone", "--origin", "origin", REMOTE_URL, str(CANDIDATE_REPO))
+            if sealed:
+                self._service_git("init", str(CANDIDATE_REPO))
+                self._service_git(
+                    "-C",
+                    str(CANDIDATE_REPO),
+                    "remote",
+                    "add",
+                    "origin",
+                    REMOTE_URL,
+                )
+            else:
+                self._service_git(
+                    "clone", "--origin", "origin", REMOTE_URL, str(CANDIDATE_REPO)
+                )
             refresh = True
             changed = True
         _validate_git_checkout_tree(
@@ -1883,16 +2098,32 @@ class HostSystem:
         ).stdout
         if dirty:
             raise InstallError("candidate checkout is dirty")
-        head = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD").stdout.strip()
+        head_result = self._service_git(
+            "-C", str(CANDIDATE_REPO), "rev-parse", "HEAD", check=False
+        )
+        head = head_result.stdout.strip() if head_result.returncode == 0 else ""
         if refresh or head != expected_sha:
-            self._service_git(
-                "-C",
-                str(CANDIDATE_REPO),
-                "fetch",
-                "--prune",
-                "origin",
-                f"{FETCH_REF}:refs/remotes/origin/dev",
-            )
+            if sealed:
+                self._service_git(
+                    "-c",
+                    f"safe.directory={INSTALL_SOURCE}",
+                    "-C",
+                    str(CANDIDATE_REPO),
+                    "fetch",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    str(INSTALL_SOURCE),
+                    expected_sha,
+                )
+            else:
+                self._service_git(
+                    "-C",
+                    str(CANDIDATE_REPO),
+                    "fetch",
+                    "--prune",
+                    "origin",
+                    f"{FETCH_REF}:refs/remotes/origin/dev",
+                )
             self._service_git(
                 "-C",
                 str(CANDIDATE_REPO),
@@ -1912,9 +2143,26 @@ class HostSystem:
         head = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD").stdout.strip()
         if head != expected_sha:
             raise InstallError("candidate checkout did not converge to the installed source SHA")
+        if sealed:
+            if source_tree_sha is None or source_base_sha is None:  # pragma: no cover
+                raise InstallError("candidate sealed source binding is incomplete")
+            self._validate_candidate_sealed_identity(
+                expected_sha,
+                source_tree_sha=source_tree_sha,
+                source_base_sha=source_base_sha,
+            )
         return changed
 
-    def candidate_ready(self, expected_sha: str) -> bool:
+    def candidate_ready(
+        self,
+        expected_sha: str,
+        *,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> bool:
+        sealed = source_tree_sha is not None or source_base_sha is not None
+        if sealed and (source_tree_sha is None or source_base_sha is None):
+            return False
         if self._probe(["test", "-d", str(CANDIDATE_REPO / ".git")]).returncode != 0:
             return False
         try:
@@ -1954,7 +2202,7 @@ class HostSystem:
             check=False,
         )
         head = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD", check=False)
-        return bool(
+        ready = bool(
             remotes == ["origin"]
             and urls == [REMOTE_URL]
             and pushurl.returncode != 0
@@ -1963,6 +2211,20 @@ class HostSystem:
             and head.returncode == 0
             and head.stdout.strip() == expected_sha
         )
+        if not ready:
+            return False
+        if sealed:
+            try:
+                if source_tree_sha is None or source_base_sha is None:  # pragma: no cover
+                    return False
+                self._validate_candidate_sealed_identity(
+                    expected_sha,
+                    source_tree_sha=source_tree_sha,
+                    source_base_sha=source_base_sha,
+                )
+            except InstallError:
+                return False
+        return True
 
     def venv_ready(self) -> bool:
         if not os.path.lexists(VENV):
@@ -2847,7 +3109,13 @@ class HostSystem:
             ]
         )
 
-    def check_runtime(self, expected_sha: str) -> list[str]:
+    def check_runtime(
+        self,
+        expected_sha: str,
+        *,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> list[str]:
         failures: list[str] = []
         operator_group = self._probe(["getent", "group", OPERATOR_GROUP])
         if operator_group.returncode != 0:
@@ -2885,7 +3153,11 @@ class HostSystem:
                 failures.append("shared-worker-repo-root")
         except InstallError:
             failures.append("shared-worker-repo-root")
-        if not service_account_ready or not self.candidate_ready(expected_sha):
+        if not service_account_ready or not self.candidate_ready(
+            expected_sha,
+            source_tree_sha=source_tree_sha,
+            source_base_sha=source_base_sha,
+        ):
             failures.append("candidate-checkout")
         for path in PROTECTED_INPUTS:
             try:
@@ -3169,6 +3441,9 @@ class HostInstaller:
     euid: int
     source_root: Path | None = None
     source_sha: str | None = None
+    source_mode: str = "merged-dev"
+    source_tree_sha: str | None = None
+    source_base_sha: str | None = None
 
     def _source_file(self, relative_path: str) -> bytes:
         if self.source_root is None or self.source_sha is None:
@@ -3184,12 +3459,35 @@ class HostInstaller:
             raise InstallError("staging rollout config template markers are invalid")
         rendered = template.replace(_FINGERPRINT_TOKEN, _token_fingerprint(admin_token))
         rendered = rendered.replace(_TEAM_TOKEN, _validate_team_id(team_id))
+        if self.source_mode == "sealed-cumulative":
+            if self.source_sha is None or self.source_tree_sha is None or self.source_base_sha is None:
+                raise InstallError("sealed source binding is unavailable for config rendering")
+            rendered = rendered.replace("schema_version = 1", "schema_version = 2", 1)
+            rendered += (
+                '\nsource_mode = "sealed-cumulative"\n'
+                f'source_commit_sha = "{self.source_sha}"\n'
+                f'source_tree_sha = "{self.source_tree_sha}"\n'
+                f'source_base_sha = "{self.source_base_sha}"\n'
+            )
         payload = rendered.encode("utf-8")
-        self._validate_rendered_config(payload, team_id)
+        self._validate_rendered_config(
+            payload,
+            team_id,
+            source_sha=self.source_sha if self.source_mode == "sealed-cumulative" else None,
+            source_tree_sha=self.source_tree_sha,
+            source_base_sha=self.source_base_sha,
+        )
         return payload
 
     @staticmethod
-    def _validate_rendered_config(payload: bytes, team_id: str) -> None:
+    def _validate_rendered_config(
+        payload: bytes,
+        team_id: str,
+        *,
+        source_sha: str | None = None,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> None:
         try:
             raw = tomllib.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
@@ -3221,10 +3519,15 @@ class HostInstaller:
             "backup_max_objects",
             "backup_max_entries",
         }
+        sealed = raw.get("schema_version") == 2
+        if sealed:
+            required.update(
+                {"source_mode", "source_commit_sha", "source_tree_sha", "source_base_sha"}
+            )
         if set(raw) != required:
             raise InstallError("rendered staging config keys are invalid")
         literals: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2 if sealed else 1,
             "service_user": SERVICE_USER,
             "operator_group": OPERATOR_GROUP,
             "remote_url": REMOTE_URL,
@@ -3251,6 +3554,16 @@ class HostInstaller:
         }
         if any(raw.get(key) != value for key, value in literals.items()):
             raise InstallError("rendered staging config policy is invalid")
+        if sealed and (
+            source_sha is None
+            or source_tree_sha is None
+            or source_base_sha is None
+            or raw.get("source_mode") != "sealed-cumulative"
+            or raw.get("source_commit_sha") != source_sha
+            or raw.get("source_tree_sha") != source_tree_sha
+            or raw.get("source_base_sha") != source_base_sha
+        ):
+            raise InstallError("rendered sealed source policy is invalid")
         fingerprint = raw.get("expect_admin_token_fingerprint")
         if (
             not isinstance(fingerprint, str)
@@ -3373,7 +3686,7 @@ class HostInstaller:
             return None
         if schema_version == 1:
             value = record.get("source_sha")
-        elif schema_version == 3:
+        elif schema_version in {3, 4}:
             if field not in record:
                 raise InstallError("install record legacy trust source is unavailable")
             value = record[field]
@@ -3392,12 +3705,32 @@ class HostInstaller:
         installation_state = record.get("installation_state")
         if installation_state not in {"installing", "ready", "uninstalling"}:
             raise InstallError("install record installation state is invalid")
-        self.system.validate_installed_source(
-            sha,
-            require_checkout=installation_state == "ready",
-        )
+        source_mode = record.get("source_mode", "merged-dev")
+        if source_mode not in {"merged-dev", "sealed-cumulative"}:
+            raise InstallError("install record source mode is invalid")
+        tree = record.get("source_tree_sha") if source_mode == "sealed-cumulative" else None
+        base = record.get("source_base_sha") if source_mode == "sealed-cumulative" else None
+        if source_mode == "sealed-cumulative" and (
+            not isinstance(tree, str) or not isinstance(base, str)
+        ):
+            raise InstallError("install record sealed source binding is invalid")
+        if source_mode == "sealed-cumulative":
+            self.system.validate_installed_source(
+                sha,
+                require_checkout=installation_state == "ready",
+                source_tree_sha=tree if isinstance(tree, str) else None,
+                source_base_sha=base if isinstance(base, str) else None,
+            )
+        else:
+            self.system.validate_installed_source(
+                sha,
+                require_checkout=installation_state == "ready",
+            )
         self.source_root = INSTALL_SOURCE
         self.source_sha = sha
+        self.source_mode = source_mode
+        self.source_tree_sha = tree if isinstance(tree, str) else None
+        self.source_base_sha = base if isinstance(base, str) else None
 
     def plan(self) -> dict[str, object]:
         return {
@@ -3416,23 +3749,43 @@ class HostInstaller:
             "preserves": [str(STATE_ROOT), "/data/loom-staging/rollouts"],
         }
 
-    def install(self, team_id: str, *, _lock_held: bool = False) -> dict[str, object]:
+    def install(
+        self,
+        team_id: str,
+        *,
+        sealed_source: SealedSource | None = None,
+        _lock_held: bool = False,
+    ) -> dict[str, object]:
         if not _lock_held:
             if self.euid != 0:
                 raise InstallError("install requires root")
             self.system.ensure_root_directory(TRUST_LIFECYCLE_LOCK.parent, mode=0o755)
             with self.system.trust_lifecycle_lock():
-                return self.install(team_id, _lock_held=True)
+                return self.install(team_id, sealed_source=sealed_source, _lock_held=True)
         if self.euid != 0:
             raise InstallError("install requires root")
         team_id = _validate_team_id(team_id)
         self.system.validate_prerequisites()
         invocation_head = self.system.validate_invocation_checkout()
-        self.source_root, self.source_sha = self.system.prepare_install_source()
+        if sealed_source is None:
+            self.source_mode = "merged-dev"
+            self.source_tree_sha = None
+            self.source_base_sha = None
+            self.source_root, self.source_sha = self.system.prepare_install_source()
+        else:
+            if invocation_head != sealed_source.commit_sha:
+                raise InstallError("installer checkout does not match sealed source commit")
+            self.source_mode = "sealed-cumulative"
+            self.source_tree_sha = sealed_source.tree_sha
+            self.source_base_sha = sealed_source.base_sha
+            self.source_root, self.source_sha = self.system.prepare_sealed_install_source(
+                sealed_source
+            )
         source_sha = self.source_sha
         if source_sha is None:  # pragma: no cover - prepare_install_source owns this
             raise InstallError("root installation source SHA is unavailable")
-        self.system.validate_invocation_merged(invocation_head, source_sha)
+        if sealed_source is None:
+            self.system.validate_invocation_merged(invocation_head, source_sha)
         self.system.validate_assets(self.source_root, source_sha)
         changes: list[str] = []
         root_directories = (
@@ -3601,7 +3954,7 @@ class HostInstaller:
         )
         trust_ledger_migrated = bool(
             previous_record is not None
-            and previous_record.get("schema_version") in {2, 3}
+            and previous_record.get("schema_version") in {2, 3, 4}
             and self._record_flag(previous_record, "trust_ledger_migrated")
         )
         legacy_trust_source_sha = self._record_legacy_trust_source_sha(
@@ -3625,7 +3978,7 @@ class HostInstaller:
             maintenance: bool,
         ) -> dict[str, object]:
             value: dict[str, object] = {
-                "schema_version": 3,
+                "schema_version": 4 if self.source_mode == "sealed-cumulative" else 3,
                 "installation_state": state,
                 "admission_enabled": admission,
                 "maintenance_enabled": maintenance,
@@ -3646,6 +3999,16 @@ class HostInstaller:
                     )
                 ],
             }
+            if self.source_mode == "sealed-cumulative":
+                if self.source_tree_sha is None or self.source_base_sha is None:
+                    raise InstallError("sealed source record binding is unavailable")
+                value.update(
+                    {
+                        "source_mode": "sealed-cumulative",
+                        "source_tree_sha": self.source_tree_sha,
+                        "source_base_sha": self.source_base_sha,
+                    }
+                )
             if mask_adjustments:
                 value["acl_mask_adjustments"] = [
                     adjustment.to_dict()
@@ -3690,7 +4053,14 @@ class HostInstaller:
                 (CANDIDATE_REPO, 0o700),
             )
         )
-        candidate_ready = service_directories_ready and self.system.candidate_ready(source_sha)
+        if self.source_mode == "sealed-cumulative":
+            candidate_ready = service_directories_ready and self.system.candidate_ready(
+                source_sha,
+                source_tree_sha=self.source_tree_sha,
+                source_base_sha=self.source_base_sha,
+            )
+        else:
+            candidate_ready = service_directories_ready and self.system.candidate_ready(source_sha)
         shared_worker_repo_ready = (
             not service_user_missing
             and shared_work2_mount_ready
@@ -3875,7 +4245,19 @@ class HostInstaller:
         ):
             raise InstallError("generated GB10 worker env template authority is unsafe")
 
-        if self.system.ensure_candidate(source_sha, refresh=refresh_runtime):
+        if self.source_mode == "sealed-cumulative":
+            candidate_changed = self.system.ensure_candidate(
+                source_sha,
+                refresh=refresh_runtime,
+                source_tree_sha=self.source_tree_sha,
+                source_base_sha=self.source_base_sha,
+            )
+        else:
+            candidate_changed = self.system.ensure_candidate(
+                source_sha,
+                refresh=refresh_runtime,
+            )
+        if candidate_changed:
             changes.append("candidate-checkout")
         if venv_lock_requires_hardening:
             self.system.harden_venv_lock()
@@ -4004,7 +4386,7 @@ class HostInstaller:
             return {"ok": False, "failures": ["installation-incomplete"]}
         trust_requires_revocation = self._record_flag(record, "trust_requires_revocation")
         trust_ledger_migrated = bool(
-            record.get("schema_version") in {2, 3}
+            record.get("schema_version") in {2, 3, 4}
             and self._record_flag(record, "trust_ledger_migrated")
         )
         self._record_legacy_trust_source_sha(
@@ -4051,9 +4433,28 @@ class HostInstaller:
             try:
                 if not isinstance(team_id, str):
                     raise InstallError("install record team ID is invalid")
+                record_source_sha = record.get("source_sha")
+                record_source_tree_sha = record.get("source_tree_sha")
+                record_source_base_sha = record.get("source_base_sha")
                 self._validate_rendered_config(
                     self.filesystem.read_bytes(CONFIG_PATH, limit=1 << 20),
                     team_id,
+                    source_sha=(
+                        record_source_sha
+                        if record.get("source_mode") == "sealed-cumulative"
+                        and isinstance(record_source_sha, str)
+                        else None
+                    ),
+                    source_tree_sha=(
+                        record_source_tree_sha
+                        if isinstance(record_source_tree_sha, str)
+                        else None
+                    ),
+                    source_base_sha=(
+                        record_source_base_sha
+                        if isinstance(record_source_base_sha, str)
+                        else None
+                    ),
                 )
             except InstallError:
                 failures.append("rendered-config")
@@ -4075,7 +4476,20 @@ class HostInstaller:
         source_sha = record.get("source_sha")
         if not isinstance(source_sha, str):  # _bind_existing_source has already validated this
             raise InstallError("install record source SHA is invalid")
-        failures.extend(self.system.check_runtime(source_sha))
+        if record.get("source_mode") == "sealed-cumulative":
+            source_tree_sha = record.get("source_tree_sha")
+            source_base_sha = record.get("source_base_sha")
+            if not isinstance(source_tree_sha, str) or not isinstance(source_base_sha, str):
+                raise InstallError("install record sealed source binding is invalid")
+            failures.extend(
+                self.system.check_runtime(
+                    source_sha,
+                    source_tree_sha=source_tree_sha,
+                    source_base_sha=source_base_sha,
+                )
+            )
+        else:
+            failures.extend(self.system.check_runtime(source_sha))
         for grant, adjustment in mask_adjustments.items():
             if self.system.acl_adjustment_state(adjustment) != "after":
                 namespace = "default" if grant.default else "access"
@@ -4119,7 +4533,7 @@ class HostInstaller:
             and (record.get("installation_state") == "ready" or admission_enabled)
         )
         trust_ledger_migrated = bool(
-            record.get("schema_version") in {2, 3}
+            record.get("schema_version") in {2, 3, 4}
             and self._record_flag(record, "trust_ledger_migrated")
         )
         trust_ledger_removed = (
@@ -4140,7 +4554,7 @@ class HostInstaller:
             "trust_requires_revocation",
         }
         if resuming_uninstall and (
-            record.get("schema_version") not in {2, 3}
+            record.get("schema_version") not in {2, 3, 4}
             or not uninstall_state_fields.issubset(record)
             or admission_enabled
             or trust_requires_revocation
@@ -4211,7 +4625,9 @@ class HostInstaller:
             record = dict(record)
             record.update(
                 {
-                    "schema_version": 3,
+                    "schema_version": (
+                        4 if record.get("source_mode") == "sealed-cumulative" else 3
+                    ),
                     "installation_state": "uninstalling",
                     "admission_enabled": False,
                     "maintenance_enabled": maintenance_enabled,
@@ -4299,6 +4715,14 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("plan", allow_abbrev=False)
     install = commands.add_parser("install", allow_abbrev=False)
     install.add_argument("--smoke-on-behalf-team-id", required=True)
+    install.add_argument(
+        "--source-mode",
+        choices=("merged-dev", "sealed-cumulative"),
+        default="merged-dev",
+    )
+    install.add_argument("--sealed-source-sha")
+    install.add_argument("--sealed-source-tree")
+    install.add_argument("--sealed-approved-base-sha")
     check = commands.add_parser("check", allow_abbrev=False)
     check.add_argument("--format", choices=("json", "text"), default="text")
     uninstall = commands.add_parser("uninstall", allow_abbrev=False)
@@ -4321,7 +4745,28 @@ def main(
         if args.command == "plan":
             result = active.plan()
         elif args.command == "install":
-            result = active.install(args.smoke_on_behalf_team_id)
+            sealed_values = (
+                args.sealed_source_sha,
+                args.sealed_source_tree,
+                args.sealed_approved_base_sha,
+            )
+            if args.source_mode == "merged-dev":
+                if any(value is not None for value in sealed_values):
+                    raise InstallError("merged-dev install rejects sealed source arguments")
+                sealed_source = None
+            else:
+                if any(value is None for value in sealed_values):
+                    raise InstallError("sealed-cumulative install requires exact SHA/tree/base")
+                sealed_source = SealedSource(
+                    path=REPO_ROOT,
+                    commit_sha=args.sealed_source_sha,
+                    tree_sha=args.sealed_source_tree,
+                    base_sha=args.sealed_approved_base_sha,
+                )
+            result = active.install(
+                args.smoke_on_behalf_team_id,
+                sealed_source=sealed_source,
+            )
         elif args.command == "check":
             result = active.check()
         elif args.command == "uninstall":
@@ -4333,7 +4778,7 @@ def main(
         else:
             sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
         return 0 if result.get("ok", True) else 1
-    except InstallError as exc:
+    except (InstallError, SealedSourceError) as exc:
         sys.stderr.write(json.dumps({"error": str(exc)}, sort_keys=True) + "\n")
         return 1
 

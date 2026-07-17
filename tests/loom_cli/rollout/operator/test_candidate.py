@@ -53,6 +53,22 @@ def fixed_now() -> datetime:
     return FETCHED_AT
 
 
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Sealed Test",
+            "GIT_AUTHOR_EMAIL": "sealed@example.invalid",
+            "GIT_COMMITTER_NAME": "Sealed Test",
+            "GIT_COMMITTER_EMAIL": "sealed@example.invalid",
+        },
+    ).stdout.strip()
+
+
 @pytest.fixture
 def trusted_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repo = tmp_path / "repo"
@@ -144,6 +160,70 @@ class FakeRunner:
         stderr: str = "",
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+
+def test_sealed_binding_uses_exact_detached_local_candidate_without_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "remote", "add", "origin", FETCH_URL)
+    (repo / "value.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "value.txt")
+    _git(repo, "commit", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "value.txt").write_text("sealed\n", encoding="utf-8")
+    _git(repo, "commit", "-am", "sealed")
+    commit = _git(repo, "rev-parse", "HEAD")
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    _git(repo, "checkout", "--detach", commit)
+    config_path = tmp_path / "staging-rollout.toml"
+    config_path.write_text("schema_version = 2\n", encoding="utf-8")
+    config_path.chmod(0o600)
+    monkeypatch.setattr(
+        candidate.pwd,
+        "getpwnam",
+        lambda username: SimpleNamespace(pw_name=username, pw_uid=os.getuid()),
+    )
+    real_lstat = os.lstat
+
+    def root_owned_config_lstat(path: os.PathLike[str] | str) -> object:
+        metadata = real_lstat(path)
+        if Path(path) == config_path:
+            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=0)
+        return metadata
+
+    monkeypatch.setattr(candidate.os, "lstat", root_owned_config_lstat)
+    config = replace(
+        make_config(repo),
+        config_path=config_path,
+        source_mode="sealed-cumulative",
+        source_commit_sha=commit,
+        source_tree_sha=tree,
+        source_base_sha=base,
+    )
+    argvs: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        argvs.append(argv)
+        return subprocess.run(argv, check=False, capture_output=True, text=True)
+
+    binding = candidate.bind_configured_candidate(config, run=run, now=fixed_now)
+
+    assert binding.source_mode == "sealed-cumulative"
+    assert binding.resolved_sha == commit
+    assert binding.resolved_tree == tree
+    assert binding.approved_base_sha == base
+    assert not any("fetch" in argv for argv in argvs)
+
+    with pytest.raises(candidate.CandidateBindingError, match="tree identity drifted"):
+        candidate.bind_configured_candidate(
+            replace(config, source_tree_sha="f" * 40),
+            run=run,
+            now=fixed_now,
+        )
 
 
 def expected_argvs(repo: Path) -> list[list[str]]:

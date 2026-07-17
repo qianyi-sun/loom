@@ -25,7 +25,7 @@ from .backup import (
     VerifiedBackup,
     normalize_backup_public_reason,
 )
-from .candidate import CandidateBindingError, bind_fresh_origin_dev
+from .candidate import CandidateBindingError, bind_configured_candidate
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
 from .lifecycle import LifecycleBusyError, LifecycleCoordinator, LifecycleError
@@ -249,6 +249,9 @@ def _envelope(
         scope=config.scope,
         gb10_prep_concurrency=config.gb10_prep_concurrency,
         resume=resume,
+        source_mode=request.candidate.source_mode,
+        resolved_tree=request.candidate.resolved_tree,
+        approved_base_sha=request.candidate.approved_base_sha,
     )
 
 
@@ -258,6 +261,8 @@ def _start(
     *,
     dry_run: bool,
 ) -> int:
+    if dependencies.config.source_mode == "sealed-cumulative" and caller.username != "qianyi":
+        return _safe_error(dependencies, "sealed cumulative rollout requires coordinator authority")
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
         _assert_available(dependencies)
@@ -414,6 +419,17 @@ def _resume_binding_matches(
         and envelope.resolved_sha == request.candidate.resolved_sha
         and envelope.image_tag == request.candidate.image_tag
         and envelope.fetched_at == request.candidate.fetched_at
+        and envelope.source_mode == request.candidate.source_mode == config.source_mode
+        and envelope.resolved_tree == request.candidate.resolved_tree
+        and envelope.approved_base_sha == request.candidate.approved_base_sha
+        and (
+            config.source_mode == "merged-dev"
+            or (
+                envelope.resolved_sha == config.source_commit_sha
+                and envelope.resolved_tree == config.source_tree_sha
+                and envelope.approved_base_sha == config.source_base_sha
+            )
+        )
         and envelope.cluster_name == config.cluster_name
         and envelope.namespace == config.namespace
         and envelope.environment == config.environment
@@ -457,6 +473,8 @@ def _resume(
     caller: CallerIdentity,
     request_id: str,
 ) -> int:
+    if dependencies.config.source_mode == "sealed-cumulative" and caller.username != "qianyi":
+        return _safe_error(dependencies, "sealed cumulative rollout requires coordinator authority")
     validate_safe_identifier(request_id, "request_id")
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
@@ -993,7 +1011,7 @@ def _default_dependencies() -> BrokerDependencies:
             groups=_groups,
         ),
         preflight=lambda: collect_preflight(config, service_uid=service_uid),
-        bind_candidate=lambda: bind_fresh_origin_dev(
+        bind_candidate=lambda: bind_configured_candidate(
             config,
             run=run,
             now=lambda: datetime.now(UTC),

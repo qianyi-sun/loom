@@ -383,6 +383,9 @@ class RequestStore:
             "resolved_sha": request.candidate.resolved_sha,
             "image_tag": request.candidate.image_tag,
             "fetched_at": request.candidate.fetched_at,
+            "source_mode": request.candidate.source_mode,
+            "resolved_tree": request.candidate.resolved_tree,
+            "approved_base_sha": request.candidate.approved_base_sha,
             "runner_config_sha256": request.runner_config_sha256,
         }
         envelope_binding = {
@@ -395,6 +398,9 @@ class RequestStore:
             "resolved_sha": envelope.resolved_sha,
             "image_tag": envelope.image_tag,
             "fetched_at": envelope.fetched_at,
+            "source_mode": envelope.source_mode,
+            "resolved_tree": envelope.resolved_tree,
+            "approved_base_sha": envelope.approved_base_sha,
             "runner_config_sha256": envelope.runner_config_sha256,
         }
         if envelope_binding != request_binding:

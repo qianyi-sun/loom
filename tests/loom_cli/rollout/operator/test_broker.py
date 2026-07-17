@@ -400,6 +400,25 @@ def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
     assert deps.store.read_events(REQUEST_ID)[-1].event == "preview"
 
 
+def test_sealed_cumulative_start_rejects_non_coordinator_before_preflight_or_request(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    dependencies = replace(deps.dependencies, config=sealed_config)
+
+    assert broker_main(["start", "--dry-run"], dependencies=dependencies) == 1
+    assert deps.order == []
+    assert deps.store.requests == {}
+    assert "coordinator authority" in deps.stderr.getvalue()
+
+
 def test_maintenance_marker_blocks_start_before_preflight(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     deps.lifecycle.maintenance = True

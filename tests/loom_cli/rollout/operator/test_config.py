@@ -51,6 +51,16 @@ gb10_prep_concurrency = 8
 backup_max_objects = 1000000
 backup_max_entries = 16000000
 """
+SEALED_COMMIT = "a" * 40
+SEALED_TREE = "b" * 40
+SEALED_BASE = "c" * 40
+SEALED_CONFIG = (
+    VALID_CONFIG.replace("schema_version = 1", "schema_version = 2", 1)
+    + 'source_mode = "sealed-cumulative"\n'
+    + f'source_commit_sha = "{SEALED_COMMIT}"\n'
+    + f'source_tree_sha = "{SEALED_TREE}"\n'
+    + f'source_base_sha = "{SEALED_BASE}"\n'
+)
 
 
 def _write_config(path: Path, contents: str = VALID_CONFIG) -> Path:
@@ -146,6 +156,66 @@ def test_config_loads_exact_schema_and_records_digest(tmp_path: Path) -> None:
     assert config.backup_max_entries == 16_000_000
     assert config.config_path == path
     assert config.config_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_config_loads_exact_sealed_cumulative_binding(tmp_path: Path) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml", SEALED_CONFIG)
+
+    config = OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+    assert config.source_mode == "sealed-cumulative"
+    assert config.source_commit_sha == SEALED_COMMIT
+    assert config.source_tree_sha == SEALED_TREE
+    assert config.source_base_sha == SEALED_BASE
+
+
+def test_sealed_candidate_and_envelope_round_trip_exact_provenance() -> None:
+    candidate = CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref="origin/dev",
+        resolved_sha=SEALED_COMMIT,
+        image_tag="staging-aaaaaaa",
+        fetched_at="2026-07-17T13:00:00Z",
+        source_mode="sealed-cumulative",
+        resolved_tree=SEALED_TREE,
+        approved_base_sha=SEALED_BASE,
+    )
+    envelope = make_driver_envelope(
+        resolved_sha=SEALED_COMMIT,
+        image_tag="staging-aaaaaaa",
+        source_mode="sealed-cumulative",
+        resolved_tree=SEALED_TREE,
+        approved_base_sha=SEALED_BASE,
+    )
+
+    assert CandidateBinding.from_dict(candidate.to_dict()) == candidate
+    assert DriverEnvelope.from_dict(envelope.to_dict()) == envelope
+    assert envelope.rollout_inputs()["source_mode"] == "sealed-cumulative"
+    assert envelope.rollout_inputs()["resolved_tree"] == SEALED_TREE
+    assert envelope.rollout_inputs()["approved_base_sha"] == SEALED_BASE
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ('source_mode = "merged-dev"', "source_mode must be sealed-cumulative"),
+        ('source_tree_sha = "ABC"', "exact lowercase Git SHAs"),
+        (f'source_base_sha = "{SEALED_TREE}"', "identities must be distinct"),
+    ],
+)
+def test_config_rejects_unbound_or_malformed_sealed_source(
+    tmp_path: Path,
+    replacement: str,
+    message: str,
+) -> None:
+    key = replacement.split(" = ", 1)[0]
+    path = _write_config(
+        tmp_path / "staging-rollout.toml",
+        _replace_config_value(SEALED_CONFIG, key, replacement),
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
 
 
 def test_config_rejects_non_root_owned_or_writable_file(tmp_path: Path) -> None:
@@ -336,7 +406,7 @@ def test_config_rejects_unknown_and_missing_keys(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("key", "line", "message"),
     [
-        ("schema_version", "schema_version = 2", "schema_version must be 1"),
+        ("schema_version", "schema_version = 3", "schema_version must be 1 or 2"),
         ("service_user", 'service_user = "root"', "service_user must be loom-rollout"),
         (
             "operator_group",

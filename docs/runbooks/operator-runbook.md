@@ -1522,7 +1522,10 @@ bootstrap prerequisite: the script cannot establish checkout trust after
 Python has already loaded it. Its in-process ownership check catches accidental
 drift before installer-managed mutation, not a malicious checkout controlled by
 an already root-equivalent operator. The installer takes its assets from the
-exact freshly fetched `dev` head, never from unmerged working-tree content.
+exact freshly fetched `dev` head by default. The only exception is the
+coordinator-only sealed cumulative repair mode below; it still rejects
+working-tree content and binds immutable Git objects rather than a branch or
+arbitrary ref.
 
 The host must provide Ubuntu with systemd, a root-owned `/usr/bin/python3`
 whose resolved executable stays under `/usr` and reports Python 3.11 or newer,
@@ -1684,6 +1687,42 @@ sudo "$INSTALLER_CHECKOUT/scripts/ops/staging_rollout_host.py" plan
 sudo "$INSTALLER_CHECKOUT/scripts/ops/staging_rollout_host.py" install \
   --smoke-on-behalf-team-id "<agentic-rl-team-uuid>"
 ```
+
+During one explicitly approved replacement-attempt incident, Qianyi may
+accumulate reviewed fixes locally and install the cumulative result before one
+final durable PR. This is not a general unmerged deployment path. Create a new
+standalone root-owned checkout (a linked Git worktree is not accepted), detach
+it at the independently reviewed exact commit, retain only the approved GitHub
+origin URL, and record the exact commit tree and approved merged base. The
+sealed checkout and every parent must be root-owned and non-group/world-
+writable; it must be clean, detached, free of alternates, grafts, shallow or
+replacement objects, and contain a bounded linear chain of at most 32 commits
+from the approved base. Do not fetch or resolve `origin/dev` in this mode.
+
+```bash
+SEALED_CHECKOUT=/root/loom-staging-sealed-cumulative
+SEALED_SHA=<reviewed-40-character-commit>
+SEALED_TREE=<reviewed-40-character-tree>
+SEALED_BASE=<approved-40-character-merged-base>
+
+sudo "$SEALED_CHECKOUT/scripts/ops/staging_rollout_host.py" install \
+  --source-mode sealed-cumulative \
+  --sealed-source-sha "$SEALED_SHA" \
+  --sealed-source-tree "$SEALED_TREE" \
+  --sealed-approved-base-sha "$SEALED_BASE" \
+  --smoke-on-behalf-team-id "<agentic-rl-team-uuid>"
+sudo "$SEALED_CHECKOUT/scripts/ops/staging_rollout_host.py" check
+```
+
+The installer validates the sealed checkout before any staging mutation,
+copies only the exact commit into its root source without resolving a remote
+ref, imports the same commit into the service candidate, and records source
+mode, commit, tree, and approved base in the install ledger, protected config,
+request, and attempt envelope. In sealed mode only `qianyi` may start or resume;
+the other operators retain status/log access. A missing or mismatched exact
+argument fails closed. Never bypass this path by copying files into the install
+directory, adding a global/system `safe.directory`, injecting Git objects, or selecting a
+caller-provided source path.
 
 For first installation, run the clone command only when the destination is
 absent. For updates, skip clone and use the three refresh commands. An occupied,
@@ -1866,7 +1905,10 @@ before rerunning step 11.
 For staging GB10, `repo_dir` is an exact image-tagged direct child of
 `/shared_work2/qianyi/.loom-staging-rollout/worker-repos`. First run the
 checked-in `staging_rollout_shared_work2_export.py install` helper as root on
-the `trt-gb10-2` exporter; it installs only the exact
+the `trt-gb10-2` exporter. In sealed cumulative mode it requires the same
+`--sealed-source-sha`, `--sealed-source-tree`, and
+`--sealed-approved-base-sha` binding as the host installer and validates that
+fixed script checkout before changing the export. It installs only the exact
 `192.168.50.103/32` allowance and fails rather than widening or overwriting a
 drifted fragment. The platform-dev root installer then installs and starts the
 fixed `shared_work2.mount` unit and rejects any source other than

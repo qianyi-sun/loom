@@ -218,10 +218,113 @@ def bind_fresh_origin_dev(
     )
 
 
+def bind_configured_candidate(
+    config: OperatorConfig,
+    *,
+    run: GitRunner,
+    now: Clock,
+) -> CandidateBinding:
+    """Bind merged dev by default or one exact installed cumulative source."""
+    if config.source_mode == "merged-dev":
+        return bind_fresh_origin_dev(config, run=run, now=now)
+    if (
+        config.source_mode != "sealed-cumulative"
+        or config.source_commit_sha is None
+        or config.source_tree_sha is None
+        or config.source_base_sha is None
+    ):
+        raise CandidateBindingError("sealed candidate config binding is incomplete")
+
+    _validate_protected_config(config.config_path)
+    service_uid = _service_uid(config)
+    _validate_trusted_directory(config.runner_repo, service_uid=service_uid)
+    _validate_trusted_directory(config.runner_repo / ".git", service_uid=service_uid)
+    _validate_trusted_git_config(config.runner_repo / ".git" / "config", service_uid=service_uid)
+
+    def exact(*args: str, operation: str) -> str:
+        return _require_success(
+            _invoke(run, _git_argv(config.runner_repo, *args), operation=operation),
+            operation=operation,
+        ).strip()
+
+    if exact("remote", operation="remote inspection") != "origin":
+        raise CandidateBindingError("trusted checkout must have only remote origin")
+    if (
+        exact("remote", "get-url", "--all", "origin", operation="origin fetch URL inspection")
+        != APPROVED_REMOTE_URL
+    ):
+        raise CandidateBindingError("origin must have exactly one approved fetch URL")
+    pushurl = _invoke(
+        run,
+        _git_argv(config.runner_repo, "config", "--get-all", "remote.origin.pushurl"),
+        operation="origin pushurl inspection",
+    )
+    if not (pushurl.returncode == 1 and pushurl.stdout == "" and pushurl.stderr == ""):
+        raise CandidateBindingError("remote.origin.pushurl must be absent")
+    if exact("status", "--porcelain=v1", "--untracked-files=all", operation="status inspection"):
+        raise CandidateBindingError("trusted checkout must be clean")
+    symbolic = _invoke(
+        run,
+        _git_argv(config.runner_repo, "symbolic-ref", "-q", "HEAD"),
+        operation="HEAD mode inspection",
+    )
+    if not (symbolic.returncode == 1 and symbolic.stdout == "" and symbolic.stderr == ""):
+        raise CandidateBindingError("sealed candidate must use detached HEAD")
+    if (
+        exact("rev-parse", "--verify", "HEAD^{commit}", operation="commit inspection")
+        != config.source_commit_sha
+    ):
+        raise CandidateBindingError("sealed candidate commit identity drifted")
+    if (
+        exact("rev-parse", "--verify", "HEAD^{tree}", operation="tree inspection")
+        != config.source_tree_sha
+    ):
+        raise CandidateBindingError("sealed candidate tree identity drifted")
+    if (
+        exact(
+            "merge-base",
+            config.source_base_sha,
+            config.source_commit_sha,
+            operation="base inspection",
+        )
+        != config.source_base_sha
+    ):
+        raise CandidateBindingError("sealed candidate base identity drifted")
+    history = exact(
+        "rev-list",
+        "--reverse",
+        "--parents",
+        f"{config.source_base_sha}..{config.source_commit_sha}",
+        operation="history inspection",
+    ).splitlines()
+    expected_parent = config.source_base_sha
+    for line in history:
+        fields = line.split()
+        if len(fields) != 2 or fields[1] != expected_parent:
+            raise CandidateBindingError("sealed candidate history is not linear")
+        expected_parent = fields[0]
+    if (
+        not 1 <= len(history) <= 32
+        or expected_parent != config.source_commit_sha
+    ):
+        raise CandidateBindingError("sealed candidate history does not match config")
+    return CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref=PINNED_TARGET_REF,
+        resolved_sha=config.source_commit_sha,
+        image_tag=f"staging-{config.source_commit_sha[:7]}",
+        fetched_at=_utc_timestamp(now()),
+        source_mode="sealed-cumulative",
+        resolved_tree=config.source_tree_sha,
+        approved_base_sha=config.source_base_sha,
+    )
+
+
 __all__ = [
     "CandidateBindingError",
     "Clock",
     "CommandResult",
     "GitRunner",
+    "bind_configured_candidate",
     "bind_fresh_origin_dev",
 ]

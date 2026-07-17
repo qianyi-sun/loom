@@ -15,6 +15,19 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+try:
+    from scripts.ops.staging_rollout_sealed_source import (
+        SealedSource,
+        SealedSourceError,
+        validate_sealed_source,
+    )
+except ModuleNotFoundError:  # direct execution from scripts/ops
+    from staging_rollout_sealed_source import (
+        SealedSource,
+        SealedSourceError,
+        validate_sealed_source,
+    )  # type: ignore[import-not-found, no-redef]
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPORT_ROOT = Path("/shared_work2")
 CLIENT = "192.168.50.103/32"
@@ -208,10 +221,30 @@ def converge(*, install: bool, run: CommandRunner = _run) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("check", "install"))
+    parser.add_argument("--sealed-source-sha")
+    parser.add_argument("--sealed-source-tree")
+    parser.add_argument("--sealed-approved-base-sha")
     args = parser.parse_args(argv)
     try:
+        sealed_values = (
+            args.sealed_source_sha,
+            args.sealed_source_tree,
+            args.sealed_approved_base_sha,
+        )
+        if args.command == "install" and any(value is None for value in sealed_values):
+            raise ExportError("export installation requires an exact sealed source binding")
+        if any(value is not None for value in sealed_values):
+            if any(value is None for value in sealed_values):
+                raise ExportError("sealed source binding is incomplete")
+            source = SealedSource(
+                path=REPO_ROOT,
+                commit_sha=args.sealed_source_sha,
+                tree_sha=args.sealed_source_tree,
+                base_sha=args.sealed_approved_base_sha,
+            )
+            validate_sealed_source(source)
         changed = converge(install=args.command == "install")
-    except (ExportError, OSError):
+    except (ExportError, OSError, SealedSourceError):
         print("error: shared_work2 export check failed safely", file=sys.stderr)
         return 1
     print("changed" if changed else "ok")
