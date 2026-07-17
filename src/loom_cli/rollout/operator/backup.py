@@ -37,6 +37,11 @@ from loom_cli.cluster_backup_guard import (
 )
 from loom_cli.cluster_config import load_cluster_config
 
+from .backup_limits import (
+    BACKUP_MAX_TOTAL_BYTES,
+    BACKUP_NON_MINIO_ENTRY_ALLOWANCE,
+    operator_backup_traversal_limits,
+)
 from .config import (
     APPROVED_BACKUP_MAX_ENTRIES,
     APPROVED_BACKUP_MAX_OBJECTS,
@@ -59,12 +64,10 @@ _RESTORE_SECRET_NAMES = (
 _MINIO_LOCAL_HOST = "127.0.0.1"
 _MINIO_REMOTE_PORT = 9000
 _POSTGRES_MAX_BYTES = 1024**4
-_BACKUP_MAX_TOTAL_BYTES = 16 * 1024**4
+_BACKUP_MAX_TOTAL_BYTES = BACKUP_MAX_TOTAL_BYTES
 _MINIO_MAX_PAGES = 20_000
-_BACKUP_NON_MINIO_FILE_ALLOWANCE = 4
-_BACKUP_NON_MINIO_ENTRY_ALLOWANCE = 6
 _MINIO_MAX_OBJECTS = APPROVED_BACKUP_MAX_OBJECTS
-_MINIO_MAX_ENTRIES = APPROVED_BACKUP_MAX_ENTRIES - _BACKUP_NON_MINIO_ENTRY_ALLOWANCE
+_MINIO_MAX_ENTRIES = APPROVED_BACKUP_MAX_ENTRIES - BACKUP_NON_MINIO_ENTRY_ALLOWANCE
 _MINIO_MAX_TOTAL_BYTES = _BACKUP_MAX_TOTAL_BYTES - _POSTGRES_MAX_BYTES
 _MINIO_TOTAL_TIMEOUT_SECONDS = float(DEFAULT_BACKUP_MAX_ELAPSED_SECONDS)
 _MINIO_DISK_RESERVE_BYTES = 256 * 1024**2
@@ -2047,7 +2050,7 @@ class BackupCreator:
         self._runner = runner or SubprocessBackupCommandRunner()
         self._minio = minio or Boto3MinioMirror(
             max_objects=config.backup_max_objects,
-            max_entries=config.backup_max_entries - _BACKUP_NON_MINIO_ENTRY_ALLOWANCE,
+            max_entries=config.backup_max_entries - BACKUP_NON_MINIO_ENTRY_ALLOWANCE,
         )
         self._now = now or (lambda: datetime.now(UTC))
         self._env = _command_environment(config)
@@ -2070,9 +2073,8 @@ class BackupCreator:
         self._disk_reserve_bytes = disk_reserve_bytes
         self._inode_reserve = inode_reserve
         self._capacity_provider = capacity_provider
-        self._traversal_limits = traversal_limits or BackupTraversalLimits(
-            max_files=config.backup_max_objects + _BACKUP_NON_MINIO_FILE_ALLOWANCE,
-            max_entries=config.backup_max_entries,
+        self._traversal_limits = traversal_limits or operator_backup_traversal_limits(
+            config,
             max_total_bytes=max_total_bytes,
         )
 
