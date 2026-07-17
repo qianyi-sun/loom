@@ -86,6 +86,11 @@ _CANONICAL_SHARED_REPO_GIT_CONFIG = (
     b"\tlogallrefupdates = true\n"
 )
 _OVERSIZED_PORT_FORWARD_OUTPUT = "[REDACTED:oversized-port-forward-output]\n"
+_CATALOG_CACHE_ENV_PATHS = {
+    "XDG_CACHE_HOME": Path("xdg"),
+    "HF_HOME": Path("huggingface"),
+    "HF_HUB_CACHE": Path("huggingface/hub"),
+}
 _PORT_FORWARD_ENV_KEYS = frozenset(
     {
         "DBUS_SESSION_BUS_ADDRESS",
@@ -1042,6 +1047,51 @@ def _catalog_port_forward_evidence(
     }
 
 
+def _catalog_cache_environment(step_dir: StepDir) -> dict[str, str]:
+    """Create one private, rollout-owned cache namespace for catalog tooling."""
+    cache_root = step_dir.artifact_path("catalog-cache")
+    directories = (
+        cache_root,
+        cache_root / "xdg",
+        cache_root / "huggingface",
+        cache_root / "huggingface" / "hub",
+    )
+    for path in directories:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise CatalogProvisioningError(
+                "catalog provisioning cache could not be created safely",
+            ) from exc
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise CatalogProvisioningError(
+                "catalog provisioning cache could not be inspected safely",
+            ) from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != os.getegid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise CatalogProvisioningError(
+                "catalog provisioning cache authority is unsafe",
+            )
+    return {name: str(cache_root / relative) for name, relative in _CATALOG_CACHE_ENV_PATHS.items()}
+
+
+def _catalog_cache_evidence(step_dir: StepDir) -> dict[str, object]:
+    return {
+        "environment_keys": sorted(_CATALOG_CACHE_ENV_PATHS),
+        "mode": "0o700",
+        "root": str(step_dir.artifact_path("catalog-cache")),
+    }
+
+
 @contextmanager
 def _catalog_effective_env(
     plan: CatalogProvisioningPlan,
@@ -1049,6 +1099,7 @@ def _catalog_effective_env(
     step_dir: StepDir,
 ) -> Iterator[tuple[dict[str, str], dict[str, Any]]]:
     env = dict(plan.env)
+    env.update(_catalog_cache_environment(step_dir))
     config = plan.kubernetes_port_forward
     if config is None:
         yield env, {"enabled": False}
@@ -1177,6 +1228,7 @@ def _run_catalog_provisioning(
                 "required_env": plan.required_env,
                 "env_file": plan.env_file,
                 "env_sources": plan.env_sources,
+                "cache": _catalog_cache_evidence(step_dir),
                 "kubernetes_port_forward": {"enabled": True, "error": message},
                 "stdout_log": str(stdout_log),
                 "stderr_log": str(stderr_log),
@@ -1210,6 +1262,7 @@ def _run_catalog_provisioning(
         "required_env": plan.required_env,
         "env_file": plan.env_file,
         "env_sources": plan.env_sources,
+        "cache": _catalog_cache_evidence(step_dir),
         "kubernetes_port_forward": port_forward_evidence,
         "environment_keys": sorted(effective_env),
         "stdout_log": str(stdout_log),

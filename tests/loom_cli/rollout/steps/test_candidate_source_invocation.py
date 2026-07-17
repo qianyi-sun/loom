@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -958,6 +959,9 @@ def test_env_state_runs_catalog_provisioning_between_apply_and_check(
     db_url = "postgresql://loom:catalog-secret@postgres/loom"
     env_file.write_text(
         f"HF_TOKEN={hf_token}\n"
+        "XDG_CACHE_HOME=/data/loom-staging/breakglass/stale/xdg\n"
+        "HF_HOME=/data/loom-staging/breakglass/stale/huggingface\n"
+        "HF_HUB_CACHE=/data/loom-staging/breakglass/stale/huggingface/hub\n"
         f"LOOM_SVC_DB_URL={db_url}\n"
         "LOOM_SVC_MINIO_ENDPOINT=http://minio:9000\n"
         "LOOM_SVC_MINIO_ACCESS_KEY=minio-access-secret\n"
@@ -1022,6 +1026,17 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
             assert kwargs["env"]["HF_TOKEN"] == hf_token
             assert kwargs["env"]["LOOM_SVC_DB_URL"] == db_url
             assert kwargs["env"]["PUBLISHED_SHA"] == ("79087002d62bb22169a704bc941c8d614082d880")
+            cache_root = step_dir.artifact_path("catalog-cache")
+            assert kwargs["env"]["XDG_CACHE_HOME"] == str(cache_root / "xdg")
+            assert kwargs["env"]["HF_HOME"] == str(cache_root / "huggingface")
+            assert kwargs["env"]["HF_HUB_CACHE"] == str(cache_root / "huggingface/hub")
+            for path in (
+                cache_root,
+                cache_root / "xdg",
+                cache_root / "huggingface",
+                cache_root / "huggingface/hub",
+            ):
+                assert stat.S_IMODE(path.stat().st_mode) == 0o700
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -1080,6 +1095,11 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
     assert "[REDACTED:LOOM_SVC_DB_URL]" in combined
     evidence = json.loads(artifact)
     assert evidence["returncode"] == 0
+    assert evidence["cache"] == {
+        "environment_keys": ["HF_HOME", "HF_HUB_CACHE", "XDG_CACHE_HOME"],
+        "mode": "0o700",
+        "root": str(step_dir.artifact_path("catalog-cache")),
+    }
     assert evidence["env_file"]["source_identity"].startswith("sha256:")
     assert str(env_file) not in artifact
     assert evidence["required_env"] == [

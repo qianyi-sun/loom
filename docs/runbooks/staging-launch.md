@@ -120,6 +120,8 @@ Attach these to the release issue or release PR:
 - Benchmark catalog provisioning evidence from `loom cluster rollout` step 11
   (`catalog-provisioning.json`, redacted stdout/stderr logs) showing the
   committed staging profile's HF registration path,
+  the rollout-owned mode-`0700` catalog cache root that overrides inherited
+  `XDG_CACHE_HOME`/`HF_HOME`/`HF_HUB_CACHE`,
   `loom datasets register <benchmark>` against the published HF manifest with
   `--mirror-to-object-store`, non-zero `registered`, non-zero `mirrored`, zero
   unexpected `legacy_placeholders`, and `loom datasets audit --verify-bundles`
