@@ -1924,8 +1924,11 @@ Do not run that command through the coordinator's sudo identity: bootstrap
 intentionally requires a direct external root administrator and is absent from
 the installed sudoers rule. The fixed approved merged base is embedded in the
 reviewed boundary. Bootstrap validates the checkout and sudoers before
-publication, installs sudoers last, and rolls back only files it created if a
-later validation fails. It does not create a general root command channel.
+publication, converges its three root-owned mode-`0755` directory roots inside
+the same transaction, installs sudoers last, and rolls back all directories
+and files created by the failed attempt in reverse order. Pre-existing exact
+directories are retained, while a wrong type, owner, or mode fails closed. It
+does not create a general root command channel.
 
 The sealed checkout may contain a reviewed Git symlink such as
 `deploy/.env -> ../.env`, but validation never follows it. An allowed link must

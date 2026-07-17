@@ -276,6 +276,244 @@ def test_bootstrap_rolls_back_only_files_created_by_failed_attempt(
     assert rolled_back == [authority.LIBEXEC]
 
 
+def _prepare_bootstrap_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> SimpleNamespace:
+    fixed_entrypoint = authority.SOURCE_ROOT / "scripts/ops" / Path(authority.__file__).name
+    monkeypatch.setattr(authority, "__file__", str(fixed_entrypoint))
+    monkeypatch.setattr(authority.os, "geteuid", lambda: 0)
+    for variable in ("SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr(authority, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(authority, "_regular_root_file", lambda *_args, **_kwargs: b"asset\n")
+    validator = SimpleNamespace(
+        SealedSource=lambda *_args, **_kwargs: object(),
+        validate_sealed_source=lambda _source: None,
+    )
+    monkeypatch.setattr(authority, "_load_validator", lambda _path: validator)
+
+    state = SimpleNamespace(
+        created_assets=[],
+        created_directories=[],
+        existing_directories={authority.POLICY.parent},
+        publication_order=[],
+    )
+
+    def ensure(path: Path, *, mode: int) -> bool:
+        assert mode == 0o755
+        if path in state.existing_directories:
+            return False
+        state.created_directories.append(path)
+        return True
+
+    def rollback_assets(paths: list[Path]) -> None:
+        for path in reversed(paths):
+            state.created_assets.remove(path)
+
+    def remove_directory(path: Path) -> None:
+        state.created_directories.remove(path)
+
+    monkeypatch.setattr(authority, "_ensure_root_directory", ensure)
+    monkeypatch.setattr(authority, "_rollback_created", rollback_assets)
+    monkeypatch.setattr(authority.os, "rmdir", remove_directory)
+    return state
+
+
+@pytest.mark.parametrize("failed_publication", range(1, 6))
+def test_bootstrap_rolls_back_every_new_asset_and_directory_on_publication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_publication: int,
+) -> None:
+    state = _prepare_bootstrap_transaction(monkeypatch)
+    calls = 0
+
+    def install(path: Path, _payload: bytes, _mode: int) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == failed_publication:
+            raise authority.AuthorityError("injected publication failure")
+        state.publication_order.append(path)
+        state.created_assets.append(path)
+        return True
+
+    monkeypatch.setattr(authority, "_atomic_install", install)
+
+    with pytest.raises(authority.AuthorityError, match="injected publication"):
+        authority.bootstrap("a" * 40, "b" * 40, run=lambda _argv, _env: Result(0))
+
+    assert state.created_assets == []
+    assert state.created_directories == []
+    assert state.existing_directories == {authority.POLICY.parent}
+
+
+@pytest.mark.parametrize("failed_directory", range(1, 4))
+def test_bootstrap_rolls_back_prior_directories_when_directory_convergence_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_directory: int,
+) -> None:
+    state = _prepare_bootstrap_transaction(monkeypatch)
+    calls = 0
+
+    def ensure(path: Path, *, mode: int) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == failed_directory:
+            raise authority.AuthorityError("injected directory failure")
+        if path in state.existing_directories:
+            return False
+        state.created_directories.append(path)
+        return True
+
+    monkeypatch.setattr(authority, "_ensure_root_directory", ensure)
+    monkeypatch.setattr(
+        authority,
+        "_atomic_install",
+        lambda *_args, **_kwargs: pytest.fail("asset publication must not start"),
+    )
+
+    with pytest.raises(authority.AuthorityError, match="injected directory"):
+        authority.bootstrap("a" * 40, "b" * 40, run=lambda _argv, _env: Result(0))
+
+    assert state.created_assets == []
+    assert state.created_directories == []
+    assert state.existing_directories == {authority.POLICY.parent}
+
+
+def test_bootstrap_rolls_back_sudoers_and_all_dependencies_when_final_validation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _prepare_bootstrap_transaction(monkeypatch)
+
+    def install(path: Path, _payload: bytes, _mode: int) -> bool:
+        state.publication_order.append(path)
+        state.created_assets.append(path)
+        return True
+
+    monkeypatch.setattr(authority, "_atomic_install", install)
+    validations = 0
+
+    def run(_argv, _env):  # type: ignore[no-untyped-def]
+        nonlocal validations
+        validations += 1
+        return Result(0 if validations == 1 else 1)
+
+    with pytest.raises(authority.AuthorityError, match="sudoers is invalid"):
+        authority.bootstrap("a" * 40, "b" * 40, run=run)
+
+    assert state.publication_order[-1] == authority.SUDOERS
+    assert state.created_assets == []
+    assert state.created_directories == []
+    assert state.existing_directories == {authority.POLICY.parent}
+
+
+def test_bootstrap_creates_missing_libexec_inside_the_single_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _prepare_bootstrap_transaction(monkeypatch)
+
+    def install(path: Path, _payload: bytes, _mode: int) -> bool:
+        state.publication_order.append(path)
+        state.created_assets.append(path)
+        return True
+
+    monkeypatch.setattr(authority, "_atomic_install", install)
+    report = authority.bootstrap("a" * 40, "b" * 40, run=lambda _argv, _env: Result(0))
+
+    assert authority.LIBEXEC.parent in state.created_directories
+    assert state.publication_order[-1] == authority.SUDOERS
+    assert report["changed"] == [str(path) for path in state.publication_order]
+
+
+def test_directory_creation_cleans_up_when_metadata_convergence_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "new-directory"
+
+    def safe_directory(path: Path, *, mode: int) -> None:
+        assert mode == 0o755
+        if path == target and not target.exists():
+            raise authority.AuthorityError("absent")
+
+    monkeypatch.setattr(authority, "_safe_root_directory", safe_directory)
+    monkeypatch.setattr(
+        authority.os,
+        "chown",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected chown failure")),
+    )
+
+    with pytest.raises(authority.AuthorityError, match="creation failed safely"):
+        authority._ensure_root_directory(target, mode=0o755)
+
+    assert not target.exists()
+
+
+def test_atomic_install_removes_temporary_file_when_payload_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "asset"
+    monkeypatch.setattr(authority, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        authority,
+        "_regular_root_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(authority.AuthorityError("absent")),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_write_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            authority.AuthorityError("injected write failure")
+        ),
+    )
+
+    with pytest.raises(authority.AuthorityError, match="publication failed safely"):
+        authority._atomic_install(destination, b"payload", 0o600)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_install_removes_published_file_when_directory_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "asset"
+    monkeypatch.setattr(authority, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        authority,
+        "_regular_root_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(authority.AuthorityError("absent")),
+    )
+    monkeypatch.setattr(authority.os, "fchown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        authority,
+        "_rename_noreplace",
+        lambda directory, source, destination: os.rename(
+            source,
+            destination,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        ),
+    )
+    real_fsync = authority.os.fsync
+    calls = 0
+
+    def fail_first_directory_sync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected directory fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(authority.os, "fsync", fail_first_directory_sync)
+
+    with pytest.raises(authority.AuthorityError, match="publication failed safely"):
+        authority._atomic_install(destination, b"payload", 0o600)
+
+    assert calls == 3
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_check_uses_read_only_shared_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     opened: list[int] = []
     monkeypatch.setattr(authority.os, "open", lambda _path, flags: opened.append(flags) or 41)

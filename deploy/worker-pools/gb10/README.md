@@ -263,9 +263,13 @@ sealed-cumulative repair uses the repository-owned
 `staging_rollout_shared_work2_export_authority.py` boundary instead. An
 external administrator first provisions the exact detached root-owned checkout
 at `/opt/loom-staging-exporter-authority/source` and runs its `bootstrap` verb
-locally as root with the independently reviewed commit and tree. Bootstrap is
-not present in the operator sudoers rule. It installs only two exact commands
-for `qianyi`:
+locally as root with the independently reviewed commit and tree. Bootstrap
+owns idempotent creation of `/usr/local/libexec`, `/etc/loom`, and its dedicated
+state root as root-owned mode-`0755` directories in the same transaction as its
+assets. Pre-existing exact directories are retained; a wrong type, owner, or
+mode fails closed. Any failed first publication removes every directory and
+asset created by that attempt in reverse order. Bootstrap is not present in
+the operator sudoers rule. It grants only two exact commands to `qianyi`:
 
 ```text
 sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority install

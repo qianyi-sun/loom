@@ -174,16 +174,31 @@ def _ensure_root_directory(path: Path, *, mode: int) -> bool:
         _safe_root_directory(path, mode=mode)
         return False
     except AuthorityError:
-        if path.exists() or path.is_symlink():
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise AuthorityError("export authority directory is unavailable") from exc
+        else:
             raise
     _safe_root_directory(path.parent, mode=0o755)
+    created = False
     try:
         os.mkdir(path, mode)
+        created = True
         os.chown(path, 0, 0)
         os.chmod(path, mode)
-    except OSError as exc:
+        _safe_root_directory(path, mode=mode)
+    except (AuthorityError, OSError) as exc:
+        if created:
+            try:
+                os.rmdir(path)
+            except OSError as rollback_exc:
+                raise AuthorityError(
+                    "export authority directory creation rollback failed safely"
+                ) from rollback_exc
         raise AuthorityError("export authority directory creation failed safely") from exc
-    _safe_root_directory(path, mode=mode)
     return True
 
 
@@ -431,30 +446,61 @@ def _atomic_install(path: Path, payload: bytes, mode: int) -> bool:
         return False
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     temporary = f".{path.name}.new-{os.getpid()}"
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
-        0o600,
-        dir_fd=directory,
-    )
+    published = False
     try:
-        _write_all(descriptor, payload)
-        os.fchown(descriptor, 0, 0)
-        os.fchmod(descriptor, mode)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        _rename_noreplace(directory, temporary, path.name)
-        os.fsync(directory)
-    except FileExistsError as exc:
-        os.unlink(temporary, dir_fd=directory)
-        raise AuthorityError("export authority asset raced with another writer") from exc
-    except OSError as exc:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
         try:
-            os.unlink(temporary, dir_fd=directory)
-        except FileNotFoundError:
-            pass
+            try:
+                _write_all(descriptor, payload)
+                os.fchown(descriptor, 0, 0)
+                os.fchmod(descriptor, mode)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except (AuthorityError, OSError) as exc:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            except OSError as rollback_exc:
+                raise AuthorityError(
+                    "export authority asset publication rollback failed safely"
+                ) from rollback_exc
+            raise AuthorityError("export authority asset publication failed safely") from exc
+        try:
+            _rename_noreplace(directory, temporary, path.name)
+            published = True
+            os.fsync(directory)
+        except FileExistsError as exc:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError as rollback_exc:
+                raise AuthorityError(
+                    "export authority asset publication rollback failed safely"
+                ) from rollback_exc
+            raise AuthorityError("export authority asset raced with another writer") from exc
+        except (AuthorityError, OSError) as exc:
+            try:
+                os.unlink(path.name if published else temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            except OSError as rollback_exc:
+                raise AuthorityError(
+                    "export authority asset publication rollback failed safely"
+                ) from rollback_exc
+            try:
+                os.fsync(directory)
+            except OSError as rollback_exc:
+                raise AuthorityError(
+                    "export authority asset publication rollback failed safely"
+                ) from rollback_exc
+            raise AuthorityError("export authority asset publication failed safely") from exc
+    except OSError as exc:
         raise AuthorityError("export authority asset publication failed safely") from exc
     finally:
         os.close(directory)
@@ -484,6 +530,23 @@ def _rollback_created(paths: Sequence[Path]) -> None:
             os.unlink(path)
         except OSError:
             failures.append(str(path))
+    if failures:
+        raise AuthorityError("export authority bootstrap rollback failed safely")
+
+
+def _rollback_bootstrap(
+    created_assets: Sequence[Path], created_directories: Sequence[Path]
+) -> None:
+    failures: list[str] = []
+    try:
+        _rollback_created(created_assets)
+    except AuthorityError:
+        failures.extend(str(path) for path in created_assets)
+    for directory in reversed(created_directories):
+        try:
+            os.rmdir(directory)
+        except OSError:
+            failures.append(str(directory))
     if failures:
         raise AuthorityError("export authority bootstrap rollback failed safely")
 
@@ -520,14 +583,17 @@ def bootstrap(source_sha: str, source_tree_sha: str, *, run: Runner = _run) -> d
     validation = run(("/usr/sbin/visudo", "-cf", str(SOURCE_ROOT / SUDOERS_RELATIVE)), _clean_env())
     if validation.returncode != 0:
         raise AuthorityError("export authority sudoers asset is invalid")
-    created_directories = []
-    for directory in (POLICY.parent, STATE_ROOT):
-        if _ensure_root_directory(directory, mode=0o755):
-            created_directories.append(directory)
-    for directory in (LIBEXEC.parent, SUDOERS.parent, LOCK.parent):
-        _safe_root_directory(directory, mode=0o755)
+    created_directories: list[Path] = []
     created: list[Path] = []
     try:
+        # Directory convergence is part of the same transaction as asset
+        # publication.  In particular, bootstrap owns creation of libexec;
+        # an external administrator must not precreate it as an extra step.
+        for directory in (POLICY.parent, STATE_ROOT, LIBEXEC.parent):
+            if _ensure_root_directory(directory, mode=0o755):
+                created_directories.append(directory)
+        for directory in (SUDOERS.parent, LOCK.parent):
+            _safe_root_directory(directory, mode=0o755)
         # Sudoers is deliberately published last, after every dependency exists.
         for path, payload, mode in (
             (LIBEXEC, wrapper_payload, 0o755),
@@ -550,12 +616,7 @@ def bootstrap(source_sha: str, source_tree_sha: str, *, run: Runner = _run) -> d
         if installed_validation.returncode != 0:
             raise AuthorityError("installed export authority sudoers is invalid")
     except (AuthorityError, OSError):
-        _rollback_created(created)
-        for directory in reversed(created_directories):
-            try:
-                os.rmdir(directory)
-            except OSError:
-                pass
+        _rollback_bootstrap(created, created_directories)
         raise
     return {
         "action": "bootstrap",

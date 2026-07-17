@@ -108,10 +108,12 @@ Therefore a one-time external administrator must provision the fixed sealed
 checkout and run the reviewed bootstrap entrypoint locally as root. Bootstrap
 validates the sealed checkout and sudoers asset before mutation, installs the
 root-owned wrapper, validator, policy, lock, journal, and exact command-only
-sudoers rule with sudoers last, and rolls back files it created if publication
-or validation fails. This explicit external authority requirement must not be
-replaced with a password request, root SSH, a sudo wildcard, or the abandoned
-multi-host root-helper design.
+sudoers rule with sudoers last. Its root-owned mode-`0755` directory roots are
+part of the same transaction; pre-existing exact directories are retained,
+wrong metadata fails closed, and a failed first publication removes all
+directories and files created by that attempt in reverse order. This explicit
+external authority requirement must not be replaced with a password request,
+root SSH, a sudo wildcard, or the abandoned multi-host root-helper design.
 
 Candidate-bound authenticated staging browser acceptance follows the same
 authority. Only a broker-owned rollout step may exchange the singleton admin
