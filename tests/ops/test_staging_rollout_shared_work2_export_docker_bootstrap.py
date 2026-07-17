@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts.ops import staging_rollout_shared_work2_export_docker_bootstrap as bootstrap
@@ -151,13 +152,14 @@ def test_provision_source_reuses_only_an_exact_existing_checkout(
     monkeypatch.setattr(bootstrap, "SOURCE_PARENT", parent)
     monkeypatch.setattr(bootstrap, "SOURCE", source)
     monkeypatch.setattr(bootstrap, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap, "_reject_stale_backups", lambda: None)
     monkeypatch.setattr(
         bootstrap,
         "_validate_source",
         lambda path, _identity, *, name: validated.append(path),
     )
 
-    assert bootstrap._provision_source(identity) is False
+    assert bootstrap._provision_source(identity) == bootstrap.ProvisionedSource(mode="existing")
     assert validated == [source]
 
 
@@ -194,7 +196,12 @@ def test_execute_rolls_back_new_source_when_bootstrap_fails(
     monkeypatch.setattr(bootstrap, "_validate_runtime", lambda: None)
     monkeypatch.setattr(bootstrap, "_validate_host_roots", lambda: None)
     monkeypatch.setattr(bootstrap, "_bundle_digest", lambda: identity.bundle_sha256)
-    monkeypatch.setattr(bootstrap, "_provision_source", lambda _identity: True)
+    monkeypatch.setattr(
+        bootstrap,
+        "_provision_source",
+        lambda _identity: bootstrap.ProvisionedSource(mode="created", created_parent=True),
+    )
+    monkeypatch.setattr(bootstrap, "_validate_source", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         bootstrap,
         "_bootstrap",
@@ -241,6 +248,187 @@ def test_provision_source_rolls_back_after_published_validation_failure(
 
     assert validations == 2
     assert not parent.exists()
+
+
+def test_unused_authority_requires_an_empty_journal_and_absent_fragment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = SimpleNamespace(
+        source_sha="a" * 40,
+        source_tree_sha="b" * 40,
+        source_base_sha=bootstrap.APPROVED_BASE_SHA,
+    )
+    authority = SimpleNamespace(
+        _open_lock=lambda *, exclusive: os.open(os.devnull, os.O_RDONLY),
+        _read_policy=lambda: policy,
+        _validate_runtime_assets=lambda _policy: None,
+        _validate_source=lambda _policy: None,
+        _validate_journal=lambda _policy: None,
+        _regular_root_file=lambda _path, *, mode: b"used\n",
+    )
+    monkeypatch.setattr(bootstrap, "_load_installed_authority", lambda: authority)
+    monkeypatch.setattr(bootstrap, "_safe_root_regular", lambda *_args, **_kwargs: b"")
+    monkeypatch.setattr(bootstrap, "EXPORT_FRAGMENT", tmp_path / "fragment")
+
+    with pytest.raises(bootstrap.DockerBootstrapError, match="cannot be upgraded"):
+        bootstrap._read_unused_installed_identity()
+
+    authority._regular_root_file = lambda _path, *, mode: b""
+    (tmp_path / "fragment").write_text("export\n", encoding="ascii")
+    with pytest.raises(bootstrap.DockerBootstrapError, match="cannot be upgraded"):
+        bootstrap._read_unused_installed_identity()
+
+
+def test_move_unused_authority_restores_every_asset_after_partial_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    assets = tuple(
+        (tmp_path / name, mode) for name, mode in (("sudoers", 0o440), ("wrapper", 0o755))
+    )
+    for path, _mode in assets:
+        path.write_text(path.name, encoding="ascii")
+    previous = bootstrap.InstalledIdentity(
+        "a" * 40,
+        "b" * 40,
+        bootstrap.APPROVED_BASE_SHA,
+    )
+    monkeypatch.setattr(bootstrap, "SOURCE", source)
+    monkeypatch.setattr(bootstrap, "_installed_assets", lambda: assets)
+    monkeypatch.setattr(bootstrap, "_fsync_parent", lambda _path: None)
+    calls = 0
+
+    def rename(source_path: Path, destination_path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise bootstrap.DockerBootstrapError("injected move failure")
+        os.rename(source_path, destination_path)
+
+    monkeypatch.setattr(bootstrap, "_rename_noreplace", rename)
+
+    with pytest.raises(bootstrap.DockerBootstrapError, match="injected move failure"):
+        bootstrap._move_unused_authority(previous)
+
+    assert source.is_dir()
+    assert all(path.is_file() for path, _mode in assets)
+    assert not tuple(tmp_path.glob(".*.previous-*"))
+
+
+def test_provision_source_upgrades_only_a_linear_unused_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "authority"
+    source = parent / "source"
+    source.mkdir(parents=True)
+    (source / "identity").write_text("old", encoding="ascii")
+    temporary = parent / ".source.new"
+    temporary.mkdir()
+    (temporary / "identity").write_text("new", encoding="ascii")
+    previous = bootstrap.InstalledIdentity(
+        "a" * 40,
+        "b" * 40,
+        bootstrap.APPROVED_BASE_SHA,
+    )
+    identity = bootstrap.Identity(
+        "c" * 40,
+        "d" * 40,
+        bootstrap.APPROVED_BASE_SHA,
+        "e" * 64,
+    )
+    backup = parent / ".source.previous"
+    descendants: list[tuple[str, str]] = []
+    monkeypatch.setattr(bootstrap, "SOURCE_PARENT", parent)
+    monkeypatch.setattr(bootstrap, "SOURCE", source)
+    monkeypatch.setattr(bootstrap, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap, "_reject_stale_backups", lambda: None)
+
+    def validate(_path: Path, _identity: bootstrap.Identity, *, name: str) -> None:
+        if name.endswith("existing"):
+            raise bootstrap.DockerBootstrapError("not the requested source")
+
+    monkeypatch.setattr(bootstrap, "_validate_source", validate)
+    previous_lock = os.open(os.devnull, os.O_RDONLY)
+    monkeypatch.setattr(
+        bootstrap,
+        "_lock_unused_installed_identity",
+        lambda: (previous, previous_lock),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_prepare_source",
+        lambda _identity, *, created_parent: temporary,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_is_descendant",
+        lambda _checkout, old, new: descendants.append((old, new)),
+    )
+
+    def move(_previous: bootstrap.InstalledIdentity) -> tuple[tuple[Path, Path], ...]:
+        os.rename(source, backup)
+        return ((source, backup),)
+
+    monkeypatch.setattr(bootstrap, "_move_unused_authority", move)
+    monkeypatch.setattr(bootstrap, "_rename_noreplace", os.rename)
+    monkeypatch.setattr(bootstrap, "_fsync_parent", lambda _path: None)
+
+    provision = bootstrap._provision_source(identity)
+
+    assert provision == bootstrap.ProvisionedSource(
+        mode="upgraded",
+        previous_identity=previous,
+        previous_lock_descriptor=previous_lock,
+        moved=((source, backup),),
+    )
+    assert descendants == [(previous.source_sha, identity.source_sha)]
+    assert (source / "identity").read_text(encoding="ascii") == "new"
+    assert (backup / "identity").read_text(encoding="ascii") == "old"
+    os.close(previous_lock)
+
+
+def test_upgrade_rollback_restores_the_exact_previous_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "authority"
+    source = parent / "source"
+    backup = parent / ".source.previous"
+    source.mkdir(parents=True)
+    backup.mkdir()
+    (source / "identity").write_text("new", encoding="ascii")
+    (backup / "identity").write_text("old", encoding="ascii")
+    previous = bootstrap.InstalledIdentity(
+        "a" * 40,
+        "b" * 40,
+        bootstrap.APPROVED_BASE_SHA,
+    )
+    identity = bootstrap.Identity(
+        "c" * 40,
+        "d" * 40,
+        bootstrap.APPROVED_BASE_SHA,
+        "e" * 64,
+    )
+    monkeypatch.setattr(bootstrap, "SOURCE", source)
+    monkeypatch.setattr(bootstrap, "_installed_assets", lambda: ())
+    monkeypatch.setattr(bootstrap, "_validate_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap, "_rename_noreplace", os.rename)
+    monkeypatch.setattr(bootstrap, "_fsync_parent", lambda _path: None)
+    monkeypatch.setattr(bootstrap, "_read_unused_installed_identity", lambda: previous)
+    previous_lock = os.open(os.devnull, os.O_RDONLY)
+
+    bootstrap._rollback_provision(
+        bootstrap.ProvisionedSource(
+            mode="upgraded",
+            previous_identity=previous,
+            previous_lock_descriptor=previous_lock,
+            moved=((source, backup),),
+        ),
+        identity,
+    )
+
+    assert (source / "identity").read_text(encoding="ascii") == "old"
+    assert not backup.exists()
 
 
 def test_rename_noreplace_refuses_existing_destination(tmp_path: Path) -> None:

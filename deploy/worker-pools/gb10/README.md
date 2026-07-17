@@ -302,6 +302,18 @@ different image/argv/environment is not an accepted bootstrap channel.
 The build and entrypoint both reject a non-ARM64 target so an AMD64 artifact
 cannot depend on optional host emulation.
 
+If bootstrap completed but the fixed `install` verb never succeeded, a later
+reviewed cumulative image may replace that unused authority without reopening
+a general root channel. The launcher takes the old authority's exclusive lock,
+revalidates its exact policy/assets/source, requires an empty install journal
+and absent export fragment, and proves the new sealed commit is a descendant on
+the same approved base. It disables sudoers first, moves only the six fixed
+authority assets and source to same-directory no-replace backups, publishes the
+new exact source, and invokes the normal atomic bootstrap. Failure removes the
+new source and restores the old source/assets with sudoers last; success
+revalidates the new identity before deleting the old backups. An authority with
+any completed install evidence cannot use this replacement path.
+
 ## Health And Scheduling Gates
 
 The broker's environment-state and release-gate artifacts are authoritative.

@@ -1948,6 +1948,16 @@ an interactive shell, `--privileged`, or a writable `/` bind.
 Do not substitute an AMD64 image or rely on optional binfmt emulation; the
 build and runtime reject any non-ARM64 target.
 
+A reviewed cumulative replacement is permitted only when the installed
+authority is provably unused: its exclusive lock is held, its exact old sealed
+identity and assets validate, its install journal is empty, and its export
+fragment is absent. The new commit must be a descendant of that old commit on
+the same approved base. The Docker launcher removes sudo authority first,
+moves only fixed assets to same-directory no-replace backups, and either
+atomically bootstraps the new identity or restores the old identity with
+sudoers last. Do not use this path after any successful `install`; such an
+authority requires a separately reviewed lifecycle change.
+
 The fixed exporter `install` verb owns convergence of a missing
 `/etc/exports.d` as root-owned mode `0755` before publishing its one fragment.
 It retains a pre-existing exact directory, rejects any type/owner/mode drift,

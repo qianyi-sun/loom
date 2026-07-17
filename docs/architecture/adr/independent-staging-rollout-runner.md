@@ -204,6 +204,15 @@ the dedicated root and the `qianyi` Slurm submitter can read/search but not
 write it. Secret/token env files remain private mode `0600` platform-dev-local
 state and are never materialized into `/shared_work2`.
 
+The constrained Docker bootstrap may transactionally advance an exporter
+authority only before its first successful install. It holds the old exclusive
+authority lock, requires an empty journal and absent export fragment, proves a
+same-base descendant sealed commit, disables sudoers first, and keeps rollback
+copies beside the fixed files. New bootstrap failure restores the old exact
+identity with sudoers last; success removes the copies only after new identity
+validation. This is not a general authority-upgrade mechanism and refuses any
+authority with install evidence.
+
 Candidate checkout publication is a single-writer lifecycle. Step 11 accepts
 only the exact image-tagged direct child, verifies every authority path with
 no-follow metadata, and clones with `--no-hardlinks` inside an unpredictable

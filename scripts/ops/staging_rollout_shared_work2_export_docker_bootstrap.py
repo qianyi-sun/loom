@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -23,6 +24,16 @@ APPROVED_ORIGIN: Final = "https://github.com/qianyi-sun/loom.git"
 BUNDLE: Final = Path("/run/loom-handoff/loom.bundle")
 SOURCE_PARENT: Final = Path("/opt/loom-staging-exporter-authority")
 SOURCE: Final = SOURCE_PARENT / "source"
+INSTALLED_WRAPPER: Final = Path(
+    "/usr/local/libexec/loom-staging-rollout-shared-work2-export-authority"
+)
+INSTALLED_VALIDATOR: Final = Path("/usr/local/libexec/staging_rollout_sealed_source.py")
+INSTALLED_POLICY: Final = Path("/etc/loom/staging-rollout-shared-work2-export-authority.json")
+INSTALLED_SUDOERS: Final = Path("/etc/sudoers.d/loom-staging-rollout-shared-work2-export-authority")
+INSTALLED_STATE_ROOT: Final = Path("/var/lib/loom-staging-exporter-authority")
+INSTALLED_LOCK: Final = INSTALLED_STATE_ROOT / "authority.lock"
+INSTALLED_JOURNAL: Final = INSTALLED_STATE_ROOT / "journal.jsonl"
+EXPORT_FRAGMENT: Final = Path("/etc/exports.d/loom-staging-rollout-platform-dev.exports")
 AUTHORITY_RELATIVE: Final = Path("scripts/ops/staging_rollout_shared_work2_export_authority.py")
 VALIDATOR_RELATIVE: Final = Path("scripts/ops/staging_rollout_sealed_source.py")
 MOUNTINFO: Final = Path("/proc/self/mountinfo")
@@ -75,6 +86,22 @@ class MountRecord:
     root: str
     mount_point: str
     options: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledIdentity:
+    source_sha: str
+    source_tree_sha: str
+    source_base_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProvisionedSource:
+    mode: str
+    created_parent: bool = False
+    previous_identity: InstalledIdentity | None = None
+    previous_lock_descriptor: int | None = None
+    moved: tuple[tuple[Path, Path], ...] = ()
 
 
 def _decode_mount_path(value: str) -> str:
@@ -261,6 +288,112 @@ def _load_module(path: Path, name: str) -> ModuleType:
     return module
 
 
+def _safe_root_regular(path: Path, *, mode: int) -> bytes:
+    try:
+        lexical = os.lstat(path)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise DockerBootstrapError("installed exporter authority is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or metadata.st_nlink != 1
+            or (metadata.st_dev, metadata.st_ino) != (lexical.st_dev, lexical.st_ino)
+            or metadata.st_size > MAX_BUNDLE_BYTES
+        ):
+            raise DockerBootstrapError("installed exporter authority is unsafe")
+        chunks: list[bytes] = []
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise DockerBootstrapError("installed exporter authority is unsafe")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _load_installed_authority() -> ModuleType:
+    _safe_root_regular(INSTALLED_WRAPPER, mode=0o755)
+    name = "loom_installed_shared_work2_export_authority"
+    loader = importlib.machinery.SourceFileLoader(name, str(INSTALLED_WRAPPER))
+    spec = importlib.util.spec_from_loader(name, loader)
+    if spec is None:
+        raise DockerBootstrapError("installed exporter authority is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        loader.exec_module(module)
+    except Exception as exc:
+        raise DockerBootstrapError("installed exporter authority failed validation") from exc
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return module
+
+
+def _lock_unused_installed_identity() -> tuple[InstalledIdentity, int]:
+    authority = _load_installed_authority()
+    try:
+        descriptor = authority._open_lock(exclusive=True)
+    except Exception as exc:
+        raise DockerBootstrapError("installed exporter authority lock is unavailable") from exc
+    try:
+        policy = authority._read_policy()
+        authority._validate_runtime_assets(policy)
+        authority._validate_source(policy)
+        authority._validate_journal(policy)
+        journal = authority._regular_root_file(INSTALLED_JOURNAL, mode=0o600)
+    except Exception as exc:
+        os.close(descriptor)
+        raise DockerBootstrapError("installed exporter authority failed validation") from exc
+    if journal:
+        os.close(descriptor)
+        raise DockerBootstrapError("used exporter authority cannot be upgraded")
+    try:
+        os.lstat(EXPORT_FRAGMENT)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        os.close(descriptor)
+        raise DockerBootstrapError("export fragment state is unavailable") from exc
+    else:
+        os.close(descriptor)
+        raise DockerBootstrapError("used exporter authority cannot be upgraded")
+    identity = InstalledIdentity(
+        source_sha=policy.source_sha,
+        source_tree_sha=policy.source_tree_sha,
+        source_base_sha=policy.source_base_sha,
+    )
+    if (
+        identity.source_base_sha != APPROVED_BASE_SHA
+        or SHA_RE.fullmatch(identity.source_sha) is None
+        or SHA_RE.fullmatch(identity.source_tree_sha) is None
+    ):
+        os.close(descriptor)
+        raise DockerBootstrapError("installed exporter authority identity is invalid")
+    return identity, descriptor
+
+
+def _read_unused_installed_identity() -> InstalledIdentity:
+    identity, descriptor = _lock_unused_installed_identity()
+    os.close(descriptor)
+    return identity
+
+
 def _validate_source(path: Path, identity: Identity, *, name: str) -> None:
     validator = _load_module(path / VALIDATOR_RELATIVE, name)
     try:
@@ -314,11 +447,136 @@ def _remove_checkout(path: Path) -> None:
         raise DockerBootstrapError("Docker bootstrap source rollback failed safely") from exc
 
 
-def _provision_source(identity: Identity) -> bool:
-    if SOURCE.exists() or SOURCE.is_symlink():
-        _safe_root_directory(SOURCE_PARENT, 0o755)
-        _validate_source(SOURCE, identity, name="loom_sealed_source_existing")
-        return False
+def _fsync_parent(path: Path) -> None:
+    try:
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise DockerBootstrapError("Docker bootstrap publication sync failed safely") from exc
+
+
+def _prepare_source(identity: Identity, *, created_parent: bool) -> Path:
+    temporary = SOURCE_PARENT / f".source.new-{os.getpid()}"
+    if temporary.exists() or temporary.is_symlink():
+        raise DockerBootstrapError("Docker bootstrap temporary source already exists")
+    try:
+        _checked("/usr/bin/git", "clone", "--no-hardlinks", str(BUNDLE), str(temporary))
+        _checked("/usr/bin/git", "-C", str(temporary), "bundle", "verify", str(BUNDLE))
+        _checked(
+            "/usr/bin/git", "-C", str(temporary), "remote", "set-url", "origin", APPROVED_ORIGIN
+        )
+        _checked("/usr/bin/git", "-C", str(temporary), "checkout", "--detach", identity.source_sha)
+        os.chmod(temporary, 0o700)
+        _validate_source(temporary, identity, name="loom_sealed_source_temporary")
+        return temporary
+    except Exception:
+        _remove_checkout(temporary)
+        if created_parent:
+            try:
+                os.rmdir(SOURCE_PARENT)
+            except OSError as exc:
+                raise DockerBootstrapError(
+                    "Docker bootstrap source parent rollback failed safely"
+                ) from exc
+        raise
+
+
+def _installed_assets() -> tuple[tuple[Path, int], ...]:
+    return (
+        (INSTALLED_SUDOERS, 0o440),
+        (INSTALLED_WRAPPER, 0o755),
+        (INSTALLED_VALIDATOR, 0o644),
+        (INSTALLED_POLICY, 0o600),
+        (INSTALLED_LOCK, 0o600),
+        (INSTALLED_JOURNAL, 0o600),
+    )
+
+
+def _backup_path(path: Path, source_sha: str) -> Path:
+    return path.parent / f".{path.name}.previous-{source_sha}"
+
+
+def _reject_stale_backups() -> None:
+    originals = (*tuple(path for path, _mode in _installed_assets()), SOURCE)
+    scanned: set[tuple[Path, str]] = set()
+    for original in originals:
+        key = (original.parent, f".{original.name}.previous-")
+        if key in scanned:
+            continue
+        scanned.add(key)
+        try:
+            entries = tuple(os.scandir(original.parent))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DockerBootstrapError("exporter authority upgrade backup is unavailable") from exc
+        if any(entry.name.startswith(key[1]) for entry in entries):
+            raise DockerBootstrapError("exporter authority upgrade backup already exists")
+
+
+def _restore_moved(moved: tuple[tuple[Path, Path], ...]) -> None:
+    failures: list[str] = []
+    for original, backup in reversed(moved):
+        try:
+            os.lstat(original)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            failures.append(str(original))
+            continue
+        else:
+            failures.append(str(original))
+            continue
+        try:
+            _rename_noreplace(backup, original)
+            _fsync_parent(original)
+        except (DockerBootstrapError, OSError):
+            failures.append(str(original))
+    if failures:
+        raise DockerBootstrapError("exporter authority upgrade rollback failed safely")
+
+
+def _move_unused_authority(previous: InstalledIdentity) -> tuple[tuple[Path, Path], ...]:
+    originals = (*tuple(path for path, _mode in _installed_assets()), SOURCE)
+    planned = tuple((path, _backup_path(path, previous.source_sha)) for path in originals)
+    for _original, backup in planned:
+        try:
+            os.lstat(backup)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DockerBootstrapError("exporter authority upgrade backup is unavailable") from exc
+        raise DockerBootstrapError("exporter authority upgrade backup already exists")
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for original, backup in planned:
+            _rename_noreplace(original, backup)
+            moved.append((original, backup))
+            _fsync_parent(original)
+    except Exception:
+        _restore_moved(tuple(moved))
+        raise
+    return tuple(moved)
+
+
+def _is_descendant(checkout: Path, previous_sha: str, current_sha: str) -> None:
+    result = _run(
+        "/usr/bin/git",
+        "-C",
+        str(checkout),
+        "merge-base",
+        "--is-ancestor",
+        previous_sha,
+        current_sha,
+    )
+    if result.returncode != 0 or result.stdout or result.stderr:
+        raise DockerBootstrapError("exporter authority upgrade is not a linear descendant")
+
+
+def _provision_source(identity: Identity) -> ProvisionedSource:
     created_parent = False
     if SOURCE_PARENT.exists() or SOURCE_PARENT.is_symlink():
         _safe_root_directory(SOURCE_PARENT, 0o755)
@@ -331,26 +589,50 @@ def _provision_source(identity: Identity) -> bool:
                 "Docker bootstrap source parent creation failed safely"
             ) from exc
         _safe_root_directory(SOURCE_PARENT, 0o755)
-    temporary = SOURCE_PARENT / f".source.new-{os.getpid()}"
-    if temporary.exists() or temporary.is_symlink():
-        raise DockerBootstrapError("Docker bootstrap temporary source already exists")
+    _reject_stale_backups()
+    if SOURCE.exists() or SOURCE.is_symlink():
+        try:
+            _validate_source(SOURCE, identity, name="loom_sealed_source_existing")
+        except DockerBootstrapError as exact_error:
+            previous, previous_lock = _lock_unused_installed_identity()
+            if previous.source_sha == identity.source_sha:
+                os.close(previous_lock)
+                raise DockerBootstrapError(
+                    "installed exporter authority identity drifted"
+                ) from exact_error
+            temporary: Path | None = None
+            try:
+                temporary = _prepare_source(identity, created_parent=False)
+                if previous.source_base_sha != identity.source_base_sha:
+                    raise DockerBootstrapError("exporter authority upgrade base drifted")
+                _is_descendant(temporary, previous.source_sha, identity.source_sha)
+                moved = _move_unused_authority(previous)
+                try:
+                    _rename_noreplace(temporary, SOURCE)
+                    _fsync_parent(SOURCE)
+                    _validate_source(SOURCE, identity, name="loom_sealed_source_upgraded")
+                except Exception:
+                    _remove_checkout(SOURCE if SOURCE.exists() else temporary)
+                    _restore_moved(moved)
+                    raise
+            except Exception:
+                if temporary is not None:
+                    _remove_checkout(temporary)
+                os.close(previous_lock)
+                raise
+            return ProvisionedSource(
+                mode="upgraded",
+                previous_identity=previous,
+                previous_lock_descriptor=previous_lock,
+                moved=moved,
+            )
+        return ProvisionedSource(mode="existing")
+    temporary = _prepare_source(identity, created_parent=created_parent)
     published = False
     try:
-        _checked("/usr/bin/git", "clone", "--no-hardlinks", str(BUNDLE), str(temporary))
-        _checked("/usr/bin/git", "-C", str(temporary), "bundle", "verify", str(BUNDLE))
-        _checked(
-            "/usr/bin/git", "-C", str(temporary), "remote", "set-url", "origin", APPROVED_ORIGIN
-        )
-        _checked("/usr/bin/git", "-C", str(temporary), "checkout", "--detach", identity.source_sha)
-        os.chmod(temporary, 0o700)
-        _validate_source(temporary, identity, name="loom_sealed_source_temporary")
         _rename_noreplace(temporary, SOURCE)
         published = True
-        descriptor = os.open(SOURCE_PARENT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        _fsync_parent(SOURCE)
         _validate_source(SOURCE, identity, name="loom_sealed_source_published")
     except Exception:
         _remove_checkout(SOURCE if published else temporary)
@@ -362,7 +644,7 @@ def _provision_source(identity: Identity) -> bool:
                     "Docker bootstrap source parent rollback failed safely"
                 ) from exc
         raise
-    return True
+    return ProvisionedSource(mode="created", created_parent=created_parent)
 
 
 def _bootstrap(identity: Identity) -> dict[str, object]:
@@ -394,24 +676,100 @@ def _bootstrap(identity: Identity) -> dict[str, object]:
     return report
 
 
-def execute(identity: Identity) -> dict[str, object]:
-    _validate_runtime()
-    _validate_host_roots()
-    if _bundle_digest() != identity.bundle_sha256:
-        raise DockerBootstrapError("sealed Docker bootstrap bundle digest does not match")
-    created_source = _provision_source(identity)
-    try:
-        report = _bootstrap(identity)
-    except Exception:
-        if created_source:
-            _remove_checkout(SOURCE)
+def _rollback_provision(provision: ProvisionedSource, identity: Identity) -> None:
+    if provision.mode == "created":
+        _validate_source(SOURCE, identity, name="loom_sealed_source_created_rollback")
+        _remove_checkout(SOURCE)
+        if provision.created_parent:
             try:
                 os.rmdir(SOURCE_PARENT)
             except OSError as exc:
                 raise DockerBootstrapError(
                     "Docker bootstrap source rollback failed safely"
                 ) from exc
+        return
+    if provision.mode != "upgraded" or provision.previous_identity is None:
+        return
+    if provision.previous_lock_descriptor is None:
+        raise DockerBootstrapError("exporter authority upgrade lock is missing")
+    try:
+        _validate_source(SOURCE, identity, name="loom_sealed_source_upgrade_rollback")
+        _remove_checkout(SOURCE)
+        for path, _mode in _installed_assets():
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise DockerBootstrapError(
+                    "exporter authority upgrade rollback state is unavailable"
+                ) from exc
+            raise DockerBootstrapError("exporter authority upgrade rollback left new assets")
+        _restore_moved(provision.moved)
+    finally:
+        os.close(provision.previous_lock_descriptor)
+    restored = _read_unused_installed_identity()
+    if restored != provision.previous_identity:
+        raise DockerBootstrapError("exporter authority upgrade rollback identity drifted")
+
+
+def _finalize_upgrade(provision: ProvisionedSource, identity: Identity) -> None:
+    if provision.mode != "upgraded" or provision.previous_identity is None:
+        return
+    if provision.previous_lock_descriptor is None:
+        raise DockerBootstrapError("exporter authority upgrade lock is missing")
+    os.close(provision.previous_lock_descriptor)
+    installed = _read_unused_installed_identity()
+    if installed != InstalledIdentity(
+        identity.source_sha,
+        identity.source_tree_sha,
+        identity.source_base_sha,
+    ):
+        raise DockerBootstrapError("upgraded exporter authority identity drifted")
+    previous = provision.previous_identity
+    modes = dict(_installed_assets())
+    source_backup: Path | None = None
+    file_backups: list[Path] = []
+    for original, backup in provision.moved:
+        if original == SOURCE:
+            source_backup = backup
+            _validate_source(
+                backup,
+                Identity(
+                    previous.source_sha,
+                    previous.source_tree_sha,
+                    previous.source_base_sha,
+                    identity.bundle_sha256,
+                ),
+                name="loom_sealed_source_previous_cleanup",
+            )
+        else:
+            _safe_root_regular(backup, mode=modes[original])
+            file_backups.append(backup)
+    if source_backup is None:
+        raise DockerBootstrapError("exporter authority upgrade backup is incomplete")
+    for backup in file_backups:
+        try:
+            os.unlink(backup)
+            _fsync_parent(backup)
+        except OSError as exc:
+            raise DockerBootstrapError("exporter authority upgrade cleanup failed safely") from exc
+    _remove_checkout(source_backup)
+    _fsync_parent(source_backup)
+
+
+def execute(identity: Identity) -> dict[str, object]:
+    _validate_runtime()
+    _validate_host_roots()
+    if _bundle_digest() != identity.bundle_sha256:
+        raise DockerBootstrapError("sealed Docker bootstrap bundle digest does not match")
+    provision = _provision_source(identity)
+    try:
+        report = _bootstrap(identity)
+    except Exception:
+        _rollback_provision(provision, identity)
         raise
+    _finalize_upgrade(provision, identity)
     source_metadata = os.lstat(SOURCE)
     source_mode = stat.S_IMODE(source_metadata.st_mode)
     return {
@@ -427,6 +785,7 @@ def execute(identity: Identity) -> dict[str, object]:
             "/usr/bin/git", "-C", str(SOURCE), "status", "--porcelain=v1", "--untracked-files=all"
         ),
         "source_tree_sha": identity.source_tree_sha,
+        "source_transition": provision.mode,
         "source_uid": source_metadata.st_uid,
         "status": "ok",
         # A successful sealed authority bootstrap includes both source-asset
