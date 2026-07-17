@@ -113,6 +113,58 @@ def _validate_directory(path: Path) -> int:
     return fd
 
 
+def _ensure_exports_directory() -> bool:
+    try:
+        descriptor = _validate_directory(EXPORTS_DIRECTORY)
+    except ExportError:
+        if EXPORTS_DIRECTORY.exists() or EXPORTS_DIRECTORY.is_symlink():
+            raise
+    else:
+        os.close(descriptor)
+        return False
+    parent = _validate_directory(EXPORTS_DIRECTORY.parent)
+    created = False
+    try:
+        os.mkdir(EXPORTS_DIRECTORY.name, 0o755, dir_fd=parent)
+        created = True
+        created_descriptor = os.open(EXPORTS_DIRECTORY.name, _DIRECTORY_FLAGS, dir_fd=parent)
+        try:
+            os.fchown(created_descriptor, 0, 0)
+            os.fchmod(created_descriptor, 0o755)
+            os.fsync(created_descriptor)
+        finally:
+            os.close(created_descriptor)
+        descriptor = _validate_directory(EXPORTS_DIRECTORY)
+        os.close(descriptor)
+        os.fsync(parent)
+    except (ExportError, OSError) as exc:
+        if created:
+            try:
+                os.rmdir(EXPORTS_DIRECTORY.name, dir_fd=parent)
+                os.fsync(parent)
+            except OSError as rollback_exc:
+                raise ExportError(
+                    "exports.d authority creation rollback failed safely"
+                ) from rollback_exc
+        raise ExportError("exports.d authority creation failed safely") from exc
+    finally:
+        os.close(parent)
+    return True
+
+
+def _remove_created_exports_directory() -> None:
+    descriptor = _validate_directory(EXPORTS_DIRECTORY)
+    os.close(descriptor)
+    parent = _validate_directory(EXPORTS_DIRECTORY.parent)
+    try:
+        os.rmdir(EXPORTS_DIRECTORY.name, dir_fd=parent)
+        os.fsync(parent)
+    except OSError as exc:
+        raise ExportError("exports.d authority rollback failed safely") from exc
+    finally:
+        os.close(parent)
+
+
 def _file_is_exact(payload: bytes) -> bool:
     try:
         metadata = os.lstat(EXPORTS_PATH)
@@ -150,13 +202,14 @@ def _rename_noreplace(directory_fd: int, source: str, destination: str) -> None:
     raise ExportError("atomic export publication failed safely")
 
 
-def _install_file(payload: bytes) -> bool:
+def _install_file(payload: bytes) -> tuple[bool, bool]:
+    directory_created = _ensure_exports_directory()
     directory_fd = _validate_directory(EXPORTS_DIRECTORY)
     temp_name = f".{EXPORTS_PATH.name}.tmp-{secrets.token_hex(16)}"
     temp_fd: int | None = None
     try:
         if _file_is_exact(payload):
-            return False
+            return False, directory_created
         temp_fd = os.open(
             temp_name,
             os.O_WRONLY
@@ -181,11 +234,15 @@ def _install_file(payload: bytes) -> bool:
                 raise ExportError(
                     "platform-dev export allowance raced with another writer"
                 ) from None
-            return False
+            return False, directory_created
         os.fsync(directory_fd)
         if not _file_is_exact(payload):  # pragma: no cover - publication invariant
             raise ExportError("platform-dev export allowance did not converge")
-        return True
+        return True, directory_created
+    except (ExportError, OSError):
+        if directory_created and not EXPORTS_PATH.exists() and not EXPORTS_PATH.is_symlink():
+            _remove_created_exports_directory()
+        raise
     finally:
         if temp_fd is not None:
             os.close(temp_fd)
@@ -227,14 +284,18 @@ def converge(*, install: bool, run: CommandRunner = _run) -> bool:
     if install:
         if os.geteuid() != 0:
             raise ExportError("export installation requires root")
-        changed = _install_file(payload)
+        changed, directory_created = _install_file(payload)
         refreshed = run([str(EXPORTFS), "-ra"])
         if refreshed.returncode != 0:
+            rollback_failed = False
             if changed:
                 _remove_exact_file(payload)
                 rollback = run([str(EXPORTFS), "-ra"])
-                if rollback.returncode != 0:
-                    raise ExportError("NFS export refresh and rollback failed safely")
+                rollback_failed = rollback.returncode != 0
+            if directory_created:
+                _remove_created_exports_directory()
+            if rollback_failed:
+                raise ExportError("NFS export refresh and rollback failed safely")
             raise ExportError("NFS export refresh failed safely")
     else:
         if not _file_is_exact(payload):

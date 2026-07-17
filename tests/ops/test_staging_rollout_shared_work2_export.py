@@ -58,7 +58,7 @@ def test_export_check_requires_exact_installed_fragment(
 def test_export_install_is_idempotent_and_refreshes_before_readback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    installs = iter((True, False))
+    installs = iter(((True, False), (False, False)))
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
     monkeypatch.setattr(helper, "_install_file", lambda _payload: next(installs))
@@ -77,15 +77,65 @@ def test_new_fragment_rolls_back_if_export_refresh_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     removed: list[bytes] = []
+    removed_directories: list[bool] = []
     results = iter((Result(1), Result(0)))
     monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(helper, "_install_file", lambda _payload: True)
+    monkeypatch.setattr(helper, "_install_file", lambda _payload: (True, True))
     monkeypatch.setattr(helper, "_remove_exact_file", removed.append)
+    monkeypatch.setattr(
+        helper,
+        "_remove_created_exports_directory",
+        lambda: removed_directories.append(True),
+    )
 
     with pytest.raises(helper.ExportError, match="refresh failed safely"):
         helper.converge(install=True, run=lambda _argv: next(results))
 
     assert removed == [helper._asset_payload()]
+    assert removed_directories == [True]
+
+
+def test_created_directory_rolls_back_even_if_export_refresh_rollback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    removed_directories: list[bool] = []
+    results = iter((Result(1), Result(1)))
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(helper, "_install_file", lambda _payload: (True, True))
+    monkeypatch.setattr(helper, "_remove_exact_file", lambda _payload: None)
+    monkeypatch.setattr(
+        helper,
+        "_remove_created_exports_directory",
+        lambda: removed_directories.append(True),
+    )
+
+    with pytest.raises(helper.ExportError, match="refresh and rollback failed safely"):
+        helper.converge(install=True, run=lambda _argv: next(results))
+
+    assert removed_directories == [True]
+
+
+def test_missing_exports_directory_is_created_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exports_parent = tmp_path / "etc"
+    exports_parent.mkdir()
+    exports_directory = exports_parent / "exports.d"
+    monkeypatch.setattr(helper, "EXPORTS_DIRECTORY", exports_directory)
+    monkeypatch.setattr(helper, "EXPORTS_PATH", exports_directory / "allowance.exports")
+
+    def validate(path: Path) -> int:
+        if not path.exists():
+            raise helper.ExportError("missing")
+        return helper.os.open(path, helper._DIRECTORY_FLAGS)
+
+    monkeypatch.setattr(helper, "_validate_directory", validate)
+    monkeypatch.setattr(helper.os, "fchown", lambda *_args, **_kwargs: None)
+
+    assert helper._ensure_exports_directory() is True
+    assert exports_directory.is_dir()
+    assert exports_directory.stat().st_mode & 0o777 == 0o755
+    assert helper._ensure_exports_directory() is False
 
 
 def test_export_asset_rejects_any_path_or_client_drift(

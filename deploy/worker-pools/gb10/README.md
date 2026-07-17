@@ -279,7 +279,9 @@ sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority check
 The commands accept no further arguments. Root reloads the fixed sealed policy,
 validates wrapper/sudoers/source identity, and invokes only the exact export
 fragment helper. `check` is read-only; `install` is locked, journaled, atomic,
-idempotent, and rolls back a newly created fragment if `exportfs -ra` fails.
+idempotent, creates a missing exact root-owned mode-`0755` `/etc/exports.d`,
+and rolls back the fragment and a directory created by that attempt if
+`exportfs -ra` fails. A pre-existing wrong directory fails closed.
 Do not request a sudo password, allow a shell or wildcard command, enable root
 SSH, or reuse the rejected 14-host root-helper design.
 

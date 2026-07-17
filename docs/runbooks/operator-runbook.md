@@ -1948,6 +1948,12 @@ an interactive shell, `--privileged`, or a writable `/` bind.
 Do not substitute an AMD64 image or rely on optional binfmt emulation; the
 build and runtime reject any non-ARM64 target.
 
+The fixed exporter `install` verb owns convergence of a missing
+`/etc/exports.d` as root-owned mode `0755` before publishing its one fragment.
+It retains a pre-existing exact directory, rejects any type/owner/mode drift,
+and removes a directory created by the failed attempt after fragment and
+`exportfs` rollback.
+
 The sealed checkout may contain a reviewed Git symlink such as
 `deploy/.env -> ../.env`, but validation never follows it. An allowed link must
 be mode `120000` in both the exact tree and stage-zero index, retain the
