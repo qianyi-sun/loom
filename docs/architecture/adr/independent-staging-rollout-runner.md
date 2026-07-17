@@ -120,6 +120,38 @@ a safe private template nor a safe legacy bootstrap source exists. Runtime
 materialization likewise rejects symlinked, hard-linked, non-regular, oversized,
 or non-`0600` private env sources before reading them.
 
+Shared GB10 worker checkouts use a separate authority instead of the
+operator-owned `/shared_work/qianyi` root. During an inactive,
+admission-closed transaction, the installer creates
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750` and records the resolved owner and
+consumer UID/GID values. It does not add the service to `sharedwork` or grant
+write on the operator parent. Runtime checks prove the service can write/search
+the dedicated root and the `qianyi` Slurm submitter can read/search but not
+write it.
+
+Candidate checkout publication is a single-writer lifecycle. Step 11 accepts
+only the exact image-tagged direct child, verifies every authority path with
+no-follow metadata, and clones with `--no-hardlinks` inside an unpredictable
+private temp directory that inherited sharedwork/setgid from the authority
+root. It permits tracked git symlinks but rejects authority symlinks, foreign
+ownership, group/other write, hard-linked or special files, and a non-exact
+resolved HEAD. After permission normalization it uses a same-root atomic
+Linux `renameat2(RENAME_NOREPLACE)`. The candidate path is immutable: an
+existing exact checkout is reused only after full index/physical-tree
+validation, while any different HEAD, mode/content drift, or extra directory
+fails without replacement. Materialization cleans only the unchanged inode it
+created for its own temp container and never removes or takes over an ambient
+path.
+
+The broker preflight verifies the fixed 14 active GB10 nodes can consume the
+shared root as `qianyi` without writing it. After publication and before
+environment-state mutation, step 11 streams verifier bytes from the trusted
+candidate worktree over the protected SSH stdin path. It does not execute code
+from the checkout under verification. Exact HEAD/status/index/mode/readability
+and non-write checks must agree on all nodes; per-node NFS device/inode evidence
+is retained without cross-node equality assumptions.
+
 The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the
 safe resolved target of `/usr/bin/python3`, which must be Python 3.11 or newer
 and remain under `/usr`. Because the repository intentionally treats

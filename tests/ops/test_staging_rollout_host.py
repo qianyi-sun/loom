@@ -61,6 +61,7 @@ class FakeSystem:
         self.remote_source_sha = "a" * 40
         self.install_source_sha: str | None = None
         self.install_owner_calls: list[tuple[Path, str, str, int]] = []
+        self.shared_worker_identity_ready = True
 
     def validate_prerequisites(self) -> None:
         self.validated += 1
@@ -148,6 +149,62 @@ class FakeSystem:
 
     def docker_membership_present(self) -> bool:
         return self.docker
+
+    def shared_worker_repo_identity(self) -> dict[str, object]:
+        if not self.service_user or not self.shared_worker_identity_ready:
+            raise host.InstallError("shared worker repository identity is unavailable")
+        identity: dict[str, object] = {
+            "root": str(host.SHARED_WORKER_REPO_ROOT),
+            "service_user": host.SERVICE_USER,
+            "service_uid": 995,
+            "service_primary_group": host.SERVICE_GROUP,
+            "service_primary_gid": 982,
+            "consumer_user": host.SHARED_WORK_CONSUMER,
+            "consumer_uid": 2005,
+            "shared_group": host.SHARED_WORK_GROUP,
+            "shared_gid": 2007,
+        }
+        authority = self.filesystem.path(host.SHARED_WORKER_AUTHORITY_ROOT)
+        repository = self.filesystem.path(host.SHARED_WORKER_REPO_ROOT)
+        if authority.is_dir() and repository.is_dir():
+            parent = authority.parent
+            parent_metadata = parent.stat()
+            authority_metadata = authority.stat()
+            repository_metadata = repository.stat()
+            identity.update(
+                {
+                    "schema_version": 1,
+                    "parent_mode": "2775",
+                    "authority_mode": "2750",
+                    "repository_mode": "2750",
+                    "parent_device": parent_metadata.st_dev,
+                    "parent_inode": parent_metadata.st_ino,
+                    "authority_device": authority_metadata.st_dev,
+                    "authority_inode": authority_metadata.st_ino,
+                    "repository_device": repository_metadata.st_dev,
+                    "repository_inode": repository_metadata.st_ino,
+                    "service_capability": ("parent-not-writable;repository-writable-searchable"),
+                    "consumer_capability": "repository-readable-searchable-not-writable",
+                    "created": [],
+                }
+            )
+        return identity
+
+    def shared_worker_repo_root_ready(self) -> bool:
+        self.shared_worker_repo_identity()
+        return all(
+            (mapped := self.filesystem.path(path)).is_dir()
+            and not mapped.is_symlink()
+            and stat.S_IMODE(mapped.stat().st_mode) == 0o2750
+            for path in (host.SHARED_WORKER_AUTHORITY_ROOT, host.SHARED_WORKER_REPO_ROOT)
+        )
+
+    def ensure_shared_worker_repo_root(self) -> bool:
+        self.shared_worker_repo_identity()
+        changed = False
+        for path in (host.SHARED_WORKER_AUTHORITY_ROOT, host.SHARED_WORKER_REPO_ROOT):
+            changed = self.filesystem.ensure_directory(path, 0o2750) or changed
+        return changed
 
     def ensure_owned_directory(self, path: Path, *, owner: str, mode: int) -> bool:
         assert owner == host.SERVICE_USER
@@ -362,7 +419,10 @@ class FakeSystem:
         self.dry_runs += 1
 
     def check_runtime(self, expected_sha: str) -> list[str]:
-        return [] if self.candidate_sha == expected_sha else ["candidate-checkout"]
+        failures = [] if self.candidate_sha == expected_sha else ["candidate-checkout"]
+        if not self.shared_worker_repo_root_ready():
+            failures.append("shared-worker-repo-root")
+        return failures
 
     def export_kubeconfig(self) -> bytes:
         return b"apiVersion: v1\ncurrent-context: loom-staging\n"
@@ -549,6 +609,8 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     installer, system = _installer(tmp_path)
 
     first = installer.install(TEAM_ID)
+    maintenance_begins_after_first = system.maintenance_begins
+    maintenance_ends_after_first = system.maintenance_ends
     second = installer.install(TEAM_ID)
 
     assert first["changed"]
@@ -582,6 +644,8 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert system.candidate_syncs == 2  # candidate convergence and venv sync run only once
     assert system.maintenance_begins == 1
     assert system.maintenance_ends == 1
+    assert system.maintenance_begins == maintenance_begins_after_first
+    assert system.maintenance_ends == maintenance_ends_after_first
     assert system.maintenance is False
     assert first["post_install_check"] == "awaiting-gb10-trust"
     assert system.dry_runs == 0
@@ -600,6 +664,14 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert record["maintenance_enabled"] is False
     assert record["trust_requires_revocation"] is True
     assert record["trust_ledger_migrated"] is True
+    assert record["shared_worker_repo"] == system.shared_worker_repo_identity()
+    assert record["shared_worker_repo"]["schema_version"] == 1
+    assert record["shared_worker_repo"]["created"] == []
+    install_record = installer.filesystem.path(host.INSTALL_RECORD)
+    assert stat.S_IMODE(install_record.stat().st_mode) == 0o600
+    assert (host.INSTALL_RECORD, "root", "root", 0o600) in system.install_owner_calls
+    for path in (host.SHARED_WORKER_AUTHORITY_ROOT, host.SHARED_WORKER_REPO_ROOT):
+        assert stat.S_IMODE(installer.filesystem.path(path).stat().st_mode) == 0o2750
     assert "trust_legacy_source_sha" not in record
     assert record["added_acls"]
     assert system.ledger_modes == ["fresh", "existing"]
@@ -632,6 +704,218 @@ def test_worker_env_validation_allows_empty_optional_value() -> None:
             )
         )
     )
+
+
+class SharedWorkerRepoRunner:
+    def __init__(self) -> None:
+        self.consumer_present = True
+        self.shared_group_present = True
+        self.consumer_membership = True
+        self.consumer_id_uid = 2005
+        self.parent_numeric = "2005:2007"
+        self.root_numeric = "995:2007"
+        self.root_metadata = "directory:loom-rollout:sharedwork:2750"
+        self.symlinks: set[str] = set()
+        self.service_parent_writable = False
+        self.consumer_readable = True
+        self.consumer_writable = False
+        self.consumer_searchable = True
+
+    def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        call = list(argv)
+        if call[:2] == [str(host.SYSTEM_PYTHON), str(host.SHARED_WORKER_REPO_HELPER)]:
+            if len(call) != 3 or call[2] not in {"check", "ensure"}:
+                raise AssertionError(f"unexpected command: {call}")
+            helper_ok = bool(
+                self.consumer_present
+                and self.shared_group_present
+                and self.consumer_membership
+                and self.consumer_id_uid == 2005
+                and self.parent_numeric == "2005:2007"
+                and self.root_numeric == "995:2007"
+                and self.root_metadata == "directory:loom-rollout:sharedwork:2750"
+                and not self.symlinks
+                and not self.service_parent_writable
+                and self.consumer_readable
+                and self.consumer_searchable
+                and not self.consumer_writable
+            )
+            if not helper_ok:
+                return host.CommandResult(1, stderr="safe failure\n")
+            return host.CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "root": str(host.SHARED_WORKER_REPO_ROOT),
+                        "service_user": host.SERVICE_USER,
+                        "service_uid": 995,
+                        "service_primary_group": host.SERVICE_GROUP,
+                        "service_primary_gid": 982,
+                        "consumer_user": host.SHARED_WORK_CONSUMER,
+                        "consumer_uid": 2005,
+                        "shared_group": host.SHARED_WORK_GROUP,
+                        "shared_gid": 2007,
+                        "parent_mode": "2775",
+                        "authority_mode": "2750",
+                        "repository_mode": "2750",
+                        "parent_device": 1,
+                        "parent_inode": 2,
+                        "authority_device": 1,
+                        "authority_inode": 3,
+                        "repository_device": 1,
+                        "repository_inode": 4,
+                        "service_capability": (
+                            "parent-not-writable;repository-writable-searchable"
+                        ),
+                        "consumer_capability": ("repository-readable-searchable-not-writable"),
+                        "created": [],
+                    }
+                )
+                + "\n",
+            )
+        if call == ["getent", "passwd", host.SERVICE_USER]:
+            return host.CommandResult(
+                0,
+                f"{host.SERVICE_USER}:x:995:982::{host.STATE_ROOT}:/usr/sbin/nologin\n",
+            )
+        if call == ["getent", "group", host.SERVICE_GROUP]:
+            return host.CommandResult(0, f"{host.SERVICE_GROUP}:x:982:\n")
+        if call == ["id", "-u", host.SERVICE_USER]:
+            return host.CommandResult(0, "995\n")
+        if call == ["id", "-g", host.SERVICE_USER]:
+            return host.CommandResult(0, "982\n")
+        if call == ["getent", "passwd", host.SHARED_WORK_CONSUMER]:
+            if not self.consumer_present:
+                return host.CommandResult(1)
+            return host.CommandResult(0, "qianyi:x:2005:2005::/home/qianyi:/bin/bash\n")
+        if call == ["id", "-u", host.SHARED_WORK_CONSUMER]:
+            return host.CommandResult(0, f"{self.consumer_id_uid}\n")
+        if call == ["getent", "group", host.SHARED_WORK_GROUP]:
+            if not self.shared_group_present:
+                return host.CommandResult(1)
+            return host.CommandResult(0, "sharedwork:x:2007:qianyi\n")
+        if call == ["id", "-nG", host.SHARED_WORK_CONSUMER]:
+            groups = "qianyi sharedwork\n" if self.consumer_membership else "qianyi\n"
+            return host.CommandResult(0, groups)
+        if call[:3] == ["stat", "-c", "%F"]:
+            return host.CommandResult(0, "directory\n")
+        if call[:3] == ["stat", "-c", "%F:%U:%G:%a"]:
+            path = call[-1]
+            if path == str(host.SHARED_WORKER_AUTHORITY_ROOT.parent):
+                return host.CommandResult(0, "directory:qianyi:sharedwork:2775\n")
+            return host.CommandResult(0, self.root_metadata + "\n")
+        if call[:3] == ["stat", "-c", "%u:%g"]:
+            path = call[-1]
+            value = (
+                self.parent_numeric
+                if path == str(host.SHARED_WORKER_AUTHORITY_ROOT.parent)
+                else self.root_numeric
+            )
+            return host.CommandResult(0, value + "\n")
+        if call[:2] == ["test", "-L"]:
+            return host.CommandResult(0 if call[-1] in self.symlinks else 1)
+        if call[:7] == ["sudo", "-n", "-u", host.SERVICE_USER, "--", "test", "-w"]:
+            writable = call[-1] == str(host.SHARED_WORKER_REPO_ROOT)
+            if call[-1] == str(host.SHARED_WORKER_AUTHORITY_ROOT.parent):
+                writable = self.service_parent_writable
+            return host.CommandResult(0 if writable else 1)
+        if call[:7] == ["sudo", "-n", "-u", host.SERVICE_USER, "--", "test", "-x"]:
+            return host.CommandResult(0)
+        if call[:7] == [
+            "sudo",
+            "-n",
+            "-u",
+            host.SHARED_WORK_CONSUMER,
+            "--",
+            "test",
+            "-r",
+        ]:
+            return host.CommandResult(0 if self.consumer_readable else 1)
+        if call[:7] == [
+            "sudo",
+            "-n",
+            "-u",
+            host.SHARED_WORK_CONSUMER,
+            "--",
+            "test",
+            "-x",
+        ]:
+            return host.CommandResult(0 if self.consumer_searchable else 1)
+        if call[:7] == [
+            "sudo",
+            "-n",
+            "-u",
+            host.SHARED_WORK_CONSUMER,
+            "--",
+            "test",
+            "-w",
+        ]:
+            return host.CommandResult(0 if self.consumer_writable else 1)
+        raise AssertionError(f"unexpected command: {call}")
+
+
+def test_shared_worker_repo_root_capabilities_are_exact_and_read_only() -> None:
+    runner = SharedWorkerRepoRunner()
+
+    assert host.HostSystem(runner).shared_worker_repo_root_ready() is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (lambda runner: setattr(runner, "consumer_present", False), "helper"),
+        (lambda runner: setattr(runner, "shared_group_present", False), "helper"),
+        (lambda runner: setattr(runner, "consumer_membership", False), "helper"),
+        (lambda runner: setattr(runner, "consumer_id_uid", 2006), "helper"),
+        (lambda runner: setattr(runner, "parent_numeric", "2005:2999"), "helper"),
+        (
+            lambda runner: runner.symlinks.add(str(host.SHARED_WORKER_REPO_ROOT)),
+            "helper",
+        ),
+        (
+            lambda runner: setattr(
+                runner,
+                "root_metadata",
+                "directory:qianyi:sharedwork:2750",
+            ),
+            "helper",
+        ),
+        (
+            lambda runner: setattr(
+                runner,
+                "root_metadata",
+                "directory:loom-rollout:loom-rollout:2750",
+            ),
+            "helper",
+        ),
+        (
+            lambda runner: setattr(
+                runner,
+                "root_metadata",
+                "directory:loom-rollout:sharedwork:2770",
+            ),
+            "helper",
+        ),
+        (lambda runner: setattr(runner, "root_numeric", "995:2999"), "helper"),
+        (
+            lambda runner: setattr(runner, "service_parent_writable", True),
+            "helper",
+        ),
+        (lambda runner: setattr(runner, "consumer_readable", False), "helper"),
+        (lambda runner: setattr(runner, "consumer_writable", True), "helper"),
+    ),
+)
+def test_shared_worker_repo_root_fails_closed_on_identity_metadata_or_capability_drift(
+    mutation,
+    message: str,
+) -> None:
+    runner = SharedWorkerRepoRunner()
+    mutation(runner)
+
+    with pytest.raises(host.InstallError, match=message):
+        host.HostSystem(runner).shared_worker_repo_root_ready()
 
 
 @pytest.mark.parametrize("semantic_empty", (b'""', b"'   '"))

@@ -1873,6 +1873,38 @@ and redacted worker-token fingerprint only. Profiles that do not opt in to
 `materialize = true` remain operator-owned prerequisites and must be created
 before rerunning step 11.
 
+For staging GB10, `repo_dir` is an exact image-tagged direct child of
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos`. The root installer
+converges that authority only with admission closed and the service inactive,
+records the resolved `loom-rollout` and `qianyi` UID plus service/sharedwork
+GID values, and verifies effective access: the service owns and writes only
+the dedicated root; the Slurm submitter reads/searches but cannot write it.
+Do not add `loom-rollout` to `sharedwork` or widen the existing traverse-only
+ACL on `/shared_work/qianyi`.
+
+Repository materialization always clones with `--no-hardlinks` inside a
+service-created unpredictable temp container that inherited the sharedwork
+group and setgid bit from the dedicated root. Before atomic publication it
+rejects authority symlinks, foreign ownership, group/other write, hard-linked
+or special files, extra directories, and non-exact candidate HEADs while
+allowing tracked git symlinks. Publication uses Linux
+`renameat2(RENAME_NOREPLACE)`: an existing exact target is reused only after a
+complete immutable-tree validation, while any drift or different HEAD fails
+closed without replacement, cleanup, or takeover.
+
+Before request creation the broker also checks the exact 14 active GB10 SSH
+targets as `qianyi`: the shared root must have the fixed owner/group/mode and
+be readable/searchable but not writable. Immediately after the one-time
+checkout publish, and before environment-state apply, step 11 streams trusted
+candidate verifier bytes over the protected SSH stdin path to
+`/usr/bin/python3 -`; verifier code is never loaded from the target under test.
+All 14 nodes must independently observe the exact HEAD, a zero status including
+ignored and untracked entries, the complete index-derived file/directory modes,
+a readable deterministically selected tracked file, and non-writable
+root/target. Content digests and tracked-entry counts must agree across nodes.
+NFS device/inode
+values are recorded per node only and are not compared across nodes.
+
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.
 It is separate from the Control Plane admin token. Step 13 resolves this source

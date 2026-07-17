@@ -919,9 +919,7 @@ def test_env_state_rejects_symlink_profile_without_mutating_referent(tmp_path: P
     assert target.is_symlink()
     assert referent.read_bytes() == source_profile.read_bytes()
     assert oct(referent.stat().st_mode & 0o777) == "0o644"
-    assert not step_dir.artifact_path(
-        "environment-state-profile-materialization.json"
-    ).exists()
+    assert not step_dir.artifact_path("environment-state-profile-materialization.json").exists()
 
 
 def test_env_state_rejects_nonregular_profile_without_replacing_it(tmp_path: Path) -> None:
@@ -948,9 +946,7 @@ def test_env_state_rejects_nonregular_profile_without_replacing_it(tmp_path: Pat
 
     assert target.is_dir()
     assert marker.read_text(encoding="utf-8") == "do not replace\n"
-    assert not step_dir.artifact_path(
-        "environment-state-profile-materialization.json"
-    ).exists()
+    assert not step_dir.artifact_path("environment-state-profile-materialization.json").exists()
 
 
 def test_env_state_runs_catalog_provisioning_between_apply_and_check(
@@ -2262,8 +2258,9 @@ def test_gb10_prep_ssh_uses_declared_config(
     )
     captured: dict[str, Any] = {}
 
-    def fake_run(argv):
+    def fake_run(argv, *, stdin_text=None):
         captured["argv"] = list(argv)
+        captured["stdin_text"] = stdin_text
         return SubprocessResult(
             argv=list(argv),
             returncode=0,
@@ -2273,7 +2270,7 @@ def test_gb10_prep_ssh_uses_declared_config(
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep.run_captured", fake_run)
 
-    _ssh(host, "hostname >/dev/null")
+    _ssh(host, "hostname >/dev/null", stdin_text="trusted verifier\n")
 
     argv = captured["argv"]
     assert argv[:3] == ["/usr/bin/ssh", "-F", str(ssh_config)]
@@ -2288,6 +2285,7 @@ def test_gb10_prep_ssh_uses_declared_config(
     assert "GlobalKnownHostsFile=/dev/null" in argv
     assert "UpdateHostKeys=no" in argv
     assert argv[-2:] == ["trt-gb10-1", "hostname >/dev/null"]
+    assert captured["stdin_text"] == "trusted verifier\n"
 
 
 @pytest.fixture
