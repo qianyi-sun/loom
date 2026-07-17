@@ -471,6 +471,25 @@ def _write_protected_inputs(filesystem: host.LocalFilesystem) -> None:
         mapped.chmod(0o640)
     for path in host.DATA_DIRECTORIES:
         filesystem.ensure_directory(path, 0o770)
+    legacy_template = filesystem.path(
+        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
+    )
+    legacy_template.parent.mkdir(parents=True, exist_ok=True)
+    legacy_template.write_text(
+        "\n".join(
+            [
+                "LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+                "LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
+                "LOOM_WORKER_TOKEN=legacy-worker-token",
+                "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+                "LOOM_WORKER_MINIO_ACCESS_KEY=minio-access",
+                "LOOM_WORKER_MINIO_SECRET_KEY=minio-secret",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    legacy_template.chmod(0o600)
 
 
 def _installer(tmp_path: Path) -> tuple[host.HostInstaller, FakeSystem]:
@@ -566,6 +585,13 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert system.maintenance is False
     assert first["post_install_check"] == "awaiting-gb10-trust"
     assert system.dry_runs == 0
+    generated_template = installer.filesystem.path(host.GENERATED_GB10_ENV_SEED)
+    assert generated_template.read_text(encoding="utf-8").endswith(
+        "LOOM_WORKER_MINIO_SECRET_KEY=minio-secret\n"
+    )
+    assert stat.S_IMODE(generated_template.stat().st_mode) == 0o600
+    assert f"worker-env-template:{host.GENERATED_GB10_ENV_SEED}" in first["changed"]
+    assert all("minio-secret" not in str(value) for value in first.values())
     record = installer.filesystem.load_install_record()
     assert record is not None
     assert record["schema_version"] == 3
@@ -589,6 +615,162 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_worker_env_validation_allows_empty_optional_value() -> None:
+    host._validate_gb10_env_payload(
+        b"\n".join(
+            (
+                b"LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+                b"LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
+                b"LOOM_WORKER_TOKEN=worker-token",
+                b"LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+                b"LOOM_WORKER_MINIO_ACCESS_KEY=minio-access",
+                b"LOOM_WORKER_MINIO_SECRET_KEY=minio-secret",
+                b'LOOM_WORKER_SUBPROCESS_GATEWAY_URL=""',
+                b"",
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize("semantic_empty", (b'""', b"'   '"))
+def test_worker_env_validation_rejects_semantically_empty_required_value(
+    semantic_empty: bytes,
+) -> None:
+    payload = b"\n".join(
+        (
+            b"LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+            b"LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
+            b"LOOM_WORKER_TOKEN=" + semantic_empty,
+            b"LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            b"LOOM_WORKER_MINIO_ACCESS_KEY=minio-access",
+            b"LOOM_WORKER_MINIO_SECRET_KEY=minio-secret",
+            b"",
+        )
+    )
+
+    with pytest.raises(host.InstallError, match="empty value"):
+        host._validate_gb10_env_payload(payload)
+
+
+def test_worker_env_validation_rejects_required_interpolation() -> None:
+    payload = b"\n".join(
+        (
+            b"LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+            b"LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
+            b"LOOM_WORKER_TOKEN=${UNSET}",
+            b"LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            b"LOOM_WORKER_MINIO_ACCESS_KEY=minio-access",
+            b"LOOM_WORKER_MINIO_SECRET_KEY=minio-secret",
+            b"",
+        )
+    )
+
+    with pytest.raises(host.InstallError, match="cannot use interpolation"):
+        host._validate_gb10_env_payload(payload)
+
+
+def test_worker_env_validation_allows_literal_dollar_value() -> None:
+    payload = b"\n".join(
+        (
+            b"LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+            b"LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
+            b"LOOM_WORKER_TOKEN=worker$literal",
+            b"LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            b"LOOM_WORKER_MINIO_ACCESS_KEY=minio-access",
+            b"LOOM_WORKER_MINIO_SECRET_KEY=minio-secret",
+            b"",
+        )
+    )
+
+    host._validate_gb10_env_payload(payload)
+
+
+def test_install_fails_closed_when_no_legacy_or_generated_worker_env_exists(
+    tmp_path: Path,
+) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.filesystem.path(
+        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
+    ).unlink()
+
+    with pytest.raises(host.InstallError, match="legacy GB10 worker env template"):
+        installer.install(TEAM_ID)
+
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+
+
+def test_reinstall_preserves_private_template_without_legacy_source(tmp_path: Path) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    private_before = installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED)
+    installer.filesystem.path(
+        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
+    ).unlink()
+
+    result = installer.install(TEAM_ID)
+
+    assert result["changed"] == []
+    assert installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED) == private_before
+
+
+def test_install_rejects_unsafe_legacy_worker_env_without_copying_secrets(
+    tmp_path: Path,
+) -> None:
+    installer, _ = _installer(tmp_path)
+    source = installer.filesystem.path(
+        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
+    )
+    source.chmod(0o622)
+
+    with pytest.raises(host.InstallError, match="metadata is unsafe"):
+        installer.install(TEAM_ID)
+
+    assert not installer.filesystem.exists(host.GENERATED_GB10_ENV_SEED)
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+
+
+def test_check_reports_missing_generated_worker_env_template(tmp_path: Path) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.filesystem.remove(host.GENERATED_GB10_ENV_SEED)
+
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert "generated-gb10-worker-env-template" in result["failures"]
+
+
+def test_reinstall_closes_admission_before_rejecting_unsafe_generated_template(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.filesystem.remove(host.GENERATED_GB10_ENV_SEED)
+    outside = installer.filesystem.path(Path("/tmp/outside-worker.env"))
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("LOOM_WORKER_TOKEN=outside\n", encoding="utf-8")
+    installer.filesystem.path(host.GENERATED_GB10_ENV_SEED).symlink_to(outside)
+    system.status = "done"
+
+    with pytest.raises(host.InstallError, match="metadata is unsafe"):
+        installer.install(TEAM_ID)
+
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.maintenance is True
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
 
 
 def test_install_atomically_detaches_hardlinked_config_authority(tmp_path: Path) -> None:
@@ -2031,10 +2213,7 @@ def test_service_account_rejects_root_uid() -> None:
             assert call == ["getent", "passwd", host.SERVICE_USER]
             return host.CommandResult(
                 0,
-                (
-                    f"{host.SERVICE_USER}:x:0:1002:"
-                    f":{host.STATE_ROOT}:/usr/sbin/nologin\n"
-                ),
+                (f"{host.SERVICE_USER}:x:0:1002::{host.STATE_ROOT}:/usr/sbin/nologin\n"),
             )
 
     with pytest.raises(host.InstallError, match="unexpected identity"):

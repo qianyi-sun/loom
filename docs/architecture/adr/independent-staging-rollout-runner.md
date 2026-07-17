@@ -106,6 +106,20 @@ ordinary-file/directory type, and contained symlink validation; any other drift
 fails closed. Readiness revalidates that complete tree before running Git or
 loading candidate configuration.
 
+The private generated-worker-env directory is not self-bootstrapping: the
+candidate env-state step can derive a new release file only from an existing
+complete template. During an inactive, admission-closed install transaction,
+the installer therefore migrates the newest fixed-name legacy staging GB10 env
+into one service-owned mode-`0600` bootstrap file when the private directory has
+no template. It opens only a bounded, single-link regular source that is not
+group- or world-writable,
+validates UTF-8 dotenv structure and all required control-plane, Gateway,
+worker-token, and MinIO keys, and copies atomically without reporting values.
+Existing private templates are preserved. Install readiness fails when neither
+a safe private template nor a safe legacy bootstrap source exists. Runtime
+materialization likewise rejects symlinked, hard-linked, non-regular, oversized,
+or non-`0600` private env sources before reading them.
+
 The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the
 safe resolved target of `/usr/bin/python3`, which must be Python 3.11 or newer
 and remain under `/usr`. Because the repository intentionally treats

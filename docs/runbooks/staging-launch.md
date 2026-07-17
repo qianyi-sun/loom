@@ -597,6 +597,12 @@ failed autoscaler service results such as `status=203/EXEC`, and the active
 `gb10-arm64`/`oldlab` pool shapes; the node-agent check catches stale
 host-local checkouts, local-build fallback using an old tree, and env files
 that did not apply even when the pool still has healthy heartbeats.
+The installed runner's private generated directory must already contain a
+service-owned mode-`0600` GB10 env template. The host installer bootstraps that
+template once from a validated fixed legacy source when the directory is empty;
+the rollout step never falls back to an arbitrary path. A missing template or
+any symlink, hard link, wrong mode, oversized file, malformed dotenv entry, or
+missing required endpoint/credential key fails before environment-state apply.
 The external Slurm autoscaler also treats release-state drift as a fail-closed
 decision. This includes a pending/running job whose node is no longer in the
 policy's `allowed_nodes`; such jobs are neither healthy warm capacity nor part
