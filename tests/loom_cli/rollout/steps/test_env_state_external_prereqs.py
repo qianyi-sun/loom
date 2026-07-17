@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.steps import s10_env_state as env_state_module
 from loom_cli.rollout.steps.s10_env_state import (
     ControlPlaneReadinessError,
     EnvStateStep,
@@ -575,6 +578,7 @@ def test_wait_for_control_plane_uses_root_healthz_and_records_evidence(
 
 def test_materialize_repo_dir_replaces_dirty_half_updated_checkout(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_repo = tmp_path / "source"
     source_repo.mkdir()
@@ -596,20 +600,31 @@ def test_materialize_repo_dir_replaces_dirty_half_updated_checkout(
         capture_output=True,
         text=True,
     ).stdout.strip()
-    repo_dir = tmp_path / "loom-remote-worker-staging-abc123"
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir()
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._SHARED_WORKER_REPO_ROOT",
+        repo_root,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state.grp.getgrnam",
+        lambda name: SimpleNamespace(gr_gid=os.getgid()) if name == "sharedwork" else None,
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
 
     created = _materialize_repo_dir(
         repo_dir=repo_dir,
         source_repo=source_repo,
         resolved_sha=head,
-        expected_ref=head[:7],
+        expected_ref="staging-abc123",
     )
     (repo_dir / "README.md").write_text("dirty half update\n", encoding="utf-8")
     replaced = _materialize_repo_dir(
         repo_dir=repo_dir,
         source_repo=source_repo,
         resolved_sha=head,
-        expected_ref=head[:7],
+        expected_ref="staging-abc123",
     )
 
     assert created["repo_action"] == "created"
@@ -632,3 +647,418 @@ def test_materialize_repo_dir_replaces_dirty_half_updated_checkout(
         == ""
     )
     assert list(repo_dir.parent.glob(f".{repo_dir.name}.previous-*"))
+
+
+def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clone_commands: list[list[str]] = []
+    original_run_captured = env_state_module.run_captured
+
+    def record_git_commands(argv: list[str]) -> SubprocessResult:
+        if argv[:2] == ["git", "clone"]:
+            clone_commands.append(argv)
+        return original_run_captured(argv)
+
+    monkeypatch.setattr(env_state_module, "run_captured", record_git_commands)
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("target\n", encoding="utf-8")
+    (source_repo / "README.link").symlink_to("README.md")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-m", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir()
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._SHARED_WORKER_REPO_ROOT",
+        repo_root,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state.grp.getgrnam",
+        lambda name: SimpleNamespace(gr_gid=os.getgid()) if name == "sharedwork" else None,
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+
+    result = _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+
+    assert result["repo_head"] == head
+    assert (repo_dir / "README.link").is_symlink()
+    assert (repo_dir / "README.link").readlink() == Path("README.md")
+    assert (repo_dir / "README.md").stat().st_ino != (source_repo / "README.md").stat().st_ino
+    assert stat.S_IMODE((repo_dir / "README.md").stat().st_mode) == 0o640
+    assert clone_commands
+    assert all("--no-hardlinks" in command for command in clone_commands)
+
+
+def test_materialize_repo_dir_rejects_non_direct_or_symlinked_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_root = tmp_path / "real" / "worker-repos"
+    real_root.mkdir(parents=True)
+    real_root.chmod(0o2750)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._SHARED_WORKER_REPO_ROOT",
+        real_root,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state.grp.getgrnam",
+        lambda name: SimpleNamespace(gr_gid=os.getgid()) if name == "sharedwork" else None,
+    )
+    nested = real_root / "nested" / "loom-remote-worker-staging-abc123"
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="candidate-bound root",
+    ):
+        _materialize_repo_dir(
+            repo_dir=nested,
+            source_repo=tmp_path,
+            resolved_sha="a" * 40,
+            expected_ref="staging-abc123",
+        )
+
+    linked_root = tmp_path / "linked" / "worker-repos"
+    linked_root.parent.mkdir()
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._SHARED_WORKER_REPO_ROOT",
+        linked_root,
+    )
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="real directory",
+    ):
+        _materialize_repo_dir(
+            repo_dir=linked_root / "loom-remote-worker-staging-abc123",
+            source_repo=tmp_path,
+            resolved_sha="a" * 40,
+            expected_ref="staging-abc123",
+        )
+
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", real_root)
+    outside = tmp_path / "outside-checkout"
+    outside.mkdir()
+    target = real_root / "loom-remote-worker-staging-abc123"
+    target.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="unsafe authority",
+    ):
+        _materialize_repo_dir(
+            repo_dir=target,
+            source_repo=tmp_path,
+            resolved_sha="a" * 40,
+            expected_ref="staging-abc123",
+        )
+
+
+def test_materialize_repo_dir_does_not_clean_replaced_temp_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir()
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._SHARED_WORKER_REPO_ROOT",
+        repo_root,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state.grp.getgrnam",
+        lambda name: SimpleNamespace(gr_gid=os.getgid()) if name == "sharedwork" else None,
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+
+    def replace_temp_authority(*, tmp_dir: Path, **_: Any) -> None:
+        temp_root = tmp_dir.parent
+        original = temp_root.with_name(f"{temp_root.name}.original")
+        temp_root.rename(original)
+        temp_root.mkdir()
+        (temp_root / "foreign-marker").write_text("preserve\n", encoding="utf-8")
+        raise ExternalSlurmPrereqMaterializationError("injected clone failure")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._clone_repo_checkout",
+        replace_temp_authority,
+    )
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="authority changed",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=tmp_path,
+            resolved_sha="a" * 40,
+            expected_ref="staging-abc123",
+        )
+
+    replacement = next(
+        path
+        for path in repo_root.glob(f".{repo_dir.name}.tmp-*")
+        if not path.name.endswith(".original")
+    )
+    assert (replacement / "foreign-marker").read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_temp_root_requires_linux_setgid_inheritance_for_nonmember_shared_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inherited = SimpleNamespace(
+        st_gid=2007,
+        st_uid=995,
+        st_mode=stat.S_IFDIR | 0o2700,
+    )
+    missing_setgid = SimpleNamespace(
+        st_gid=2007,
+        st_uid=995,
+        st_mode=stat.S_IFDIR | 0o700,
+    )
+    root = SimpleNamespace(st_gid=2007)
+    monkeypatch.setattr(env_state_module.os, "geteuid", lambda: 995)
+    monkeypatch.setattr(env_state_module.os, "getgid", lambda: 982)
+    monkeypatch.setattr(env_state_module.os, "getgroups", lambda: [])
+
+    class FakeTempRoot:
+        def __init__(self, metadata: SimpleNamespace) -> None:
+            self.metadata = metadata
+
+        def lstat(self) -> SimpleNamespace:
+            return self.metadata
+
+    assert env_state_module._prepare_temp_root(  # type: ignore[arg-type]
+        FakeTempRoot(inherited),
+        root=root,  # type: ignore[arg-type]
+    ) is inherited
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="did not inherit setgid",
+    ):
+        env_state_module._prepare_temp_root(  # type: ignore[arg-type]
+            FakeTempRoot(missing_setgid),
+            root=root,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("drift", ("owner", "group", "mode"))
+def test_materialize_repo_dir_rejects_root_metadata_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir()
+    repo_root.chmod(0o2750 if drift != "mode" else 0o2770)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    expected_gid = os.getgid() + (1 if drift == "group" else 0)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=expected_gid),
+    )
+    if drift == "owner":
+        monkeypatch.setattr(env_state_module.os, "geteuid", lambda: os.getuid() + 1)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="unsafe owner or mode",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_root / "loom-remote-worker-staging-abc123",
+            source_repo=tmp_path,
+            resolved_sha="a" * 40,
+            expected_ref="staging-abc123",
+        )
+
+
+@pytest.mark.parametrize("unsafe", ("foreign-owner", "top-writable", "hardlink", "fifo"))
+def test_repo_tree_rejects_unsafe_authority_or_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe: str,
+) -> None:
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir()
+    repo_root.chmod(0o2750)
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    repo_dir.mkdir(mode=0o750)
+    root = repo_root.lstat()
+
+    if unsafe == "foreign-owner":
+        original_lstat = Path.lstat
+
+        def foreign_lstat(path: Path) -> os.stat_result:
+            metadata = original_lstat(path)
+            if path == repo_dir:
+                fields = list(metadata)
+                fields[4] = metadata.st_uid + 1
+                return os.stat_result(fields)
+            return metadata
+
+        monkeypatch.setattr(Path, "lstat", foreign_lstat)
+    elif unsafe == "top-writable":
+        repo_dir.chmod(0o770)
+    elif unsafe == "hardlink":
+        original = repo_dir / "object"
+        original.write_text("payload\n", encoding="utf-8")
+        os.link(original, repo_dir / "object-link")
+    else:
+        os.mkfifo(repo_dir / "unsafe-fifo")
+
+    with pytest.raises(ExternalSlurmPrereqMaterializationError):
+        env_state_module._validate_repo_tree(repo_dir, root=root)
+
+
+def test_materialize_repo_dir_matches_exact_sha_without_reclone_and_replaces_wrong_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-m", "one"], check=True)
+    first_sha = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (source_repo / "README.md").write_text("two\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-am", "two"], check=True)
+    second_sha = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir()
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+
+    created = _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=first_sha,
+        expected_ref="staging-abc123",
+    )
+    original_clone = env_state_module._clone_repo_checkout
+    clone_calls = 0
+
+    def count_clone(**kwargs: Any) -> None:
+        nonlocal clone_calls
+        clone_calls += 1
+        original_clone(**kwargs)
+
+    monkeypatch.setattr(env_state_module, "_clone_repo_checkout", count_clone)
+    matched = _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=first_sha,
+        expected_ref="staging-abc123",
+    )
+    replaced = _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=second_sha,
+        expected_ref="staging-abc123",
+    )
+
+    assert created["repo_action"] == "created"
+    assert matched["repo_action"] == "matched"
+    assert replaced["repo_action"] == "replaced"
+    assert replaced["repo_head"] == second_sha
+    assert clone_calls == 1
+
+
+def test_materialize_repo_dir_preserves_previous_collision_and_cleans_clone_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir()
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+
+    def fail_clone(**_: Any) -> None:
+        raise ExternalSlurmPrereqMaterializationError("injected clone failure")
+
+    monkeypatch.setattr(env_state_module, "_clone_repo_checkout", fail_clone)
+    with pytest.raises(ExternalSlurmPrereqMaterializationError, match="injected clone failure"):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=tmp_path,
+            resolved_sha="a" * 40,
+            expected_ref="staging-abc123",
+        )
+    assert not list(repo_root.glob(f".{repo_dir.name}.tmp-*"))
+
+    repo_dir.mkdir(mode=0o750)
+    (repo_dir / ".git").mkdir(mode=0o750)
+    (repo_dir / "dirty").write_text("dirty\n", encoding="utf-8")
+    (repo_dir / "dirty").chmod(0o640)
+    collision = repo_root / f".{repo_dir.name}.previous-fixed"
+    collision.mkdir(mode=0o750)
+    monkeypatch.setattr(env_state_module.secrets, "token_hex", lambda _size: "fixed")
+    monkeypatch.setattr(env_state_module, "_normalize_repo_tree", lambda *_args, **_kwargs: None)
+
+    def create_checkout(*, tmp_dir: Path, **_: Any) -> None:
+        tmp_dir.mkdir(mode=0o750)
+        (tmp_dir / ".git").mkdir(mode=0o750)
+
+    monkeypatch.setattr(env_state_module, "_clone_repo_checkout", create_checkout)
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="already exists",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=tmp_path,
+            resolved_sha="a" * 40,
+            expected_ref="staging-abc123",
+        )
+    assert collision.is_dir()

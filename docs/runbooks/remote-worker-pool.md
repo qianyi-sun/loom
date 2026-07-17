@@ -1299,7 +1299,7 @@ available only on the OLDLAB submit host, mark the policy as externally run:
       "trt-eai-oldlab-5"
     ],
     "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
-    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
+    "repo_dir": "/shared_work/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 2,
     "requested_memory_mib": 8192,
     "requested_concurrency": 1,
@@ -1380,6 +1380,25 @@ then copies the latest matching staging GB10 env file template when the target
 from the replayable `--worker-token` source, forces mode `0600`, and prepares
 a clean shared checkout at the target `repo_dir` before the environment-state
 check validates existence, git HEAD, clean status, and token parity.
+
+The platform-dev installer owns the dedicated staging checkout root at
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750`. It creates or verifies that root only
+while rollout admission is closed and no request is active. The service can
+write the root, while the `qianyi` Slurm submitter can read and traverse it but
+cannot write it; the service receives no write access to `/shared_work/qianyi`
+itself. The install record binds both account names to their resolved UID/GID,
+and readiness rechecks metadata plus effective service/consumer access.
+
+Step 11 accepts only the candidate-named direct child of that exact root. It
+clones with `--no-hardlinks` into a private, unpredictable setgid-root temp
+container, normalizes the completed tree to shared-group read/execute without
+group or other write, and then publishes by a same-root atomic rename. Tracked
+repository symlinks remain valid; authority symlinks, foreign ownership,
+hard-linked or special files, wrong modes, and SHA drift fail closed. A
+replaced service-owned checkout is renamed to an unpredictable
+`.previous-...` sibling and preserved for explicit later maintenance; rollout
+materialization never cleans ambient or previous directories.
 
 Keep the GB10 node-agent path only for Docker Compose rollout validation,
 legacy compatibility, or break-glass operation when Slurm is unavailable. The

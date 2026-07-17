@@ -603,6 +603,17 @@ template once from a validated fixed legacy source when the directory is empty;
 the rollout step never falls back to an arbitrary path. A missing template or
 any symlink, hard link, wrong mode, oversized file, malformed dotenv entry, or
 missing required endpoint/credential key fails before environment-state apply.
+The same installer creates the external-runner checkout authority at
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750`, without granting the service write
+access to `/shared_work/qianyi`. Runtime readiness proves that `loom-rollout`
+can write/search the dedicated root and that the `qianyi` Slurm submitter can
+read/search but not write it. Step 11 publishes only the exact image-tagged
+direct child through a private setgid temp container and same-root rename;
+authority symlinks, wrong owner/group/mode, hardlinks, special files, or a
+non-exact resolved SHA fail closed. The previous service-owned candidate is
+preserved as an unpredictable sibling and is never implicitly cleaned during
+rollout or resume.
 The external Slurm autoscaler also treats release-state drift as a fail-closed
 decision. This includes a pending/running job whose node is no longer in the
 policy's `allowed_nodes`; such jobs are neither healthy warm capacity nor part

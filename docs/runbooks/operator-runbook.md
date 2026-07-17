@@ -1873,6 +1873,25 @@ and redacted worker-token fingerprint only. Profiles that do not opt in to
 `materialize = true` remain operator-owned prerequisites and must be created
 before rerunning step 11.
 
+For staging GB10, `repo_dir` is an exact image-tagged direct child of
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos`. The root installer
+converges that authority only with admission closed and the service inactive,
+records the resolved `loom-rollout` and `qianyi` UID plus service/sharedwork
+GID values, and verifies effective access: the service owns and writes only
+the dedicated root; the Slurm submitter reads/searches but cannot write it.
+Do not add `loom-rollout` to `sharedwork` or widen the existing traverse-only
+ACL on `/shared_work/qianyi`.
+
+Repository materialization always clones with `--no-hardlinks` inside a
+service-created unpredictable temp container that inherited the sharedwork
+group and setgid bit from the dedicated root. Before atomic publication it
+rejects authority symlinks, foreign ownership, group/other write, hard-linked
+or special files, and non-exact candidate HEADs while allowing tracked git
+symlinks. Replacement preserves the former service-owned tree under an
+unpredictable `.previous-...` direct child. Never delete that previous tree or
+an ambient temp path as part of rollout resume; removal is a separate,
+admission-closed maintenance decision.
+
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.
 It is separate from the Control Plane admin token. Step 13 resolves this source

@@ -39,6 +39,10 @@ SERVICE_USER = "loom-rollout"
 SERVICE_GROUP = "loom-rollout"
 OPERATOR_GROUP = "loom-staging-operators"
 OPERATORS = ("qianyi", "hongjian", "devansh")
+SHARED_WORK_CONSUMER = "qianyi"
+SHARED_WORK_GROUP = "sharedwork"
+SHARED_WORKER_AUTHORITY_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout")
+SHARED_WORKER_REPO_ROOT = SHARED_WORKER_AUTHORITY_ROOT / "worker-repos"
 
 RUNNER_ROOT = Path("/opt/loom-staging-runner")
 INSTALL_SOURCE = RUNNER_ROOT / "source"
@@ -1524,6 +1528,138 @@ class HostSystem:
             raise InstallError("service account has unexpected supplementary groups")
         return "docker" in groups
 
+    def shared_worker_repo_identity(self) -> dict[str, object]:
+        service_uid, service_gid = self._service_ids()
+        consumer = self._probe(["getent", "passwd", SHARED_WORK_CONSUMER])
+        consumer_uid = self._probe(["id", "-u", SHARED_WORK_CONSUMER])
+        shared_group = self._probe(["getent", "group", SHARED_WORK_GROUP])
+        consumer_groups = self._probe(["id", "-nG", SHARED_WORK_CONSUMER])
+        consumer_fields = consumer.stdout.strip().split(":")
+        group_fields = shared_group.stdout.strip().split(":")
+        rendered_uid = consumer_uid.stdout.strip()
+        if (
+            consumer.returncode != 0
+            or consumer_uid.returncode != 0
+            or shared_group.returncode != 0
+            or consumer_groups.returncode != 0
+            or len(consumer_fields) < 4
+            or len(group_fields) < 3
+            or not consumer_fields[2].isdigit()
+            or not rendered_uid.isdigit()
+            or not group_fields[2].isdigit()
+            or int(consumer_fields[2]) != int(rendered_uid)
+            or int(consumer_fields[2]) == 0
+            or int(group_fields[2]) == 0
+        ):
+            raise InstallError("shared worker repository identity is unavailable or inconsistent")
+        if SHARED_WORK_GROUP not in consumer_groups.stdout.split():
+            raise InstallError("shared worker repository consumer lacks sharedwork membership")
+        return {
+            "root": str(SHARED_WORKER_REPO_ROOT),
+            "service_user": SERVICE_USER,
+            "service_uid": service_uid,
+            "service_primary_group": SERVICE_GROUP,
+            "service_primary_gid": service_gid,
+            "consumer_user": SHARED_WORK_CONSUMER,
+            "consumer_uid": int(rendered_uid),
+            "shared_group": SHARED_WORK_GROUP,
+            "shared_gid": int(group_fields[2]),
+        }
+
+    def shared_worker_repo_root_ready(self) -> bool:
+        identity = self.shared_worker_repo_identity()
+        shared_work_root = SHARED_WORKER_AUTHORITY_ROOT.parent.parent
+        shared_work = self._probe(
+            ["stat", "-c", "%F", str(shared_work_root)]
+        ).stdout.strip()
+        if shared_work != "directory" or self._probe(
+            ["test", "-L", str(shared_work_root)]
+        ).returncode == 0:
+            raise InstallError("shared worker repository root ancestor is unsafe")
+        parent = self._probe(
+            ["stat", "-c", "%F:%U:%G:%a", str(SHARED_WORKER_AUTHORITY_ROOT.parent)]
+        ).stdout.strip()
+        if parent != "directory:qianyi:sharedwork:2775":
+            raise InstallError("shared worker repository parent authority is unsafe")
+        if self._probe(["test", "-L", str(SHARED_WORKER_AUTHORITY_ROOT.parent)]).returncode == 0:
+            raise InstallError("shared worker repository parent authority is a symlink")
+        parent_numeric = self._probe(
+            ["stat", "-c", "%u:%g", str(SHARED_WORKER_AUTHORITY_ROOT.parent)]
+        ).stdout.strip()
+        if parent_numeric != f"{identity['consumer_uid']}:{identity['shared_gid']}":
+            raise InstallError("shared worker repository parent identity drifted")
+        expected = f"directory:{SERVICE_USER}:{SHARED_WORK_GROUP}:2750"
+        for path in (SHARED_WORKER_AUTHORITY_ROOT, SHARED_WORKER_REPO_ROOT):
+            if self._probe(["test", "-L", str(path)]).returncode == 0:
+                raise InstallError("shared worker repository authority path is a symlink")
+            current = self._probe(["stat", "-c", "%F:%U:%G:%a", str(path)])
+            if current.returncode != 0:
+                return False
+            if current.stdout.strip() != expected:
+                raise InstallError("shared worker repository authority metadata is unsafe")
+            numeric = self._probe(["stat", "-c", "%u:%g", str(path)]).stdout.strip()
+            if numeric != f"{identity['service_uid']}:{identity['shared_gid']}":
+                raise InstallError("shared worker repository authority identity drifted")
+        service_test = ["sudo", "-n", "-u", SERVICE_USER, "--", "test"]
+        consumer_test = ["sudo", "-n", "-u", SHARED_WORK_CONSUMER, "--", "test"]
+        if (
+            self._probe([*service_test, "-w", str(SHARED_WORKER_REPO_ROOT)]).returncode != 0
+            or self._probe([*service_test, "-x", str(SHARED_WORKER_REPO_ROOT)]).returncode != 0
+            or self._probe(
+                [*service_test, "-w", str(SHARED_WORKER_AUTHORITY_ROOT.parent)]
+            ).returncode
+            == 0
+        ):
+            raise InstallError("shared worker repository service capability is unsafe")
+        if (
+            self._probe([*consumer_test, "-r", str(SHARED_WORKER_REPO_ROOT)]).returncode != 0
+            or self._probe([*consumer_test, "-x", str(SHARED_WORKER_REPO_ROOT)]).returncode
+            != 0
+            or self._probe([*consumer_test, "-w", str(SHARED_WORKER_REPO_ROOT)]).returncode
+            == 0
+        ):
+            raise InstallError("shared worker repository consumer capability is unavailable")
+        return True
+
+    def ensure_shared_worker_repo_root(self) -> bool:
+        if self.shared_worker_repo_root_ready():
+            return False
+        identity = self.shared_worker_repo_identity()
+        changed = False
+        expected = f"directory:{SERVICE_USER}:{SHARED_WORK_GROUP}:2750"
+        for path in (SHARED_WORKER_AUTHORITY_ROOT, SHARED_WORKER_REPO_ROOT):
+            current = self._probe(["stat", "-c", "%F:%U:%G:%a", str(path)])
+            if current.returncode == 0:
+                if current.stdout.strip() != expected:
+                    raise InstallError("refusing to take over shared worker repository authority")
+                continue
+            self.runner.run(
+                [
+                    "install",
+                    "-d",
+                    "-o",
+                    SERVICE_USER,
+                    "-g",
+                    SHARED_WORK_GROUP,
+                    "-m",
+                    "2750",
+                    str(path),
+                ]
+            )
+            confirmed = self.runner.run(
+                ["stat", "-c", "%F:%U:%G:%a", str(path)]
+            ).stdout.strip()
+            numeric = self.runner.run(["stat", "-c", "%u:%g", str(path)]).stdout.strip()
+            if (
+                confirmed != expected
+                or numeric != f"{identity['service_uid']}:{identity['shared_gid']}"
+            ):
+                raise InstallError("shared worker repository authority did not converge safely")
+            changed = True
+        if not self.shared_worker_repo_root_ready():  # pragma: no cover - convergence invariant
+            raise InstallError("shared worker repository authority did not converge safely")
+        return changed
+
     def ensure_root_directory(self, path: Path, *, mode: int) -> bool:
         expected = f"directory:root:root:{mode:o}"
         current = self._probe(["stat", "-c", "%F:%U:%G:%a", str(path)]).stdout.strip()
@@ -2649,6 +2785,11 @@ class HostSystem:
         service_groups = set(self._probe(["id", "-nG", SERVICE_USER]).stdout.split())
         if service_groups != {SERVICE_USER, "docker"}:
             failures.append("service-groups")
+        try:
+            if not self.shared_worker_repo_root_ready():
+                failures.append("shared-worker-repo-root")
+        except InstallError:
+            failures.append("shared-worker-repo-root")
         if not service_account_ready or not self.candidate_ready(expected_sha):
             failures.append("candidate-checkout")
         for path in PROTECTED_INPUTS:
@@ -3168,6 +3309,9 @@ class HostInstaller:
             "service_user": SERVICE_USER,
             "operator_group": OPERATOR_GROUP,
             "operators": list(OPERATORS),
+            "shared_worker_repo_root": str(SHARED_WORKER_REPO_ROOT),
+            "shared_worker_repo_consumer": SHARED_WORK_CONSUMER,
+            "shared_worker_repo_group": SHARED_WORK_GROUP,
             "protected_inputs": [str(path) for path in PROTECTED_INPUTS],
             "data_directories": [str(path) for path in DATA_DIRECTORIES],
             "preserves": [str(STATE_ROOT), "/data/loom-staging/rollouts"],
@@ -3358,6 +3502,13 @@ class HostInstaller:
             trust_ledger_migrated=trust_ledger_migrated,
             trust_requires_revocation=trust_requires_revocation,
         )
+        group_missing = not self.system.group_present(OPERATOR_GROUP)
+        service_user_missing = not self.system.service_user_present()
+        shared_worker_repo_identity = (
+            None
+            if service_user_missing
+            else self.system.shared_worker_repo_identity()
+        )
 
         def record_value(
             state: str,
@@ -3397,6 +3548,8 @@ class HostInstaller:
                 ]
             if legacy_trust_source_sha is not None:
                 value["trust_legacy_source_sha"] = legacy_trust_source_sha
+            if shared_worker_repo_identity is not None:
+                value["shared_worker_repo"] = shared_worker_repo_identity
             return value
 
         def persist_record(
@@ -3420,8 +3573,6 @@ class HostInstaller:
             owner_changed = self.system.install_owner(INSTALL_RECORD, "root", 0o600)
             return changed or owner_changed
 
-        group_missing = not self.system.group_present(OPERATOR_GROUP)
-        service_user_missing = not self.system.service_user_present()
         install_source_ready = self.system.install_source_ready(source_sha)
         service_directories_ready = not service_user_missing and all(
             self.system.owned_directory_ready(directory, owner=SERVICE_USER, mode=mode)
@@ -3432,6 +3583,9 @@ class HostInstaller:
             )
         )
         candidate_ready = service_directories_ready and self.system.candidate_ready(source_sha)
+        shared_worker_repo_ready = (
+            not service_user_missing and self.system.shared_worker_repo_root_ready()
+        )
         venv_lock_requires_hardening = self.system.venv_lock_requires_hardening()
         venv_ready = not venv_lock_requires_hardening and self.system.venv_ready()
         package_runtime_ready = (
@@ -3502,6 +3656,7 @@ class HostInstaller:
             or service_key_missing
             or acl_plans
             or not service_directories_ready
+            or not shared_worker_repo_ready
             or generated_env_error is not None
             or not generated_env_templates_ready
             or not candidate_ready
@@ -3551,6 +3706,7 @@ class HostInstaller:
             changes.append(f"group:{OPERATOR_GROUP}")
         if self.system.ensure_service_user():
             changes.append(f"user:{SERVICE_USER}")
+        shared_worker_repo_identity = self.system.shared_worker_repo_identity()
         for username in OPERATORS:
             if self.system.ensure_operator_membership(username):
                 added_operator_memberships.add(username)
@@ -3558,6 +3714,9 @@ class HostInstaller:
         if self.system.ensure_docker_membership():
             added_docker_membership = True
             changes.append("service-group:docker")
+
+        if self.system.ensure_shared_worker_repo_root():
+            changes.append(f"directory:{SHARED_WORKER_REPO_ROOT}")
 
         for directory, mode in (
             (STATE_ROOT, 0o700),
