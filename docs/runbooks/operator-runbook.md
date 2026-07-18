@@ -2060,11 +2060,11 @@ ignored and untracked entries, the complete index-derived file/directory modes,
 a readable deterministically selected tracked file, and non-writable
 root/target. Content digests and tracked-entry counts must agree across nodes.
 Mount/device/inode values are bound into sanitized per-node evidence. A
-non-zero SSH or remote verifier exit receives at most seven exact-command
-observations with bounded incremental backoff. Structured evidence that is
-valid but content-divergent fails immediately; an exhausted transient records
-only host, attempt count, and a non-sensitive failure class before the rollout
-fails closed.
+non-zero SSH or remote verifier exit receives at most thirteen exact-command
+observations over a bounded 390-second incremental-backoff window. Structured
+evidence that is valid but content-divergent fails immediately; an exhausted
+transient records only host, attempt count, and a non-sensitive failure class
+before the rollout fails closed.
 
 After that 14/14 consumer proof, sealed-cumulative GB10 prep fetches the exact
 commit from the fixed shared checkout with the system upload-pack and object

@@ -1476,11 +1476,12 @@ zero modified/untracked/ignored status, exact physical index and modes,
 readability of the deterministic tracked probe file, and no qianyi write
 capability. Content identities must agree 14/14; NFS device/inode evidence is
 recorded per node without requiring equality across nodes. A non-zero remote
-verifier or SSH exit is retried at most seven times with bounded incremental
-backoff so a just-published shared checkout or transient transport reset cannot
-fail the release on its first observation. Valid but divergent structured
-evidence is never retried, and exhausted evidence records only the host,
-attempt count, and a non-sensitive failure class before failing closed.
+verifier or SSH exit is retried at most thirteen times over a bounded
+390-second incremental-backoff window so a just-published shared checkout or
+transient transport reset cannot fail the release on its first observation.
+Valid but divergent structured evidence is never retried, and exhausted
+evidence records only the host, attempt count, and a non-sensitive failure
+class before failing closed.
 
 For sealed-cumulative rollouts, step 12 then fetches the exact commit from that
 verified shared checkout through the fixed system upload-pack with object fsck
