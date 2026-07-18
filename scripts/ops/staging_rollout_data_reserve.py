@@ -18,6 +18,8 @@ from typing import Protocol
 
 DATA_PATH = Path("/data")
 DATA_DEVICE = Path("/dev/nvme0n1p2")
+DATA_DEVICE_UID = 0
+DATA_DEVICE_GID = 6
 DATA_MOUNT = Path("/")
 FILESYSTEM_TYPE = "ext4"
 TARGET_RESERVED_PERCENT = 3.0
@@ -146,7 +148,11 @@ def _parse_device_stat(payload: str) -> None:
         mode = int(fields[0], 16)
     except (IndexError, ValueError) as exc:
         raise ReserveError("data block device identity is invalid") from exc
-    if len(fields) != 3 or not stat.S_ISBLK(mode) or fields[1:] != ["0", "0"]:
+    if (
+        len(fields) != 3
+        or not stat.S_ISBLK(mode)
+        or fields[1:] != [str(DATA_DEVICE_UID), str(DATA_DEVICE_GID)]
+    ):
         raise ReserveError("data block device identity is invalid")
 
 

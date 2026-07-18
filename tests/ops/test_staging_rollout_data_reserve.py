@@ -35,6 +35,7 @@ class FakeRunner:
         self.calls: list[tuple[str, ...]] = []
         self.fail_readback = False
         self.active_unit = False
+        self.device_stat = "61b0|0|6\n"
 
     def run(self, argv: Sequence[str]) -> reserve.CommandResult:
         call = tuple(argv)
@@ -42,7 +43,7 @@ class FakeRunner:
         if call[0] == "/usr/bin/findmnt":
             return reserve.CommandResult(0, _findmnt(source=self.source), "")
         if call[0] == "/usr/bin/stat":
-            return reserve.CommandResult(0, "61b0|0|0\n", "")
+            return reserve.CommandResult(0, self.device_stat, "")
         if call[0] == "/usr/bin/systemctl":
             output = "loom-staging-rollout-req-example-1.service loaded active running\n"
             return reserve.CommandResult(0, output if self.active_unit else "", "")
@@ -92,6 +93,16 @@ def test_install_refuses_active_rollout_before_filesystem_inspection(tmp_path: P
         reserve.install(runner, euid=0, lock_path=tmp_path / "lock")
 
     assert [call[0] for call in runner.calls] == ["/usr/bin/systemctl"]
+
+
+def test_install_rejects_device_owner_drift(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    runner.device_stat = "61b0|0|0\n"
+
+    with pytest.raises(reserve.ReserveError, match="block device identity"):
+        reserve.install(runner, euid=0, lock_path=tmp_path / "lock")
+
+    assert not any(call[:2] == ("/usr/sbin/tune2fs", "-m") for call in runner.calls)
 
 
 @pytest.mark.parametrize(
