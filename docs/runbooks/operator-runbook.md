@@ -4508,6 +4508,7 @@ loom datasets hf-boundary-evidence skilllearnbench \
   --namespace "$K8S_NAMESPACE" \
   --cluster-config "$CLUSTER_CONFIG" \
   --gb10-workers-status "$ROLLOUT_DIR/gb10-workers-status-$IMAGE_TAG.json" \
+  --canary-batch-id "$CURRENT_CANDIDATE_SLB_CANARY_BATCH_ID" \
   --output "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json"
 ```
 
@@ -4523,10 +4524,16 @@ candidate or a different status snapshot fails closed. Every canary trial's
 persisted `worker_id` must belong to an active, fresh manifest-selected worker
 registration in that same GB10 status snapshot. A worker restart therefore
 invalidates an older canary even when the batch otherwise succeeded, and an
-explicit `--canary-batch-id` does not bypass this check. Arrange the small
-SkillLearnBench canary after current-candidate GB10 prep and before release-gate;
-if none exists yet, release-gate fails closed and can be resumed after that
-canary completes. The GB10 check uses the same
+explicit `--canary-batch-id` does not bypass this check. Protected rollout
+step 14 now submits and waits for a deterministic one-trial
+`skilllearnbench/fix-security-bug/fix-security-bug-1` oracle canary after the
+GB10 status artifact proves all manifest-active hosts have fresh current
+registrations. The canary name binds the image tag and a stable digest of the
+exact host-to-worker registration set, so heartbeat timestamp changes reuse the
+same batch while a worker restart creates a new canary. Evidence generation is
+then pinned to the returned batch id instead of discovering an older succeeded
+batch. Manual investigations must preserve the same order and pass their exact
+current-candidate batch id explicitly. The GB10 check uses the same
 `[gb10_pool].ssh_config`, `ssh_identity_file`, and optional
 `ssh_certificate_file` as rollout GB10 prep; failed SSH, failed container
 listing or inspection, or no running inspected worker container on any active

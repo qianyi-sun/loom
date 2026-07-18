@@ -21,7 +21,7 @@ from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps import candidate_source
-from loom_cli.rollout.steps.base import VerifyOutcome
+from loom_cli.rollout.steps.base import RunResult, VerifyOutcome
 from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_argv,
     candidate_loom_env,
@@ -51,11 +51,25 @@ from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
 from loom_cli.rollout.steps.s12_production_defaults import ProductionDefaultsStep
 from loom_cli.rollout.steps.s12_release_gate import (
     ReleaseGateStep,
+    _current_candidate_worker_binding,
     _is_gb10_convergence_failure,
 )
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
+_RUN_CANDIDATE_BOUND_HF_CANARY = ReleaseGateStep._run_candidate_bound_hf_canary
+
+
+@pytest.fixture(autouse=True)
+def _stub_candidate_bound_hf_canary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ReleaseGateStep,
+        "_run_candidate_bound_hf_canary",
+        lambda _self, _ctx, _step_dir: RunResult(
+            exit_code=0,
+            artifacts={"batch_id": "00000000-0000-4000-8000-000000000001"},
+        ),
+    )
 
 
 def test_sealed_gb10_prep_fetches_exact_shared_candidate(
@@ -3350,6 +3364,9 @@ def test_release_gate_run_generates_manifest_then_gates(
     assert calls[5]["argv"][calls[5]["argv"].index("--gb10-workers-status") + 1] == (
         str(step_dir.artifact_path("gb10-workers-status-staging-abc123.json"))
     )
+    assert calls[5]["argv"][calls[5]["argv"].index("--canary-batch-id") + 1] == (
+        "00000000-0000-4000-8000-000000000001"
+    )
     assert calls[5]["argv"][calls[5]["argv"].index("--output") + 1] == str(hf_boundary)
     assert calls[6]["argv"][calls[6]["argv"].index("--manifest") + 1] == str(manifest)
     assert calls[6]["argv"][calls[6]["argv"].index("--minio-storage-preflight") + 1] == str(storage)
@@ -3600,6 +3617,170 @@ def test_release_gate_retry_classifier_accepts_failing_gb10_check() -> None:
     )
 
     assert _is_gb10_convergence_failure(result)
+
+
+def test_current_candidate_worker_binding_is_stable_across_heartbeat_timestamps(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        resolved_sha="a" * 40,
+    )
+    status_path = tmp_path / "status.json"
+
+    def write_status(timestamp: str) -> None:
+        status_path.write_text(
+            json.dumps(
+                {
+                    "desired_states": [
+                        {
+                            "environment": "staging",
+                            "pool_name": "gb10-arm64",
+                            "image_tag": "staging-abc123",
+                            "source_git_commit": "a" * 40,
+                            "updated_at": timestamp,
+                            "host_intents": {
+                                "trt-gb10-1": "active",
+                                "trt-gb10-7": "stopped",
+                            },
+                        }
+                    ],
+                    "nodes": [
+                        {
+                            "environment": "staging",
+                            "pool_name": "gb10-arm64",
+                            "hostname": "trt-gb10-1",
+                            "worker_id": "worker-current",
+                            "worker_status": "active",
+                            "worker_fresh": True,
+                            "worker_last_seen_at": timestamp,
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    write_status("2026-07-18T00:00:00Z")
+    first = _current_candidate_worker_binding(ctx=ctx, status_path=status_path)
+    write_status("2026-07-18T00:01:00Z")
+    second = _current_candidate_worker_binding(ctx=ctx, status_path=status_path)
+
+    assert first == second
+
+
+def test_current_candidate_worker_binding_rejects_stale_registration(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        resolved_sha="a" * 40,
+    )
+    status_path = tmp_path / "status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "desired_states": [
+                    {
+                        "environment": "staging",
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "staging-abc123",
+                        "source_git_commit": "a" * 40,
+                        "host_intents": {"trt-gb10-1": "active"},
+                    }
+                ],
+                "nodes": [
+                    {
+                        "environment": "staging",
+                        "pool_name": "gb10-arm64",
+                        "hostname": "trt-gb10-1",
+                        "worker_id": "worker-stale",
+                        "worker_status": "active",
+                        "worker_fresh": False,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="no active fresh worker registration"):
+        _current_candidate_worker_binding(ctx=ctx, status_path=status_path)
+
+
+def test_release_gate_runs_exact_candidate_bound_canary_before_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = replace(
+        make_ctx(
+            tmp_path,
+            image_tag="staging-abc123",
+            resolved_sha="a" * 40,
+        ),
+        smoke_task_id="loom-smoke/gb10-oracle-hello-world",
+        smoke_required_worker_pool="gb10-arm64",
+        smoke_agent="oracle",
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="11111111-1111-4111-8111-111111111111",
+        smoke_admin_actor="qianyi",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(14, "release-gate")
+    status_path = ReleaseGateStep().gb10_status_path(ctx, step_dir)
+    status_path.write_text(
+        json.dumps(
+            {
+                "desired_states": [
+                    {
+                        "environment": "staging",
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "staging-abc123",
+                        "source_git_commit": "a" * 40,
+                        "host_intents": {"trt-gb10-1": "active"},
+                    }
+                ],
+                "nodes": [
+                    {
+                        "environment": "staging",
+                        "pool_name": "gb10-arm64",
+                        "hostname": "trt-gb10-1",
+                        "worker_id": "worker-current",
+                        "worker_status": "active",
+                        "worker_fresh": True,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_canary(canary_ctx, _step_dir, **kwargs):
+        captured["ctx"] = canary_ctx
+        captured.update(kwargs)
+        return RunResult(exit_code=0, artifacts={"batch_id": "batch-current"})
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate.run_admin_on_behalf_smoke",
+        fake_canary,
+    )
+
+    result = _RUN_CANDIDATE_BOUND_HF_CANARY(ReleaseGateStep(), ctx, step_dir)
+
+    assert result.artifacts == {"batch_id": "batch-current"}
+    canary_ctx = captured["ctx"]
+    assert isinstance(canary_ctx, RolloutContext)
+    assert canary_ctx.smoke_task_id == ("skilllearnbench/fix-security-bug/fix-security-bug-1")
+    assert captured["n_per_task"] == 1
+    assert captured["artifact_prefix"] == "hf-canary-"
+    assert str(captured["batch_name"]).startswith("rollout-hf-boundary-staging-abc123-")
 
 
 def test_release_gate_retries_transient_gb10_status_cp_unreachable(

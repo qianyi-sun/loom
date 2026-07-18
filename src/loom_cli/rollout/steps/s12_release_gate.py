@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +29,14 @@ from loom_cli.rollout.steps.s10_env_state import (
     _profile_path_for,
     environment_state_check_argv,
 )
+from loom_cli.rollout.steps.s13_smoke import run_admin_on_behalf_smoke
 from loom_cli.rollout.steps.subcommand_step import SubcommandStep
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult, run_captured
 
 _GB10_STATUS_MAX_ATTEMPTS = 180
 _GB10_STATUS_RETRY_DELAY_SEC = 5.0
+_HF_BOUNDARY_CANARY_TASK_ID = "skilllearnbench/fix-security-bug/fix-security-bug-1"
+_HF_BOUNDARY_CANARY_TIMEOUT_SEC = 3600.0
 
 
 def _append_redacted_diagnostic(path: Path, text: str) -> None:
@@ -64,6 +69,89 @@ def _is_gb10_convergence_failure(result: SubprocessResult) -> bool:
         ):
             return True
     return False
+
+
+def _current_candidate_worker_binding(
+    *,
+    ctx: RolloutContext,
+    status_path: Path,
+) -> str:
+    """Return a stable digest for the current candidate worker registrations.
+
+    The full status artifact remains the release-gate authority. This smaller
+    digest only makes the pre-gate SkillLearnBench canary idempotent while
+    worker heartbeat timestamps change.
+    """
+
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"GB10 status artifact is unreadable: {exc}") from exc
+    if not isinstance(status, dict):
+        raise ValueError("GB10 status artifact root must be an object")
+    desired_states = status.get("desired_states")
+    if not isinstance(desired_states, list) or len(desired_states) != 1:
+        raise ValueError("GB10 status must contain exactly one desired state")
+    desired = desired_states[0]
+    if not isinstance(desired, dict):
+        raise ValueError("GB10 desired state must be an object")
+    if (
+        desired.get("environment") != ctx.environment
+        or desired.get("image_tag") != ctx.image_tag
+        or desired.get("source_git_commit") != ctx.resolved_sha
+    ):
+        raise ValueError("GB10 desired state does not bind the exact rollout candidate")
+    pool_name = desired.get("pool_name")
+    if not isinstance(pool_name, str) or not pool_name:
+        raise ValueError("GB10 desired state pool_name is required")
+    host_intents = desired.get("host_intents")
+    if not isinstance(host_intents, dict):
+        raise ValueError("GB10 desired state host_intents must be an object")
+    active_hosts = sorted(
+        host
+        for host, intent in host_intents.items()
+        if isinstance(host, str) and host and intent == "active"
+    )
+    if not active_hosts:
+        raise ValueError("GB10 desired state has no active hosts")
+    raw_nodes = status.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raise ValueError("GB10 status nodes must be a list")
+    nodes = [node for node in raw_nodes if isinstance(node, dict)]
+    registrations: list[dict[str, str]] = []
+    seen_worker_ids: set[str] = set()
+    for hostname in active_hosts:
+        matches = [
+            node
+            for node in nodes
+            if node.get("hostname") == hostname
+            and node.get("environment") == ctx.environment
+            and node.get("pool_name") == pool_name
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"active GB10 host {hostname} must have exactly one current node status"
+            )
+        node = matches[0]
+        worker_id = node.get("worker_id")
+        if not isinstance(worker_id, str) or not worker_id:
+            raise ValueError(f"active GB10 host {hostname} has no worker_id")
+        if node.get("worker_status") != "active" or node.get("worker_fresh") is not True:
+            raise ValueError(f"active GB10 host {hostname} has no active fresh worker registration")
+        if worker_id in seen_worker_ids:
+            raise ValueError(f"worker_id {worker_id} is linked to multiple active hosts")
+        seen_worker_ids.add(worker_id)
+        registrations.append({"hostname": hostname, "worker_id": worker_id})
+    binding = {
+        "environment": ctx.environment,
+        "image_tag": ctx.image_tag,
+        "source_git_commit": ctx.resolved_sha,
+        "pool_name": pool_name,
+        "registrations": registrations,
+    }
+    return hashlib.sha256(
+        json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _string_list(value: Any) -> list[str]:
@@ -142,6 +230,9 @@ class ReleaseGateStep(SubcommandStep):
             "image_tag": ctx.image_tag,
             "namespace": ctx.namespace,
             "resolved_sha": ctx.resolved_sha,
+            "smoke_admin_actor": ctx.smoke_admin_actor,
+            "smoke_on_behalf_team_id": ctx.smoke_on_behalf_team_id,
+            "smoke_on_behalf_username": ctx.smoke_on_behalf_username,
         }
 
     def release_manifest_path(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
@@ -175,6 +266,37 @@ class ReleaseGateStep(SubcommandStep):
 
     def environment_state_check_path(self, step_dir: StepDir) -> Path:
         return step_dir.artifact_path("environment-state-check.json")
+
+    def _run_candidate_bound_hf_canary(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> RunResult:
+        try:
+            worker_binding = _current_candidate_worker_binding(
+                ctx=ctx,
+                status_path=self.gb10_status_path(ctx, step_dir),
+            )
+        except ValueError as exc:
+            return RunResult(
+                exit_code=2,
+                summary="GB10 canary binding validation failed",
+                error=str(exc),
+            )
+        canary_ctx = replace(
+            ctx,
+            smoke_task_id=_HF_BOUNDARY_CANARY_TASK_ID,
+            smoke_required_worker_pool="gb10-arm64",
+            smoke_agent="oracle",
+        )
+        return run_admin_on_behalf_smoke(
+            canary_ctx,
+            step_dir,
+            batch_name=f"rollout-hf-boundary-{ctx.image_tag}-{worker_binding[:16]}",
+            n_per_task=1,
+            artifact_prefix="hf-canary-",
+            terminal_timeout_sec=_HF_BOUNDARY_CANARY_TIMEOUT_SEC,
+        )
 
     def release_manifest_argv(
         self,
@@ -297,6 +419,8 @@ class ReleaseGateStep(SubcommandStep):
         self,
         ctx: RolloutContext,
         step_dir: StepDir,
+        *,
+        canary_batch_id: str,
     ) -> Sequence[str]:
         return candidate_loom_argv(
             "datasets",
@@ -310,6 +434,8 @@ class ReleaseGateStep(SubcommandStep):
             str(rollout_cluster_config(ctx, step_dir)),
             "--gb10-workers-status",
             str(self.gb10_status_path(ctx, step_dir)),
+            "--canary-batch-id",
+            canary_batch_id,
             "--output",
             str(self.hf_mirror_boundary_evidence_path(ctx, step_dir)),
         )
@@ -564,8 +690,30 @@ class ReleaseGateStep(SubcommandStep):
                     )
 
             if ctx.environment in {"staging", "production"}:
+                canary = self._run_candidate_bound_hf_canary(ctx, step_dir)
+                if canary.exit_code != 0:
+                    return RunResult(
+                        exit_code=canary.exit_code,
+                        summary="candidate-bound SkillLearnBench canary failed",
+                        error=canary.error,
+                        artifacts={**artifacts, **canary.artifacts},
+                    )
+                canary_batch_id = canary.artifacts.get("batch_id")
+                if not isinstance(canary_batch_id, str) or not canary_batch_id:
+                    return RunResult(
+                        exit_code=2,
+                        summary="candidate-bound SkillLearnBench canary is invalid",
+                        error="successful canary result did not include batch_id",
+                        artifacts={**artifacts, **canary.artifacts},
+                    )
                 hf_boundary = run_captured(
-                    list(self.hf_mirror_boundary_generation_argv(ctx, step_dir)),
+                    list(
+                        self.hf_mirror_boundary_generation_argv(
+                            ctx,
+                            step_dir,
+                            canary_batch_id=canary_batch_id,
+                        )
+                    ),
                     stdout_log=step_dir.artifact_path(
                         "hf-mirror-boundary-evidence.stdout",
                     ),

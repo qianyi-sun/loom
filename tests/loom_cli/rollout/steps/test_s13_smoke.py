@@ -15,6 +15,7 @@ from loom_cli.rollout.steps.s13_smoke import (
     _ingress_base,
     _smoke_task_id,
     _trajectory_head_request,
+    run_admin_on_behalf_smoke,
 )
 
 
@@ -473,8 +474,7 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
         if url.endswith("/api/v1/tasks/loom-smoke/gb10-oracle-hello-world"):
             return (
                 200,
-                b'{"id":"loom-smoke/gb10-oracle-hello-world",'
-                b'"benchmark_id":"loom-smoke"}',
+                b'{"id":"loom-smoke/gb10-oracle-hello-world","benchmark_id":"loom-smoke"}',
             )
         if url.endswith("/api/v1/trials/trial-1"):
             return 200, b'{"id":"trial-1","state":"succeeded","aggregate_reward":1.0}'
@@ -747,6 +747,87 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
             "05-submit.json",
         ).read_text()
     )
+
+
+def test_admin_on_behalf_smoke_accepts_candidate_bound_canary_overrides(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        scope="current-gb10",
+        smoke_submit_mode="admin-on-behalf",
+        smoke_task_id="skilllearnbench/fix-security-bug/fix-security-bug-1",
+        smoke_required_worker_pool="gb10-arm64",
+        smoke_agent="oracle",
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="11111111-1111-4111-8111-111111111111",
+        smoke_admin_actor="qianyi",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(14, "release-gate")
+    captured: list[dict[str, object]] = []
+    monkeypatch.setenv("LOOM_CP_ADMIN_TOKEN", "admin-token")
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s13_smoke._ingress_base",
+        lambda _ctx: "https://loom.test",
+    )
+
+    def fake_get(url: str, *, token: str | None = None) -> tuple[int, bytes]:
+        assert token == "admin-token"
+        if url.endswith("/api/v1/health"):
+            return 200, b'{"status":"ok"}'
+        if url.endswith("/api/v1/auth/whoami"):
+            return 200, b'{"credential_type":"admin_bearer_token"}'
+        if url.endswith("/api/v1/benchmarks"):
+            return 200, b'{"items":[{"id":"skilllearnbench"}]}'
+        if url.endswith("/api/v1/tasks/skilllearnbench/fix-security-bug/fix-security-bug-1"):
+            return 200, b'{"id":"skilllearnbench/fix-security-bug/fix-security-bug-1"}'
+        if url.startswith("https://loom.test/api/v1/batches?"):
+            return 200, b'{"items":[]}'
+        if url.endswith("/api/v1/batches/batch-current"):
+            return (
+                200,
+                b'{"state":"finished","result_status":"succeeded",'
+                b'"expected_trial_count":1,"trial_summary":{"succeeded":1},'
+                b'"submitted_by_user":{"username":"devansh",'
+                b'"team_id":"11111111-1111-4111-8111-111111111111"}}',
+            )
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_post(
+        _url: str,
+        payload: dict[str, object],
+        *,
+        token: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        assert token == "admin-token"
+        assert headers == {"X-Loom-Admin-Actor": "qianyi"}
+        captured.append(dict(payload))
+        return 201, b'{"batch_id":"batch-current"}'
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_get", fake_get)
+    monkeypatch.setattr("loom_cli.rollout.steps.s13_smoke._http_post", fake_post)
+
+    result = run_admin_on_behalf_smoke(
+        ctx,
+        step_dir,
+        batch_name="rollout-hf-boundary-staging-abc123-registration",
+        n_per_task=1,
+        artifact_prefix="hf-canary-",
+        terminal_timeout_sec=60.0,
+    )
+
+    assert result.exit_code == 0
+    assert result.artifacts == {"batch_id": "batch-current"}
+    assert captured[0]["name"] == "rollout-hf-boundary-staging-abc123-registration"
+    assert captured[0]["task_filter"] == {
+        "task_ids": ["skilllearnbench/fix-security-bug/fix-security-bug-1"]
+    }
+    assert captured[0]["required_worker_pools"] == ["gb10-arm64"]
+    assert step_dir.artifact_path("hf-canary-05-submit.json").is_file()
 
 
 def test_admin_on_behalf_config_resolves_team_id_source(

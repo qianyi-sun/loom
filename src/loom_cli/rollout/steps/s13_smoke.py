@@ -37,6 +37,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from loom.security.redaction import redact_mapping, redact_text
 from loom_cli.rollout.context import RolloutContext
@@ -151,11 +152,13 @@ def _smoke_required_worker_pool(
     *,
     explicit_task_id: bool,
 ) -> str | None:
-    pool_name = os.environ.get(
+    pool_name = _config_value(
+        ctx,
         "LOOM_SMOKE_REQUIRED_WORKER_POOL",
-    ) or ctx.metadata.get("smoke_required_worker_pool")
-    if isinstance(pool_name, str) and pool_name.strip():
-        return pool_name.strip()
+        "smoke_required_worker_pool",
+    )
+    if pool_name is not None:
+        return pool_name
     if ctx.scope == "current-gb10" and not explicit_task_id:
         return DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL
     return None
@@ -471,13 +474,16 @@ def _task_payload_inputs(
 def _admin_on_behalf_payload(
     ctx: RolloutContext,
     cfg: _AdminOnBehalfConfig,
+    *,
+    batch_name: str | None = None,
+    n_per_task: int = 1,
 ) -> dict[str, object]:
     task_id, required_worker_pool = _task_payload_inputs(
         ctx,
         submit_mode="admin-on-behalf",
     )
     payload: dict[str, object] = {
-        "name": _admin_smoke_batch_name(ctx),
+        "name": batch_name or _admin_smoke_batch_name(ctx),
         "represented_username": cfg.represented_username,
         "team_id": cfg.team_id,
         "task_filter": {"task_ids": [task_id]},
@@ -485,7 +491,7 @@ def _admin_on_behalf_payload(
             "agent_name": _smoke_agent(ctx),
             "agent_model": None,
         },
-        "n_per_task": 1,
+        "n_per_task": n_per_task,
     }
     if required_worker_pool is not None:
         payload["required_worker_pools"] = [required_worker_pool]
@@ -640,10 +646,27 @@ def _admin_batch_nonrecoverable_failure(batch: Mapping[str, object]) -> str | No
     return "; ".join(parts)
 
 
-def _run_admin_on_behalf_smoke(
+def run_admin_on_behalf_smoke(
     ctx: RolloutContext,
     step_dir: StepDir,
+    *,
+    batch_name: str | None = None,
+    n_per_task: int = 1,
+    artifact_prefix: str = "",
+    terminal_timeout_sec: float = DEFAULT_TERMINAL_TIMEOUT_SEC,
 ) -> RunResult:
+    """Run an audited, idempotent admin-on-behalf canary batch.
+
+    Release-gate uses the optional overrides to run a candidate-bound
+    SkillLearnBench canary before collecting HF boundary evidence. The normal
+    step-15 smoke keeps the historical defaults.
+    """
+
+    def artifact(name: str) -> Path:
+        return step_dir.artifact_path(f"{artifact_prefix}{name}")
+
+    if n_per_task <= 0:
+        return RunResult(exit_code=2, error="n_per_task must be greater than zero")
     cfg, cfg_error = _admin_on_behalf_config(ctx)
     if cfg_error is not None:
         return RunResult(exit_code=2, error=cfg_error)
@@ -656,12 +679,12 @@ def _run_admin_on_behalf_smoke(
     base = _ingress_base(ctx)
 
     status, body = _http_get(f"{base}/api/v1/health", token=token)
-    step_dir.artifact_path("01-health.json").write_bytes(body)
+    artifact("01-health.json").write_bytes(body)
     if status != 200:
         return RunResult(exit_code=1, error=f"/api/v1/health returned {status}")
 
     status, body = _http_get(f"{base}/api/v1/auth/whoami", token=token)
-    step_dir.artifact_path("02-whoami.json").write_bytes(body)
+    artifact("02-whoami.json").write_bytes(body)
     if status != 200:
         return RunResult(exit_code=1, error=f"/api/v1/auth/whoami returned {status}")
     ok, reason = _validate_admin_identity(body)
@@ -669,7 +692,7 @@ def _run_admin_on_behalf_smoke(
         return RunResult(exit_code=1, error=reason)
 
     status, body = _http_get(f"{base}/api/v1/benchmarks", token=token)
-    step_dir.artifact_path("03-benchmarks.json").write_bytes(body)
+    artifact("03-benchmarks.json").write_bytes(body)
     if status != 200:
         return RunResult(exit_code=1, error=f"/api/v1/benchmarks returned {status}")
     catalog_error = _validate_benchmark_catalog(body)
@@ -682,7 +705,7 @@ def _run_admin_on_behalf_smoke(
     )
     quoted_task_id = urllib.parse.quote(task_id, safe="/")
     status, body = _http_get(f"{base}/api/v1/tasks/{quoted_task_id}", token=token)
-    step_dir.artifact_path("04-task.json").write_bytes(body)
+    artifact("04-task.json").write_bytes(body)
     if status == 404:
         return RunResult(
             exit_code=1,
@@ -694,7 +717,7 @@ def _run_admin_on_behalf_smoke(
             error=f"/api/v1/tasks/{task_id} returned {status}",
         )
 
-    batch_name = _admin_smoke_batch_name(ctx)
+    batch_name = batch_name or _admin_smoke_batch_name(ctx)
     existing_params = urllib.parse.urlencode(
         {"team_id": cfg.team_id, "q": batch_name, "limit": "20"},
     )
@@ -702,7 +725,7 @@ def _run_admin_on_behalf_smoke(
         f"{base}/api/v1/batches?{existing_params}",
         token=token,
     )
-    step_dir.artifact_path("05-existing-batches.json").write_bytes(body)
+    artifact("05-existing-batches.json").write_bytes(body)
     if status != 200:
         return RunResult(
             exit_code=1,
@@ -715,7 +738,7 @@ def _run_admin_on_behalf_smoke(
         task_id=task_id,
     )
     if batch_id is not None:
-        step_dir.artifact_path("05-submit.json").write_text(
+        artifact("05-submit.json").write_text(
             json.dumps(
                 {"batch_id": batch_id, "recovered": True},
                 sort_keys=True,
@@ -725,11 +748,16 @@ def _run_admin_on_behalf_smoke(
     else:
         status, body = _http_post(
             f"{base}/api/v1/admin/batches/on-behalf",
-            _admin_on_behalf_payload(ctx, cfg),
+            _admin_on_behalf_payload(
+                ctx,
+                cfg,
+                batch_name=batch_name,
+                n_per_task=n_per_task,
+            ),
             token=token,
             headers={"X-Loom-Admin-Actor": cfg.admin_actor},
         )
-        step_dir.artifact_path("05-submit.json").write_bytes(body)
+        artifact("05-submit.json").write_bytes(body)
         if status not in (200, 201):
             return RunResult(
                 exit_code=1,
@@ -744,14 +772,14 @@ def _run_admin_on_behalf_smoke(
             return RunResult(exit_code=1, error="submit response has no batch id")
         batch_id = batch_id_raw
 
-    deadline = time.time() + DEFAULT_TERMINAL_TIMEOUT_SEC
+    deadline = time.time() + terminal_timeout_sec
     terminal_batch: dict[str, object] | None = None
     while time.time() < deadline:
         status, body = _http_get(
             f"{base}/api/v1/batches/{batch_id}",
             token=token,
         )
-        step_dir.artifact_path("06-poll.json").write_bytes(body)
+        artifact("06-poll.json").write_bytes(body)
         if status == 200:
             try:
                 batch = json.loads(body)
@@ -773,8 +801,7 @@ def _run_admin_on_behalf_smoke(
     if terminal_batch is None:
         return RunResult(
             exit_code=1,
-            error=f"batch {batch_id} did not reach terminal state in "
-            f"{DEFAULT_TERMINAL_TIMEOUT_SEC}s",
+            error=f"batch {batch_id} did not reach terminal state in {terminal_timeout_sec}s",
         )
     ok, reason = _admin_batch_succeeded(terminal_batch, cfg=cfg)
     if not ok:
@@ -842,7 +869,7 @@ class SmokeStep(BaseStep):
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         submit_mode = _smoke_submit_mode(ctx)
         if submit_mode == "admin-on-behalf":
-            return _run_admin_on_behalf_smoke(ctx, step_dir)
+            return run_admin_on_behalf_smoke(ctx, step_dir)
         if submit_mode != "user-token":
             return RunResult(
                 exit_code=2,
