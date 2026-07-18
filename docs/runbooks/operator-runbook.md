@@ -4533,7 +4533,11 @@ exact host-to-worker registration set, so heartbeat timestamp changes reuse the
 same batch while a worker restart creates a new canary. Evidence generation is
 then pinned to the returned batch id instead of discovering an older succeeded
 batch. Manual investigations must preserve the same order and pass their exact
-current-candidate batch id explicitly. The GB10 check uses the same
+current-candidate batch id explicitly. The status and environment-state
+subcommands each retain a bounded 180-second timeout because a protected status
+snapshot can include the complete retained unlinked-worker audit ledger; a
+timeout remains a release-gate failure rather than permission to skip or reuse
+older status. The GB10 check uses the same
 `[gb10_pool].ssh_config`, `ssh_identity_file`, and optional
 `ssh_certificate_file` as rollout GB10 prep; failed SSH, failed container
 listing or inspection, or no running inspected worker container on any active

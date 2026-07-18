@@ -35,6 +35,7 @@ from loom_cli.rollout.steps.subprocess_util import SubprocessResult, run_capture
 
 _GB10_STATUS_MAX_ATTEMPTS = 180
 _GB10_STATUS_RETRY_DELAY_SEC = 5.0
+_GB10_STATUS_COMMAND_TIMEOUT_SEC = 180.0
 _HF_BOUNDARY_CANARY_TASK_ID = "skilllearnbench/fix-security-bug/fix-security-bug-1"
 _HF_BOUNDARY_CANARY_TIMEOUT_SEC = 3600.0
 
@@ -633,7 +634,7 @@ class ReleaseGateStep(SubcommandStep):
                 stderr_log=step_dir.artifact_path("gb10-workers-status.stderr"),
                 cwd=cwd,
                 env=env,
-                timeout_sec=60,
+                timeout_sec=_GB10_STATUS_COMMAND_TIMEOUT_SEC,
             )
             if gb10.returncode != 0:
                 if _is_transient_cp_unreachable(
@@ -664,7 +665,7 @@ class ReleaseGateStep(SubcommandStep):
                     stderr_log=step_dir.artifact_path("environment-state-check.stderr"),
                     cwd=cwd,
                     env=env,
-                    timeout_sec=60,
+                    timeout_sec=_GB10_STATUS_COMMAND_TIMEOUT_SEC,
                 )
                 last_env_state_check = env_state_check
                 if env_state_check.returncode != 0:

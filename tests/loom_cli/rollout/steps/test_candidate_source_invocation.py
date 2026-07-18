@@ -3268,6 +3268,7 @@ def test_release_gate_run_generates_manifest_then_gates(
                 "argv": list(argv),
                 "cwd": kwargs.get("cwd"),
                 "env": kwargs.get("env"),
+                "timeout_sec": kwargs.get("timeout_sec"),
             }
         )
         if list(argv[:3]) == ["docker", "image", "inspect"]:
@@ -3346,6 +3347,8 @@ def test_release_gate_run_generates_manifest_then_gates(
         "environment-state",
         "check",
     ]
+    assert calls[3]["timeout_sec"] == 180.0
+    assert calls[4]["timeout_sec"] == 180.0
     assert _candidate_args(calls[5]["argv"])[:2] == [
         "datasets",
         "hf-boundary-evidence",
