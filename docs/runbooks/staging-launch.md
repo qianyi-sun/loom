@@ -83,13 +83,12 @@ Attach these to the release issue or release PR:
   smoke and release evidence should use the canonical bare-domain routes.
 - Sanitized `loom-staging-admin-browser-smoke.json` evidence bound to the exact
   build SHA reported by the running service and `https://yylx.world/staging`,
-  to be produced only by a candidate-bound brokered protected-staging rollout
-  after the logged-out route smoke. Until that broker step exists and succeeds,
-  this evidence item remains unmet. The ephemeral kind workflow remains
+  produced only by broker-owned step 16 of a candidate-bound protected-staging
+  rollout after the logged-out route smoke. The ephemeral kind workflow remains
   `runtime_environment = "development"` and only proves that this exchange is
   hidden with a credential-free `404`; it must never pose as protected staging.
-  Archive the report with the broker request ID, attempt, resolved merged `dev`
-  SHA, and matching running-service build SHA; a PR artifact or manual command
+  Archive the report with the broker request ID, attempt, envelope digest,
+  resolved candidate SHA, and matching running-service build SHA; a PR artifact or manual command
   is not candidate evidence. The rollout evidence must show the correlated
   browser request ID and safe audit event, successful product APIs and visible
   state for all six Admin Access tabs,

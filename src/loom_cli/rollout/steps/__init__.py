@@ -23,11 +23,12 @@ from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
 from loom_cli.rollout.steps.s12_production_defaults import ProductionDefaultsStep
 from loom_cli.rollout.steps.s12_release_gate import ReleaseGateStep
 from loom_cli.rollout.steps.s13_smoke import SmokeStep
+from loom_cli.rollout.steps.s14_browser_acceptance import BrowserAcceptanceStep
 from loom_cli.rollout.steps.s99_summary import SummaryStep
 
 
 def default_step_sequence() -> list[Step]:
-    """Return the standard 16-step + summary rollout sequence.
+    """Return the standard 17-step + summary rollout sequence.
 
     The order is significant: dependencies flow left-to-right (worktree
     is required by build; kind-cluster by kind-load; render by migrate; etc.).
@@ -49,6 +50,7 @@ def default_step_sequence() -> list[Step]:
         ProductionDefaultsStep(),
         ReleaseGateStep(),
         SmokeStep(),
+        BrowserAcceptanceStep(),
         SummaryStep(),
     ]
 

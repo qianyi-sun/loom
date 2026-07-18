@@ -1100,9 +1100,9 @@ def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() ->
     operator = (REPO_ROOT / "docs/runbooks/operator-runbook.md").read_text(
         encoding="utf-8",
     )
-    assert "acceptance row remains unmet" in adr
-    assert "this evidence item remains unmet" in launch
-    assert "this acceptance item remains unmet" in operator
+    assert "Broker-owned step 16" in adr
+    assert "broker-owned step 16" in launch
+    assert "Broker-owned step 16" in operator
 
 
 def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:

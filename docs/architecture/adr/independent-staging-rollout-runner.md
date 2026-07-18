@@ -129,14 +129,14 @@ recursive exposure of Docker state are outside the accepted authority model.
 Both the build and entrypoint reject an architecture mismatch.
 
 Candidate-bound authenticated staging browser acceptance follows the same
-authority. Only a broker-owned rollout step may exchange the singleton admin
-bearer, and its sanitized report must bind the request/attempt envelope's
-resolved SHA to the build SHA read from the running service. Pull-request kind
-CI remains credential-free and non-protected; its `development` runtime may
-only prove that the staging-only exchange returns `404`. A kind artifact,
-manual invocation, ambient checkout, or unmerged ref is never candidate
-evidence. Until the broker-owned positive browser step completes, this
-acceptance row remains unmet.
+authority. Broker-owned step 16 is the only path allowed to exchange the
+singleton admin bearer. It runs a revision-labelled browser image built from
+the exact candidate and writes one sanitized report that binds request,
+attempt, envelope digest, resolved SHA, and the build SHA read from the running
+service. Pull-request kind CI remains credential-free and non-protected; its
+`development` runtime may only prove that the staging-only exchange returns
+`404`. A kind artifact, manual invocation, ambient checkout, or unmerged ref is
+never candidate evidence.
 
 ### Service authority and secrets
 

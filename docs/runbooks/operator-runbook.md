@@ -2280,6 +2280,7 @@ desired state.
 | 13 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
 | 14 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, rerun `loom admin environment-state check --format json`, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift, #593 post-prep env-state recheck). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. This retry window includes release-target mismatches returned directly by `loom admin gb10-workers status`, such as a worker registration that exists before its first fresh heartbeat lands. Active GB10 hosts must also show a linked fresh active docker worker registration (`worker_id`, `worker_status=active`, `worker_fresh=true`, `worker_backend_names` contains `docker`), because smoke/admin submission uses `/api/v1/backends`, not node-agent metadata alone. |
 | 15 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
+| 16 | staging-admin-browser-acceptance | Runs the exact candidate-built Playwright image under the broker attempt, exchanges the singleton admin bearer for the fixed `qianyi` validation principal, verifies authenticated admin surfaces and correlated audit identity, logs out, and stores one sanitized report bound to request, attempt, envelope digest, candidate SHA, and runtime build SHA. |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
 Step 14 deliberately writes a narrow image-identity artifact instead of full
@@ -4905,12 +4906,12 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    the build identity exposed by the running service, not an ambient checkout
    or PR ref:
 
-   The broker-owned rollout sequence must be extended to execute this command
-   and store its report with the request/attempt evidence. Until that integration
-   exists and succeeds, this acceptance item remains unmet; do not run it
-   manually against shared staging from an ambient checkout. Once integrated,
-   operators inspect the evidence with `loom-staging-rollout status REQUEST_ID`
-   and `loom-staging-rollout logs REQUEST_ID`.
+   Broker-owned step 16 executes this check from the candidate-built,
+   revision-labelled browser image and stores its report with request/attempt
+   evidence. Do not run it manually against shared staging from an ambient
+   checkout. Operators inspect the evidence with
+   `loom-staging-rollout status REQUEST_ID` and
+   `loom-staging-rollout logs REQUEST_ID`.
 
    The following illustrates the required broker-owned step, not an authorized
    standalone operator command:

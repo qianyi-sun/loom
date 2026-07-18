@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -29,6 +28,8 @@ const ADMIN_TABS = Object.freeze([
 ]);
 
 const SHA_RE = /^[0-9a-f]{40}$/;
+const SHA256_RE = /^[0-9a-f]{64}$/;
+const ROLLOUT_REQUEST_RE = /^req-[0-9a-f]{16}$/;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$/;
@@ -117,6 +118,9 @@ export function parseArgs(argv) {
     adminTokenSource: "",
     username: "",
     reportPath: "",
+    rolloutRequestId: "",
+    rolloutAttemptNumber: 0,
+    requestEnvelopeSha256: "",
     timeoutMs: DEFAULT_TIMEOUT_MS,
     insecureForKind: false,
     viewport: { ...DEFAULT_VIEWPORT },
@@ -128,6 +132,9 @@ export function parseArgs(argv) {
     "--admin-token-source",
     "--username",
     "--report",
+    "--rollout-request-id",
+    "--rollout-attempt-number",
+    "--request-envelope-sha256",
     "--timeout-ms",
   ]);
   const seen = new Set();
@@ -173,6 +180,13 @@ export function parseArgs(argv) {
     }
     if (argument === "--username") options.username = value;
     if (argument === "--report") options.reportPath = value;
+    if (argument === "--rollout-request-id") options.rolloutRequestId = value;
+    if (argument === "--rollout-attempt-number") {
+      options.rolloutAttemptNumber = Number(value);
+    }
+    if (argument === "--request-envelope-sha256") {
+      options.requestEnvelopeSha256 = value;
+    }
     if (argument === "--timeout-ms") options.timeoutMs = Number(value);
   }
 
@@ -182,11 +196,15 @@ export function parseArgs(argv) {
     !options.expectedDeployedSha ||
     !options.adminTokenSource ||
     !options.username ||
-    !options.reportPath
+    !options.reportPath ||
+    !options.rolloutRequestId ||
+    !options.rolloutAttemptNumber ||
+    !options.requestEnvelopeSha256
   ) {
     throw new SafeSmokeError(
       "invalid_arguments",
-      "route, deployed SHA, token source, username, and report are required",
+      "route, deployed SHA, token source, username, report, rollout request, " +
+        "attempt, and envelope digest are required",
     );
   }
   options.route = canonicalStagingRoute(options.route);
@@ -194,6 +212,23 @@ export function parseArgs(argv) {
     throw new SafeSmokeError(
       "invalid_deployed_identity",
       "deployed SHA must be 40 lowercase hexadecimal characters",
+    );
+  }
+  if (!ROLLOUT_REQUEST_RE.test(options.rolloutRequestId)) {
+    throw new SafeSmokeError(
+      "invalid_rollout_binding",
+      "rollout request id must use the broker request format",
+    );
+  }
+  if (
+    !Number.isInteger(options.rolloutAttemptNumber) ||
+    options.rolloutAttemptNumber < 1 ||
+    options.rolloutAttemptNumber > 1000 ||
+    !SHA256_RE.test(options.requestEnvelopeSha256)
+  ) {
+    throw new SafeSmokeError(
+      "invalid_rollout_binding",
+      "rollout attempt and envelope digest are invalid",
     );
   }
   const username = options.username.trim().toLowerCase();
@@ -1038,7 +1073,6 @@ export async function executeSmoke(
     stdin = process.stdin,
     dnsLookup = lookup,
     playwrightModule,
-    randomUUIDFn = randomUUID,
     nowFn = () => Date.now(),
   } = {},
 ) {
@@ -1048,7 +1082,7 @@ export async function executeSmoke(
     stdin,
   });
   const playwright = playwrightModule ?? (await import("@playwright/test"));
-  const requestId = `staging-admin-browser-${randomUUIDFn()}`;
+  const requestId = options.rolloutRequestId;
   const checks = initialChecks();
   const cleanup = {
     logout_status: null,
@@ -1230,7 +1264,7 @@ export async function executeSmoke(
     failureCode ??= "cleanup_failed";
   }
   const report = {
-    schema_version: 2,
+    schema_version: 3,
     status: reportStatus(checks, cleanup, failureCode),
     deployment_identity: {
       expected_deployed_sha: options.expectedDeployedSha,
@@ -1241,6 +1275,12 @@ export async function executeSmoke(
     },
     route: options.route,
     request_id: requestId,
+    rollout_binding: {
+      request_id: options.rolloutRequestId,
+      attempt_number: options.rolloutAttemptNumber,
+      request_envelope_sha256: options.requestEnvelopeSha256,
+      resolved_sha: options.expectedDeployedSha,
+    },
     target: {
       username: options.username,
       user_id: targetUserId,
@@ -1271,6 +1311,8 @@ const USAGE =
   "--route https://yylx.world/dev --expected-deployed-sha <40-hex-sha> " +
   "--admin-token-source <file:/absolute/path|-> " +
   "--username <platform-admin> --report <sanitized.json> " +
+  "--rollout-request-id <req-16hex> --rollout-attempt-number <n> " +
+  "--request-envelope-sha256 <64-hex> " +
   "[--timeout-ms <milliseconds>] [--insecure-for-kind]";
 
 async function main() {
@@ -1291,7 +1333,7 @@ async function main() {
     const code = error instanceof SafeSmokeError ? error.code : "execution_failed";
     if (options?.reportPath) {
       const failure = sanitizeReportValue({
-        schema_version: 2,
+        schema_version: 3,
         status: "fail",
         deployment_identity: {
           expected_deployed_sha: options.expectedDeployedSha,
@@ -1299,6 +1341,12 @@ async function main() {
           matched: false,
         },
         route: options.route,
+        rollout_binding: {
+          request_id: options.rolloutRequestId,
+          attempt_number: options.rolloutAttemptNumber,
+          request_envelope_sha256: options.requestEnvelopeSha256,
+          resolved_sha: options.expectedDeployedSha,
+        },
         target: { username: options.username },
         failure_code: code,
       });

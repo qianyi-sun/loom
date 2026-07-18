@@ -254,6 +254,7 @@ class TestRolloutCLIDryRun:
             "13 production-defaults",
             "14 release-gate",
             "15 smoke",
+            "16 staging-admin-browser-acceptance",
             "99 summary",
         ]
 

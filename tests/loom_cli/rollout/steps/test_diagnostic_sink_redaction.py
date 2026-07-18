@@ -108,6 +108,10 @@ def test_build_failure_logs_redact_without_driver_cleanup(
         "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
         (("loom-service", "deploy/Dockerfile.service"),),
     )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.AUXILIARY_ROLLOUT_IMAGES",
+        (),
+    )
     monkeypatch.setattr("loom_cli.rollout.steps.s02_build_images.run_captured", fake_run)
 
     with rollout_redaction_scope((_SECRET,)):

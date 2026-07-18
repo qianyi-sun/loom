@@ -24,6 +24,8 @@ import {
 
 const RAW_ADMIN_TOKEN = `loom_admin_${"A".repeat(43)}`;
 const DEPLOYED_SHA = "a".repeat(40);
+const ROLLOUT_REQUEST_ID = "req-1111111111111111";
+const ENVELOPE_SHA256 = "b".repeat(64);
 const originalCi = process.env.CI;
 const originalGithubActions = process.env.GITHUB_ACTIONS;
 
@@ -39,6 +41,12 @@ function validArgs(tokenSource = "file:/run/secrets/admin-token") {
     "Qianyi",
     "--report",
     "/tmp/staging-admin-browser-smoke.json",
+    "--rollout-request-id",
+    ROLLOUT_REQUEST_ID,
+    "--rollout-attempt-number",
+    "1",
+    "--request-envelope-sha256",
+    ENVELOPE_SHA256,
   ];
 }
 
@@ -61,6 +69,9 @@ describe("staging admin browser smoke arguments", () => {
       adminTokenSource: "file:/run/secrets/admin-token",
       username: "qianyi",
       reportPath: "/tmp/staging-admin-browser-smoke.json",
+      rolloutRequestId: ROLLOUT_REQUEST_ID,
+      rolloutAttemptNumber: 1,
+      requestEnvelopeSha256: ENVELOPE_SHA256,
       insecureForKind: true,
     });
   });
@@ -373,8 +384,7 @@ describe("sanitized evidence contract", () => {
   });
 
   it("always logs out and confirms 401 after a browser-check failure", async () => {
-    const requestUuid = "11111111-1111-4111-8111-111111111111";
-    const requestId = `staging-admin-browser-${requestUuid}`;
+    const requestId = ROLLOUT_REQUEST_ID;
     const targetUserId = "22222222-2222-4222-8222-222222222222";
     const nowMs = 1_800_000_000_000;
     const calls = [];
@@ -490,12 +500,17 @@ describe("sanitized evidence contract", () => {
       },
       stdin: stdin(),
       playwrightModule,
-      randomUUIDFn: () => requestUuid,
       nowFn: () => nowMs,
     });
 
     expect(report.status).toBe("fail");
     expect(report.failure_code).toBe("browser_check_failed");
+    expect(report.rollout_binding).toEqual({
+      request_id: ROLLOUT_REQUEST_ID,
+      attempt_number: 1,
+      request_envelope_sha256: ENVELOPE_SHA256,
+      resolved_sha: DEPLOYED_SHA,
+    });
     expect(report.cleanup).toEqual({
       logout_status: 204,
       auth_me_after_logout_status: 401,

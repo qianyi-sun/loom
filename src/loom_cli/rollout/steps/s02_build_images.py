@@ -36,8 +36,26 @@ ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
     ("loom-egress-xds", "deploy/Dockerfile.egress-xds"),
 )
 
-_SERVICE_IMAGE = "loom-service"
+# Rollout-owned validation images are built from the exact candidate but are
+# not loaded into kind or referenced by a managed Deployment.  Keep them
+# separate from ``ROLLOUT_IMAGES`` so the deployment-coverage invariant stays
+# exact while the broker can still prove that its browser runtime came from
+# the sealed candidate.
+AUXILIARY_ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
+    (
+        "loom-staging-admin-browser-smoke",
+        "deploy/Dockerfile.staging-admin-browser-smoke",
+    ),
+)
+
+_REVISION_BOUND_IMAGES = frozenset(
+    {"loom-service", "loom-staging-admin-browser-smoke"},
+)
 _REVISION_LABEL = "org.opencontainers.image.revision"
+
+
+def _all_build_images() -> tuple[tuple[str, str], ...]:
+    return ROLLOUT_IMAGES + AUXILIARY_ROLLOUT_IMAGES
 
 
 def image_tag(image_name: str, ctx: RolloutContext) -> str:
@@ -50,7 +68,7 @@ def _inspect_image(
     resolved_sha: str,
 ) -> tuple[bool, str]:
     command = ["docker", "inspect", "--type=image"]
-    if image == _SERVICE_IMAGE:
+    if image in _REVISION_BOUND_IMAGES:
         command.extend(
             [
                 "--format",
@@ -61,7 +79,7 @@ def _inspect_image(
     result = run_captured(command)
     if result.returncode != 0:
         return False, "missing"
-    if image == _SERVICE_IMAGE and result.stdout.strip() != resolved_sha:
+    if image in _REVISION_BOUND_IMAGES and result.stdout.strip() != resolved_sha:
         return False, "revision-mismatch"
     return True, "match"
 
@@ -83,7 +101,7 @@ class BuildImagesStep(BaseStep):
     ) -> VerifyOutcome:
         """Ask docker whether each expected tag exists."""
         missing: list[str] = []
-        for image, _ in ROLLOUT_IMAGES:
+        for image, _ in _all_build_images():
             tag = image_tag(image, ctx)
             matched, _reason = _inspect_image(image, tag, ctx.resolved_sha)
             if not matched:
@@ -105,7 +123,7 @@ class BuildImagesStep(BaseStep):
             )
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
-        for image, dockerfile in ROLLOUT_IMAGES:
+        for image, dockerfile in _all_build_images():
             tag = image_tag(image, ctx)
             # If the tag already matches (recovery from a partial prior
             # run), skip re-building. The service image additionally has
@@ -132,7 +150,7 @@ class BuildImagesStep(BaseStep):
                 "-t",
                 tag,
             ]
-            if image == _SERVICE_IMAGE:
+            if image in _REVISION_BOUND_IMAGES:
                 build_command.extend(
                     ["--build-arg", f"LOOM_BUILD_SHA={ctx.resolved_sha}"],
                 )
@@ -158,5 +176,5 @@ class BuildImagesStep(BaseStep):
         self.write_stderr(step_dir, "\n".join(stderr_lines))
         return RunResult(
             exit_code=0,
-            summary=(f"built {len(ROLLOUT_IMAGES)} images at tag {ctx.image_tag}"),
+            summary=(f"built {len(_all_build_images())} images at tag {ctx.image_tag}"),
         )

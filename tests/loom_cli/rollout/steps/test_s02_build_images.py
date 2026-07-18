@@ -16,6 +16,7 @@ import yaml
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.s02_build_images import (
+    AUXILIARY_ROLLOUT_IMAGES,
     ROLLOUT_IMAGES,
     BuildImagesStep,
 )
@@ -97,12 +98,41 @@ class TestBuildImagesCoverage:
 
     @pytest.mark.parametrize("image,dockerfile", list(ROLLOUT_IMAGES))
     def test_every_rollout_image_has_a_dockerfile(
-        self, image: str, dockerfile: str,
+        self,
+        image: str,
+        dockerfile: str,
     ) -> None:
         path = _repo_root() / dockerfile
         assert path.is_file(), (
-            f"ROLLOUT_IMAGES entry {image!r} points at {dockerfile!r} "
-            f"which does not exist"
+            f"ROLLOUT_IMAGES entry {image!r} points at {dockerfile!r} which does not exist"
+        )
+
+    @pytest.mark.parametrize("image,dockerfile", list(AUXILIARY_ROLLOUT_IMAGES))
+    def test_every_auxiliary_rollout_image_has_a_dockerfile(
+        self,
+        image: str,
+        dockerfile: str,
+    ) -> None:
+        path = _repo_root() / dockerfile
+        assert path.is_file(), f"auxiliary rollout image {image!r} points at missing {dockerfile!r}"
+
+    def test_browser_acceptance_image_is_content_addressed_and_revision_bound(
+        self,
+    ) -> None:
+        dockerfile = (_repo_root() / "deploy/Dockerfile.staging-admin-browser-smoke").read_text(
+            encoding="utf-8"
+        )
+
+        assert (
+            "mcr.microsoft.com/playwright:v1.61.1-noble@sha256:"
+            "5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48" in dockerfile
+        )
+        assert "ARG LOOM_BUILD_SHA" in dockerfile
+        assert 'org.opencontainers.image.revision="${LOOM_BUILD_SHA}"' in dockerfile
+        assert "npm ci --prefix web --ignore-scripts" in dockerfile
+        assert (
+            'ENTRYPOINT ["node", "/opt/loom/web/scripts/'
+            'staging-admin-browser-smoke.mjs"]' in dockerfile
         )
 
 
@@ -135,6 +165,10 @@ def test_service_image_build_is_bound_to_resolved_candidate_sha(
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
         (("loom-service", "deploy/Dockerfile.service"),),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.AUXILIARY_ROLLOUT_IMAGES",
+        (),
     )
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s02_build_images.run_captured",
@@ -184,6 +218,10 @@ def test_verify_rejects_service_image_with_stale_revision(
         (("loom-service", "deploy/Dockerfile.service"),),
     )
     monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.AUXILIARY_ROLLOUT_IMAGES",
+        (),
+    )
+    monkeypatch.setattr(
         "loom_cli.rollout.steps.s02_build_images.run_captured",
         fake_run,
     )
@@ -231,6 +269,10 @@ def test_run_rebuilds_service_image_with_stale_revision(
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
         (("loom-service", "deploy/Dockerfile.service"),),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.AUXILIARY_ROLLOUT_IMAGES",
+        (),
     )
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s02_build_images.run_captured",
