@@ -258,6 +258,85 @@ def test_post_publish_consumer_verification_rejects_divergent_host_content_ident
     )
     assert persisted["passed"] is False
     assert persisted["host_count"] == 13
+    assert persisted["failed_attempts"] == 1
+    assert persisted["failed_host"] == "trt-gb10-15"
+    assert persisted["failure_class"] == "content_identity"
+
+
+def test_post_publish_consumer_verification_retries_transient_verifier_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+    from loom_cli.rollout.steps import s04_gb10_prep
+
+    original_ssh = s04_gb10_prep._ssh
+    first = True
+
+    def transient(
+        host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        nonlocal first
+        if host.ssh_target == "trt-gb10-1" and first:
+            first = False
+            calls.append((host.ssh_target, command, stdin_text or ""))
+            return SubprocessResult([], 1, "", "transient verifier failure")
+        return original_ssh(host, command, stdin_text=stdin_text)
+
+    monkeypatch.setattr(s04_gb10_prep, "_ssh", transient)
+    monkeypatch.setattr(env_state_module.time, "sleep", lambda _seconds: None)
+
+    evidence = _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+    assert evidence is not None
+    assert evidence["passed"] is True
+    assert evidence["host_count"] == 14
+    assert len(calls) == 15
+    assert [node["attempts"] for node in evidence["nodes"]] == [2] + [1] * 13
+
+
+@pytest.mark.parametrize(
+    ("returncode", "failure_class"),
+    [(1, "verifier"), (255, "ssh")],
+)
+def test_post_publish_consumer_verification_exhausts_transient_failure_safely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    failure_class: str,
+) -> None:
+    ctx, step_dir, records, calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+    from loom_cli.rollout.steps import s04_gb10_prep
+
+    def unavailable(
+        host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        calls.append((host.ssh_target, command, stdin_text or ""))
+        return SubprocessResult([], returncode, "", "secret-bearing transport detail")
+
+    monkeypatch.setattr(s04_gb10_prep, "_ssh", unavailable)
+    monkeypatch.setattr(env_state_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="failed safely",
+    ):
+        _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+    persisted_path = step_dir.artifact_path("external-slurm-runner-consumer-verification.json")
+    persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
+    assert len(calls) == 3
+    assert persisted["failed_attempts"] == 3
+    assert persisted["failed_host"] == "trt-gb10-1"
+    assert persisted["failure_class"] == failure_class
+    assert persisted["host_count"] == 0
+    assert "secret-bearing" not in persisted_path.read_text(encoding="utf-8")
 
 
 def test_post_publish_consumer_verification_rejects_oversized_commit_blob(

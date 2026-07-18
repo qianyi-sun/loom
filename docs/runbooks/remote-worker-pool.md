@@ -1475,7 +1475,12 @@ only, never verifier authority. Every node must report the exact HEAD,
 zero modified/untracked/ignored status, exact physical index and modes,
 readability of the deterministic tracked probe file, and no qianyi write
 capability. Content identities must agree 14/14; NFS device/inode evidence is
-recorded per node without requiring equality across nodes.
+recorded per node without requiring equality across nodes. A non-zero remote
+verifier or SSH exit is retried at most three times with bounded incremental
+backoff so a just-published shared checkout or transient transport reset cannot
+fail the release on its first observation. Valid but divergent structured
+evidence is never retried, and exhausted evidence records only the host,
+attempt count, and a non-sensitive failure class before failing closed.
 
 Keep the GB10 node-agent path only for Docker Compose rollout validation,
 legacy compatibility, or break-glass operation when Slurm is unavailable. The

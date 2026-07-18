@@ -91,6 +91,8 @@ _CATALOG_CACHE_ENV_PATHS = {
     "HF_HOME": Path("huggingface"),
     "HF_HUB_CACHE": Path("huggingface/hub"),
 }
+_EXTERNAL_CONSUMER_VERIFY_ATTEMPTS = 3
+_EXTERNAL_CONSUMER_VERIFY_BACKOFF_SECONDS = 5.0
 _PORT_FORWARD_ENV_KEYS = frozenset(
     {
         "DBUS_SESSION_BUS_ADDRESS",
@@ -2740,63 +2742,85 @@ def _verify_external_slurm_runner_consumers(
     }
     content_identity: tuple[str, str, str, int] | None = None
     for host in hosts:
-        result = _ssh(host, command, stdin_text=verifier_text)
         safe = False
         parsed: dict[str, object] | None = None
-        if (
-            result.returncode == 0
-            and not result.stderr
-            and 0 < len(result.stdout) <= 1024
-            and result.stdout.count("\n") <= 1
-        ):
-            try:
-                candidate = json.loads(result.stdout)
-            except (TypeError, ValueError):
-                candidate = None
-            if isinstance(candidate, dict) and set(candidate) == expected_keys:
-                parsed = candidate
-                numeric_keys = {
-                    "root_device",
-                    "root_inode",
-                    "target_device",
-                    "target_inode",
-                    "tracked_entries",
-                }
-                safe = bool(
-                    candidate.get("head") == ctx.resolved_sha
-                    and all(
-                        isinstance(candidate.get(key), str)
-                        and re.fullmatch(r"[0-9a-f]{64}", str(candidate[key]))
-                        for key in {
-                            "index_sha256",
-                            "probe_file_sha256",
-                            "tree_content_sha256",
-                        }
+        attempts = 0
+        failure_class = "verifier"
+        for attempt in range(1, _EXTERNAL_CONSUMER_VERIFY_ATTEMPTS + 1):
+            attempts = attempt
+            result = _ssh(host, command, stdin_text=verifier_text)
+            retryable = result.returncode != 0
+            if result.returncode == 255:
+                failure_class = "ssh"
+            elif result.returncode != 0:
+                failure_class = "verifier"
+            elif result.stderr:
+                failure_class = "unexpected_stderr"
+            elif not (0 < len(result.stdout) <= 1024 and result.stdout.count("\n") <= 1):
+                failure_class = "evidence_shape"
+            else:
+                try:
+                    candidate = json.loads(result.stdout)
+                except (TypeError, ValueError):
+                    candidate = None
+                if isinstance(candidate, dict) and set(candidate) == expected_keys:
+                    parsed = candidate
+                    numeric_keys = {
+                        "root_device",
+                        "root_inode",
+                        "target_device",
+                        "target_inode",
+                        "tracked_entries",
+                    }
+                    safe = bool(
+                        candidate.get("head") == ctx.resolved_sha
+                        and all(
+                            isinstance(candidate.get(key), str)
+                            and re.fullmatch(r"[0-9a-f]{64}", str(candidate[key]))
+                            for key in {
+                                "index_sha256",
+                                "probe_file_sha256",
+                                "tree_content_sha256",
+                            }
+                        )
+                        and all(
+                            type(candidate.get(key)) is int and int(candidate[key]) > 0
+                            for key in numeric_keys
+                        )
                     )
-                    and all(
-                        type(candidate.get(key)) is int and int(candidate[key]) > 0
-                        for key in numeric_keys
-                    )
-                )
-                if safe:
-                    candidate_identity = (
-                        str(candidate["index_sha256"]),
-                        str(candidate["probe_file_sha256"]),
-                        str(candidate["tree_content_sha256"]),
-                        int(candidate["tracked_entries"]),
-                    )
-                    if content_identity is None:
-                        content_identity = candidate_identity
-                    elif candidate_identity != content_identity:
-                        safe = False
+                    if safe:
+                        candidate_identity = (
+                            str(candidate["index_sha256"]),
+                            str(candidate["probe_file_sha256"]),
+                            str(candidate["tree_content_sha256"]),
+                            int(candidate["tracked_entries"]),
+                        )
+                        if content_identity is None:
+                            content_identity = candidate_identity
+                        elif candidate_identity != content_identity:
+                            safe = False
+                            failure_class = "content_identity"
+                    else:
+                        failure_class = "evidence_values"
+                else:
+                    failure_class = "evidence_shape"
+            if safe:
+                break
+            if retryable and attempt < _EXTERNAL_CONSUMER_VERIFY_ATTEMPTS:
+                time.sleep(_EXTERNAL_CONSUMER_VERIFY_BACKOFF_SECONDS * attempt)
+                continue
+            break
         if not safe or parsed is None:
             evidence_hash.update(host.ssh_target.encode("ascii"))
-            evidence_hash.update(b"\0failed\0")
+            evidence_hash.update(f"\0failed\0{failure_class}\0{attempts}\0".encode("ascii"))
             _write_safe_json(
                 artifact,
                 {
                     "evidence_sha256": evidence_hash.hexdigest(),
                     "expected_host_count": len(ACTIVE_GB10_HOSTS),
+                    "failed_attempts": attempts,
+                    "failed_host": host.ssh_target,
+                    "failure_class": failure_class,
                     "host_count": len(node_evidence),
                     "nodes": node_evidence,
                     "passed": False,
@@ -2813,6 +2837,7 @@ def _verify_external_slurm_runner_consumers(
         evidence_hash.update(b"\0")
         node_evidence.append(
             {
+                "attempts": attempts,
                 "host": host.ssh_target,
                 "root_device": parsed["root_device"],
                 "root_inode": parsed["root_inode"],

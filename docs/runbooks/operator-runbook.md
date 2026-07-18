@@ -2059,7 +2059,12 @@ All 14 nodes must independently observe the exact HEAD, a zero status including
 ignored and untracked entries, the complete index-derived file/directory modes,
 a readable deterministically selected tracked file, and non-writable
 root/target. Content digests and tracked-entry counts must agree across nodes.
-mount/device/inode values are bound into sanitized per-node evidence. The
+Mount/device/inode values are bound into sanitized per-node evidence. A
+non-zero SSH or remote verifier exit receives at most three exact-command
+observations with bounded incremental backoff. Structured evidence that is
+valid but content-divergent fails immediately; an exhausted transient records
+only host, attempt count, and a non-sensitive failure class before the rollout
+fails closed. The
 preflight derives the mount major/minor pair from each repository directory's
 `st_dev`; the separately recorded inode is never interpreted as a device
 minor number. It selects the most specific mountinfo entry containing
