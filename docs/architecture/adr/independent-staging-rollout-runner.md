@@ -246,7 +246,7 @@ It does not execute code from the mutable rollout worktree or checkout under
 verification. Exact HEAD/status/index/mode/readability
 and non-write checks must agree on all nodes; per-node NFS device/inode evidence
 is retained without cross-node equality assumptions. Non-zero transport or
-verifier exits receive a three-observation bounded retry before failing closed,
+verifier exits receive a seven-observation bounded retry before failing closed,
 while valid divergent content evidence is never retried.
 
 The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the

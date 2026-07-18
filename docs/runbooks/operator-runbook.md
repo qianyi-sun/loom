@@ -2060,7 +2060,7 @@ ignored and untracked entries, the complete index-derived file/directory modes,
 a readable deterministically selected tracked file, and non-writable
 root/target. Content digests and tracked-entry counts must agree across nodes.
 Mount/device/inode values are bound into sanitized per-node evidence. A
-non-zero SSH or remote verifier exit receives at most three exact-command
+non-zero SSH or remote verifier exit receives at most seven exact-command
 observations with bounded incremental backoff. Structured evidence that is
 valid but content-divergent fails immediately; an exhausted transient records
 only host, attempt count, and a non-sensitive failure class before the rollout

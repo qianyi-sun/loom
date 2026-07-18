@@ -331,8 +331,8 @@ def test_post_publish_consumer_verification_exhausts_transient_failure_safely(
 
     persisted_path = step_dir.artifact_path("external-slurm-runner-consumer-verification.json")
     persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
-    assert len(calls) == 3
-    assert persisted["failed_attempts"] == 3
+    assert len(calls) == 7
+    assert persisted["failed_attempts"] == 7
     assert persisted["failed_host"] == "trt-gb10-1"
     assert persisted["failure_class"] == failure_class
     assert persisted["host_count"] == 0
