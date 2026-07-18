@@ -10,6 +10,8 @@ WORKDIR /opt/loom
 COPY web/package.json web/package-lock.json ./web/
 RUN npm ci --prefix web --ignore-scripts \
     && npm cache clean --force
-COPY web/scripts/staging-admin-browser-smoke.mjs ./web/scripts/
+RUN install -d -o root -g root -m 0755 /opt/loom/web/scripts
+COPY --chmod=0444 web/scripts/staging-admin-browser-smoke.mjs \
+    /opt/loom/web/scripts/staging-admin-browser-smoke.mjs
 
 ENTRYPOINT ["node", "/opt/loom/web/scripts/staging-admin-browser-smoke.mjs"]

@@ -130,6 +130,8 @@ class TestBuildImagesCoverage:
         assert "ARG LOOM_BUILD_SHA" in dockerfile
         assert 'org.opencontainers.image.revision="${LOOM_BUILD_SHA}"' in dockerfile
         assert "npm ci --prefix web --ignore-scripts" in dockerfile
+        assert "install -d -o root -g root -m 0755 /opt/loom/web/scripts" in dockerfile
+        assert "COPY --chmod=0444 web/scripts/staging-admin-browser-smoke.mjs" in dockerfile
         assert (
             'ENTRYPOINT ["node", "/opt/loom/web/scripts/'
             'staging-admin-browser-smoke.mjs"]' in dockerfile

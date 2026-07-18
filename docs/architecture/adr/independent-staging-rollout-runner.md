@@ -137,6 +137,10 @@ service. Pull-request kind CI remains credential-free and non-protected; its
 `development` runtime may only prove that the staging-only exchange returns
 `404`. A kind artifact, manual invocation, ambient checkout, or unmerged ref is
 never candidate evidence.
+The image publishes its non-secret entrypoint read-only and makes only the
+required parent directories traversable, so the broker's numeric service UID
+can execute it even when the sealed build context was created under a
+service-private umask. The image remains non-writable at runtime.
 The step consumes the same installer-validated credential authority as broker
 preflight: a root-, service-, or Qianyi-owned single-link regular file may be
 group-readable for the `loom-rollout` read-only ACL, but must not grant group
