@@ -246,7 +246,7 @@ def _run(
         check=False,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         env=environment,
     )
 

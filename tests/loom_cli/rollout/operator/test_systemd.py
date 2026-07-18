@@ -211,6 +211,39 @@ def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
     ]
 
 
+def test_start_timeout_is_a_fail_closed_launch_error() -> None:
+    def timeout_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, timeout=120)
+
+    manager = SystemdUserManager(
+        make_config(),
+        service_uid=SERVICE_UID,
+        run=timeout_runner,
+    )
+    envelope = Path("/var/lib/loom-staging-rollout/requests/req-alpha/attempts/1/envelope.json")
+
+    with pytest.raises(UnitLaunchError) as captured:
+        manager.start_attempt(envelope, "loom-staging-rollout-req-alpha-1.service")
+
+    assert str(captured.value) == "transient rollout unit could not be started"
+
+
+def test_show_timeout_is_a_fail_closed_query_error() -> None:
+    def timeout_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, timeout=120)
+
+    manager = SystemdUserManager(
+        make_config(),
+        service_uid=SERVICE_UID,
+        run=timeout_runner,
+    )
+
+    with pytest.raises(SystemdQueryError) as captured:
+        manager.show("loom-staging-rollout-req-alpha-1.service")
+
+    assert str(captured.value) == "systemd unit status could not be queried"
+
+
 @pytest.mark.parametrize(
     ("envelope", "unit"),
     [

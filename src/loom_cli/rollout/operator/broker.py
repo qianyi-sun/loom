@@ -931,12 +931,13 @@ def _run(
     *,
     environment: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
+    timeout = 120 if argv and argv[0] in {"systemctl", "systemd-run"} else 30
     return subprocess.run(
         argv,
         check=False,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
         env=environment,
     )
 

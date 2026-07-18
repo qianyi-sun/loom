@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -312,7 +313,7 @@ class SystemdUserManager:
         argv = self.start_argv(envelope_path, unit_name)
         try:
             result = self._run(argv)
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             raise UnitLaunchError("transient rollout unit could not be started") from exc
         if result.returncode != 0:
             raise UnitLaunchError("transient rollout unit launch failed")
@@ -329,7 +330,7 @@ class SystemdUserManager:
         ]
         try:
             result = self._run(argv)
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             raise SystemdQueryError("systemd unit status could not be queried") from exc
         if result.returncode == 4:
             return None

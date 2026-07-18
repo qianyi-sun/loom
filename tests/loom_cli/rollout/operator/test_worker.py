@@ -342,12 +342,15 @@ def test_default_worker_run_uses_exact_sanitized_environment(
     config = make_config(tmp_path)
     expected = sanitized_child_environment(config, service_uid=1234)
     environments: list[dict[str, str] | None] = []
+    timeouts: list[object] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         environments.append(kwargs.get("env"))  # type: ignore[arg-type]
+        timeouts.append(kwargs.get("timeout"))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     worker_module._run(["systemctl", "--user", "show"], environment=expected)
 
     assert environments == [expected]
+    assert timeouts == [120]

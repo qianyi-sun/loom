@@ -1096,10 +1096,12 @@ def test_default_broker_run_and_stream_use_exact_sanitized_environment(
     config = make_config(tmp_path)
     expected = sanitized_child_environment(config, service_uid=1234)
     run_environments: list[dict[str, str] | None] = []
+    run_timeouts: list[object] = []
     popen_environments: list[dict[str, str] | None] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         run_environments.append(kwargs.get("env"))  # type: ignore[arg-type]
+        run_timeouts.append(kwargs.get("timeout"))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     class FakePopen:
@@ -1122,9 +1124,12 @@ def test_default_broker_run_and_stream_use_exact_sanitized_environment(
     monkeypatch.setattr(subprocess, "Popen", FakePopen)
 
     broker_module._run(["git", "status"], environment=expected)
+    broker_module._run(["systemd-run", "--user"], environment=expected)
+    broker_module._run(["systemctl", "--user", "show"], environment=expected)
     stream = broker_module._stream(["journalctl"], environment=expected)
     stream.close()
-    assert run_environments == [expected]
+    assert run_environments == [expected, expected, expected]
+    assert run_timeouts == [30, 120, 120]
     assert popen_environments == [expected]
 
 

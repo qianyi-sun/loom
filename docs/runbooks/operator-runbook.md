@@ -1730,6 +1730,11 @@ argument fails closed. Never bypass this path by copying files into the install
 directory, adding a global/system `safe.directory`, injecting Git objects, or selecting a
 caller-provided source path.
 
+Broker and worker systemd management operations use a bounded two-minute
+budget, separate from the shorter general command budget, so transient manager
+I/O cannot strand a launch. A management timeout still fails closed as an
+explicit launch or query error and is never retried implicitly.
+
 For first installation, run the clone command only when the destination is
 absent. For updates, skip clone and use the three refresh commands. An occupied,
 dirty, wrongly owned, writable, or wrong-origin checkout must be inspected and
