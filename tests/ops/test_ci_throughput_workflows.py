@@ -155,7 +155,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     matrix = json.loads(_github_output_value(output, "images"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 9
+    assert len(matrix) == 10
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
         "control-plane",
@@ -164,6 +164,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "llm-gateway",
         "llm-gateway-sandbox",
         "service",
+        "staging-admin-browser-smoke",
         "web",
         "worker",
     }
@@ -188,6 +189,7 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
         "egress-xds",
         "family-orchestrator",
         "llm-gateway",
+        "staging-admin-browser-smoke",
         "web",
         "llm-gateway-sandbox",
     }

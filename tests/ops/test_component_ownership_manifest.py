@@ -781,7 +781,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 9
+    assert len(matrix) == 10
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
@@ -802,6 +802,25 @@ def test_release_image_selection_uses_manifest_source_ownership() -> None:
             "image": "web",
             "image_name": "loom-web",
             "dockerfile": "deploy/Dockerfile.web",
+            "context": ".",
+        },
+    )
+
+
+def test_browser_acceptance_dockerfile_selects_its_conformance_image() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    matrix = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("deploy/Dockerfile.staging-admin-browser-smoke",),
+        force_all=False,
+    )
+
+    assert matrix == (
+        {
+            "image": "staging-admin-browser-smoke",
+            "image_name": "loom-staging-admin-browser-smoke",
+            "dockerfile": "deploy/Dockerfile.staging-admin-browser-smoke",
             "context": ".",
         },
     )
