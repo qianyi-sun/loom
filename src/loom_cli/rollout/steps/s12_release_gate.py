@@ -45,7 +45,12 @@ _HF_BOUNDARY_CANARY_TASK_ID = "skilllearnbench/fix-security-bug/fix-security-bug
 _HF_BOUNDARY_CANARY_TIMEOUT_SEC = 3600.0
 _STAGING_ROLLOUT_ROOT = Path("/data/loom-staging")
 _DOCKER_CACHE_RETENTION_HOURS = 24
-_DOCKER_CACHE_PRUNE_TIMEOUT_SEC = 1800.0
+# A first convergence on platform-dev can retire roughly two thousand stale
+# images and spend well over 30 minutes in Docker's metadata deletion path.
+# Keep the operation bounded, but allow enough time for Docker to finish
+# atomically instead of killing a healthy prune after it has already restored
+# the required storage headroom.
+_DOCKER_CACHE_PRUNE_TIMEOUT_SEC = 2 * 60 * 60.0
 
 
 def _append_redacted_diagnostic(path: Path, text: str) -> None:

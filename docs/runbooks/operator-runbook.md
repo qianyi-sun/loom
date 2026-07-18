@@ -3210,6 +3210,9 @@ On fixed platform-dev staging, `/data` and Docker share the same ext4 backing
 filesystem. The brokered rollout therefore performs one bounded host-cache
 retention pass immediately before the storage preflight: Docker may remove only
 images and build-cache records it considers unused and older than 24 hours.
+Each Docker prune command has a two-hour fail-closed ceiling so an initial
+convergence with thousands of stale images can finish without becoming an
+unbounded maintenance operation.
 The current candidate is freshly built, then its exact image identities are
 re-read after cleanup. The resulting `staging-host-cache-retention.json` records
 the policy, candidate SHA/tag, command exit codes, and measured free bytes

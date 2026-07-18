@@ -69,7 +69,7 @@ def test_staging_host_cache_retention_is_bounded_and_audited(
                 "--filter",
                 "until=24h",
             ],
-            1800.0,
+            7200.0,
         ),
         (
             [
@@ -81,7 +81,7 @@ def test_staging_host_cache_retention_is_bounded_and_audited(
                 "--filter",
                 "until=24h",
             ],
-            1800.0,
+            7200.0,
         ),
     ]
     record = json.loads(
@@ -174,7 +174,7 @@ def test_staging_host_cache_retention_records_launch_or_timeout_failure(
     )
 
     def fail_run(*_args, **_kwargs):
-        raise SubprocessExecutionError("command timed out after 1800s: docker image prune")
+        raise SubprocessExecutionError("command timed out after 7200s: docker image prune")
 
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s12_release_gate.run_captured",
