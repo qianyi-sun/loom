@@ -87,6 +87,10 @@ Attach these to the release issue or release PR:
   rollout after the logged-out route smoke. The ephemeral kind workflow remains
   `runtime_environment = "development"` and only proves that this exchange is
   hidden with a credential-free `404`; it must never pose as protected staging.
+  The broker accepts the installed Qianyi-owned `0640` token only through its
+  existing `loom-rollout` read-only ACL; symlinked paths, mutable group/other
+  authority, owner drift, hard links, and changing metadata fail closed before
+  the browser container starts.
   Archive the report with the broker request ID, attempt, envelope digest,
   resolved candidate SHA, and matching running-service build SHA; a PR artifact or manual command
   is not candidate evidence. The rollout evidence must show the correlated

@@ -3,13 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import StepDir
-from loom_cli.rollout.steps.s14_browser_acceptance import BrowserAcceptanceStep
+from loom_cli.rollout.steps.s14_browser_acceptance import (
+    BrowserAcceptanceStep,
+    _validate_admin_token_file,
+)
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
 
@@ -29,6 +34,7 @@ def _context(tmp_path: Path):
     _private_file(envelope, json.dumps(envelope_payload).encode())
     token = tmp_path / "admin-token"
     _private_file(token, b"loom_admin_" + b"A" * 43 + b"\n")
+    token.chmod(0o640)
     ctx = make_ctx(
         tmp_path,
         resolved_sha="a" * 40,
@@ -104,6 +110,72 @@ def test_browser_acceptance_runs_hardened_candidate_image(
     assert "qianyi" in command
     assert ctx.request_id in command
     assert ctx.resolved_sha in command
+
+
+def test_browser_acceptance_accepts_qianyi_owned_0640_acl_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = tmp_path / "admin-token"
+    _private_file(token, b"loom_admin_" + b"A" * 43 + b"\n")
+    token.chmod(0o640)
+    service_uid = os.getuid() + 10_000
+    monkeypatch.setattr(os, "geteuid", lambda: service_uid)
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda _name: type("User", (), {"pw_uid": token.stat().st_uid})(),
+    )
+
+    metadata = _validate_admin_token_file(token)
+
+    assert metadata.st_uid == token.stat().st_uid
+
+
+def test_browser_acceptance_rejects_untrusted_token_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = tmp_path / "admin-token"
+    _private_file(token, b"loom_admin_" + b"A" * 43 + b"\n")
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 10_000)
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda _name: type("User", (), {"pw_uid": os.getuid() + 20_000})(),
+    )
+
+    with pytest.raises(ValueError, match="admin token metadata is unsafe"):
+        _validate_admin_token_file(token)
+
+
+@pytest.mark.parametrize("mode", [0o660, 0o641, 0o740, 0o4640])
+def test_browser_acceptance_rejects_unsafe_token_mode(tmp_path: Path, mode: int) -> None:
+    ctx, step_dir = _context(tmp_path)
+    token = Path(ctx.admin_token_source.removeprefix("file:"))
+    token.chmod(mode)
+
+    result = BrowserAcceptanceStep().run(ctx, step_dir)
+
+    assert result.exit_code == 1
+    assert "admin token metadata is unsafe" in (result.error or "")
+
+
+def test_browser_acceptance_rejects_symlinked_token_parent(tmp_path: Path) -> None:
+    ctx, step_dir = _context(tmp_path)
+    token = Path(ctx.admin_token_source.removeprefix("file:"))
+    real_parent = tmp_path / "real-credentials"
+    real_parent.mkdir()
+    real_token = real_parent / "admin-token"
+    token.replace(real_token)
+    linked_parent = tmp_path / "linked-credentials"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    ctx = replace(ctx, admin_token_source=f"file:{linked_parent / 'admin-token'}")
+
+    result = BrowserAcceptanceStep().run(ctx, step_dir)
+
+    assert result.exit_code == 1
+    assert "admin token path is unsafe" in (result.error or "")
 
 
 def test_browser_acceptance_fails_closed_without_broker_envelope(tmp_path: Path) -> None:

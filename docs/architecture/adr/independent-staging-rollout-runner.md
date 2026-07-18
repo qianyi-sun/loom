@@ -137,6 +137,12 @@ service. Pull-request kind CI remains credential-free and non-protected; its
 `development` runtime may only prove that the staging-only exchange returns
 `404`. A kind artifact, manual invocation, ambient checkout, or unmerged ref is
 never candidate evidence.
+The step consumes the same installer-validated credential authority as broker
+preflight: a root-, service-, or Qianyi-owned single-link regular file may be
+group-readable for the `loom-rollout` read-only ACL, but must not grant group
+write/execute or any other-user access. Every parent and the token itself are
+opened without following symlinks and the file identity must remain stable
+before Docker receives the fixed read-only bind.
 
 ### Service authority and secrets
 

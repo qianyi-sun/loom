@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import stat
 from pathlib import Path
 from typing import cast
@@ -28,6 +29,7 @@ _OUTPUT_DIRECTORY_NAME = "browser-output"
 _REPORT_NAME = "staging-admin-browser-acceptance.json"
 _MAX_ENVELOPE_BYTES = 128 * 1024
 _MAX_REPORT_BYTES = 1024 * 1024
+_MAX_ADMIN_TOKEN_BYTES = 64 * 1024
 
 
 def _read_private_file(path: Path, *, max_bytes: int) -> tuple[bytes, os.stat_result]:
@@ -92,6 +94,85 @@ def _token_file(ctx: RolloutContext) -> Path:
     if not path.is_absolute() or ".." in path.parts:
         raise ValueError("browser acceptance admin token path is unsafe")
     return path
+
+
+def _validate_admin_token_file(path: Path) -> os.stat_result:
+    """Validate the installed ACL-readable admin-token authority.
+
+    The rollout installer deliberately preserves Qianyi-owned ``0640`` token
+    files and grants ``loom-rollout`` a read-only ACL.  Requiring service
+    ownership here would contradict the already validated operator contract.
+    Open every parent without following symlinks, accept only the same trusted
+    owner set as operator preflight, and reject any effective write/execute
+    authority outside the owner before the path is bind-mounted read-only.
+    """
+
+    normalized = Path(os.path.normpath(path))
+    if not normalized.is_absolute() or ".." in path.parts:
+        raise ValueError("browser acceptance admin token path is unsafe")
+    directory_flags = (
+        getattr(os, "O_PATH", os.O_RDONLY)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd: int | None = None
+    try:
+        directory_fd = os.open("/", directory_flags)
+        for component in normalized.parts[1:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        fd = os.open(normalized.name, file_flags, dir_fd=directory_fd)
+    except OSError as exc:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise ValueError("browser acceptance admin token path is unsafe") from exc
+    os.close(directory_fd)
+    try:
+        before = os.fstat(fd)
+        allowed_owners = {0, os.geteuid()}
+        try:
+            allowed_owners.add(pwd.getpwnam(BROWSER_ACCEPTANCE_USERNAME).pw_uid)
+        except (KeyError, OSError):
+            pass
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid not in allowed_owners
+            or stat.S_IMODE(before.st_mode) & 0o7137
+            or before.st_nlink != 1
+            or before.st_size < 1
+            or before.st_size > _MAX_ADMIN_TOKEN_BYTES
+        ):
+            raise ValueError("browser acceptance admin token metadata is unsafe")
+        payload = os.read(fd, before.st_size + 1)
+        after = os.fstat(fd)
+        if len(payload) != before.st_size or (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise ValueError("browser acceptance admin token changed while it was read")
+        return before
+    finally:
+        os.close(fd)
 
 
 def _report_is_valid(
@@ -164,14 +245,7 @@ class BrowserAcceptanceStep(BaseStep):
             envelope_sha256 = hashlib.sha256(envelope).hexdigest()
             route = _browser_route(ctx)
             token_file = _token_file(ctx)
-            token_metadata = token_file.stat(follow_symlinks=False)
-            if (
-                not stat.S_ISREG(token_metadata.st_mode)
-                or token_metadata.st_uid != os.geteuid()
-                or stat.S_IMODE(token_metadata.st_mode) != 0o600
-                or token_metadata.st_nlink != 1
-            ):
-                raise ValueError("browser acceptance admin token metadata is unsafe")
+            _validate_admin_token_file(token_file)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return RunResult(exit_code=1, error=str(exc))
 
