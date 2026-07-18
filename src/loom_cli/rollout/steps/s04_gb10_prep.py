@@ -331,6 +331,7 @@ def _no_gb10_hosts_error(
 
 
 _GB10_KNOWN_HOSTS = "/etc/loom/staging-rollout-gb10-known-hosts"
+_SHARED_WORKER_REPO_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
 
 
 def _ssh(
@@ -602,6 +603,20 @@ def _prep_one_host(
     repo_url = shlex.quote(host.repo_url)
     image_tag = shlex.quote(ctx.image_tag)
     resolved_sha = shlex.quote(ctx.resolved_sha)
+    if ctx.source_mode == "sealed-cumulative":
+        shared_repo = _SHARED_WORKER_REPO_ROOT / f"loom-remote-worker-{ctx.image_tag}"
+        if shared_repo.parent != _SHARED_WORKER_REPO_ROOT:
+            return False, f"sealed source path is invalid on {host.ssh_target}"
+        upload_pack = f"/usr/bin/git -c safe.directory={shared_repo}/.git upload-pack"
+        fetch_command = (
+            f"cd {repo_path} && "
+            "git -c protocol.file.allow=always -c fetch.fsckObjects=true "
+            "fetch --quiet --no-tags --no-recurse-submodules --no-write-fetch-head "
+            f"--upload-pack={shlex.quote(upload_pack)} "
+            f"{shlex.quote(str(shared_repo))} {resolved_sha}"
+        )
+    else:
+        fetch_command = f"cd {repo_path} && git fetch --quiet origin"
     steps: list[tuple[str, str]] = [
         (
             "checkout-present",
@@ -614,7 +629,7 @@ def _prep_one_host(
         ),
         (
             "fetch",
-            f"cd {repo_path} && git fetch --quiet origin",
+            fetch_command,
         ),
         (
             "checkout",

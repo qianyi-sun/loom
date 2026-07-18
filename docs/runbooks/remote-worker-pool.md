@@ -1482,6 +1482,11 @@ fail the release on its first observation. Valid but divergent structured
 evidence is never retried, and exhausted evidence records only the host,
 attempt count, and a non-sensitive failure class before failing closed.
 
+For sealed-cumulative rollouts, step 12 then fetches the exact commit from that
+verified shared checkout through the fixed system upload-pack with object fsck
+enabled. It does not resolve or fetch `origin/dev`; merged-dev keeps the
+existing GitHub-origin fetch path.
+
 Keep the GB10 node-agent path only for Docker Compose rollout validation,
 legacy compatibility, or break-glass operation when Slurm is unavailable. The
 Control Plane does not SSH into hosts. Each `loom worker gb10-agent apply`

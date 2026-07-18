@@ -2064,7 +2064,17 @@ non-zero SSH or remote verifier exit receives at most seven exact-command
 observations with bounded incremental backoff. Structured evidence that is
 valid but content-divergent fails immediately; an exhausted transient records
 only host, attempt count, and a non-sensitive failure class before the rollout
-fails closed. The
+fails closed.
+
+After that 14/14 consumer proof, sealed-cumulative GB10 prep fetches the exact
+commit from the fixed shared checkout with the system upload-pack and object
+fsck enabled. It does not resolve or fetch `origin/dev`; merged-dev prep keeps
+the existing GitHub-origin fetch path. The shared source path is derived only
+from the candidate-bound image tag beneath the fixed worker-repository root;
+the upload-pack receives an exact per-repository `safe.directory` binding
+without changing global or system Git configuration.
+
+The
 preflight derives the mount major/minor pair from each repository directory's
 `st_dev`; the separately recorded inode is never interpreted as a device
 minor number. It selects the most specific mountinfo entry containing

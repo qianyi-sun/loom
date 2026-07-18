@@ -942,6 +942,9 @@ def _handle_envelope_mode(args: argparse.Namespace) -> int:
         exclude_oldlab=False,
         gb10_prep_concurrency=envelope.gb10_prep_concurrency,
         resume=envelope.resume,
+        source_mode=envelope.source_mode,
+        resolved_tree=envelope.resolved_tree,
+        approved_base_sha=envelope.approved_base_sha,
         metadata={"rollout_id": envelope.rollout_id},
     )
 

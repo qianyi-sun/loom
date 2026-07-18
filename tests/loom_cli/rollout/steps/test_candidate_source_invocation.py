@@ -33,6 +33,7 @@ from loom_cli.rollout.steps.s04_gb10_prep import (
     GB10Host,
     GB10PrepStep,
     _node_agent_timer_name,
+    _prep_one_host,
     _ssh,
     gb10_hosts_for,
 )
@@ -55,6 +56,103 @@ from loom_cli.rollout.steps.s12_release_gate import (
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def test_sealed_gb10_prep_fetches_exact_shared_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "a" * 40
+    ctx = replace(
+        make_ctx(tmp_path),
+        image_tag="staging-aaaaaaa",
+        resolved_sha=sha,
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+    host = GB10Host(
+        ssh_target="trt-gb10-1",
+        repo_path="/home/qianyi/loom-worker-build-staging",
+        env_file_path="/home/qianyi/loom-worker-staging.env",
+    )
+    commands: list[str] = []
+
+    def successful_ssh(
+        _host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        assert stdin_text is None
+        commands.append(command)
+        return SubprocessResult([], 0, "", "")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", successful_ssh)
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+
+    ok, _summary = _prep_one_host(ctx, host, host_dir)
+
+    assert ok is True
+    fetch = next(command for command in commands if " fetch " in command)
+    assert "git fetch --quiet origin" not in fetch
+    assert "-c protocol.file.allow=always" in fetch
+    assert "-c fetch.fsckObjects=true" in fetch
+    assert "--upload-pack='/usr/bin/git -c safe.directory=" in fetch
+    assert "/loom-remote-worker-staging-aaaaaaa/.git upload-pack'" in fetch
+    assert (
+        "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-staging-aaaaaaa"
+    ) in fetch
+    assert fetch.endswith(sha)
+
+
+def test_merged_dev_gb10_prep_keeps_origin_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    host = GB10Host(
+        ssh_target="trt-gb10-1",
+        repo_path="/home/qianyi/loom-worker-build-staging",
+        env_file_path="/home/qianyi/loom-worker-staging.env",
+    )
+    commands: list[str] = []
+
+    def successful_ssh(
+        _host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        assert stdin_text is None
+        commands.append(command)
+        return SubprocessResult([], 0, "", "")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", successful_ssh)
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+
+    ok, _summary = _prep_one_host(ctx, host, host_dir)
+
+    assert ok is True
+    assert any(command.endswith("git fetch --quiet origin") for command in commands)
+
+
+def test_sealed_context_binds_source_identities_into_inputs(tmp_path: Path) -> None:
+    ctx = replace(
+        make_ctx(tmp_path),
+        request_id="req-1234567890abcdef",
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+
+    inputs = ctx.to_inputs_dict()
+
+    assert inputs["source_mode"] == "sealed-cumulative"
+    assert inputs["resolved_tree"] == "b" * 40
+    assert inputs["approved_base_sha"] == "c" * 40
 
 
 def _is_candidate_invocation(argv: list[str]) -> bool:
