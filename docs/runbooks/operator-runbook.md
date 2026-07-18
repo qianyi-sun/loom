@@ -3236,6 +3236,32 @@ Remediation paths, in priority order:
    doesn't support resize, the durable answer is migration to
    external object storage via `loom cluster --storage external`.
 
+On the fixed `platform-dev` host, `/data` and `/shared_work` currently share
+the large ext4 root filesystem.  Do not delete `/shared_work`: it is active
+multi-user data, not rollout cache.  A default five-percent ext4 root reserve
+on this multi-terabyte filesystem can also make MinIO's non-root `df /data`
+view cross the stop threshold even when physical free blocks remain.  The
+sealed-candidate helper below provides the only supported bounded convergence
+for that exact host and device; it keeps a three-percent root reserve, validates
+the exact mount/device/type/ownership and large-filesystem identity before
+mutation, locks concurrent calls, reads back the result, and rolls back to the
+exact prior reserved-block count on a bad readback:
+
+```bash
+sudo /usr/bin/python3 \
+  "$SEALED_CHECKOUT/scripts/ops/staging_rollout_data_reserve.py" check
+sudo /usr/bin/python3 \
+  "$SEALED_CHECKOUT/scripts/ops/staging_rollout_data_reserve.py" install
+sudo /usr/bin/python3 \
+  "$SEALED_CHECKOUT/scripts/ops/staging_rollout_data_reserve.py" check
+```
+
+Run it only with no active rollout attempt and only from an independently
+validated exact sealed checkout.  It is not a storage-stop override: the
+15-percent MinIO threshold remains unchanged, and a new preflight must still
+pass before a replacement rollout.  Device, filesystem, or reserve drift fails
+closed and requires a reviewed repo update rather than ad hoc `tune2fs` flags.
+
 4. **Long-term durability.** Single-node MinIO + a fixed PVC is fine
    for cluster-internal scratch space but is not durable archival
    storage (no replication, no off-cluster backup beyond manual
