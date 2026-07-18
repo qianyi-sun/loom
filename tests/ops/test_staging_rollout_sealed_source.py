@@ -111,6 +111,39 @@ def test_sealed_source_accepts_only_exact_clean_linear_detached_binding(
         )
 
 
+def test_sealed_source_accepts_exact_history_bound_and_rejects_next_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path / "repo")
+    _trust_tmp_parents(monkeypatch)
+    existing_history = int(
+        _git(source.path, "rev-list", "--count", f"{source.base_sha}..{source.commit_sha}")
+    )
+    for index in range(existing_history, sealed.MAX_CUMULATIVE_COMMITS):
+        (source.path / "value.txt").write_text(f"bounded-{index}\n", encoding="utf-8")
+        _git(source.path, "commit", "-am", f"bounded {index}")
+    source = sealed.SealedSource(
+        source.path,
+        _git(source.path, "rev-parse", "HEAD"),
+        _git(source.path, "rev-parse", "HEAD^{tree}"),
+        source.base_sha,
+    )
+
+    _validate_real_checkout(source)
+
+    (source.path / "value.txt").write_text("over-bound\n", encoding="utf-8")
+    _git(source.path, "commit", "-am", "over bound")
+    over_bound = sealed.SealedSource(
+        source.path,
+        _git(source.path, "rev-parse", "HEAD"),
+        _git(source.path, "rev-parse", "HEAD^{tree}"),
+        source.base_sha,
+    )
+    with pytest.raises(sealed.SealedSourceError, match="exceeds its bound"):
+        _validate_real_checkout(over_bound)
+
+
 def test_sealed_source_rejects_branch_checkout_dirty_tree_and_remote_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

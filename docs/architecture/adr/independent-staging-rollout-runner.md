@@ -71,7 +71,7 @@ until staging acceptance succeeds. The default remains merged-only. The root
 installer exposes one explicit `sealed-cumulative` mode that accepts no path or
 ref override and binds the fixed invocation checkout to an exact commit, tree,
 and approved merged base. It requires a standalone root-owned clean detached
-checkout, rejects Git indirection and non-linear or over-32-commit history,
+checkout, rejects Git indirection and non-linear or over-64-commit history,
 and copies only that exact commit into the root install source and service
 candidate without fetching or resolving `origin/dev`.
 

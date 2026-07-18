@@ -20,6 +20,7 @@ from typing import Protocol
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 APPROVED_REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
+MAX_CUMULATIVE_COMMITS = 64
 
 
 class SealedSourceError(RuntimeError):
@@ -356,7 +357,7 @@ def validate_sealed_source(
     expected_uid: int = 0,
     expected_gid: int = 0,
 ) -> None:
-    """Prove exact detached identity and a one-commit approved lineage."""
+    """Prove exact detached identity and a bounded approved lineage."""
     _validate_authority(
         source,
         run=run,
@@ -411,7 +412,7 @@ def validate_sealed_source(
         "--parents",
         f"{source.base_sha}..{source.commit_sha}",
     ).splitlines()
-    if not 1 <= len(history) <= 32:
+    if not 1 <= len(history) <= MAX_CUMULATIVE_COMMITS:
         raise SealedSourceError("sealed source cumulative history is empty or exceeds its bound")
     expected_parent = source.base_sha
     for line in history:
@@ -427,6 +428,7 @@ def validate_sealed_source(
 
 __all__ = [
     "APPROVED_REMOTE_URL",
+    "MAX_CUMULATIVE_COMMITS",
     "CommandRunner",
     "SealedSource",
     "SealedSourceError",
