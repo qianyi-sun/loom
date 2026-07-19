@@ -15,6 +15,7 @@ from tests.loom_cli.rollout.test_preflight_artifact_store import (
     _images,
     _manifests,
     _migration,
+    _production_defaults,
 )
 
 
@@ -55,6 +56,7 @@ def _published_plan(tmp_path: Path):
         images=images,
         manifests=_manifests(images),
         migration=migration,
+        production_defaults=_production_defaults(candidate_tree="b" * 40),
         migration_plan_sha256="4" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="8" * 64,
@@ -68,6 +70,8 @@ def _published_plan(tmp_path: Path):
         migration_manifest_path=str(publication.migration_manifest_path),
         migration_manifest_sha256=publication.migration_manifest_sha256,
         migration_manifest_artifact_sha256=publication.migration_manifest_artifact_sha256,
+        production_defaults_path=str(publication.production_defaults_path),
+        production_defaults_sha256=publication.production_defaults_sha256,
         migration_job_name=publication.migration_job_name,
         migration_image_id=publication.migration_image_id,
     )

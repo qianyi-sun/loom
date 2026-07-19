@@ -45,6 +45,7 @@ from tests.loom_cli.rollout.test_preflight_artifact_store import (
     _images,
     _manifests,
     _migration,
+    _production_defaults,
 )
 
 NOW = datetime(2026, 7, 19, 21, tzinfo=UTC)
@@ -78,6 +79,7 @@ def _execution(publication, *, image_digest: str | None = None):
                 EvidenceField("rendered-manifest-digest", "sha256"),
                 EvidenceField("migration-manifest-digest", "sha256"),
                 EvidenceField("migration-artifact-digest", "sha256"),
+                EvidenceField("production-defaults-digest", "sha256"),
             ),
             timeout_seconds=5,
             freshness_ttl_seconds=600,
@@ -95,6 +97,7 @@ def _execution(publication, *, image_digest: str | None = None):
                     "rendered-manifest-digest": publication.rendered_manifest_sha256,
                     "migration-manifest-digest": publication.migration_manifest_sha256,
                     "migration-artifact-digest": publication.migration_manifest_artifact_sha256,
+                    "production-defaults-digest": publication.production_defaults_sha256,
                 },
             )
         },
@@ -120,6 +123,7 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
             candidate_tree="b" * 40,
             migration_plan_sha256="4" * 64,
         ),
+        production_defaults=_production_defaults(candidate_tree="b" * 40),
         migration_plan_sha256="4" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="8" * 64,

@@ -28,6 +28,7 @@ from loom_cli.rollout.preflight_contract import CheckContext, CheckOperation
 from loom_cli.rollout.preflight_registered_checks import (
     build_preflight_artifact_publication_check,
 )
+from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
 
 
 def _images() -> ImageArtifactSet:
@@ -74,9 +75,35 @@ def _publish(store: PreflightArtifactStore):
         images=images,
         manifests=_manifests(images),
         migration=_migration(images),
+        production_defaults=_production_defaults(),
         migration_plan_sha256="1" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="2" * 64,
+    )
+
+
+def _production_defaults(*, candidate_tree: str = "f" * 40) -> ProductionDefaultsArtifact:
+    payload = {
+        "schema_version": 1,
+        "candidate_sha": "a" * 40,
+        "candidate_tree": candidate_tree,
+        "environment": "staging",
+        "yibuapi_sync": None,
+        "providers": [],
+    }
+    digest = (
+        __import__("hashlib")
+        .sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+        .hexdigest()
+    )
+    return ProductionDefaultsArtifact(
+        schema_version=1,
+        candidate_sha="a" * 40,
+        candidate_tree=candidate_tree,
+        environment="staging",
+        yibuapi_sync=None,
+        providers=(),
+        artifact_digest=digest,
     )
 
 
@@ -178,6 +205,7 @@ def test_store_publishes_and_reuses_exact_private_artifacts(tmp_path: Path) -> N
         first.descriptor_path,
         first.rendered_manifest_path,
         first.migration_manifest_path,
+        first.production_defaults_path,
     ):
         assert path.stat().st_uid == os.geteuid()
         assert path.stat().st_mode & 0o777 == 0o600
@@ -203,6 +231,15 @@ def test_store_rejects_migration_artifact_drift(tmp_path: Path) -> None:
     publication.migration_manifest_path.write_text("changed\n")
 
     with pytest.raises(PreflightArtifactStoreError, match="drift"):
+        store.read(publication.bundle_digest)
+
+
+def test_store_rejects_production_defaults_artifact_drift(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    publication = _publish(store)
+    publication.production_defaults_path.write_text("{}\n")
+
+    with pytest.raises(PreflightArtifactStoreError, match="invalid"):
         store.read(publication.bundle_digest)
 
 
@@ -236,6 +273,7 @@ def test_store_rejects_cross_artifact_image_drift(tmp_path: Path) -> None:
             images=images,
             manifests=drifted,
             migration=_migration(images),
+            production_defaults=_production_defaults(),
             migration_plan_sha256="1" * 64,
             migration_target_revision="0067",
             browser_report_schema_sha256="2" * 64,
@@ -252,6 +290,7 @@ def test_store_rejects_unbounded_migration_target(tmp_path: Path) -> None:
             images=images,
             manifests=_manifests(images),
             migration=_migration(images),
+            production_defaults=_production_defaults(),
             migration_plan_sha256="1" * 64,
             migration_target_revision="head",
             browser_report_schema_sha256="2" * 64,
@@ -272,6 +311,7 @@ def test_store_loads_one_exact_publication_without_rebuild_or_render(tmp_path: P
             image_tag=image_tag,
             migration_target_revision="0066",
         ),
+        production_defaults=_production_defaults(),
         migration_plan_sha256="1" * 64,
         migration_target_revision="0066",
         browser_report_schema_sha256="2" * 64,
@@ -307,6 +347,7 @@ def test_store_rejects_ambiguous_exact_publications(tmp_path: Path) -> None:
                 migration_plan_sha256=migration_digest,
                 migration_target_revision="0066",
             ),
+            production_defaults=_production_defaults(),
             migration_plan_sha256=migration_digest,
             migration_target_revision="0066",
             browser_report_schema_sha256="2" * 64,
@@ -335,6 +376,7 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
             image_tag=image_tag,
             migration_target_revision="0066",
         ),
+        production_defaults_artifact=_production_defaults,
         candidate_sha="a" * 40,
         candidate_tree="f" * 40,
         mutation_epoch=8,
@@ -362,7 +404,9 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
         "migration.plan",
         "migration.manifest",
         "browser.runtime",
+        "production-defaults.plan",
     )
+    assert outcome.evidence["production-defaults-digest"] == _production_defaults().artifact_digest
     loaded = store.load_exact(
         candidate_sha="a" * 40,
         candidate_tree="f" * 40,

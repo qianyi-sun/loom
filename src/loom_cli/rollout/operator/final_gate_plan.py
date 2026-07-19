@@ -65,6 +65,8 @@ class FinalGatePlan:
     migration_manifest_path: str
     migration_manifest_sha256: str
     migration_manifest_artifact_sha256: str
+    production_defaults_path: str
+    production_defaults_sha256: str
     migration_job_name: str
     migration_image_id: str
     image_digests: Mapping[str, str]
@@ -130,6 +132,7 @@ class FinalGatePlan:
             self.rendered_manifest_sha256,
             self.migration_manifest_sha256,
             self.migration_manifest_artifact_sha256,
+            self.production_defaults_sha256,
             self.migration_plan_digest,
             self.browser_report_schema,
             self.backup_manifest_sha256,
@@ -150,6 +153,7 @@ class FinalGatePlan:
             self.artifact_descriptor_path,
             self.rendered_manifest_path,
             self.migration_manifest_path,
+            self.production_defaults_path,
             self.backup_manifest_path,
         ):
             path = Path(value)
@@ -159,6 +163,8 @@ class FinalGatePlan:
             raise ValueError("final gate preflight artifact roots differ")
         if Path(self.artifact_descriptor_path).parent != Path(self.migration_manifest_path).parent:
             raise ValueError("final gate migration artifact root differs")
+        if Path(self.artifact_descriptor_path).parent != Path(self.production_defaults_path).parent:
+            raise ValueError("final gate production defaults artifact root differs")
         if not self.migration_job_name or self.migration_image_id != self.image_digests.get(
             "loom-control-plane"
         ):
@@ -311,6 +317,8 @@ class FinalGatePlan:
             "migration_manifest_path": str(artifacts.migration_manifest_path),
             "migration_manifest_sha256": artifacts.migration_manifest_sha256,
             "migration_manifest_artifact_sha256": artifacts.migration_manifest_artifact_sha256,
+            "production_defaults_path": str(artifacts.production_defaults_path),
+            "production_defaults_sha256": artifacts.production_defaults_sha256,
             "migration_job_name": artifacts.migration_job_name,
             "migration_image_id": artifacts.migration_image_id,
             "image_digests": dict(bindings.image_digests),
@@ -375,6 +383,8 @@ class FinalGatePlan:
             migration_manifest_path=_string(value, "migration_manifest_path"),
             migration_manifest_sha256=_string(value, "migration_manifest_sha256"),
             migration_manifest_artifact_sha256=_string(value, "migration_manifest_artifact_sha256"),
+            production_defaults_path=_string(value, "production_defaults_path"),
+            production_defaults_sha256=_string(value, "production_defaults_sha256"),
             migration_job_name=_string(value, "migration_job_name"),
             migration_image_id=_string(value, "migration_image_id"),
             image_digests=_string_map(value, "image_digests"),

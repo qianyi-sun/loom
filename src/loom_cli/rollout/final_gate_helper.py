@@ -128,6 +128,8 @@ def _verify_artifacts(plan: FinalGatePlan) -> None:
         or str(publication.migration_manifest_path) != plan.migration_manifest_path
         or publication.migration_manifest_sha256 != plan.migration_manifest_sha256
         or publication.migration_manifest_artifact_sha256 != plan.migration_manifest_artifact_sha256
+        or str(publication.production_defaults_path) != plan.production_defaults_path
+        or publication.production_defaults_sha256 != plan.production_defaults_sha256
         or publication.migration_job_name != plan.migration_job_name
         or publication.migration_image_id != plan.migration_image_id
         or publication.migration_plan_sha256 != plan.migration_plan_digest

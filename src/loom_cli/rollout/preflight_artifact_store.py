@@ -27,6 +27,7 @@ from loom_cli.rollout.migration_manifest_readiness import (
     MigrationManifestArtifact,
     inspect_migration_manifest_artifact,
 )
+from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -57,6 +58,7 @@ class _ParsedDescriptor(TypedDict):
     migration_plan_sha256: str
     migration_target_revision: str
     mutation_epoch: int
+    production_defaults_sha256: str
     rendered_manifest_sha256: str
     resource_set_digest: str
 
@@ -72,6 +74,7 @@ class PreflightArtifactPublication:
     descriptor_path: Path
     rendered_manifest_path: Path
     migration_manifest_path: Path
+    production_defaults_path: Path
     image_artifact_sha256: str
     manifest_artifact_sha256: str
     rendered_manifest_sha256: str
@@ -82,6 +85,7 @@ class PreflightArtifactPublication:
     migration_plan_sha256: str
     migration_target_revision: str
     browser_report_schema_sha256: str
+    production_defaults_sha256: str
 
     def __post_init__(self) -> None:
         if (
@@ -100,18 +104,21 @@ class PreflightArtifactPublication:
                     self.migration_manifest_sha256,
                     self.migration_plan_sha256,
                     self.browser_report_schema_sha256,
+                    self.production_defaults_sha256,
                 )
             )
             or not self.descriptor_path.is_absolute()
             or _REVISION_RE.fullmatch(self.migration_target_revision) is None
             or not self.rendered_manifest_path.is_absolute()
             or not self.migration_manifest_path.is_absolute()
+            or not self.production_defaults_path.is_absolute()
             or ".." in self.descriptor_path.parts
             or ".." in self.rendered_manifest_path.parts
             or ".." in self.migration_manifest_path.parts
-            or self.descriptor_path.parent
-            != self.rendered_manifest_path.parent
+            or ".." in self.production_defaults_path.parts
+            or self.descriptor_path.parent != self.rendered_manifest_path.parent
             or self.descriptor_path.parent != self.migration_manifest_path.parent
+            or self.descriptor_path.parent != self.production_defaults_path.parent
             or _DNS_RE.fullmatch(self.migration_job_name) is None
             or _IMAGE_ID_RE.fullmatch(self.migration_image_id) is None
         ):
@@ -124,16 +131,17 @@ class LoadedPreflightArtifacts:
     images: ImageArtifactSet
     manifests: ManifestArtifact
     migration: MigrationManifestArtifact
+    production_defaults: ProductionDefaultsArtifact
 
     def __post_init__(self) -> None:
         if (
             self.publication.image_artifact_sha256 != self.images.artifact_digest
             or self.publication.manifest_artifact_sha256 != self.manifests.artifact_digest
             or self.publication.rendered_manifest_sha256 != self.manifests.rendered_sha256
-            or self.publication.migration_manifest_artifact_sha256
-            != self.migration.artifact_digest
-            or self.publication.migration_manifest_sha256
-            != self.migration.rendered_sha256
+            or self.publication.migration_manifest_artifact_sha256 != self.migration.artifact_digest
+            or self.publication.migration_manifest_sha256 != self.migration.rendered_sha256
+            or self.publication.production_defaults_sha256
+            != self.production_defaults.artifact_digest
         ):
             raise ValueError("loaded preflight artifact identity drifted")
 
@@ -161,6 +169,7 @@ class PreflightArtifactStore:
         images: ImageArtifactSet,
         manifests: ManifestArtifact,
         migration: MigrationManifestArtifact,
+        production_defaults: ProductionDefaultsArtifact,
         migration_plan_sha256: str,
         migration_target_revision: str,
         browser_report_schema_sha256: str,
@@ -172,6 +181,7 @@ class PreflightArtifactStore:
             images=images,
             manifests=manifests,
             migration=migration,
+            production_defaults=production_defaults,
             migration_plan_sha256=migration_plan_sha256,
             migration_target_revision=migration_target_revision,
             browser_report_schema_sha256=browser_report_schema_sha256,
@@ -181,6 +191,7 @@ class PreflightArtifactStore:
         descriptor_path = directory / "artifact.json"
         rendered_path = directory / "rendered.yaml"
         migration_path = directory / "migration.yaml"
+        production_defaults_path = directory / "production-defaults.json"
         publication = PreflightArtifactPublication(
             candidate_sha=candidate_sha,
             candidate_tree=candidate_tree,
@@ -189,6 +200,7 @@ class PreflightArtifactStore:
             descriptor_path=descriptor_path,
             rendered_manifest_path=rendered_path,
             migration_manifest_path=migration_path,
+            production_defaults_path=production_defaults_path,
             image_artifact_sha256=images.artifact_digest,
             manifest_artifact_sha256=manifests.artifact_digest,
             rendered_manifest_sha256=manifests.rendered_sha256,
@@ -199,6 +211,7 @@ class PreflightArtifactStore:
             migration_plan_sha256=migration_plan_sha256,
             migration_target_revision=migration_target_revision,
             browser_report_schema_sha256=browser_report_schema_sha256,
+            production_defaults_sha256=production_defaults.artifact_digest,
         )
         self._ensure_roots()
         _ensure_private_directory(directory, service_uid=self.service_uid)
@@ -215,6 +228,13 @@ class PreflightArtifactStore:
             migration.rendered_yaml.encode(),
             service_uid=self.service_uid,
             max_bytes=_MAX_MANIFEST_BYTES,
+        )
+        _publish_file(
+            directory,
+            "production-defaults.json",
+            production_defaults.to_bytes(),
+            service_uid=self.service_uid,
+            max_bytes=_MAX_DESCRIPTOR_BYTES,
         )
         _publish_file(
             directory,
@@ -238,6 +258,7 @@ class PreflightArtifactStore:
         descriptor_path = directory / "artifact.json"
         rendered_path = directory / "rendered.yaml"
         migration_path = directory / "migration.yaml"
+        production_defaults_path = directory / "production-defaults.json"
         try:
             descriptor_read = read_trusted_file(
                 descriptor_path,
@@ -260,9 +281,19 @@ class PreflightArtifactStore:
                 max_bytes=_MAX_MANIFEST_BYTES,
                 require_nonempty=True,
             )
+            production_defaults_read = read_trusted_file(
+                production_defaults_path,
+                service_uid=self.service_uid,
+                private=True,
+                max_bytes=_MAX_DESCRIPTOR_BYTES,
+                require_nonempty=True,
+            )
             raw = json.loads(
                 descriptor_read.payload,
                 object_pairs_hook=_reject_duplicate_keys,
+            )
+            production_defaults = ProductionDefaultsArtifact.from_bytes(
+                production_defaults_read.payload
             )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise PreflightArtifactStoreError("preflight artifact files are invalid") from exc
@@ -274,6 +305,7 @@ class PreflightArtifactStore:
             != descriptor["rendered_manifest_sha256"]
             or hashlib.sha256(migration_read.payload).hexdigest()
             != descriptor["migration_manifest_sha256"]
+            or production_defaults.artifact_digest != descriptor["production_defaults_sha256"]
             or _hash_json({key: value for key, value in raw.items() if key != "bundle_digest"})
             != bundle_digest
         ):
@@ -286,18 +318,18 @@ class PreflightArtifactStore:
             descriptor_path=descriptor_path,
             rendered_manifest_path=rendered_path,
             migration_manifest_path=migration_path,
+            production_defaults_path=production_defaults_path,
             image_artifact_sha256=descriptor["image_artifact_sha256"],
             manifest_artifact_sha256=descriptor["manifest_artifact_sha256"],
             rendered_manifest_sha256=descriptor["rendered_manifest_sha256"],
-            migration_manifest_artifact_sha256=descriptor[
-                "migration_manifest_artifact_sha256"
-            ],
+            migration_manifest_artifact_sha256=descriptor["migration_manifest_artifact_sha256"],
             migration_manifest_sha256=descriptor["migration_manifest_sha256"],
             migration_job_name=descriptor["migration_job_name"],
             migration_image_id=descriptor["migration_image_id"],
             migration_plan_sha256=descriptor["migration_plan_sha256"],
             migration_target_revision=descriptor["migration_target_revision"],
             browser_report_schema_sha256=descriptor["browser_report_schema_sha256"],
+            production_defaults_sha256=descriptor["production_defaults_sha256"],
         )
 
     def load_exact(
@@ -362,6 +394,13 @@ class PreflightArtifactStore:
             max_bytes=_MAX_MANIFEST_BYTES,
             require_nonempty=True,
         )
+        production_defaults_read = read_trusted_file(
+            publication.production_defaults_path,
+            service_uid=self.service_uid,
+            private=True,
+            max_bytes=_MAX_DESCRIPTOR_BYTES,
+            require_nonempty=True,
+        )
         try:
             raw = json.loads(descriptor_read.payload, object_pairs_hook=_reject_duplicate_keys)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
@@ -393,6 +432,9 @@ class PreflightArtifactStore:
                 migration_plan_sha256=publication.migration_plan_sha256,
                 migration_target_revision=publication.migration_target_revision,
             )
+            production_defaults = ProductionDefaultsArtifact.from_bytes(
+                production_defaults_read.payload
+            )
         except (UnicodeDecodeError, ValueError) as exc:
             raise PreflightArtifactStoreError("preflight artifact reconstruction failed") from exc
         if (
@@ -400,11 +442,13 @@ class PreflightArtifactStore:
             or descriptor["manifest_artifact_sha256"] != manifests.artifact_digest
             or descriptor["rendered_manifest_sha256"] != manifests.rendered_sha256
             or descriptor["resource_set_digest"] != manifests.resource_set_digest
-            or descriptor["migration_manifest_artifact_sha256"]
-            != migration.artifact_digest
+            or descriptor["migration_manifest_artifact_sha256"] != migration.artifact_digest
             or descriptor["migration_manifest_sha256"] != migration.rendered_sha256
             or descriptor["migration_job_name"] != migration.job_name
             or descriptor["migration_image_id"] != migration.image_id
+            or production_defaults.candidate_sha != candidate_sha
+            or production_defaults.candidate_tree != candidate_tree
+            or descriptor["production_defaults_sha256"] != production_defaults.artifact_digest
         ):
             raise PreflightArtifactStoreError("preflight artifact reconstruction drifted")
         return LoadedPreflightArtifacts(
@@ -412,6 +456,7 @@ class PreflightArtifactStore:
             images=images,
             manifests=manifests,
             migration=migration,
+            production_defaults=production_defaults,
         )
 
     def _ensure_roots(self) -> None:
@@ -427,6 +472,7 @@ def _descriptor(
     images: ImageArtifactSet,
     manifests: ManifestArtifact,
     migration: MigrationManifestArtifact,
+    production_defaults: ProductionDefaultsArtifact,
     migration_plan_sha256: str,
     migration_target_revision: str,
     browser_report_schema_sha256: str,
@@ -444,6 +490,8 @@ def _descriptor(
         or migration.image_id != images.image_digests["loom-control-plane"]
         or migration.migration_plan_sha256 != migration_plan_sha256
         or migration.migration_target_revision != migration_target_revision
+        or production_defaults.candidate_sha != candidate_sha
+        or production_defaults.candidate_tree != candidate_tree
         or manifests.image_identities
         != {
             name: digest
@@ -466,9 +514,10 @@ def _descriptor(
         "migration_plan_sha256": migration_plan_sha256,
         "migration_target_revision": migration_target_revision,
         "mutation_epoch": mutation_epoch,
+        "production_defaults_sha256": production_defaults.artifact_digest,
         "rendered_manifest_sha256": manifests.rendered_sha256,
         "resource_set_digest": manifests.resource_set_digest,
-        "schema_version": 2,
+        "schema_version": 3,
     }
 
 
@@ -488,6 +537,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "migration_plan_sha256",
         "migration_target_revision",
         "mutation_epoch",
+        "production_defaults_sha256",
         "rendered_manifest_sha256",
         "resource_set_digest",
         "schema_version",
@@ -497,7 +547,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
     if (
         set(value) != expected
         or value.get("bundle_digest") != bundle_digest
-        or value.get("schema_version") != 2
+        or value.get("schema_version") != 3
         or type(value.get("schema_version")) is not int
         or type(mutation_epoch) is not int
         or not isinstance(image_digests, Mapping)
@@ -520,6 +570,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "migration_manifest_sha256",
         "migration_plan_sha256",
         "migration_target_revision",
+        "production_defaults_sha256",
         "rendered_manifest_sha256",
         "resource_set_digest",
     )
@@ -539,6 +590,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         migration_plan_sha256=str(value["migration_plan_sha256"]),
         migration_target_revision=str(value["migration_target_revision"]),
         mutation_epoch=mutation_epoch,
+        production_defaults_sha256=str(value["production_defaults_sha256"]),
         rendered_manifest_sha256=str(value["rendered_manifest_sha256"]),
         resource_set_digest=str(value["resource_set_digest"]),
     )

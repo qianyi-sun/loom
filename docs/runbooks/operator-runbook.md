@@ -2155,6 +2155,12 @@ derived from the rollout cluster config, for example `https://yylx.world/staging
 for staging and `https://yylx.world/prod` for first prod. Do not use stdin
 `-`; the source must be replayable as `env:VAR` or `file:PATH`.
 
+Deep preflight also normalizes these secret-free desired values into a
+candidate SHA/tree-bound `production-defaults.json` artifact. Detached
+rehearsal and protected final apply consume that exact digest-addressed file;
+neither stage may reopen the environment profile or discover provider defaults
+after backup.
+
 Step 15 defaults to `user-token` mode. In that mode, pass a replayable
 `--smoke-api-token env:VAR` or `--smoke-api-token file:PATH` source; the
 legacy `LOOM_SMOKE_API_TOKEN` environment variable remains an interactive

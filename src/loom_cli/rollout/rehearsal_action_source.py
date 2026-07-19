@@ -20,6 +20,7 @@ from loom_cli.rollout.migration_manifest_readiness import MigrationManifestArtif
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
+from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
 from loom_cli.rollout.rehearsal_readiness import (
     REHEARSAL_CHECK_IDS,
     RehearsalAction,
@@ -336,6 +337,7 @@ class RehearsalActionSource:
     image_artifacts: Callable[[], ImageArtifactSet]
     manifest_artifacts: Callable[[], ManifestArtifact]
     migration_artifacts: Callable[[], MigrationManifestArtifact]
+    production_defaults_artifacts: Callable[[], ProductionDefaultsArtifact]
     artifact_store: PreflightArtifactStore
     migration_plan_sha256: str
     migration_target_revision: str
@@ -364,6 +366,7 @@ class RehearsalActionSource:
         artifacts = self.image_artifacts()
         manifests = self.manifest_artifacts()
         migration = self.migration_artifacts()
+        production_defaults = self.production_defaults_artifacts()
         isolation_id = self._isolation_id(
             candidate,
             checkpoint,
@@ -378,6 +381,7 @@ class RehearsalActionSource:
             artifacts=artifacts,
             manifests=manifests,
             migration=migration,
+            production_defaults=production_defaults,
         )
         return isolation_id, plan.plan_digest
 
@@ -397,6 +401,7 @@ class RehearsalActionSource:
             artifacts=self.image_artifacts(),
             manifests=self.manifest_artifacts(),
             migration=self.migration_artifacts(),
+            production_defaults=self.production_defaults_artifacts(),
         )
         if plan.plan_digest != expected_digest:
             raise ValueError("rehearsal plan identity drifted")
@@ -431,6 +436,7 @@ class RehearsalActionSource:
         artifacts: ImageArtifactSet,
         manifests: ManifestArtifact,
         migration: MigrationManifestArtifact,
+        production_defaults: ProductionDefaultsArtifact,
     ) -> RehearsalPlan:
         if (
             checkpoint.environment != "staging"
@@ -446,6 +452,7 @@ class RehearsalActionSource:
             images=artifacts,
             manifests=manifests,
             migration=migration,
+            production_defaults=production_defaults,
             migration_plan_sha256=self.migration_plan_sha256,
             migration_target_revision=self.migration_target_revision,
             browser_report_schema_sha256=self.browser_report_schema_sha256,

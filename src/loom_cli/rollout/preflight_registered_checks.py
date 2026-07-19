@@ -96,6 +96,10 @@ from loom_cli.rollout.preflight_contract import (
     SecretRedactionPolicy,
     StageCapability,
 )
+from loom_cli.rollout.production_defaults_readiness import (
+    ProductionDefaultsArtifact,
+    build_production_defaults_artifact,
+)
 from loom_cli.rollout.readonly_authority import (
     ReadonlyAuthorityEvidence,
     readonly_authority_policy_digest,
@@ -1951,6 +1955,7 @@ def build_preflight_artifact_publication_check(
     image_artifact: Callable[[], ImageArtifactSet],
     manifest_artifact: Callable[[], ManifestArtifact],
     migration_manifest_artifact: Callable[[], MigrationManifestArtifact],
+    production_defaults_artifact: Callable[[], ProductionDefaultsArtifact],
     candidate_sha: str,
     candidate_tree: str,
     mutation_epoch: int,
@@ -1978,6 +1983,7 @@ def build_preflight_artifact_publication_check(
                 images=image_artifact(),
                 manifests=manifest_artifact(),
                 migration=migration_manifest_artifact(),
+                production_defaults=production_defaults_artifact(),
                 migration_plan_sha256=migration_plan_sha256,
                 migration_target_revision=migration_target_revision,
                 browser_report_schema_sha256=browser_report_schema_sha256,
@@ -1993,6 +1999,7 @@ def build_preflight_artifact_publication_check(
                 "rendered-manifest-digest": publication.rendered_manifest_sha256,
                 "migration-manifest-digest": publication.migration_manifest_sha256,
                 "migration-artifact-digest": publication.migration_manifest_artifact_sha256,
+                "production-defaults-digest": publication.production_defaults_sha256,
             },
         )
 
@@ -2008,6 +2015,7 @@ def build_preflight_artifact_publication_check(
                 "migration.plan",
                 "migration.manifest",
                 "browser.runtime",
+                "production-defaults.plan",
             ),
             mutation_class=MutationClass.NONE,
             input_keys=(
@@ -2024,6 +2032,7 @@ def build_preflight_artifact_publication_check(
                 EvidenceField("rendered-manifest-digest", "sha256"),
                 EvidenceField("migration-manifest-digest", "sha256"),
                 EvidenceField("migration-artifact-digest", "sha256"),
+                EvidenceField("production-defaults-digest", "sha256"),
             ),
             timeout_seconds=60,
             freshness_ttl_seconds=3600,
@@ -2032,7 +2041,7 @@ def build_preflight_artifact_publication_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v2",
+        implementation_version="v3",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -2047,6 +2056,81 @@ def _empty_artifact_publication_probe() -> CheckProbe:
             "rendered-manifest-digest": "0" * 64,
             "migration-manifest-digest": "0" * 64,
             "migration-artifact-digest": "0" * 64,
+            "production-defaults-digest": "0" * 64,
+        },
+    )
+
+
+def build_production_defaults_plan_check(
+    *,
+    profile_path: Path,
+    candidate_sha: str,
+    candidate_tree: str,
+    image_tag: str,
+    environment: str,
+    artifact_sink: Callable[[ProductionDefaultsArtifact], None] | None = None,
+) -> RegisteredCheck:
+    """Build the exact secret-free production-defaults plan in Tier 1."""
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != candidate_sha
+            or context.bindings["candidate.tree"] != candidate_tree
+            or context.bindings["environment"] != environment
+        ):
+            return _empty_production_defaults_probe()
+        try:
+            artifact = build_production_defaults_artifact(
+                profile_path,
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+                image_tag=image_tag,
+                environment=environment,
+            )
+        except (OSError, ValueError):
+            return _empty_production_defaults_probe()
+        if artifact_sink is not None:
+            artifact_sink(artifact)
+        return CheckProbe(
+            passed=True,
+            evidence={
+                "artifact-digest": artifact.artifact_digest,
+                "provider-count": len(artifact.providers),
+                "rate-card-sync": artifact.yibuapi_sync is not None,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="production-defaults.plan",
+            failure_code="production-defaults.plan.invalid",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("candidate.identity",),
+            mutation_class=MutationClass.NONE,
+            input_keys=("candidate.sha", "candidate.tree", "environment"),
+            evidence_schema=(
+                EvidenceField("artifact-digest", "sha256"),
+                EvidenceField("provider-count", "integer"),
+                EvidenceField("rate-card-sync", "boolean"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=3600,
+            remediation="restore valid exact production defaults in the environment profile",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_production_defaults_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "artifact-digest": "0" * 64,
+            "provider-count": 0,
+            "rate-card-sync": False,
         },
     )
 
@@ -2639,6 +2723,7 @@ __all__ = [
     "build_migration_manifest_check",
     "build_migration_plan_check",
     "build_preflight_artifact_publication_check",
+    "build_production_defaults_plan_check",
     "build_rehearsal_checks",
     "build_runner_install_check",
     "build_staging_baseline_checks",

@@ -123,6 +123,14 @@ baseline from hiding mutation-epoch or infrastructure drift. Build-once image
 artifacts remain owned by their exact candidate session and are re-inspected,
 not rebuilt, when the refreshed checks consume them.
 
+Tier 1 also normalizes the environment profile's rate-card sync and hosted
+provider pricing defaults into one canonical, secret-free
+`ProductionDefaultsArtifact`. Provider ordering, optional sync inputs,
+candidate SHA/tree and environment are digest-bound. The artifact is published
+beside the rendered and migration manifests, so rehearsal and final protected
+apply consume the same desired values instead of reopening an ambient or
+mutable environment profile after backup.
+
 `PreflightRuntimeSources` is the typed composition root for those checks. It
 accepts only the low-level command/probe boundaries and exact expected
 identities, derives every context input from the same registered-check helpers,
@@ -460,7 +468,8 @@ Before those actions can run, `FinalGatePlan` joins the driver envelope, the
 digest-addressed attestation, and the build-once preflight artifact publication
 into one strict canonical record. It binds request/attempt, candidate/tree,
 starting epoch, image digests, rendered manifest, migration plan, browser
-schema, restore-verified backup lease and snapshot, environment/route, runner
+schema, production-defaults artifact, restore-verified backup lease and snapshot,
+environment/route, runner
 source/install/config, secret metadata fingerprints, GB10 probe identities,
 and every attested implementation/evidence digest. The service publishes this
 record once as a mode-`0600`, single-link, no-follow file beneath the existing
@@ -488,7 +497,8 @@ attestation to equal the digest-addressed attestation it reloads.
 `FinalGateActionSource` obtains the artifact bundle identity only from the
 immutable passing `artifacts.publish` execution in the request's Tier 0–3
 rehearsal. Its implementation and evidence hashes must match the attestation,
-and all four artifact digests must match the digest-addressed publication.
+and every image/manifest/migration/production-defaults artifact digest must
+match the digest-addressed publication.
 Only then does it publish the plan and construct the complete six-action map
 around the fixed installed helper. Directory scanning, newest-artifact
 selection, ambient argv and partial action maps are not accepted.

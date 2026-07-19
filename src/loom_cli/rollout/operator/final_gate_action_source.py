@@ -178,6 +178,7 @@ class FinalGateActionSource:
             "rendered-manifest-digest": publication.rendered_manifest_sha256,
             "migration-manifest-digest": publication.migration_manifest_sha256,
             "migration-artifact-digest": publication.migration_manifest_artifact_sha256,
+            "production-defaults-digest": publication.production_defaults_sha256,
         }
         if dict(execution.evidence) != expected_evidence:
             raise ValueError("final gate artifact publication drifted from evidence")

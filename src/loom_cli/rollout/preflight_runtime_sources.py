@@ -63,6 +63,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_migration_manifest_check,
     build_migration_plan_check,
     build_preflight_artifact_publication_check,
+    build_production_defaults_plan_check,
     build_readonly_authority_check,
     build_runner_install_check,
     build_staging_baseline_checks,
@@ -77,6 +78,7 @@ from loom_cli.rollout.preflight_runtime import (
     RehearsalActionFactory,
     RehearsalIdentityFactory,
 )
+from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
 from loom_cli.rollout.readonly_authority import (
     ReadonlyAuthorityEvidence,
     readonly_authority_policy_digest,
@@ -218,10 +220,12 @@ class PreflightRuntimeSources:
         manifest_artifacts: dict[str, ManifestArtifact] = {}
         migration_artifacts: dict[str, MigrationPlanEvidence] = {}
         migration_manifest_artifacts: dict[str, MigrationManifestArtifact] = {}
+        production_defaults_artifacts: dict[str, ProductionDefaultsArtifact] = {}
         manifest_session: ManifestRenderSession | None = None
         if self.loaded_artifacts is not None:
             manifest_artifacts["exact"] = self.loaded_artifacts.manifests
             migration_manifest_artifacts["exact"] = self.loaded_artifacts.migration
+            production_defaults_artifacts["exact"] = self.loaded_artifacts.production_defaults
             manifest_session = ManifestRenderSession(
                 self.render_manifest,
                 self.server_dry_run,
@@ -265,6 +269,15 @@ class PreflightRuntimeSources:
             except KeyError as exc:
                 raise ValueError("preflight migration manifest was not produced") from exc
 
+        def capture_production_defaults(artifact: ProductionDefaultsArtifact) -> None:
+            production_defaults_artifacts["exact"] = artifact
+
+        def exact_production_defaults() -> ProductionDefaultsArtifact:
+            try:
+                return production_defaults_artifacts["exact"]
+            except KeyError as exc:
+                raise ValueError("preflight production defaults were not produced") from exc
+
         def groups() -> tuple[
             tuple[RegisteredCheck, ...],
             tuple[RegisteredCheck, ...],
@@ -280,6 +293,8 @@ class PreflightRuntimeSources:
                 exact_migration=exact_migration,
                 capture_migration_manifest=capture_migration_manifest,
                 exact_migration_manifest=exact_migration_manifest,
+                capture_production_defaults=capture_production_defaults,
+                exact_production_defaults=exact_production_defaults,
                 mutation_epoch=mutation_epoch,
             )
             tier2 = build_staging_baseline_checks(
@@ -392,6 +407,8 @@ class PreflightRuntimeSources:
         exact_migration: Callable[[], tuple[str, str]],
         capture_migration_manifest: Callable[[MigrationManifestArtifact], None],
         exact_migration_manifest: Callable[[], MigrationManifestArtifact],
+        capture_production_defaults: Callable[[ProductionDefaultsArtifact], None],
+        exact_production_defaults: Callable[[], ProductionDefaultsArtifact],
         mutation_epoch: int,
     ) -> tuple[RegisteredCheck, ...]:
         image_checks = build_image_preflight_checks(
@@ -424,6 +441,14 @@ class PreflightRuntimeSources:
                 candidate_root=self.candidate_root,
                 expected_candidate_sha=self.candidate.resolved_sha,
             ),
+            build_production_defaults_plan_check(
+                profile_path=self.candidate_root / "deploy/environment-state/staging.toml",
+                candidate_sha=self.candidate.resolved_sha,
+                candidate_tree=self.candidate.resolved_tree or "",
+                image_tag=self.candidate.image_tag,
+                environment=self.config.environment,
+                artifact_sink=capture_production_defaults,
+            ),
             *image_checks,
             *manifest_checks,
             build_migration_manifest_check(
@@ -450,6 +475,7 @@ class PreflightRuntimeSources:
                 image_artifact=image_session.verify,
                 manifest_artifact=exact_manifest,
                 migration_manifest_artifact=exact_migration_manifest,
+                production_defaults_artifact=exact_production_defaults,
                 candidate_sha=self.candidate.resolved_sha,
                 candidate_tree=self.candidate.resolved_tree or "",
                 mutation_epoch=mutation_epoch,

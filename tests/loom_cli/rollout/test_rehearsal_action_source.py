@@ -27,6 +27,7 @@ from loom_cli.rollout.rehearsal_action_source import (
     RehearsalSmokeAuthority,
 )
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
+from tests.loom_cli.rollout.test_preflight_artifact_store import _production_defaults
 
 
 def _candidate() -> CandidateBinding:
@@ -138,6 +139,7 @@ def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
         image_artifacts=_artifacts,
         manifest_artifacts=_manifests,
         migration_artifacts=_migration,
+        production_defaults_artifacts=lambda: _production_defaults(candidate_tree="b" * 40),
         artifact_store=PreflightArtifactStore(tmp_path / "state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
@@ -198,6 +200,7 @@ def test_isolation_identity_changes_with_browser_contract(tmp_path: Path) -> Non
         image_artifacts=_artifacts,
         manifest_artifacts=_manifests,
         migration_artifacts=_migration,
+        production_defaults_artifacts=lambda: _production_defaults(candidate_tree="b" * 40),
         artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
@@ -219,6 +222,7 @@ def test_isolation_identity_changes_with_smoke_authority(tmp_path: Path) -> None
         image_artifacts=_artifacts,
         manifest_artifacts=_manifests,
         migration_artifacts=_migration,
+        production_defaults_artifacts=lambda: _production_defaults(candidate_tree="b" * 40),
         artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
