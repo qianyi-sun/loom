@@ -53,6 +53,20 @@ def _artifact() -> LegacyRow:
     )
 
 
+def _pinned_benchmark() -> LegacyRow:
+    return LegacyRow(
+        table="artifacts",
+        row_id=ARTIFACT_ID,
+        team_id=TEAM_ID,
+        data_class=DataClass.BENCHMARK,
+        owner_kind=OwnerKind.BENCHMARK,
+        owner_id=str(ARTIFACT_ID),
+        created_at=NOW,
+        source_fingerprint="b" * 64,
+        pinned=True,
+    )
+
+
 def _object() -> LegacyObject:
     return LegacyObject(
         row_table="artifacts",
@@ -103,6 +117,26 @@ def test_artifact_without_exact_object_evidence_fails_closed() -> None:
 
     with pytest.raises(LegacyClassificationError, match="lacks exact object evidence"):
         plan.require_applicable()
+
+
+def test_pinned_legacy_object_is_registered_without_gc_expiry() -> None:
+    plan = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        planned_at=NOW,
+        rows=[_pinned_benchmark()],
+        objects=[_object()],
+    )
+
+    plan.require_applicable()
+    assert len(plan.authorities) == 1
+    authority = plan.authorities[0]
+    assert authority.data_class is DataClass.BENCHMARK
+    assert authority.pinned is True
+    assert authority.expires_at is None
+    document = classification_plan_document(plan)
+    assert document["authorities"][0]["pinned"] is True  # type: ignore[index]
+    assert document["authorities"][0]["expires_at"] is None  # type: ignore[index]
 
 
 def test_unknown_object_owner_and_duplicate_identity_are_reported_together() -> None:

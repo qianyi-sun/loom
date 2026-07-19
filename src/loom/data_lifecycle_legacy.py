@@ -39,6 +39,7 @@ class LegacyRow:
     owner_id: str
     created_at: datetime
     source_fingerprint: str
+    pinned: bool = False
 
     def __post_init__(self) -> None:
         if self.table not in _ROW_TABLES:
@@ -97,7 +98,14 @@ class LegacyAuthority:
     owner_kind: OwnerKind
     owner_id: str
     created_at: datetime
-    expires_at: datetime
+    expires_at: datetime | None
+    pinned: bool
+
+    def __post_init__(self) -> None:
+        if self.pinned == (self.expires_at is not None):
+            raise ValueError(
+                "pinned legacy authorities require no expiry; ephemeral authorities require one"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +165,8 @@ def _payload(
                 "owner_kind": item.owner_kind.value,
                 "owner_id": item.owner_id,
                 "created_at": item.created_at.isoformat(),
-                "expires_at": item.expires_at.isoformat(),
+                "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+                "pinned": item.pinned,
             }
             for item in authorities
         ],
@@ -171,6 +180,7 @@ def _payload(
                 "owner_id": item.owner_id,
                 "created_at": item.created_at.isoformat(),
                 "source_fingerprint": item.source_fingerprint,
+                "pinned": item.pinned,
             }
             for item in rows
         ],
@@ -224,7 +234,8 @@ def build_legacy_classification_plan(
             owner_kind=row.owner_kind,
             owner_id=row.owner_id,
             created_at=row.created_at,
-            expires_at=row.created_at + STAGING_EPHEMERAL_TTL,
+            expires_at=None if row.pinned else row.created_at + STAGING_EPHEMERAL_TTL,
+            pinned=row.pinned,
         )
         existing = authority_specs.get(authority_id)
         if existing is not None and existing != authority:

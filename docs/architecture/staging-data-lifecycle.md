@@ -102,6 +102,13 @@ S3/MinIO credentials. Missing owners, cross-team links, incomplete bucket/key
 metadata, and digest/size/version drift are returned together as blockers.
 There is no prefix fallback.
 
+Legacy benchmark, catalog, bootstrap, system, and explicitly
+`shared_reusable` artifacts follow the same exact-object inspection path, but
+the classifier registers them as pinned authorities with no expiry. This keeps
+their keys visible to referential reconciliation without ever making them
+eligible for the seven-day execution-history purge. An unknown retention class
+or an object whose exact identity cannot be proven still fails closed.
+
 The inventory digest excludes wall-clock report time, but binds every row
 fingerprint, exact object identity, retention authority, scope, and current
 mutation epoch. `apply` requires the operator to echo that digest and provide a
@@ -199,13 +206,18 @@ python scripts/ops/staging_data_lifecycle_gc.py inventory \
   --bucket artifacts
 ```
 
-The fixed `loom-staging-data-lifecycle.timer` runs every five minutes. Its
-oneshot first publishes capacity from the same exact bucket inventory, then
-uses the `auto` action: no eligible owners is a journal-free no-op; any
-classification/reconciliation blocker makes the unit fail and alert; otherwise
-the ordinary epoch-bound two-phase executor performs the deletion. The service
-uses the `loom-rollout` identity, a read-only `/data` view, no shell or sudo,
-and the standard secret-bearing environment file. Automatic policy authority
+The staging-only `loom-staging-data-lifecycle` CronJob runs every five minutes
+inside the protected staging namespace. It first publishes capacity from the
+same exact bucket inventory, then uses the `auto` action: no eligible owners is
+a journal-free no-op; any classification/reconciliation blocker makes the job
+fail and alert; otherwise the ordinary epoch-bound two-phase executor performs
+the deletion. The pod has no service-account token, uses a read-only root
+filesystem, drops every Linux capability, and receives only its dedicated
+lifecycle database and object-store credentials. A namespace-scoped
+NetworkPolicy limits egress to the selected Postgres and MinIO pods. The
+capacity PVC mounts are read-only and all configured data filesystems must be
+measured; missing or duplicate filesystem authority fails closed. Development
+and production renders omit the CronJob entirely. Automatic policy authority
 does not weaken the manual digest-approved `apply` or exact failed-run `resume`
 paths.
 

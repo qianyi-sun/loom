@@ -513,7 +513,7 @@ def test_legacy_artifact_classification_is_digest_approved_and_epoch_bound(
                 text(
                     "INSERT INTO artifacts "
                     "(id, artifact_type, name, team_id, content_hash, storage, created_at) "
-                    "VALUES (:id,'trajectory','legacy',:team_id,:content_hash,"
+                    "VALUES (:id,'benchmark','legacy',:team_id,:content_hash,"
                     "CAST(:storage AS jsonb),:created_at)"
                 ),
                 {
@@ -539,6 +539,9 @@ def test_legacy_artifact_classification_is_digest_approved_and_epoch_bound(
         plan.require_applicable()
         assert [row.row_id for row in plan.rows] == [artifact_id]
         assert plan.objects[0].content_sha256 == object_sha
+        assert plan.authorities[0].data_class is DataClass.BENCHMARK
+        assert plan.authorities[0].pinned is True
+        assert plan.authorities[0].expires_at is None
 
         with pytest.raises(RuntimeError, match="digest"):
             classifier.apply(
@@ -566,8 +569,16 @@ def test_legacy_artifact_classification_is_digest_approved_and_epoch_bound(
                 ),
                 {"id": artifact_authority},
             ).one()
+            pinned_authority = connection.execute(
+                text(
+                    "SELECT data_class, owner_kind, pinned, expires_at "
+                    "FROM data_lifecycle_authorities WHERE id=:id"
+                ),
+                {"id": artifact_authority},
+            ).one()
         assert state.epoch == plan.mutation_epoch + 1
         assert tuple(registered) == (artifact_authority, object_sha, len(object_body))
+        assert tuple(pinned_authority) == ("benchmark", "benchmark", True, None)
     finally:
         with engine.begin() as connection:
             authority_ids = list(

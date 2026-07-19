@@ -61,6 +61,7 @@ def _row(
     owner_id: str,
     created_at: datetime,
     source_values: Iterable[object],
+    pinned: bool = False,
 ) -> LegacyRow:
     return LegacyRow(
         table=table,
@@ -71,6 +72,7 @@ def _row(
         owner_id=owner_id,
         created_at=created_at,
         source_fingerprint=_fingerprint(source_values),
+        pinned=pinned,
     )
 
 
@@ -174,10 +176,24 @@ def _load_rows(
         retention_class = (
             item.retention.get("class") if isinstance(item.retention, dict) else None
         )
-        if item.artifact_type in {"benchmark", "catalog", "bootstrap", "system"} or (
-            retention_class == "shared_reusable"
-        ):
-            blockers.append(f"legacy artifact {item.id} requires pinned classification")
+        pinned = item.artifact_type in {
+            "benchmark",
+            "catalog",
+            "bootstrap",
+            "system",
+        } or retention_class == "shared_reusable"
+        if item.artifact_type == "benchmark":
+            data_class = DataClass.BENCHMARK
+            owner_kind = OwnerKind.BENCHMARK
+        elif item.artifact_type == "catalog":
+            data_class = DataClass.CATALOG
+            owner_kind = OwnerKind.SYSTEM
+        elif item.artifact_type in {"bootstrap", "system"}:
+            data_class = DataClass.SYSTEM
+            owner_kind = OwnerKind.SYSTEM
+        else:
+            data_class = DataClass.ARTIFACT
+            owner_kind = OwnerKind.ARTIFACT
         if item.batch_id is not None and item.batch_team_id != item.team_id:
             blockers.append(f"legacy artifact {item.id} has missing or cross-team batch owner")
         if item.trial_id is not None and item.trial_team_id != item.team_id:
@@ -186,11 +202,12 @@ def _load_rows(
             table="artifacts",
             row_id=item.id,
             team_id=item.team_id,
-            data_class=DataClass.ARTIFACT,
-            owner_kind=OwnerKind.ARTIFACT,
+            data_class=data_class,
+            owner_kind=owner_kind,
             owner_id=str(item.id),
             created_at=item.created_at,
             source_values=item,
+            pinned=pinned,
         )
         rows.append(row)
         artifacts.append((row, item))
@@ -343,7 +360,7 @@ class SqlAlchemyLegacyClassifier:
                         "(id, environment, namespace, team_id, data_class, owner_kind, "
                         "owner_id, created_at, expires_at, pinned, state, metadata) VALUES "
                         "(:id,:environment,:namespace,:team_id,:data_class,:owner_kind,"
-                        ":owner_id,:created_at,:expires_at,false,'active',"
+                        ":owner_id,:created_at,:expires_at,:pinned,'active',"
                         "CAST(:metadata AS jsonb)) ON CONFLICT DO NOTHING"
                     ),
                     {
@@ -356,6 +373,7 @@ class SqlAlchemyLegacyClassifier:
                         "owner_id": authority.owner_id,
                         "created_at": authority.created_at,
                         "expires_at": authority.expires_at,
+                        "pinned": authority.pinned,
                         "metadata": json.dumps(
                             {
                                 "classification": "legacy-staging-v1",
@@ -383,7 +401,7 @@ class SqlAlchemyLegacyClassifier:
                     authority.owner_id,
                     authority.created_at,
                     authority.expires_at,
-                    False,
+                    authority.pinned,
                     "active",
                 )
                 if existing is None or tuple(existing) != expected_authority:
