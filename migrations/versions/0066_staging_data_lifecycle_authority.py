@@ -31,6 +31,7 @@ def upgrade() -> None:
         sa.Column("epoch", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
         sa.Column("reason", sa.Text(), nullable=False, server_default=sa.text("'bootstrap'")),
         sa.Column("request_id", sa.Text(), nullable=True),
+        sa.Column("evidence_sha256", sa.Text(), nullable=True),
         sa.Column(
             "updated_at",
             postgresql.TIMESTAMP(timezone=True),
@@ -40,6 +41,48 @@ def upgrade() -> None:
         sa.CheckConstraint("environment = 'staging'", name="staging_mutation_epochs_env_check"),
         sa.CheckConstraint("namespace <> ''", name="staging_mutation_epochs_namespace_check"),
         sa.CheckConstraint("epoch >= 0", name="staging_mutation_epochs_epoch_check"),
+        sa.CheckConstraint(
+            "reason IN ('bootstrap','rollout_apply','lifecycle_gc','object_rewrite','rollback')",
+            name="staging_mutation_epochs_reason_check",
+        ),
+        sa.CheckConstraint(
+            "(reason = 'bootstrap' AND request_id IS NULL AND evidence_sha256 IS NULL) OR "
+            "(reason <> 'bootstrap' AND request_id ~ '^[a-z0-9][a-z0-9-]{7,79}$' "
+            "AND evidence_sha256 ~ '^[0-9a-f]{64}$')",
+            name="staging_mutation_epochs_evidence_check",
+        ),
+    )
+    op.create_table(
+        "staging_mutation_epoch_events",
+        sa.Column("environment", sa.Text(), nullable=False),
+        sa.Column("namespace", sa.Text(), nullable=False),
+        sa.Column("epoch", sa.BigInteger(), nullable=False),
+        sa.Column("mutation_class", sa.Text(), nullable=False),
+        sa.Column("request_id", sa.Text(), nullable=False),
+        sa.Column("evidence_sha256", sa.Text(), nullable=False),
+        sa.Column("occurred_at", postgresql.TIMESTAMP(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint(
+            "environment",
+            "namespace",
+            "epoch",
+            name="staging_mutation_epoch_events_pkey",
+        ),
+        sa.CheckConstraint(
+            "environment = 'staging'",
+            name="staging_mutation_epoch_events_env_check",
+        ),
+        sa.CheckConstraint(
+            "namespace <> '' AND epoch > 0",
+            name="staging_mutation_epoch_events_identity_check",
+        ),
+        sa.CheckConstraint(
+            "mutation_class IN ('rollout_apply','lifecycle_gc','object_rewrite','rollback')",
+            name="staging_mutation_epoch_events_class_check",
+        ),
+        sa.CheckConstraint(
+            "request_id ~ '^[a-z0-9][a-z0-9-]{7,79}$' AND evidence_sha256 ~ '^[0-9a-f]{64}$'",
+            name="staging_mutation_epoch_events_evidence_check",
+        ),
     )
     op.create_table(
         "data_lifecycle_authorities",
@@ -256,6 +299,7 @@ def downgrade() -> None:
             IF EXISTS (SELECT 1 FROM data_lifecycle_authorities)
                OR EXISTS (SELECT 1 FROM data_lifecycle_gc_runs)
                OR EXISTS (SELECT 1 FROM staging_mutation_epochs)
+               OR EXISTS (SELECT 1 FROM staging_mutation_epoch_events)
             THEN
                 RAISE EXCEPTION 'cannot downgrade lifecycle authority while deployment data remains';
             END IF;
@@ -278,4 +322,5 @@ def downgrade() -> None:
     op.drop_table("data_lifecycle_objects")
     op.drop_index("data_lifecycle_authorities_gc_idx", table_name="data_lifecycle_authorities")
     op.drop_table("data_lifecycle_authorities")
+    op.drop_table("staging_mutation_epoch_events")
     op.drop_table("staging_mutation_epochs")

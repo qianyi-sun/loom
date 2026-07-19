@@ -43,37 +43,47 @@ class Team(Base):
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     disabled_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     submissions_paused_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     submissions_paused_reason: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
 
 
 class TeamQuota(Base):
     __tablename__ = "team_quotas"
     team_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id"), primary_key=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id"),
+        primary_key=True,
     )
     fair_share_weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     # Admin's ceiling: the scheduler stops re-claiming a trial once
     # `attempt_count >= max_attempts_ceiling`. Semantically distinct from
     # TrialConfig.retry.max_attempts (submitter's requested count). See #401.
     max_attempts_ceiling: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=3,
+        Integer,
+        nullable=False,
+        default=3,
     )
     in_flight_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Legacy per-team SPDX metadata. This field is retained for API/backfill
     # compatibility; license values no longer gate task selection or submit.
     license_allowlist: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False,
+        ARRAY(Text),
+        nullable=False,
         server_default=text(
             "ARRAY['MIT', 'Apache-2.0', 'BSD-3-Clause', 'CC-BY-4.0']::text[]",
         ),
@@ -81,10 +91,12 @@ class TeamQuota(Base):
     # TaskSet quota columns (#242 sub-plan 7). NULL means "use global
     # default from loom-schema.toml"; non-NULL overrides per-team.
     taskset_max_count: Mapped[int | None] = mapped_column(
-        Integer, nullable=True,
+        Integer,
+        nullable=True,
     )
     taskset_max_storage_bytes: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True,
+        BigInteger,
+        nullable=True,
     )
     # SSRF defense layer 3 opt-in (cluster-deploy.md §Secrets/SSRF).
     # When False (default for `loom cluster`), `POST /provider-connections`
@@ -93,7 +105,9 @@ class TeamQuota(Base):
     # RFC1918 + ULA are permitted; loopback + link-local stay rejected
     # unconditionally.
     allow_private_endpoints: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"),
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
     )
 
 
@@ -111,6 +125,16 @@ class StagingMutationEpoch(Base):
             name="staging_mutation_epochs_namespace_check",
         ),
         CheckConstraint("epoch >= 0", name="staging_mutation_epochs_epoch_check"),
+        CheckConstraint(
+            "reason IN ('bootstrap','rollout_apply','lifecycle_gc','object_rewrite','rollback')",
+            name="staging_mutation_epochs_reason_check",
+        ),
+        CheckConstraint(
+            "(reason = 'bootstrap' AND request_id IS NULL AND evidence_sha256 IS NULL) OR "
+            "(reason <> 'bootstrap' AND request_id ~ '^[a-z0-9][a-z0-9-]{7,79}$' "
+            "AND evidence_sha256 ~ '^[0-9a-f]{64}$')",
+            name="staging_mutation_epochs_evidence_check",
+        ),
     )
     environment: Mapped[str] = mapped_column(Text, primary_key=True)
     namespace: Mapped[str] = mapped_column(Text, nullable=False)
@@ -127,10 +151,45 @@ class StagingMutationEpoch(Base):
         default="bootstrap",
     )
     request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+
+
+class StagingMutationEpochEvent(Base):
+    """Append-only evidence for one successful protected mutation CAS."""
+
+    __tablename__ = "staging_mutation_epoch_events"
+    __table_args__ = (
+        CheckConstraint(
+            "environment = 'staging'",
+            name="staging_mutation_epoch_events_env_check",
+        ),
+        CheckConstraint(
+            "namespace <> '' AND epoch > 0",
+            name="staging_mutation_epoch_events_identity_check",
+        ),
+        CheckConstraint(
+            "mutation_class IN ('rollout_apply','lifecycle_gc','object_rewrite','rollback')",
+            name="staging_mutation_epoch_events_class_check",
+        ),
+        CheckConstraint(
+            "request_id ~ '^[a-z0-9][a-z0-9-]{7,79}$' AND evidence_sha256 ~ '^[0-9a-f]{64}$'",
+            name="staging_mutation_epoch_events_evidence_check",
+        ),
+    )
+    environment: Mapped[str] = mapped_column(Text, primary_key=True)
+    namespace: Mapped[str] = mapped_column(Text, primary_key=True)
+    epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    mutation_class: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
     )
 
 
@@ -381,7 +440,8 @@ class User(Base):
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     password_set_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     status: Mapped[str] = mapped_column(
         Text,
@@ -390,16 +450,23 @@ class User(Base):
         default="pending_setup",
     )
     disabled_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     is_platform_admin: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"), default=False,
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+        default=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     last_login_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
 
 
@@ -412,14 +479,20 @@ class TeamMembership(Base):
         ),
     )
     team_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="CASCADE"),
+        primary_key=True,
     )
     user_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
     )
     role: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
@@ -446,7 +519,9 @@ class TeamInvite(Base):
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     team_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="CASCADE"),
+        nullable=False,
     )
     email: Mapped[str] = mapped_column(Text, nullable=False)
     allowed_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -463,10 +538,14 @@ class TeamInvite(Base):
     accepted_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_by_actor: Mapped[str] = mapped_column(Text, nullable=False)
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     last_sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
@@ -479,10 +558,14 @@ class UserSession(Base):
     __tablename__ = "user_sessions"
     session_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
     user_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
     )
     current_team_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="SET NULL"),
+        nullable=True,
     )
     csrf_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
@@ -495,7 +578,9 @@ class LoginChallenge(Base):
     __tablename__ = "login_challenges"
     challenge_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
     user_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
     )
     issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
@@ -516,14 +601,19 @@ class PendingTeamRegistration(Base):
         default="pending",
     )
     requested_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     reviewed_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     approved_team_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id"),
+        nullable=True,
     )
     source_ip_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_agent_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -559,7 +649,9 @@ class UserRegistrationRequest(Base):
     username: Mapped[str] = mapped_column(Text, nullable=False)
     username_normalized: Mapped[str] = mapped_column(Text, nullable=False)
     team_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="CASCADE"),
+        nullable=False,
     )
     role: Mapped[str] = mapped_column(Text, nullable=False, default="member")
     status: Mapped[str] = mapped_column(
@@ -569,15 +661,21 @@ class UserRegistrationRequest(Base):
         default="pending",
     )
     requested_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     reviewed_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     setup_token_prefix: Mapped[str | None] = mapped_column(Text, nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -607,7 +705,9 @@ class AccountActionToken(Base):
     token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     purpose: Mapped[str] = mapped_column(Text, nullable=False)
     user_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
     )
     registration_request_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -620,7 +720,9 @@ class AccountActionToken(Base):
         nullable=True,
     )
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
@@ -647,7 +749,9 @@ class PasswordResetRequest(Base):
     username: Mapped[str] = mapped_column(Text, nullable=False)
     username_normalized: Mapped[str] = mapped_column(Text, nullable=False)
     user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     status: Mapped[str] = mapped_column(
         Text,
@@ -656,11 +760,15 @@ class PasswordResetRequest(Base):
         default="pending",
     )
     requested_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     reviewed_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_token_prefix: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -673,7 +781,9 @@ class AdminAuditEvent(Base):
     __tablename__ = "admin_audit_events"
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     actor: Mapped[str] = mapped_column(Text, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
@@ -709,18 +819,24 @@ class Task(Base):
     license: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Parent benchmark, NULL for hand-authored tasks.
     benchmark_id: Mapped[str | None] = mapped_column(
-        Text, ForeignKey("benchmarks.id"), nullable=True,
+        Text,
+        ForeignKey("benchmarks.id"),
+        nullable=True,
     )
     # Parent user TaskSet (#242 sub-plan 3). NULL for benchmark/hand-authored.
     task_set_id: Mapped[str | None] = mapped_column(
-        Text, ForeignKey("task_sets.id", ondelete="SET NULL"), nullable=True,
+        Text,
+        ForeignKey("task_sets.id", ondelete="SET NULL"),
+        nullable=True,
     )
     # PR-1 (benchmark series): open-ended key→value metadata. Adapters
     # populate from upstream (year/exam/difficulty/topic/…). The SPA
     # uses these for the tag filter UI; the backend exposes a
     # discovery endpoint that walks distinct values per benchmark.
     tags: Mapped[dict[str, str]] = mapped_column(
-        JSONB, nullable=False, server_default="{}",
+        JSONB,
+        nullable=False,
+        server_default="{}",
     )
     # Immutable upstream identity for benchmark-imported tasks. Legacy tasks
     # default to an empty object; profile-specific importers populate it.
@@ -728,12 +844,15 @@ class Task(Base):
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
     )
     registered_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
 class Benchmark(Base):
     """One row per registered benchmark suite (Plan 13)."""
+
     __tablename__ = "benchmarks"
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -748,7 +867,8 @@ class Benchmark(Base):
     # standalone, not part of a series. Disjoint variants (AIME by year)
     # are siblings under the same series so group-select unions cleanly.
     series: Mapped[str | None] = mapped_column(
-        String(64), nullable=True,
+        String(64),
+        nullable=True,
     )
     # Physical profile state. Historical profiles remain readable but cannot
     # be selected for new execution.
@@ -765,7 +885,9 @@ class Benchmark(Base):
         default=dict,
     )
     imported_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     imported_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -790,6 +912,7 @@ class BenchmarkAlias(Base):
 
 class TaskSet(Base):
     """Team-owned user TaskSet"""
+
     __tablename__ = "task_sets"
     __table_args__ = (
         CheckConstraint(
@@ -832,59 +955,79 @@ class TaskSet(Base):
     )
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     owning_team_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id"),
+        nullable=False,
     )
     slug: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     visibility: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'private'"),
+        Text,
+        nullable=False,
+        server_default=text("'private'"),
     )
     status: Mapped[str] = mapped_column(Text, nullable=False)
     status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     intents: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     evaluation_ready: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"),
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
     )
     manifest_blob_uri: Mapped[str] = mapped_column(Text, nullable=False)
     task_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     soft_deleted_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
 class TaskSetManifest(Base):
     """Current manifest sidecar for a user TaskSet."""
+
     __tablename__ = "task_set_manifests"
     task_set_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("task_sets.id", ondelete="CASCADE"), primary_key=True,
+        Text,
+        ForeignKey("task_sets.id", ondelete="CASCADE"),
+        primary_key=True,
     )
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     manifest: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     verifier_blob_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     transform_blob_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
 class TaskSetMaterializationJob(Base):
     """Queued materialization work for a user TaskSet (#242 sub-plan 2)."""
+
     __tablename__ = "task_set_materialization_jobs"
     __table_args__ = (
         CheckConstraint(
-            "state IN ('queued', 'claimed', 'running', 'succeeded', "
-            "'failed', 'cancelled')",
+            "state IN ('queued', 'claimed', 'running', 'succeeded', 'failed', 'cancelled')",
             name="task_set_materialization_jobs_state_check",
         ),
         Index(
@@ -904,8 +1047,7 @@ class TaskSetMaterializationJob(Base):
             "task_set_materialization_jobs_active_heartbeat_idx",
             "lease_heartbeat_at",
             postgresql_where=text(
-                "state IN ('claimed', 'running') "
-                "AND lease_heartbeat_at IS NOT NULL",
+                "state IN ('claimed', 'running') AND lease_heartbeat_at IS NOT NULL",
             ),
         ),
     )
@@ -921,50 +1063,73 @@ class TaskSetMaterializationJob(Base):
         nullable=False,
     )
     owning_team_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id"),
+        nullable=False,
     )
     state: Mapped[str] = mapped_column(Text, nullable=False)
     attempt_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     max_attempts: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("3"),
+        Integer,
+        nullable=False,
+        server_default=text("3"),
     )
     next_attempt_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     enqueued_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     claimed_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     lease_epoch: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     lease_heartbeat_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     published_materialization_generation: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     started_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     finished_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_summary: Mapped[list[Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
@@ -1015,16 +1180,20 @@ class TaskSetFenceCanaryAuthorization(Base):
     expected_task_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     nonce_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     consumed_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     consumed_lease_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class TaskSetGenerationGcCursor(Base):
     """Scheduling-only progress for bounded live-generation reconciliation."""
+
     __tablename__ = "task_set_generation_gc_cursors"
     __table_args__ = (
         CheckConstraint(
@@ -1140,7 +1309,9 @@ class SlurmWorkerJob(Base):
     )
     pending_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     worker_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("workers.id", ondelete="SET NULL"),
+        nullable=True,
     )
     redacted_env: Mapped[dict[str, str]] = mapped_column(
         JSONB,
@@ -1150,16 +1321,21 @@ class SlurmWorkerJob(Base):
     )
     submission_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     submitted_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     last_reconciled_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     stale_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -1236,7 +1412,9 @@ class GB10WorkerPoolDesiredState(Base):
         default=dict,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -1285,7 +1463,9 @@ class GB10WorkerNodeStatus(Base):
     pool_name: Mapped[str] = mapped_column(Text, nullable=False)
     hostname: Mapped[str] = mapped_column(Text, nullable=False)
     worker_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("workers.id", ondelete="SET NULL"),
+        nullable=True,
     )
     current_image_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1309,13 +1489,18 @@ class GB10WorkerNodeStatus(Base):
     source_git_commit: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_git_dirty: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_heartbeat_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     last_apply_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -1451,7 +1636,9 @@ class WorkerPoolAutoscalerPolicy(Base):
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -1471,6 +1658,7 @@ class Batch(Base):
     so the SPA, docs, and code all share Harbor's vocabulary
     (Task / Trial / Batch / Benchmark) without per-layer translation.
     """
+
     __tablename__ = "batches"
     __table_args__ = (
         CheckConstraint(
@@ -1483,61 +1671,85 @@ class Batch(Base):
         ),
     )
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True,
+        PgUUID(as_uuid=True),
+        primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
     team_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id"),
+        nullable=False,
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     task_filter: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     trial_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     state: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'submitted'"),
+        Text,
+        nullable=False,
+        server_default=text("'submitted'"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     finished_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     created_by_token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     submitted_by_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     usage_attributed_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     usage_attributed_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     expected_trial_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0,
+        Integer,
+        nullable=False,
+        default=0,
     )
     # Plan 23: n-sampling. Runner submits n_per_task trials per matched
     # task; expected_trial_count = len(task_ids) * n_per_task.
     # When `combinations` is non-empty, this `n_per_task` is ignored —
     # each Combination carries its own n_per_task.
     n_per_task: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("1"), default=1,
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+        default=1,
     )
     # Plan 28 PR-3: backend selection at the batch level. Catalog
     # lives at `/api/v1/backends` (derived from worker capabilities).
     backend: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'docker'"), default="docker",
+        Text,
+        nullable=False,
+        server_default=text("'docker'"),
+        default="docker",
     )
     # Plan 28 PR-3: multi-(agent, model) combinations. Each entry is
     # `{agent_name, agent_model, n_per_task, label?}`. Empty list ⇒
     # single-combination behaviour (agent + model + n_per_task live
     # on trial_config / Batch.n_per_task as before).
     combinations: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
         default=list,
     )
     # Issue #188: release canaries can request deterministic terminal
     # coverage on named worker pools. The batch runner emits one extra
     # pool-pinned coverage trial per entry; ordinary batches keep [].
     required_worker_pools: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
         default=list,
     )
     # Plan 28 PR-3: outcome separate from lifecycle `status`. NULL
@@ -1545,12 +1757,16 @@ class Batch(Base):
     # to a terminal lifecycle state. Values: succeeded /
     # partial_failed / all_failed / cancelled.
     result_status: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
     # Fan-out failures happen before Control Plane accepts a child Trial.
     # Store them on the batch for retry suppression and user diagnostics.
     fanout_errors: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     # Issue #298: failed-case reruns are represented as ordinary child
     # batches with exact trial coordinates to re-submit. The parent batch
@@ -1561,7 +1777,10 @@ class Batch(Base):
         nullable=True,
     )
     rerun_targets: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("jsonb_build_array()"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("jsonb_build_array()"),
+        default=list,
     )
     # cluster-deploy.md §Schema additions: per-batch provider override.
     # When set, the gateway uses this connection (decrypts its API key,
@@ -1575,34 +1794,49 @@ class Batch(Base):
         nullable=True,
     )
     provider_model_id: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
     budget_usd: Mapped[Decimal | None] = mapped_column(
-        Numeric(12, 6), nullable=True,
+        Numeric(12, 6),
+        nullable=True,
     )
     budget_policy: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'none'"), default="none",
+        Text,
+        nullable=False,
+        server_default=text("'none'"),
+        default="none",
     )
     budget_confirmed_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     pre_run_estimated_cost_usd: Mapped[Decimal | None] = mapped_column(
-        Numeric(12, 6), nullable=True,
+        Numeric(12, 6),
+        nullable=True,
     )
     pre_run_cost_estimate_source: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
     pre_run_cost_estimate_confidence: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
     budget_diagnostics: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     # Issue #336: completed-run sharing is org-visible by default.
     # Team/private keeps the run in the owner team's boundary; org +
     # shared makes safe metadata visible in the org-wide Run Library.
     visibility: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'org'"), default="org",
+        Text,
+        nullable=False,
+        server_default=text("'org'"),
+        default="org",
     )
     share_status: Mapped[str] = mapped_column(
         Text,
@@ -1611,13 +1845,16 @@ class Batch(Base):
         default="shared",
     )
     source_provenance: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
         default=list,
     )
     # #672 family-runs: resolved spec persisted at batch-accept time;
     # NULL for non-family-run batches. See `docs/architecture/family-runs.md`.
     family_run_spec: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True,
+        JSONB,
+        nullable=True,
     )
     # NULL keeps pre-profile batches on their original selector semantics.
     # Non-empty lists are an immutable task-selection snapshot for new batches.
@@ -1664,7 +1901,9 @@ class Trial(Base):
         ),
     )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
-    team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False
+    )
     task_id: Mapped[str] = mapped_column(String, ForeignKey("tasks.id"), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     requires_caps: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -1673,19 +1912,31 @@ class Trial(Base):
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     submit_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     submitted_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     claimed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    pre_start_heartbeat_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    pre_start_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    cancellation_requested_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    cancellation_observed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    cancellation_observed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
     worker_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("workers.id"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("workers.id"),
+        nullable=True,
     )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    next_attempt_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     trajectory_index: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # Plan 19: batch back-link + idempotency key. batch_id is
@@ -1702,13 +1953,19 @@ class Trial(Base):
     # 0 for hand-submitted trials and the only sample of a 1-per-task
     # batch — preserves pre-migration semantics.
     sample_idx: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"), default=0,
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
     )
     # Plan 28 PR-3: which Combination this trial belongs to within
     # its parent Batch. 0 for single-combination batches (matches
     # the pre-migration behaviour exactly).
     combination_idx: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"), default=0,
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
     )
     # cluster-deploy.md §Schema additions: per-trial provider override.
     # When set, the gateway uses this connection's decrypted API key
@@ -1727,17 +1984,25 @@ class Trial(Base):
         nullable=True,
     )
     provider_model_id: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
     submitted_by_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     usage_attributed_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     usage_attributed_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     visibility: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'org'"), default="org",
+        Text,
+        nullable=False,
+        server_default=text("'org'"),
+        default="org",
     )
     share_status: Mapped[str] = mapped_column(
         Text,
@@ -1746,7 +2011,9 @@ class Trial(Base):
         default="shared",
     )
     source_provenance: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
         default=list,
     )
     # #672 family-runs: populated when the batch opts into family-run
@@ -1779,18 +2046,24 @@ class BatchFamilyState(Base):
     )
     family_key: Mapped[str] = mapped_column(Text, primary_key=True)
     task_sequence: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False,
+        ARRAY(Text),
+        nullable=False,
     )
     current_index: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     state: Mapped[str] = mapped_column(Text, nullable=False)
     state_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     next_attempt_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -1812,15 +2085,22 @@ class Artifact(Base):
     )
 
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"),
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
     )
     artifact_type: Mapped[str] = mapped_column(Text, nullable=False)
     artifact_schema_version: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'1.0'"), default="1.0",
+        Text,
+        nullable=False,
+        server_default=text("'1.0'"),
+        default="1.0",
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     team_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id"),
+        nullable=False,
     )
     project_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     batch_id: Mapped[UUID | None] = mapped_column(
@@ -1834,14 +2114,23 @@ class Artifact(Base):
         nullable=True,
     )
     created_by: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     storage: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     visibility: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'team'"), default="team",
+        Text,
+        nullable=False,
+        server_default=text("'team'"),
+        default="team",
     )
     share_status: Mapped[str] = mapped_column(
         Text,
@@ -1863,10 +2152,16 @@ class Artifact(Base):
     )
     blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     retention: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     provenance: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     artifact_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
@@ -1876,7 +2171,9 @@ class Artifact(Base):
         default=dict,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -1897,7 +2194,9 @@ class ArtifactLineageEdge(Base):
     )
 
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"),
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
     )
     child_artifact_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -1918,7 +2217,9 @@ class ArtifactLineageEdge(Base):
         default=dict,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
@@ -1929,10 +2230,14 @@ class Token(Base):
     type: Mapped[str] = mapped_column(String, nullable=False)
     scopes: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
     team_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id"),
+        nullable=True,
     )
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
@@ -1957,6 +2262,7 @@ class LlmCall(Base):
     dialect endpoint after the upstream provider returns. Read by the
     worker at trial finalize to project LLMCallEvents into the trial's
     trajectory JSONL before ATIF projection runs."""
+
     __tablename__ = "llm_calls"
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
@@ -1967,15 +2273,21 @@ class LlmCall(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     provider_extras: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict,
+        JSONB,
+        nullable=False,
+        default=dict,
     )
     request_params: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True, default=None,
+        JSONB,
+        nullable=True,
+        default=None,
     )
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     rate_card_hash: Mapped[str] = mapped_column(Text, nullable=False)
     captured_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     # #298 Slice B (migration 0029): which gateway-internal attempt
     # produced this successful row. 1 = first try (the historical
@@ -1984,7 +2296,10 @@ class LlmCall(Base):
     # query `MAX(attempt) GROUP BY trial_id` to find trials that
     # suffered retries without parsing logs.
     attempt: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("1"), default=1,
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+        default=1,
     )
     lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -2019,6 +2334,7 @@ class TrialEvent(Base):
     `emitted_at` which lives in payload) — used as a tie-breaker
     for ORDER BY when seq is ambiguous and for retention sweeps.
     """
+
     __tablename__ = "trial_events"
     __table_args__ = (
         CheckConstraint("seq >= 0", name="trial_events_seq_nonneg_check"),
@@ -2027,11 +2343,14 @@ class TrialEvent(Base):
             name="trial_events_schema_version_positive_check",
         ),
         UniqueConstraint(
-            "trial_id", "seq", name="trial_events_trial_seq_uidx",
+            "trial_id",
+            "seq",
+            name="trial_events_trial_seq_uidx",
         ),
         Index(
             "trial_events_trial_created_at_idx",
-            "trial_id", "created_at",
+            "trial_id",
+            "created_at",
         ),
         Index("trial_events_kind_idx", "kind"),
     )
@@ -2050,7 +2369,10 @@ class TrialEvent(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("1"), default=1,
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+        default=1,
     )
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -2074,6 +2396,7 @@ class Secret(Base):
     provider_connections). master_key_version is bumped by the rotation
     walker when LOOM_SECRET_STORE_MASTER_KEY changes; pre-rotation rows
     are re-encrypted in place inside the rotation transaction."""
+
     __tablename__ = "secrets"
     ref: Mapped[str] = mapped_column(Text, primary_key=True)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -2081,7 +2404,9 @@ class Secret(Base):
     nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     master_key_version: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
@@ -2102,9 +2427,12 @@ class ProviderConnection(Base):
     local-encrypted impl it's "loom://..."; for k8s-secret it's
     "k8s://ns/name". SecretStore.dispatch routes by URL scheme.
     """
+
     __tablename__ = "provider_connections"
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
     )
     team_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -2116,23 +2444,32 @@ class ProviderConnection(Base):
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     upstream_host: Mapped[str] = mapped_column(Text, nullable=False)
     resolved_egress_ips: Mapped[list[str]] = mapped_column(
-        ARRAY(INET), nullable=False, server_default=text("ARRAY[]::inet[]"),
+        ARRAY(INET),
+        nullable=False,
+        server_default=text("ARRAY[]::inet[]"),
     )
     egress_ips_refreshed_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     egress_ips_min_ttl_seconds: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("300"),
+        Integer,
+        nullable=False,
+        server_default=text("300"),
     )
     encrypted_api_key_ref: Mapped[str] = mapped_column(Text, nullable=False)
     allowed_models: Mapped[list[str] | None] = mapped_column(
-        ARRAY(Text), nullable=True,
+        ARRAY(Text),
+        nullable=True,
     )
     status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'pending'"),
+        Text,
+        nullable=False,
+        server_default=text("'pending'"),
     )
     last_validated_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     last_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # #277 / responses-api-support-probe: cache whether this upstream
@@ -2140,32 +2477,43 @@ class ProviderConnection(Base):
     # gateway probes at first use and refreshes on a TTL. TRUE routes
     # native pass-through; FALSE dispatches into responses_chat_compat.
     responses_api_supported: Mapped[bool | None] = mapped_column(
-        Boolean, nullable=True,
+        Boolean,
+        nullable=True,
     )
     responses_api_probed_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     responses_api_probe_error: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
     pricing_source: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'tokens-only'"),
+        Text,
+        nullable=False,
+        server_default=text("'tokens-only'"),
     )
     pricing_data: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True,
+        JSONB,
+        nullable=True,
     )
     rate_card_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     # Maintained by the trigger created in migration 0018 — updates
     # automatically on every UPDATE. Don't set explicitly in app code.
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
@@ -2176,6 +2524,7 @@ class ProviderConnectionShare(Base):
     provider team. Sharing grants use/list/read access only; mutation and
     rotation stay with the owner team or platform admins.
     """
+
     __tablename__ = "provider_connection_shares"
     __table_args__ = (
         Index(
@@ -2195,10 +2544,14 @@ class ProviderConnectionShare(Base):
     )
     created_by_actor: Mapped[str] = mapped_column(Text, nullable=False)
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
@@ -2208,11 +2561,11 @@ class ProviderModelCache(Base):
     `upstream_present` flips to false (audit trail). Operator can
     override visibility independently via `visible` + `hidden_reason`.
     """
+
     __tablename__ = "provider_models_cache"
     __table_args__ = (
         CheckConstraint(
-            "last_preflight_status IS NULL OR "
-            "last_preflight_status IN ('valid', 'failed')",
+            "last_preflight_status IS NULL OR last_preflight_status IN ('valid', 'failed')",
             name="provider_models_cache_preflight_status_check",
         ),
     )
@@ -2225,32 +2578,44 @@ class ProviderModelCache(Base):
     family: Mapped[str | None] = mapped_column(Text, nullable=True)
     context_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
     capabilities: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
     )
     visible: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true"),
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
     )
     hidden_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     upstream_present: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true"),
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
     )
     # Per-model entitlement probe. NULL means discovered/manual but not
     # yet preflighted. Failed entries can warn/block before submission.
     last_preflight_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_preflight_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     last_preflight_http_status: Mapped[int | None] = mapped_column(
-        Integer, nullable=True,
+        Integer,
+        nullable=True,
     )
     last_preflight_error_code: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
     last_preflight_error_message: Mapped[str | None] = mapped_column(
-        Text, nullable=True,
+        Text,
+        nullable=True,
     )
 
 
@@ -2270,14 +2635,19 @@ class ActiveTrialCacheBuild(Base):
     This table uses short transactions only (claim, exists, refresh,
     release each are one statement).
     """
+
     __tablename__ = "active_trial_cache_builds"
     cache_key: Mapped[str] = mapped_column(Text, primary_key=True)
     builder_worker_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), nullable=False,
+        PgUUID(as_uuid=True),
+        nullable=False,
     )
     started_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     expires_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
+        TIMESTAMP(timezone=True),
+        nullable=False,
     )

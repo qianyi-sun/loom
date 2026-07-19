@@ -58,6 +58,15 @@ def test_upgrade_adds_authority_journal_and_nullable_execution_links(
                     )
                 )
             }
+            mutation_tables = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema='public' AND table_name LIKE 'staging_mutation_%'"
+                    )
+                )
+            }
     finally:
         engine.dispose()
 
@@ -68,6 +77,10 @@ def test_upgrade_adds_authority_journal_and_nullable_execution_links(
         "data_lifecycle_gc_items",
     }
     assert linked == {"batches", "trials", "llm_calls", "trial_events", "artifacts"}
+    assert mutation_tables == {
+        "staging_mutation_epochs",
+        "staging_mutation_epoch_events",
+    }
 
 
 def test_constraints_reject_unbounded_or_cross_environment_authority(
