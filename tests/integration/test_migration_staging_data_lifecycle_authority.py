@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,13 @@ from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 from testcontainers.postgres import PostgresContainer
+
+from loom.staging_mutation_epoch import (
+    MutationEpochAdvance,
+    ProtectedMutationClass,
+    advance_mutation_epoch,
+)
+from loom.staging_mutation_epoch_sql import SqlAlchemyMutationEpochStore
 
 
 def _cfg(postgres_url: str) -> Config:
@@ -110,6 +118,58 @@ def test_constraints_reject_unbounded_or_cross_environment_authority(
         engine.dispose()
 
 
+def test_epoch_compare_and_swap_updates_authority_and_appends_exact_event(
+    postgres_url_at_0065: str,
+) -> None:
+    engine = create_engine(postgres_url_at_0065)
+    occurred_at = datetime(2026, 7, 20, tzinfo=UTC)
+    advance = MutationEpochAdvance(
+        environment="staging",
+        namespace="loom-staging",
+        expected_epoch=0,
+        mutation_class=ProtectedMutationClass.LIFECYCLE_GC,
+        request_id="req-gc0000000",
+        evidence_sha256="a" * 64,
+        occurred_at=occurred_at,
+    )
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO staging_mutation_epochs "
+                    "(environment, namespace, epoch, reason) "
+                    "VALUES ('staging','loom-staging',0,'bootstrap') "
+                    "ON CONFLICT (environment) DO NOTHING"
+                )
+            )
+            state = advance_mutation_epoch(
+                SqlAlchemyMutationEpochStore(conn),
+                advance,
+            )
+        with engine.connect() as conn:
+            epoch_row = conn.execute(
+                text(
+                    "SELECT epoch, reason, request_id, evidence_sha256 "
+                    "FROM staging_mutation_epochs WHERE environment='staging'"
+                )
+            ).one()
+            event_row = conn.execute(
+                text(
+                    "SELECT epoch, mutation_class, request_id, evidence_sha256 "
+                    "FROM staging_mutation_epoch_events WHERE environment='staging'"
+                )
+            ).one()
+        assert state.epoch == 1
+        assert tuple(epoch_row) == (1, "lifecycle_gc", "req-gc0000000", "a" * 64)
+        assert tuple(event_row) == (1, "lifecycle_gc", "req-gc0000000", "a" * 64)
+
+        with engine.begin() as conn:
+            with pytest.raises(RuntimeError, match="stale"):
+                advance_mutation_epoch(SqlAlchemyMutationEpochStore(conn), advance)
+    finally:
+        engine.dispose()
+
+
 def test_downgrade_refuses_to_discard_lifecycle_data(postgres_url_at_0065: str) -> None:
     cfg = _cfg(postgres_url_at_0065)
     engine = create_engine(postgres_url_at_0065)
@@ -119,7 +179,8 @@ def test_downgrade_refuses_to_discard_lifecycle_data(postgres_url_at_0065: str) 
                 text(
                     "INSERT INTO staging_mutation_epochs "
                     "(environment, namespace, epoch, reason) "
-                    "VALUES ('staging','loom-staging',0,'bootstrap')"
+                    "VALUES ('staging','loom-staging',0,'bootstrap') "
+                    "ON CONFLICT (environment) DO NOTHING"
                 )
             )
         with pytest.raises(Exception, match="deployment data remains"):
