@@ -247,6 +247,15 @@ browser acceptance. Cleanup is journaled and verified. Rehearsal credentials
 cannot mutate protected staging, and live MinIO filesystem snapshots remain
 forbidden.
 
+`RehearsalActionSource` is the sole plan and resource-name authority for these
+actions. Its identity factory and action factory consume the same checkpoint,
+candidate tree, image artifact set, migration plan, browser report schema and
+route origin. Namespace, database, object-prefix, route and transient-unit
+names are derived from that immutable plan and must retain their dedicated
+`rehearsal` prefixes; a backend cannot substitute `loom-staging` or another
+protected resource name. A change to any bound input changes both the plan
+digest and isolation identity before execution.
+
 Tier 3 is therefore the first stage after the request-specific backup worker
 has published a restore-verified lease. The pre-backup assessment alone is
 never launch authority; only the complete Tier 0–3 attestation can be promoted
