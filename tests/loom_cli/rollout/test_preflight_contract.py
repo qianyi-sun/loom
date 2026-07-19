@@ -185,6 +185,84 @@ def test_dag_rejects_cycles_and_missing_dependencies() -> None:
         )
 
 
+def test_final_dag_consumes_attested_dependencies_and_mixed_operations() -> None:
+    calls: list[tuple[str, CheckOperation]] = []
+
+    def final_check(
+        check_id: str,
+        *,
+        dependency: str,
+        mutation: MutationClass,
+        operations: tuple[CheckOperation, ...],
+    ) -> RegisteredCheck:
+        implementations = {}
+        for operation in operations:
+
+            def execute(
+                _context: CheckContext,
+                *,
+                operation: CheckOperation = operation,
+                check_id: str = check_id,
+            ) -> CheckProbe:
+                calls.append((check_id, operation))
+                return CheckProbe(passed=True, evidence={"status.value": "ready"})
+
+            implementations[operation] = execute
+        return RegisteredCheck(
+            spec=_spec(
+                check_id,
+                dependencies=(dependency,),
+                tier=4,
+                stage=StageCapability.FINAL_ONLY,
+                mutation_class=mutation,
+                final_only_justification="Only protected live state can prove this invariant.",
+            ),
+            implementation_version="v1",
+            operations=implementations,
+        )
+
+    apply = final_check(
+        "final.apply",
+        dependency="rehearsal.cleanup",
+        mutation=MutationClass.PROTECTED_STAGING,
+        operations=(CheckOperation.PROBE, CheckOperation.APPLY),
+    )
+    verify = final_check(
+        "final.verify",
+        dependency="final.apply",
+        mutation=MutationClass.NONE,
+        operations=(CheckOperation.PROBE, CheckOperation.VERIFY),
+    )
+    dag = PreflightDag(
+        (apply, verify),
+        attested_dependencies=frozenset({"rehearsal.cleanup"}),
+    )
+
+    results = dag.run(
+        _context(),
+        through_tier=4,
+        operation={
+            "final.apply": CheckOperation.APPLY,
+            "final.verify": CheckOperation.VERIFY,
+        },
+        now=lambda: NOW,
+    )
+
+    assert all(result.passed for result in results)
+    assert calls == [
+        ("final.apply", CheckOperation.APPLY),
+        ("final.verify", CheckOperation.VERIFY),
+    ]
+
+
+def test_attested_dependency_cannot_shadow_a_registered_check() -> None:
+    with pytest.raises(ValueError, match="must be external"):
+        PreflightDag(
+            (_check("candidate.identity"),),
+            attested_dependencies=frozenset({"candidate.identity"}),
+        )
+
+
 def test_input_fingerprint_rejects_raw_secret_fields() -> None:
     spec = CheckSpec(
         check_id="token.metadata",

@@ -171,6 +171,31 @@ class CoverageManifest:
             ):
                 raise ValueError(f"preflight registry contract drifts from coverage for {check_id}")
 
+    def require_exact_tier(
+        self,
+        checks: Sequence[RegisteredCheck],
+        *,
+        tier: int,
+    ) -> None:
+        """Validate one separately executed tier against the same manifest."""
+        if tier not in range(5):
+            raise ValueError("coverage registry tier must be in [0, 4]")
+        expected = {entry.check_id: entry for entry in self.checks if entry.tier == tier}
+        registered = {check.spec.check_id: check for check in checks}
+        if len(registered) != len(checks) or set(registered) != set(expected):
+            raise ValueError("separate preflight tier does not match coverage manifest")
+        for check_id, entry in expected.items():
+            spec = registered[check_id].spec
+            if (
+                spec.failure_code != entry.failure_code
+                or spec.tier != entry.tier
+                or spec.stage is not entry.stage
+                or spec.dependencies != entry.dependencies
+                or spec.mutation_class is not entry.mutation_class
+                or spec.final_only_justification != entry.final_only_justification
+            ):
+                raise ValueError(f"preflight tier contract drifts from coverage for {check_id}")
+
 
 def load_coverage_manifest(path: Path = DEFAULT_COVERAGE_MANIFEST) -> CoverageManifest:
     try:

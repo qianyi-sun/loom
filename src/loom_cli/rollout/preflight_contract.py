@@ -502,14 +502,29 @@ def _is_evidence_value(value: object) -> bool:
 class PreflightDag:
     """Run dependency waves concurrently and retain every independent blocker."""
 
-    def __init__(self, checks: Sequence[RegisteredCheck], *, max_concurrency: int = 8) -> None:
+    def __init__(
+        self,
+        checks: Sequence[RegisteredCheck],
+        *,
+        max_concurrency: int = 8,
+        attested_dependencies: frozenset[str] = frozenset(),
+    ) -> None:
         if not 1 <= max_concurrency <= 32:
             raise ValueError("max_concurrency is outside the supported range")
         self._checks = {check.spec.check_id: check for check in checks}
         if len(self._checks) != len(checks) or not checks:
             raise ValueError("preflight checks must be non-empty and unique")
+        if any(_ID_RE.fullmatch(value) is None for value in attested_dependencies):
+            raise ValueError("attested dependency identity is invalid")
+        if set(self._checks) & attested_dependencies:
+            raise ValueError("attested dependencies must be external to the DAG")
+        self._attested_dependencies = attested_dependencies
         for check in checks:
-            missing = set(check.spec.dependencies) - self._checks.keys()
+            missing = (
+                set(check.spec.dependencies)
+                - self._checks.keys()
+                - self._attested_dependencies
+            )
             if missing:
                 raise ValueError(f"check has unknown dependencies: {sorted(missing)}")
         self._assert_acyclic()
@@ -517,7 +532,7 @@ class PreflightDag:
 
     def _assert_acyclic(self) -> None:
         pending = {name: set(check.spec.dependencies) for name, check in self._checks.items()}
-        completed: set[str] = set()
+        completed: set[str] = set(self._attested_dependencies)
         while pending:
             ready = {name for name, dependencies in pending.items() if dependencies <= completed}
             if not ready:
@@ -530,7 +545,7 @@ class PreflightDag:
         self,
         context: CheckContext,
         *,
-        operation: CheckOperation = CheckOperation.PROBE,
+        operation: CheckOperation | Mapping[str, CheckOperation] = CheckOperation.PROBE,
         through_tier: int = 3,
         now: Callable[[], datetime] | None = None,
     ) -> tuple[CheckExecution, ...]:
@@ -540,15 +555,29 @@ class PreflightDag:
         selected = {
             name: check for name, check in self._checks.items() if check.spec.tier <= through_tier
         }
-        if any(set(check.spec.dependencies) - selected.keys() for check in selected.values()):
+        if any(
+            set(check.spec.dependencies)
+            - selected.keys()
+            - self._attested_dependencies
+            for check in selected.values()
+        ):
             raise ValueError("selected tier omits a required dependency")
+        if isinstance(operation, Mapping):
+            if set(operation) != set(selected) or not all(
+                isinstance(value, CheckOperation) for value in operation.values()
+            ):
+                raise ValueError("per-check operation map is incomplete or invalid")
+            operations = dict(operation)
+        else:
+            operations = {check_id: operation for check_id in selected}
         pending = dict(selected)
         results: dict[str, CheckExecution] = {}
         while pending:
             ready = [
                 check
                 for check in pending.values()
-                if set(check.spec.dependencies) <= results.keys()
+                if set(check.spec.dependencies)
+                <= (results.keys() | self._attested_dependencies)
             ]
             if not ready:
                 raise RuntimeError("preflight DAG made no progress")
@@ -557,13 +586,14 @@ class PreflightDag:
                 blocked_by = tuple(
                     dependency
                     for dependency in check.spec.dependencies
-                    if not results[dependency].passed
+                    if dependency not in self._attested_dependencies
+                    and not results[dependency].passed
                 )
                 if blocked_by and not check.spec.run_after_failed_dependencies:
                     results[check.spec.check_id] = self._blocked_execution(
                         check,
                         context=context,
-                        operation=operation,
+                        operation=operations[check.spec.check_id],
                         blocked_by=blocked_by,
                         at=clock(),
                     )
@@ -579,7 +609,7 @@ class PreflightDag:
                         self._run_one,
                         check,
                         context,
-                        operation,
+                        operations[check.spec.check_id],
                         clock,
                     )
                     for check in runnable
@@ -594,7 +624,7 @@ class PreflightDag:
                         result = self._failure_execution(
                             check,
                             context=context,
-                            operation=operation,
+                            operation=operations[check.spec.check_id],
                             outcome=CheckOutcome.TIMEOUT,
                             evidence={
                                 field.name: _empty_value(field)
