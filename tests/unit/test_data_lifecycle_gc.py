@@ -99,6 +99,36 @@ def test_plan_is_deterministic_and_selects_only_expired_authority() -> None:
     assert plan.inventory_digest == reversed_plan.inventory_digest
 
 
+def test_inventory_digest_excludes_report_time_but_binds_epoch() -> None:
+    authority = _authority()
+    item = _object(authority.id)
+    first = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=3,
+        now=NOW,
+        authorities=[authority],
+        objects=[item],
+    )
+    later = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=3,
+        now=NOW + timedelta(minutes=5),
+        authorities=[authority],
+        objects=[item],
+    )
+    changed_epoch = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=4,
+        now=NOW + timedelta(minutes=5),
+        authorities=[authority],
+        objects=[item],
+    )
+
+    assert first.planned_at != later.planned_at
+    assert first.inventory_digest == later.inventory_digest
+    assert changed_epoch.inventory_digest != later.inventory_digest
+
+
 def test_gc_plan_round_trip_is_exact_and_tampering_fails_closed() -> None:
     plan = _plan()
     document = serialize_gc_plan(plan)

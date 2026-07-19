@@ -158,6 +158,10 @@ actions: `inventory`, `dry-run`, `apply`, and `resume`. `inventory` is purely
 read-only and returns every blocker together. `apply` additionally requires the
 operator to echo the exact live inventory digest and provide a mutation request
 ID; a newly observed row, object, or epoch therefore invalidates authorization.
+The digest excludes the report-only `planned_at` wall clock, so a separately
+reviewed inventory remains usable while its exact epoch, eligible owner/object
+set, and blockers are unchanged; a newly eligible authority changes that set
+and therefore changes the digest.
 Evidence output can be written once to a new mode-0600 file. `resume` accepts
 only an exact failed run ID and its request authority; it does not rebuild or
 broaden the deletion plan from current prefixes.

@@ -264,6 +264,11 @@ def _digest_payload(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _inventory_digest(payload: Mapping[str, object]) -> str:
+    """Digest deletion authority while excluding report-only wall clock time."""
+    return _digest_payload({key: value for key, value in payload.items() if key != "planned_at"})
+
+
 def serialize_gc_plan(plan: GcPlan) -> dict[str, object]:
     """Serialize the exact epoch-bound plan for durable resume evidence."""
     payload = _inventory_payload(
@@ -274,7 +279,7 @@ def serialize_gc_plan(plan: GcPlan) -> dict[str, object]:
         objects=plan.objects,
         blockers=plan.blockers,
     )
-    if _digest_payload(payload) != plan.inventory_digest:
+    if _inventory_digest(payload) != plan.inventory_digest:
         raise LifecycleGcPlanError("GC plan inventory digest is not canonical")
     return {**payload, "inventory_digest": plan.inventory_digest}
 
@@ -348,7 +353,7 @@ def deserialize_gc_plan(document: Mapping[str, object]) -> GcPlan:
     except (TypeError, ValueError) as exc:
         raise LifecycleGcPlanError("GC plan document is invalid") from exc
     payload = {key: document[key] for key in expected - {"inventory_digest"}}
-    digest = _digest_payload(payload)
+    digest = _inventory_digest(payload)
     if digest != document["inventory_digest"]:
         raise LifecycleGcPlanError("GC plan document digest does not match")
     plan = GcPlan(
@@ -488,7 +493,7 @@ def build_gc_plan(
         authority_ids=authority_ids,
         objects=selected,
         blockers=stable_blockers,
-        inventory_digest=_digest_payload(payload),
+        inventory_digest=_inventory_digest(payload),
     )
 
 
