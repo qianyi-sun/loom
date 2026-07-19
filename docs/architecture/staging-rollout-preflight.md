@@ -12,6 +12,9 @@ legacy broker predicate must map to its earliest possible stage. A newly
 observed rollout failure whose predicate could have run earlier is a preflight
 coverage defect: a regression fixture and an earlier-stage check are required
 before another attempt.
+The legacy protected-driver failure map is validated in the reverse direction:
+every mapped step must also appear as a consumer of its declared check. Merely
+naming an existing check ID cannot hide an uncovered late predicate.
 
 ## Check contract
 

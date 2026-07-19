@@ -14,8 +14,13 @@ from loom_cli.rollout.steps import default_step_sequence
 def test_every_rollout_step_has_checked_in_failure_coverage() -> None:
     steps = default_step_sequence()
     assert {step.name for step in steps} == set(STEP_CHECK_IDS)
-    coverage_ids = {entry.check_id for entry in load_coverage_manifest().checks}
-    assert set(STEP_CHECK_IDS.values()) <= coverage_ids
+    coverage = {entry.check_id: entry for entry in load_coverage_manifest().checks}
+    assert set(STEP_CHECK_IDS.values()) <= coverage.keys()
+    assert {
+        step_name
+        for step_name, check_id in STEP_CHECK_IDS.items()
+        if step_name not in coverage[check_id].consumers
+    } == set()
 
 
 def test_late_early_predicate_is_normalized_as_coverage_defect() -> None:
