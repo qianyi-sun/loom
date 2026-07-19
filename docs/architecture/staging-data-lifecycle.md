@@ -20,6 +20,12 @@ Staging defaults are:
 - catalog, benchmark-input, bootstrap, system, and rollout-evidence data is
   pinned and separately classified.
 
+These six numeric thresholds have one deterministic policy digest. Tier 0
+`capacity.high-water` binds that digest and records object count, bytes, disk
+free percentage, inode free percentage, the GC trigger decision, and the final
+admission decision together. A missing inventory or policy-digest drift denies
+admission before request publication or backup.
+
 The object registry stores exact bucket, key, optional version, digest, and
 size. A generic prefix is never sufficient deletion authority.
 

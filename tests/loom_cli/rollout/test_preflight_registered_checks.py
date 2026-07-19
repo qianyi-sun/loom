@@ -6,6 +6,9 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import safe_content_fingerprint
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
@@ -26,6 +29,7 @@ from loom_cli.rollout.preflight_contract import (
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
     build_candidate_identity_check,
+    build_capacity_high_water_check,
     build_credentials_metadata_check,
     build_docker_runtime_check,
     build_gb10_host_readiness_check,
@@ -367,6 +371,84 @@ def test_registered_kubernetes_client_rejects_metadata_drift_before_commands(
     kubernetes = next(item for item in executions if item.check_id == "kubernetes.client")
     assert kubernetes.passed is False
     assert kubernetes.evidence["client-digest"] == "0" * 64
+    assert calls == []
+
+
+def test_registered_capacity_high_water_reports_all_bound_metrics() -> None:
+    capacity = StagingCapacity(
+        object_count=249_999,
+        bytes_used=15 * 1024**3,
+        disk_free_percent=21,
+        inode_free_percent=22,
+    )
+    check = build_capacity_high_water_check(lambda: capacity)
+    context = CheckContext(
+        {
+            "capacity.policy.sha256": staging_capacity_policy_digest(),
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+
+    executions = PreflightDag((_passing_dependency("runner.install"), check)).run(context)
+
+    result = next(item for item in executions if item.check_id == "capacity.high-water")
+    assert result.passed
+    assert result.evidence == {
+        "object-count": 249_999,
+        "bytes-used": 15 * 1024**3,
+        "disk-free-percent": 21,
+        "inode-free-percent": 22,
+        "gc-required": True,
+        "admission-allowed": True,
+        "policy-digest": staging_capacity_policy_digest(),
+        "capacity-digest": capacity.evidence_digest,
+    }
+
+
+@pytest.mark.parametrize(
+    "capacity",
+    [
+        StagingCapacity(250_000, 1, 100, 100),
+        StagingCapacity(1, 16 * 1024**3, 100, 100),
+        StagingCapacity(1, 1, 19, 100),
+        StagingCapacity(1, 1, 100, 19),
+    ],
+)
+def test_registered_capacity_high_water_fails_each_admission_boundary(
+    capacity: StagingCapacity,
+) -> None:
+    check = build_capacity_high_water_check(lambda: capacity)
+    context = CheckContext(
+        {
+            "capacity.policy.sha256": staging_capacity_policy_digest(),
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+
+    executions = PreflightDag((_passing_dependency("runner.install"), check)).run(context)
+
+    result = next(item for item in executions if item.check_id == "capacity.high-water")
+    assert result.passed is False
+    assert result.evidence["admission-allowed"] is False
+
+
+def test_registered_capacity_high_water_rejects_policy_drift_before_inventory() -> None:
+    calls: list[object] = []
+    check = build_capacity_high_water_check(
+        lambda: calls.append(object()) or StagingCapacity(0, 0, 100, 100)
+    )
+    context = CheckContext(
+        {
+            "capacity.policy.sha256": "0" * 64,
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+
+    executions = PreflightDag((_passing_dependency("runner.install"), check)).run(context)
+
+    result = next(item for item in executions if item.check_id == "capacity.high-water")
+    assert result.passed is False
+    assert result.evidence["capacity-digest"] == "0" * 64
     assert calls == []
 
 

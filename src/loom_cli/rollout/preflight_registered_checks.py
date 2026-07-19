@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import (
     read_trusted_file,
     safe_content_fingerprint,
@@ -618,6 +619,78 @@ def _empty_kubernetes_probe(namespace: str) -> CheckProbe:
     )
 
 
+def build_capacity_high_water_check(
+    capacity_source: Callable[[], StagingCapacity],
+) -> RegisteredCheck:
+    """Build the Tier 0 staging admission check from the typed capacity policy."""
+    policy_digest = staging_capacity_policy_digest()
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if context.bindings["capacity.policy.sha256"] != policy_digest:
+            return _empty_capacity_probe(policy_digest)
+        try:
+            capacity = capacity_source()
+        except Exception:
+            return _empty_capacity_probe(policy_digest)
+        return CheckProbe(
+            passed=capacity.admission_allowed,
+            evidence={
+                "object-count": capacity.object_count,
+                "bytes-used": capacity.bytes_used,
+                "disk-free-percent": capacity.disk_free_percent,
+                "inode-free-percent": capacity.inode_free_percent,
+                "gc-required": capacity.gc_required,
+                "admission-allowed": capacity.admission_allowed,
+                "policy-digest": policy_digest,
+                "capacity-digest": capacity.evidence_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="capacity.high-water",
+            failure_code="capacity.high-water.blocked",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("runner.install",),
+            mutation_class=MutationClass.NONE,
+            input_keys=("capacity.policy.sha256", "runner.config.sha256"),
+            evidence_schema=(
+                EvidenceField("object-count", "integer"),
+                EvidenceField("bytes-used", "integer"),
+                EvidenceField("disk-free-percent", "integer"),
+                EvidenceField("inode-free-percent", "integer"),
+                EvidenceField("gc-required", "boolean"),
+                EvidenceField("admission-allowed", "boolean"),
+                EvidenceField("policy-digest", "sha256"),
+                EvidenceField("capacity-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=60,
+            remediation="run supported staging GC or restore object, byte, disk, and inode headroom",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_capacity_probe(policy_digest: str) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "object-count": 0,
+            "bytes-used": 0,
+            "disk-free-percent": 0,
+            "inode-free-percent": 0,
+            "gc-required": True,
+            "admission-allowed": False,
+            "policy-digest": policy_digest,
+            "capacity-digest": "0" * 64,
+        },
+    )
+
+
 def build_systemd_user_manager_check(
     run: CommandRunner,
     *,
@@ -795,6 +868,7 @@ def _empty_gb10_probe(targets: tuple[GB10ProbeTarget, ...]) -> CheckProbe:
 __all__ = [
     "CredentialProbeSource",
     "build_candidate_identity_check",
+    "build_capacity_high_water_check",
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
     "build_gb10_host_readiness_check",

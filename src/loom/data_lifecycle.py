@@ -7,6 +7,8 @@ Unknown values fail closed: they are never eligible for garbage collection.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -19,6 +21,23 @@ STAGING_GC_FREE_PERCENT_TRIGGER = 25
 STAGING_ADMISSION_OBJECT_LIMIT = 250_000
 STAGING_ADMISSION_BYTES_LIMIT = 16 * 1024**3
 STAGING_ADMISSION_FREE_PERCENT_LIMIT = 20
+
+
+def staging_capacity_policy_digest() -> str:
+    """Return the immutable digest for the reviewed staging high-water policy."""
+    payload = json.dumps(
+        {
+            "admission_bytes_limit": STAGING_ADMISSION_BYTES_LIMIT,
+            "admission_free_percent_limit": STAGING_ADMISSION_FREE_PERCENT_LIMIT,
+            "admission_object_limit": STAGING_ADMISSION_OBJECT_LIMIT,
+            "gc_bytes_trigger": STAGING_GC_BYTES_TRIGGER,
+            "gc_free_percent_trigger": STAGING_GC_FREE_PERCENT_TRIGGER,
+            "gc_object_trigger": STAGING_GC_OBJECT_TRIGGER,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 class DataClass(StrEnum):
@@ -159,3 +178,18 @@ class StagingCapacity:
             and self.disk_free_percent >= STAGING_ADMISSION_FREE_PERCENT_LIMIT
             and self.inode_free_percent >= STAGING_ADMISSION_FREE_PERCENT_LIMIT
         )
+
+    @property
+    def evidence_digest(self) -> str:
+        payload = json.dumps(
+            {
+                "bytes_used": self.bytes_used,
+                "disk_free_percent": self.disk_free_percent,
+                "inode_free_percent": self.inode_free_percent,
+                "object_count": self.object_count,
+                "policy_digest": staging_capacity_policy_digest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
