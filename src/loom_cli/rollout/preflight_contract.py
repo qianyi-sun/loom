@@ -1,0 +1,717 @@
+"""Single-source staged preflight checks and immutable attestations.
+
+Rollout predicates are registered once as :class:`RegisteredCheck` instances.
+The same implementation may expose probe, plan, apply, and verify operations;
+the preflight DAG and final rollout consume those operations instead of
+reimplementing the predicate in step-specific code.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import inspect
+import json
+import re
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from types import MappingProxyType
+from typing import TypeAlias
+
+from loom_cli.rollout.operator.redaction import redact_rollout_mapping, redact_rollout_text
+
+SafeScalar: TypeAlias = str | int | float | bool | None
+SafeValue: TypeAlias = SafeScalar | list["SafeValue"] | dict[str, "SafeValue"]
+
+_ID_RE = re.compile(r"^[a-z][a-z0-9.-]{2,95}$")
+_VERSION_RE = re.compile(r"^[a-z][a-z0-9.-]{0,31}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SECRET_KEY_RE = re.compile(
+    r"(?:^|[._-])(secret|token|password|credential|private[_-]?key)(?:$|[._-])"
+)
+
+
+class StageCapability(StrEnum):
+    STATIC = "static"
+    BASELINE_LIVE_READONLY = "baseline-live-readonly"
+    ISOLATED_REHEARSAL = "isolated-rehearsal"
+    FINAL_ONLY = "final-only"
+
+
+class MutationClass(StrEnum):
+    NONE = "none"
+    ISOLATED = "isolated"
+    PROTECTED_STAGING = "protected-staging"
+
+
+class SecretRedactionPolicy(StrEnum):
+    NO_SECRET_INPUTS = "no-secret-inputs"
+    METADATA_FINGERPRINTS_ONLY = "metadata-fingerprints-only"
+    REDACT_ALL = "redact-all"
+
+
+class CheckOperation(StrEnum):
+    PROBE = "probe"
+    PLAN = "plan"
+    APPLY = "apply"
+    VERIFY = "verify"
+
+
+class CheckOutcome(StrEnum):
+    PASS = "pass"
+    FAIL = "fail"
+    BLOCKED = "blocked"
+    TIMEOUT = "timeout"
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceField:
+    name: str
+    value_type: str
+
+    def __post_init__(self) -> None:
+        if _ID_RE.fullmatch(self.name) is None:
+            raise ValueError("evidence field name is invalid")
+        if self.value_type not in {"string", "integer", "number", "boolean", "sha256"}:
+            raise ValueError("evidence field type is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class CheckSpec:
+    check_id: str
+    failure_code: str
+    tier: int
+    stage: StageCapability
+    dependencies: tuple[str, ...]
+    mutation_class: MutationClass
+    input_keys: tuple[str, ...]
+    evidence_schema: tuple[EvidenceField, ...]
+    timeout_seconds: int
+    freshness_ttl_seconds: int
+    remediation: str
+    secret_redaction_policy: SecretRedactionPolicy
+    final_only_justification: str | None = None
+
+    def __post_init__(self) -> None:
+        if _ID_RE.fullmatch(self.check_id) is None:
+            raise ValueError("check_id is invalid")
+        if _ID_RE.fullmatch(self.failure_code) is None:
+            raise ValueError("failure_code is invalid")
+        if self.check_id in self.dependencies or len(set(self.dependencies)) != len(
+            self.dependencies
+        ):
+            raise ValueError("check dependencies are invalid")
+        if any(_ID_RE.fullmatch(value) is None for value in self.dependencies):
+            raise ValueError("check dependency id is invalid")
+        if self.tier not in {0, 1, 2, 3, 4}:
+            raise ValueError("preflight tier must be in [0, 4]")
+        expected_tiers = {
+            StageCapability.STATIC: {0, 1},
+            StageCapability.BASELINE_LIVE_READONLY: {2},
+            StageCapability.ISOLATED_REHEARSAL: {3},
+            StageCapability.FINAL_ONLY: {4},
+        }
+        if self.tier not in expected_tiers[self.stage]:
+            raise ValueError("preflight tier does not match stage capability")
+        allowed_mutations = {
+            StageCapability.STATIC: {MutationClass.NONE},
+            StageCapability.BASELINE_LIVE_READONLY: {MutationClass.NONE},
+            StageCapability.ISOLATED_REHEARSAL: {
+                MutationClass.NONE,
+                MutationClass.ISOLATED,
+            },
+            StageCapability.FINAL_ONLY: {
+                MutationClass.NONE,
+                MutationClass.PROTECTED_STAGING,
+            },
+        }
+        if self.mutation_class not in allowed_mutations[self.stage]:
+            raise ValueError("mutation class is not permitted for this stage")
+        if not self.input_keys or len(set(self.input_keys)) != len(self.input_keys):
+            raise ValueError("check input keys must be unique and non-empty")
+        if any(_ID_RE.fullmatch(value) is None for value in self.input_keys):
+            raise ValueError("check input key is invalid")
+        if not self.evidence_schema or len({field.name for field in self.evidence_schema}) != len(
+            self.evidence_schema
+        ):
+            raise ValueError("evidence schema must be unique and non-empty")
+        if not 1 <= self.timeout_seconds <= 3600:
+            raise ValueError("check timeout is outside the supported range")
+        if not 1 <= self.freshness_ttl_seconds <= 86400:
+            raise ValueError("check freshness TTL is outside the supported range")
+        if (
+            not self.remediation.strip()
+            or len(self.remediation) > 300
+            or redact_rollout_text(self.remediation) != self.remediation
+        ):
+            raise ValueError("check remediation is not bounded and secret-safe")
+        if self.stage is StageCapability.FINAL_ONLY:
+            if not self.final_only_justification or len(self.final_only_justification) < 20:
+                raise ValueError("final-only checks require a technical justification")
+        elif self.final_only_justification is not None:
+            raise ValueError("only final-only checks may carry a final-only justification")
+
+
+@dataclass(frozen=True, slots=True)
+class CheckContext:
+    bindings: Mapping[str, SafeValue]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bindings", MappingProxyType(dict(self.bindings)))
+
+
+@dataclass(frozen=True, slots=True)
+class CheckProbe:
+    passed: bool
+    evidence: Mapping[str, SafeScalar]
+
+
+CheckImplementation = Callable[[CheckContext], CheckProbe]
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredCheck:
+    spec: CheckSpec
+    implementation_version: str
+    operations: Mapping[CheckOperation, CheckImplementation]
+
+    def __post_init__(self) -> None:
+        if _VERSION_RE.fullmatch(self.implementation_version) is None:
+            raise ValueError("check implementation version is invalid")
+        if CheckOperation.PROBE not in self.operations:
+            raise ValueError("every check must expose a probe operation")
+        if (
+            self.spec.mutation_class is MutationClass.NONE
+            and CheckOperation.APPLY in self.operations
+        ):
+            raise ValueError("non-mutating checks may not expose apply")
+        object.__setattr__(self, "operations", MappingProxyType(dict(self.operations)))
+
+    @property
+    def implementation_digest(self) -> str:
+        digest = hashlib.sha256()
+        digest.update(self.spec.check_id.encode())
+        digest.update(b"\0")
+        digest.update(self.implementation_version.encode())
+        for operation, implementation in sorted(self.operations.items()):
+            digest.update(b"\0")
+            digest.update(operation.value.encode())
+            digest.update(b"\0")
+            digest.update(implementation.__module__.encode())
+            digest.update(b"\0")
+            digest.update(implementation.__qualname__.encode())
+            try:
+                source = inspect.getsource(implementation).encode()
+            except (OSError, TypeError):
+                source = b"source-unavailable"
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(source).digest())
+        return digest.hexdigest()
+
+    def input_fingerprint(self, context: CheckContext) -> str:
+        missing = [key for key in self.spec.input_keys if key not in context.bindings]
+        if missing:
+            raise ValueError(f"missing check inputs: {','.join(sorted(missing))}")
+        selected = {key: context.bindings[key] for key in self.spec.input_keys}
+        _assert_secret_safe_mapping(
+            selected,
+            policy=self.spec.secret_redaction_policy,
+            allow_redaction=False,
+        )
+        return _hash_json(selected)
+
+
+@dataclass(frozen=True, slots=True)
+class CheckExecution:
+    check_id: str
+    failure_code: str
+    tier: int
+    stage: StageCapability
+    operation: CheckOperation
+    outcome: CheckOutcome
+    input_fingerprint: str
+    implementation_digest: str
+    evidence: Mapping[str, SafeScalar]
+    evidence_hash: str
+    started_at: datetime
+    finished_at: datetime
+    expires_at: datetime
+    remediation: str | None
+    blocked_by: tuple[str, ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        return self.outcome is CheckOutcome.PASS
+
+
+def _hash_json(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _assert_secret_safe_mapping(
+    value: Mapping[str, object],
+    *,
+    policy: SecretRedactionPolicy,
+    allow_redaction: bool,
+) -> None:
+    inspectable = dict(value)
+    for key in value:
+        normalized = key.lower()
+        if _SECRET_KEY_RE.search(normalized) is None:
+            continue
+        allowed_fingerprint = normalized.endswith("fingerprint") or normalized.endswith(
+            "fingerprints"
+        )
+        if policy is SecretRedactionPolicy.METADATA_FINGERPRINTS_ONLY and allowed_fingerprint:
+            fingerprint_value = value[key]
+            flattened = (
+                fingerprint_value.values()
+                if isinstance(fingerprint_value, Mapping)
+                else (fingerprint_value,)
+            )
+            if not all(
+                isinstance(item, str) and item.startswith("sha256:") and len(item) <= 96
+                for item in flattened
+            ):
+                raise ValueError("secret metadata must contain bounded fingerprints only")
+            inspectable.pop(key)
+            continue
+        raise ValueError("check input or evidence contains forbidden secret fields")
+    rendered = redact_rollout_mapping(inspectable)
+    if rendered != inspectable and not (
+        policy is SecretRedactionPolicy.REDACT_ALL and allow_redaction
+    ):
+        raise ValueError("check input or evidence contains secret-like data")
+
+
+def _validate_evidence(
+    spec: CheckSpec, evidence: Mapping[str, SafeScalar]
+) -> dict[str, SafeScalar]:
+    schema = {field.name: field.value_type for field in spec.evidence_schema}
+    if set(evidence) != set(schema):
+        raise ValueError("check evidence does not match its declared schema")
+    source: Mapping[str, SafeScalar]
+    if spec.secret_redaction_policy is SecretRedactionPolicy.REDACT_ALL:
+        redacted = redact_rollout_mapping(dict(evidence))
+        if not all(
+            isinstance(value, (str, int, float, bool)) or value is None
+            for value in redacted.values()
+        ):
+            raise ValueError("redacted evidence is not scalar")
+        source = redacted
+    else:
+        source = evidence
+    _assert_secret_safe_mapping(
+        source,
+        policy=spec.secret_redaction_policy,
+        allow_redaction=True,
+    )
+    normalized: dict[str, SafeScalar] = {}
+    for name, expected in schema.items():
+        value = source[name]
+        valid = {
+            "string": isinstance(value, str),
+            "integer": type(value) is int,
+            "number": type(value) in {int, float},
+            "boolean": type(value) is bool,
+            "sha256": isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None,
+        }[expected]
+        if not valid:
+            raise ValueError(f"evidence field {name} has the wrong type")
+        normalized[name] = value
+    return normalized
+
+
+class PreflightDag:
+    """Run dependency waves concurrently and retain every independent blocker."""
+
+    def __init__(self, checks: Sequence[RegisteredCheck], *, max_concurrency: int = 8) -> None:
+        if not 1 <= max_concurrency <= 32:
+            raise ValueError("max_concurrency is outside the supported range")
+        self._checks = {check.spec.check_id: check for check in checks}
+        if len(self._checks) != len(checks) or not checks:
+            raise ValueError("preflight checks must be non-empty and unique")
+        for check in checks:
+            missing = set(check.spec.dependencies) - self._checks.keys()
+            if missing:
+                raise ValueError(f"check has unknown dependencies: {sorted(missing)}")
+        self._assert_acyclic()
+        self._max_concurrency = max_concurrency
+
+    def _assert_acyclic(self) -> None:
+        pending = {name: set(check.spec.dependencies) for name, check in self._checks.items()}
+        completed: set[str] = set()
+        while pending:
+            ready = {name for name, dependencies in pending.items() if dependencies <= completed}
+            if not ready:
+                raise ValueError("preflight check graph contains a dependency cycle")
+            completed.update(ready)
+            for name in ready:
+                pending.pop(name)
+
+    def run(
+        self,
+        context: CheckContext,
+        *,
+        operation: CheckOperation = CheckOperation.PROBE,
+        through_tier: int = 3,
+        now: Callable[[], datetime] | None = None,
+    ) -> tuple[CheckExecution, ...]:
+        if through_tier not in {0, 1, 2, 3, 4}:
+            raise ValueError("through_tier must be in [0, 4]")
+        clock = now or (lambda: datetime.now(UTC))
+        selected = {
+            name: check for name, check in self._checks.items() if check.spec.tier <= through_tier
+        }
+        if any(set(check.spec.dependencies) - selected.keys() for check in selected.values()):
+            raise ValueError("selected tier omits a required dependency")
+        pending = dict(selected)
+        results: dict[str, CheckExecution] = {}
+        while pending:
+            ready = [
+                check
+                for check in pending.values()
+                if set(check.spec.dependencies) <= results.keys()
+            ]
+            if not ready:
+                raise RuntimeError("preflight DAG made no progress")
+            runnable: list[RegisteredCheck] = []
+            for check in ready:
+                blocked_by = tuple(
+                    dependency
+                    for dependency in check.spec.dependencies
+                    if not results[dependency].passed
+                )
+                if blocked_by:
+                    results[check.spec.check_id] = self._blocked_execution(
+                        check,
+                        context=context,
+                        operation=operation,
+                        blocked_by=blocked_by,
+                        at=clock(),
+                    )
+                else:
+                    runnable.append(check)
+            executor = ThreadPoolExecutor(
+                max_workers=min(self._max_concurrency, max(1, len(runnable))),
+                thread_name_prefix="loom-preflight",
+            )
+            try:
+                futures = {
+                    check.spec.check_id: executor.submit(
+                        self._run_one,
+                        check,
+                        context,
+                        operation,
+                        clock,
+                    )
+                    for check in runnable
+                }
+                for check in runnable:
+                    future = futures[check.spec.check_id]
+                    try:
+                        result = future.result(timeout=check.spec.timeout_seconds)
+                    except TimeoutError:
+                        future.cancel()
+                        at = clock()
+                        result = self._failure_execution(
+                            check,
+                            context=context,
+                            operation=operation,
+                            outcome=CheckOutcome.TIMEOUT,
+                            evidence={
+                                field.name: _empty_value(field)
+                                for field in check.spec.evidence_schema
+                            },
+                            started_at=at,
+                            finished_at=at,
+                        )
+                    results[check.spec.check_id] = result
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+            for check in ready:
+                pending.pop(check.spec.check_id)
+        return tuple(sorted(results.values(), key=lambda result: (result.tier, result.check_id)))
+
+    def _run_one(
+        self,
+        check: RegisteredCheck,
+        context: CheckContext,
+        operation: CheckOperation,
+        clock: Callable[[], datetime],
+    ) -> CheckExecution:
+        started_at = clock()
+        implementation = check.operations.get(operation)
+        if implementation is None:
+            probe = CheckProbe(
+                passed=False,
+                evidence={field.name: _empty_value(field) for field in check.spec.evidence_schema},
+            )
+        else:
+            try:
+                probe = implementation(context)
+            except Exception:
+                probe = CheckProbe(
+                    passed=False,
+                    evidence={
+                        field.name: _empty_value(field) for field in check.spec.evidence_schema
+                    },
+                )
+        finished_at = clock()
+        evidence = _validate_evidence(check.spec, probe.evidence)
+        return self._failure_execution(
+            check,
+            context=context,
+            operation=operation,
+            outcome=CheckOutcome.PASS if probe.passed else CheckOutcome.FAIL,
+            evidence=evidence,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+    def _failure_execution(
+        self,
+        check: RegisteredCheck,
+        *,
+        context: CheckContext,
+        operation: CheckOperation,
+        outcome: CheckOutcome,
+        evidence: Mapping[str, SafeScalar],
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> CheckExecution:
+        return CheckExecution(
+            check_id=check.spec.check_id,
+            failure_code=check.spec.failure_code,
+            tier=check.spec.tier,
+            stage=check.spec.stage,
+            operation=operation,
+            outcome=outcome,
+            input_fingerprint=check.input_fingerprint(context),
+            implementation_digest=check.implementation_digest,
+            evidence=MappingProxyType(dict(evidence)),
+            evidence_hash=_hash_json(evidence),
+            started_at=started_at,
+            finished_at=finished_at,
+            expires_at=finished_at + timedelta(seconds=check.spec.freshness_ttl_seconds),
+            remediation=None if outcome is CheckOutcome.PASS else check.spec.remediation,
+        )
+
+    def _blocked_execution(
+        self,
+        check: RegisteredCheck,
+        *,
+        context: CheckContext,
+        operation: CheckOperation,
+        blocked_by: tuple[str, ...],
+        at: datetime,
+    ) -> CheckExecution:
+        empty = {field.name: _empty_value(field) for field in check.spec.evidence_schema}
+        result = self._failure_execution(
+            check,
+            context=context,
+            operation=operation,
+            outcome=CheckOutcome.BLOCKED,
+            evidence=empty,
+            started_at=at,
+            finished_at=at,
+        )
+        return replace(result, blocked_by=blocked_by)
+
+
+def _empty_value(field: EvidenceField) -> SafeScalar:
+    if field.value_type == "string":
+        return "unavailable"
+    if field.value_type == "boolean":
+        return False
+    if field.value_type == "sha256":
+        return "0" * 64
+    return 0
+
+
+@dataclass(frozen=True, slots=True)
+class AttestationBindings:
+    candidate_sha: str
+    candidate_tree: str
+    image_digests: Mapping[str, str]
+    runner_source_sha: str
+    runner_source_tree: str
+    runner_install_hash: str
+    runner_config_hash: str
+    staging_mutation_epoch: int
+    backup_lease_id: str
+    db_snapshot_identity: str
+    schema_revision: str
+    migration_plan_digest: str
+    environment: str
+    namespace: str
+    route: str
+    secret_metadata_fingerprints: Mapping[str, str]
+    gb10_inventory_digest: str
+    gb10_boot_ids: Mapping[str, str]
+    gb10_mount_digest: str
+    gb10_unit_digest: str
+    browser_image_digest: str
+    browser_report_schema: str
+
+    def __post_init__(self) -> None:
+        git_identities = (
+            self.candidate_sha,
+            self.candidate_tree,
+            self.runner_source_sha,
+            self.runner_source_tree,
+        )
+        if any(
+            len(value) not in {40, 64} or any(char not in "0123456789abcdef" for char in value)
+            for value in git_identities
+        ):
+            raise ValueError("attestation Git identity is invalid")
+        for name, value in (
+            ("runner install", self.runner_install_hash),
+            ("runner config", self.runner_config_hash),
+            ("migration plan", self.migration_plan_digest),
+            ("GB10 inventory", self.gb10_inventory_digest),
+            ("GB10 mount", self.gb10_mount_digest),
+            ("GB10 unit", self.gb10_unit_digest),
+        ):
+            if _SHA256_RE.fullmatch(value) is None:
+                raise ValueError(f"attestation {name} hash is invalid")
+        image_digests = dict(self.image_digests)
+        if not image_digests or any(
+            not name
+            or not isinstance(value, str)
+            or not value.startswith("sha256:")
+            or _SHA256_RE.fullmatch(value.removeprefix("sha256:")) is None
+            for name, value in image_digests.items()
+        ):
+            raise ValueError("attestation image digest binding is invalid")
+        if (
+            not self.browser_image_digest.startswith("sha256:")
+            or _SHA256_RE.fullmatch(self.browser_image_digest.removeprefix("sha256:")) is None
+        ):
+            raise ValueError("attestation browser image digest is invalid")
+        if self.staging_mutation_epoch < 0 or self.environment != "staging":
+            raise ValueError("attestation staging epoch binding is invalid")
+        for value in (
+            self.backup_lease_id,
+            self.db_snapshot_identity,
+            self.schema_revision,
+            self.namespace,
+            self.route,
+            self.browser_report_schema,
+        ):
+            if not value or value != value.strip():
+                raise ValueError("attestation string binding is invalid")
+        if not self.gb10_boot_ids or any(
+            not host or not boot_id for host, boot_id in self.gb10_boot_ids.items()
+        ):
+            raise ValueError("attestation GB10 boot binding is invalid")
+        if not self.secret_metadata_fingerprints:
+            raise ValueError("attestation secret metadata binding is missing")
+        object.__setattr__(self, "image_digests", MappingProxyType(image_digests))
+        object.__setattr__(
+            self,
+            "secret_metadata_fingerprints",
+            MappingProxyType(dict(self.secret_metadata_fingerprints)),
+        )
+        object.__setattr__(
+            self,
+            "gb10_boot_ids",
+            MappingProxyType(dict(self.gb10_boot_ids)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightAttestation:
+    schema_version: int
+    bindings: AttestationBindings
+    check_implementation_digests: Mapping[str, str]
+    evidence_hashes: Mapping[str, str]
+    issued_at: datetime
+    expires_at: datetime
+    attestation_digest: str
+
+    @classmethod
+    def issue(
+        cls,
+        *,
+        bindings: AttestationBindings,
+        executions: Sequence[CheckExecution],
+        issued_at: datetime,
+    ) -> PreflightAttestation:
+        if issued_at.tzinfo is None:
+            raise ValueError("attestation issue time must be timezone-aware")
+        required = [
+            result for result in executions if result.stage is not StageCapability.FINAL_ONLY
+        ]
+        if len({result.check_id for result in required}) != len(required):
+            raise ValueError("attestation contains duplicate check evidence")
+        if not required or any(not result.passed for result in required):
+            raise ValueError("attestation requires every non-final check to pass")
+        if any(
+            result.finished_at > issued_at or result.expires_at <= issued_at for result in required
+        ):
+            raise ValueError("attestation contains future or expired evidence")
+        if bindings.environment != "staging" or not bindings.namespace:
+            raise ValueError("attestation is staging-only")
+        digests = {result.check_id: result.implementation_digest for result in required}
+        evidence = {result.check_id: result.evidence_hash for result in required}
+        expires_at = min(result.expires_at for result in required)
+        payload = {
+            "schema_version": 1,
+            "bindings": _attestation_bindings_payload(bindings),
+            "check_implementation_digests": digests,
+            "evidence_hashes": evidence,
+            "issued_at": issued_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        }
+        return cls(
+            schema_version=1,
+            bindings=bindings,
+            check_implementation_digests=MappingProxyType(digests),
+            evidence_hashes=MappingProxyType(evidence),
+            issued_at=issued_at,
+            expires_at=expires_at,
+            attestation_digest=_hash_json(payload),
+        )
+
+    def valid_for(self, bindings: AttestationBindings, *, now: datetime) -> bool:
+        if now.tzinfo is None:
+            raise ValueError("attestation validation time must be timezone-aware")
+        return now < self.expires_at and _attestation_bindings_payload(bindings) == (
+            _attestation_bindings_payload(self.bindings)
+        )
+
+
+def _attestation_bindings_payload(bindings: AttestationBindings) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for name in bindings.__dataclass_fields__:
+        value = getattr(bindings, name)
+        payload[name] = dict(value) if isinstance(value, Mapping) else value
+    _assert_secret_safe_mapping(
+        payload,
+        policy=SecretRedactionPolicy.METADATA_FINGERPRINTS_ONLY,
+        allow_redaction=False,
+    )
+    return payload
+
+
+__all__ = [
+    "AttestationBindings",
+    "CheckContext",
+    "CheckExecution",
+    "CheckOperation",
+    "CheckOutcome",
+    "CheckProbe",
+    "CheckSpec",
+    "EvidenceField",
+    "MutationClass",
+    "PreflightAttestation",
+    "PreflightDag",
+    "RegisteredCheck",
+    "SecretRedactionPolicy",
+    "StageCapability",
+]
