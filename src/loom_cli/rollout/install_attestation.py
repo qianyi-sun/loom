@@ -29,9 +29,27 @@ INSTALL_ASSETS = MappingProxyType(
             0o755,
             False,
         ),
+        "final-gate-helper": (
+            Path("/usr/local/libexec/loom-staging-rollout-final-gate"),
+            0o755,
+            False,
+        ),
         "rehearsal-helper": (
             Path("/usr/local/libexec/loom-staging-rollout-rehearsal"),
             0o755,
+            False,
+        ),
+        "rehearsal-authority": (
+            Path(
+                "/opt/loom-staging-runner/source/"
+                "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
+            ),
+            0o644,
+            False,
+        ),
+        "readonly-authority": (
+            Path("/opt/loom-staging-runner/source/deploy/k8s/staging-rollout-readonly.yaml"),
+            0o644,
             False,
         ),
         "shared-work2-mount-unit": (

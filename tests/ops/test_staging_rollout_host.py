@@ -12,6 +12,8 @@ from typing import ClassVar
 import pytest
 from scripts.ops import staging_rollout_host as host
 
+from loom_cli.rollout.install_attestation import RunnerInstallAttestation
+
 TEAM_ID = "11111111-1111-4111-8111-111111111111"
 TEAM_ID_2 = "22222222-2222-4222-8222-222222222222"
 SERVICE_FINGERPRINT = "SHA256:6JjXfjyF6JMXDB2Wp4t1YgAzFJPaTv5mQJaqodL6GdU"
@@ -824,6 +826,12 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         == hashlib.sha256(install_record.read_bytes()).hexdigest()
     )
     assert set(public_statement["asset_sha256"]) == host._INSTALL_ATTESTATION_ASSETS
+    # The root-side producer and service-side strict reader must accept the
+    # same exact statement. This is the cross-layer schema gate that prevents
+    # a successful install from failing only when broker preflight starts.
+    assert RunnerInstallAttestation.from_payload(install_attestation.read_bytes()).source_sha == (
+        "a" * 40
+    )
     assert all(
         isinstance(value, str) and len(value) == 64
         for value in public_statement["asset_sha256"].values()
