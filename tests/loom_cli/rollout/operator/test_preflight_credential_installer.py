@@ -182,6 +182,52 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     assert installer.paths.database_credential_source.stat().st_mode & 0o777 == 0o600
 
 
+def test_install_accepts_silent_success_only_for_mutating_convergence(
+    tmp_path: Path,
+) -> None:
+    installer, runner = _installer(tmp_path)
+    original_run = runner.__call__
+
+    def silent_mutations(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        command = tuple(argv)
+        if "apply" in command or "statefulset/loom-postgres" in command:
+            runner.calls.append((command, input))
+            return Result(stdout="")
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = silent_mutations
+
+    assert installer.install()["ok"] is True
+    assert installer.check()["ok"] is True
+
+
+def test_install_rejects_silent_success_for_required_token_output(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    original_run = runner.__call__
+
+    def missing_token(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        command = tuple(argv)
+        if "token" in command:
+            runner.calls.append((command, input))
+            return Result(stdout="")
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = missing_token
+
+    with pytest.raises(CredentialInstallError, match="returned no output"):
+        installer.install()
+
+
 def test_install_is_idempotent_only_while_bounded_tokens_are_unchanged(tmp_path: Path) -> None:
     installer, _runner = _installer(tmp_path)
     installer.install()

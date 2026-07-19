@@ -328,6 +328,7 @@ class PreflightCredentialInstaller:
             ),
             input=render_readonly_role_sql(credential),
             timeout=60,
+            require_output=False,
         )
 
     def _minified_source_kubeconfig(self) -> bytes:
@@ -370,6 +371,7 @@ class PreflightCredentialInstaller:
             ),
             input=payload,
             timeout=60,
+            require_output=False,
         )
 
     def _request_kubeconfig(
@@ -409,11 +411,12 @@ class PreflightCredentialInstaller:
         *,
         input: str | None = None,
         timeout: int,
+        require_output: bool = True,
     ) -> CommandResult:
         result = self.run(argv, input=input, timeout=timeout)
         if result.returncode != 0 or result.stderr.strip():
             raise CredentialInstallError("preflight credential command failed")
-        if not result.stdout.strip() and " apply " not in f" {' '.join(argv)} ":
+        if require_output and not result.stdout.strip():
             raise CredentialInstallError("preflight credential command returned no output")
         return result
 
