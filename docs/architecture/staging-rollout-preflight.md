@@ -267,6 +267,14 @@ names are derived from that immutable plan and must retain their dedicated
 protected resource name. A change to any bound input changes both the plan
 digest and isolation identity before execution.
 
+`AdminSmokeContract` is the sole admin-on-behalf payload and result predicate
+for both Tier 3 and the final smoke step. Tier 3 exercises health, admin
+identity, benchmark/task catalog, exact represented-user submission and cloned
+database persistence. Terminal worker completion remains final-only because an
+isolated namespace cannot safely borrow a protected GB10 worker or its Docker
+authority; the final gate consumes the same identity, payload, fanout-failure
+and terminal-result predicates and is not weakened.
+
 Tier 3 is therefore the first stage after the request-specific backup worker
 has published a restore-verified lease. The pre-backup assessment alone is
 never launch authority; only the complete Tier 0–3 attestation can be promoted

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from loom.security.redaction import redact_mapping, redact_text
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,127}$")
+_TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(?:/[a-z0-9][a-z0-9._-]{0,127})+$")
 _BATCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _NONRECOVERABLE_BATCH_RESULT_STATUSES = frozenset({"partial_failed", "all_failed"})
 _NONRECOVERABLE_FANOUT_REASONS = frozenset({"required_worker_pool_incompatible"})
@@ -38,6 +38,7 @@ class AdminSmokeAuthority:
             or str(parsed_team) != self.team_id
             or _SAFE_NAME_RE.fullmatch(self.represented_username) is None
             or _SAFE_NAME_RE.fullmatch(self.admin_actor) is None
+            or len(self.task_id) > 256
             or _TASK_ID_RE.fullmatch(self.task_id) is None
             or (
                 self.required_worker_pool is not None

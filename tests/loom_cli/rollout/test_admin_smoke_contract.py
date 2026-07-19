@@ -43,6 +43,12 @@ def test_authority_round_trips_and_builds_exact_payload() -> None:
         batch_name="full-cluster-smoke"
     )
 
+    nested_task = replace(
+        authority,
+        task_id="skilllearnbench/fix-security-bug/fix-security-bug-1",
+    )
+    assert nested_task.task_id.count("/") == 2
+
 
 @pytest.mark.parametrize(
     ("field", "value"),

@@ -39,7 +39,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from loom.security.redaction import redact_mapping, redact_text
+from loom_cli.rollout.admin_smoke_contract import (
+    AdminSmokeAuthority,
+    AdminSmokeContract,
+    decode_json_object,
+)
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult
@@ -50,8 +54,6 @@ DEFAULT_POLL_INTERVAL_SEC = 5.0
 DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = "loom-smoke/gb10-oracle-hello-world"
 DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10"
 DEFAULT_SMOKE_AGENT = "oracle"
-_NONRECOVERABLE_BATCH_RESULT_STATUSES = frozenset({"partial_failed", "all_failed"})
-_NONRECOVERABLE_FANOUT_REASONS = frozenset({"required_worker_pool_incompatible"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,29 +354,6 @@ def _validate_submitter_identity(
     return True, "ok"
 
 
-def _validate_admin_identity(body: bytes) -> tuple[bool, str]:
-    try:
-        whoami = json.loads(body)
-    except json.JSONDecodeError:
-        return False, "admin smoke whoami response is not JSON"
-    scopes = whoami.get("scopes")
-    is_admin_scoped = isinstance(scopes, list) and any(
-        isinstance(scope, str) and scope.startswith("admin:") for scope in scopes
-    )
-    credential_type = whoami.get("credential_type")
-    principal_type = whoami.get("principal_type")
-    if credential_type == "admin_bearer_token" or principal_type == "admin":
-        return True, "ok"
-    if is_admin_scoped:
-        return True, "ok"
-    return (
-        False,
-        "admin-on-behalf smoke requires an admin-capable token; "
-        f"whoami credential_type={credential_type!r} "
-        f"principal_type={principal_type!r}",
-    )
-
-
 def _admin_token_fingerprint(value: str) -> str:
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
     return f"sha256:{digest} len={len(value)}"
@@ -446,17 +425,6 @@ def _admin_on_behalf_config(
     ), None
 
 
-def _validate_benchmark_catalog(body: bytes) -> str | None:
-    try:
-        catalog = json.loads(body)
-    except json.JSONDecodeError:
-        return "benchmarks response not JSON"
-    items = catalog.get("items") or catalog.get("data") or []
-    if not items:
-        return "benchmarks catalog is empty"
-    return None
-
-
 def _task_payload_inputs(
     ctx: RolloutContext,
     *,
@@ -469,181 +437,6 @@ def _task_payload_inputs(
         explicit_task_id=explicit_task_id,
     )
     return task_id, required_worker_pool
-
-
-def _admin_on_behalf_payload(
-    ctx: RolloutContext,
-    cfg: _AdminOnBehalfConfig,
-    *,
-    batch_name: str | None = None,
-    n_per_task: int = 1,
-) -> dict[str, object]:
-    task_id, required_worker_pool = _task_payload_inputs(
-        ctx,
-        submit_mode="admin-on-behalf",
-    )
-    payload: dict[str, object] = {
-        "name": batch_name or _admin_smoke_batch_name(ctx),
-        "represented_username": cfg.represented_username,
-        "team_id": cfg.team_id,
-        "task_filter": {"task_ids": [task_id]},
-        "trial_config": {
-            "agent_name": _smoke_agent(ctx),
-            "agent_model": None,
-        },
-        "n_per_task": n_per_task,
-    }
-    if required_worker_pool is not None:
-        payload["required_worker_pools"] = [required_worker_pool]
-    return payload
-
-
-def _existing_admin_smoke_batch_id(
-    body: bytes,
-    *,
-    cfg: _AdminOnBehalfConfig,
-    batch_name: str,
-    task_id: str,
-) -> str | None:
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    items = payload.get("items")
-    if not isinstance(items, list):
-        return None
-    for item in items:
-        if not isinstance(item, Mapping):
-            continue
-        if item.get("name") != batch_name or item.get("team_id") != cfg.team_id:
-            continue
-        submitted_by_user = item.get("submitted_by_user")
-        if not isinstance(submitted_by_user, Mapping):
-            continue
-        if (
-            not _same_username(
-                submitted_by_user.get("username"),
-                cfg.represented_username,
-            )
-            or submitted_by_user.get("team_id") != cfg.team_id
-        ):
-            continue
-        task_filter = item.get("task_filter")
-        if not isinstance(task_filter, Mapping):
-            continue
-        task_ids = task_filter.get("task_ids")
-        if not isinstance(task_ids, list) or task_ids != [task_id]:
-            continue
-        batch_id = item.get("id")
-        if isinstance(batch_id, str) and batch_id:
-            return batch_id
-    return None
-
-
-def _same_username(left: object, right: str) -> bool:
-    return isinstance(left, str) and left.strip().casefold() == right.strip().casefold()
-
-
-def _json_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
-
-
-def _admin_batch_succeeded(
-    batch: Mapping[str, object],
-    *,
-    cfg: _AdminOnBehalfConfig,
-) -> tuple[bool, str]:
-    state = batch.get("state")
-    if state != "finished":
-        return False, f"batch terminal state {state!r} — expected finished"
-    result_status = batch.get("result_status")
-    if result_status != "succeeded":
-        return False, f"batch result_status {result_status!r} — expected succeeded"
-    expected = batch.get("expected_trial_count")
-    expected_count = _json_int(expected)
-    if expected_count is None:
-        return False, "batch response has no numeric expected_trial_count"
-    trial_summary = batch.get("trial_summary")
-    if not isinstance(trial_summary, Mapping):
-        return False, "batch response has no trial_summary"
-    succeeded = _json_int(trial_summary.get("succeeded", 0))
-    if succeeded is None:
-        return False, "batch trial_summary.succeeded is not numeric"
-    if succeeded < expected_count:
-        return (
-            False,
-            f"batch succeeded trials {succeeded} < expected {expected_count}",
-        )
-    submitted_by_user = batch.get("submitted_by_user")
-    if not isinstance(submitted_by_user, Mapping):
-        return False, "batch response has no submitted_by_user"
-    username = submitted_by_user.get("username")
-    team_id = submitted_by_user.get("team_id")
-    if not _same_username(username, cfg.represented_username) or team_id != cfg.team_id:
-        return (
-            False,
-            "batch submitted_by_user does not match represented "
-            f"user/team: username={username!r} team_id={team_id!r}",
-        )
-    return True, "ok"
-
-
-def _compact_redacted_json(value: object, *, limit: int = 800) -> str:
-    redacted = redact_mapping(value)
-    try:
-        rendered = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
-    except TypeError:
-        rendered = str(redacted)
-    return redact_text(rendered, limit=limit)
-
-
-def _fanout_error_reasons(value: object) -> set[str]:
-    if isinstance(value, Mapping):
-        reason = value.get("reason")
-        return {reason} if isinstance(reason, str) and reason else set()
-    if isinstance(value, list):
-        reasons: set[str] = set()
-        for item in value:
-            reasons.update(_fanout_error_reasons(item))
-        return reasons
-    return set()
-
-
-def _admin_batch_nonrecoverable_failure(batch: Mapping[str, object]) -> str | None:
-    result_status = batch.get("result_status")
-    failure_reason = batch.get("failure_reason")
-    fanout_errors = batch.get("fanout_errors")
-    fanout_reasons = _fanout_error_reasons(fanout_errors)
-    fanout_submit_failed = failure_reason == "fanout_submit_failed"
-    incompatible_fanout = bool(fanout_reasons & _NONRECOVERABLE_FANOUT_REASONS)
-    failed_result = result_status in _NONRECOVERABLE_BATCH_RESULT_STATUSES
-
-    if not fanout_submit_failed and not (failed_result and incompatible_fanout):
-        return None
-
-    parts = [
-        "admin-on-behalf smoke batch reported nonrecoverable fanout failure",
-        f"state={batch.get('state')!r}",
-        f"result_status={result_status!r}",
-        f"failure_reason={failure_reason!r}",
-    ]
-    failure_message = batch.get("failure_message")
-    if isinstance(failure_message, str) and failure_message.strip():
-        parts.append(f"failure_message={redact_text(failure_message, limit=300)!r}")
-    if fanout_errors:
-        parts.append(
-            "fanout_errors=" + _compact_redacted_json(fanout_errors, limit=1000),
-        )
-    return "; ".join(parts)
 
 
 def run_admin_on_behalf_smoke(
@@ -677,6 +470,23 @@ def run_admin_on_behalf_smoke(
         return RunResult(exit_code=exit_code, error=token_error)
     assert token is not None
     base = _ingress_base(ctx)
+    task_id, required_worker_pool = _task_payload_inputs(
+        ctx,
+        submit_mode="admin-on-behalf",
+    )
+    try:
+        contract = AdminSmokeContract(
+            AdminSmokeAuthority(
+                represented_username=cfg.represented_username,
+                team_id=cfg.team_id,
+                admin_actor=cfg.admin_actor,
+                task_id=task_id,
+                required_worker_pool=required_worker_pool,
+                agent=_smoke_agent(ctx),
+            )
+        )
+    except ValueError as exc:
+        return RunResult(exit_code=2, error=str(exc))
 
     status, body = _http_get(f"{base}/api/v1/health", token=token)
     artifact("01-health.json").write_bytes(body)
@@ -687,22 +497,18 @@ def run_admin_on_behalf_smoke(
     artifact("02-whoami.json").write_bytes(body)
     if status != 200:
         return RunResult(exit_code=1, error=f"/api/v1/auth/whoami returned {status}")
-    ok, reason = _validate_admin_identity(body)
-    if not ok:
-        return RunResult(exit_code=1, error=reason)
+    identity_error = contract.validate_admin_identity(decode_json_object(body))
+    if identity_error is not None:
+        return RunResult(exit_code=1, error=identity_error)
 
     status, body = _http_get(f"{base}/api/v1/benchmarks", token=token)
     artifact("03-benchmarks.json").write_bytes(body)
     if status != 200:
         return RunResult(exit_code=1, error=f"/api/v1/benchmarks returned {status}")
-    catalog_error = _validate_benchmark_catalog(body)
+    catalog_error = contract.validate_benchmark_catalog(decode_json_object(body))
     if catalog_error is not None:
         return RunResult(exit_code=1, error=catalog_error)
 
-    task_id, _required_worker_pool = _task_payload_inputs(
-        ctx,
-        submit_mode="admin-on-behalf",
-    )
     quoted_task_id = urllib.parse.quote(task_id, safe="/")
     status, body = _http_get(f"{base}/api/v1/tasks/{quoted_task_id}", token=token)
     artifact("04-task.json").write_bytes(body)
@@ -731,11 +537,9 @@ def run_admin_on_behalf_smoke(
             exit_code=1,
             error=f"GET /batches recovery lookup returned {status}",
         )
-    batch_id = _existing_admin_smoke_batch_id(
-        body,
-        cfg=cfg,
+    batch_id = contract.existing_batch_id(
+        decode_json_object(body),
         batch_name=batch_name,
-        task_id=task_id,
     )
     if batch_id is not None:
         artifact("05-submit.json").write_text(
@@ -748,9 +552,7 @@ def run_admin_on_behalf_smoke(
     else:
         status, body = _http_post(
             f"{base}/api/v1/admin/batches/on-behalf",
-            _admin_on_behalf_payload(
-                ctx,
-                cfg,
+            contract.submission_payload(
                 batch_name=batch_name,
                 n_per_task=n_per_task,
             ),
@@ -763,9 +565,8 @@ def run_admin_on_behalf_smoke(
                 exit_code=1,
                 error=f"POST /admin/batches/on-behalf returned {status}",
             )
-        try:
-            submit = json.loads(body)
-        except json.JSONDecodeError:
+        submit = decode_json_object(body)
+        if submit is None:
             return RunResult(exit_code=1, error="submit response not JSON")
         batch_id_raw = submit.get("id") or submit.get("batch_id")
         if not isinstance(batch_id_raw, str) or not batch_id_raw:
@@ -773,7 +574,7 @@ def run_admin_on_behalf_smoke(
         batch_id = batch_id_raw
 
     deadline = time.time() + terminal_timeout_sec
-    terminal_batch: dict[str, object] | None = None
+    terminal_batch: Mapping[str, object] | None = None
     while time.time() < deadline:
         status, body = _http_get(
             f"{base}/api/v1/batches/{batch_id}",
@@ -781,12 +582,11 @@ def run_admin_on_behalf_smoke(
         )
         artifact("06-poll.json").write_bytes(body)
         if status == 200:
-            try:
-                batch = json.loads(body)
-            except json.JSONDecodeError:
+            batch = decode_json_object(body)
+            if batch is None:
                 return RunResult(exit_code=1, error="batch poll response not JSON")
             state = batch.get("state")
-            nonrecoverable_error = _admin_batch_nonrecoverable_failure(batch)
+            nonrecoverable_error = contract.nonrecoverable_failure(batch)
             if nonrecoverable_error is not None:
                 return RunResult(exit_code=1, error=nonrecoverable_error)
             if state in ("finished", "failed", "cancelled"):
@@ -803,9 +603,9 @@ def run_admin_on_behalf_smoke(
             exit_code=1,
             error=f"batch {batch_id} did not reach terminal state in {terminal_timeout_sec}s",
         )
-    ok, reason = _admin_batch_succeeded(terminal_batch, cfg=cfg)
-    if not ok:
-        return RunResult(exit_code=1, error=reason)
+    terminal_error = contract.validate_terminal_batch(terminal_batch)
+    if terminal_error is not None:
+        return RunResult(exit_code=1, error=terminal_error)
 
     step_dir.stdout_path().write_text(
         f"admin-on-behalf smoke ok: batch {batch_id} finished for "
