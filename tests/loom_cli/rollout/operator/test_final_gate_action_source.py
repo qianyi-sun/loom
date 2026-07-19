@@ -70,6 +70,8 @@ def _execution(publication, *, image_digest: str | None = None):
                 EvidenceField("image-artifact-digest", "sha256"),
                 EvidenceField("manifest-artifact-digest", "sha256"),
                 EvidenceField("rendered-manifest-digest", "sha256"),
+                EvidenceField("migration-manifest-digest", "sha256"),
+                EvidenceField("migration-artifact-digest", "sha256"),
             ),
             timeout_seconds=5,
             freshness_ttl_seconds=600,
@@ -85,6 +87,8 @@ def _execution(publication, *, image_digest: str | None = None):
                     "image-artifact-digest": image_digest or publication.image_artifact_sha256,
                     "manifest-artifact-digest": publication.manifest_artifact_sha256,
                     "rendered-manifest-digest": publication.rendered_manifest_sha256,
+                    "migration-manifest-digest": publication.migration_manifest_sha256,
+                    "migration-artifact-digest": publication.migration_manifest_artifact_sha256,
                 },
             )
         },

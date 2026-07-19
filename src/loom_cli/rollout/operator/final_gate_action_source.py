@@ -135,6 +135,8 @@ class FinalGateActionSource:
             "image-artifact-digest": publication.image_artifact_sha256,
             "manifest-artifact-digest": publication.manifest_artifact_sha256,
             "rendered-manifest-digest": publication.rendered_manifest_sha256,
+            "migration-manifest-digest": publication.migration_manifest_sha256,
+            "migration-artifact-digest": publication.migration_manifest_artifact_sha256,
         }
         if dict(execution.evidence) != expected_evidence:
             raise ValueError("final gate artifact publication drifted from evidence")
