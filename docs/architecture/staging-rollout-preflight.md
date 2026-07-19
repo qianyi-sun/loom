@@ -124,6 +124,14 @@ request promotion cannot select an unrelated or merely pre-existing
 attestation, and failure to publish the attestation leaves the new payload
 unpromoted.
 
+Only after that `backup_verified` transition does the worker promote
+`preflight.json` into the immutable rollout `request.json` and publish attempt
+1's exact driver envelope. The shared lifecycle graph then advances by CAS to
+`launch_pending`, launches the fixed rollout unit, and records
+`launch_running`. A finalization crash therefore leaves either reusable
+verified backup authority or an explicit pending-launch record; it cannot leave
+an unattested attempt runnable.
+
 ## Tiers
 
 ### Tier 0: admission, under two minutes

@@ -25,7 +25,13 @@ from .backup_job import (
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path, load_validated_envelope
 from .lifecycle import LifecycleCoordinator
-from .model import ActivePointer, DriverEnvelope, PreflightRequest, RequestEvent
+from .model import (
+    ActivePointer,
+    DriverEnvelope,
+    PreflightRequest,
+    RequestEvent,
+    RolloutRequest,
+)
 from .policy import sanitized_child_environment
 from .redaction import redact_rollout_text
 from .store import RequestStore
@@ -100,6 +106,7 @@ class WorkerDependencies:
         ]
         | None
     ) = None
+    finalize_backup: Callable[[PreflightRequest, VerifiedBackupJob], DriverEnvelope] | None = None
 
 
 @dataclass(slots=True)
@@ -428,7 +435,100 @@ def run_backup_job(
         completed,
         expected_sequence=current.sequence,
     )
+    if dependencies.finalize_backup is None:
+        return 0
+    driver_envelope = dependencies.finalize_backup(request, verified)
+    if (
+        driver_envelope.request_id != request.request_id
+        or driver_envelope.resolved_sha != request.candidate.resolved_sha
+        or driver_envelope.preflight_attestation_sha256 != verified.preflight_attestation_sha256
+        or driver_envelope.backup_manifest_sha256 != verified.manifest_sha256
+    ):
+        raise ValueError("finalized rollout envelope drifts from verified backup")
+    launch_pending = transition_backup_job(
+        completed,
+        LifecycleAction.PUBLISH_LAUNCH,
+        updated_at=_worker_now(dependencies),
+    )
+    dependencies.store.replace_preflight_backup_job_state(
+        launch_pending,
+        expected_sequence=completed.sequence,
+    )
+    dependencies.lifecycle.launch(driver_envelope)
+    launch_running = transition_backup_job(
+        launch_pending,
+        LifecycleAction.START_LAUNCH,
+        updated_at=_worker_now(dependencies),
+    )
+    dependencies.store.replace_preflight_backup_job_state(
+        launch_running,
+        expected_sequence=launch_pending.sequence,
+    )
     return 0
+
+
+def _finalize_verified_backup(
+    config: OperatorConfig,
+    store: RequestStore,
+    request: PreflightRequest,
+    verified: VerifiedBackupJob,
+) -> DriverEnvelope:
+    """Publish final request and attempt only after exact backup verification."""
+    rollout_request = RolloutRequest(
+        request_id=request.request_id,
+        rollout_id=request.rollout_id,
+        caller=request.caller,
+        candidate=request.candidate,
+        requested_at=request.requested_at,
+        runner_config_sha256=request.runner_config_sha256,
+        preflight_attestation_sha256=verified.preflight_attestation_sha256,
+        preflight_registry_sha256=request.preflight_registry_sha256,
+        preflight_coverage_sha256=request.preflight_coverage_sha256,
+        command=request.command,
+        status="pending",
+    )
+    store.promote_preflight_request(rollout_request)
+    envelope = DriverEnvelope(
+        schema_version=1,
+        request_id=request.request_id,
+        rollout_id=request.rollout_id,
+        initiating_operator=request.caller.username,
+        initiating_uid=request.caller.uid,
+        attempt_number=1,
+        attempt_operator=request.caller.username,
+        attempt_uid=request.caller.uid,
+        remote_url=request.candidate.remote_url,
+        target_ref=request.candidate.target_ref,
+        resolved_sha=request.candidate.resolved_sha,
+        image_tag=request.candidate.image_tag,
+        fetched_at=request.candidate.fetched_at,
+        backup_manifest_path=str(verified.manifest_path),
+        backup_manifest_sha256=verified.manifest_sha256,
+        runner_config_sha256=request.runner_config_sha256,
+        preflight_attestation_sha256=verified.preflight_attestation_sha256,
+        preflight_registry_sha256=request.preflight_registry_sha256,
+        preflight_coverage_sha256=request.preflight_coverage_sha256,
+        cluster_name=config.cluster_name,
+        namespace=config.namespace,
+        environment=config.environment,
+        cp_url=config.cp_url,
+        cluster_config_path=str(config.cluster_config_path),
+        rollout_root=str(config.rollout_root),
+        admin_token_source=config.admin_token_source,
+        worker_token_source=config.worker_token_source,
+        service_token_source=config.service_token_source,
+        expect_admin_token_fingerprint=config.expect_admin_token_fingerprint,
+        smoke_on_behalf_username=config.smoke_on_behalf_username,
+        smoke_on_behalf_team_id=config.smoke_on_behalf_team_id,
+        scope=config.scope,
+        gb10_prep_concurrency=config.gb10_prep_concurrency,
+        resume=False,
+        source_mode=request.candidate.source_mode,
+        resolved_tree=request.candidate.resolved_tree,
+        approved_base_sha=request.candidate.approved_base_sha,
+    )
+    store.publish_attempt_envelope(envelope)
+    return envelope
 
 
 def _run(
@@ -489,6 +589,12 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             effective_uid=service_uid,
         ),
         load_backup_job=lambda path: _load_backup_job(config, store, path),
+        finalize_backup=lambda request, verified: _finalize_verified_backup(
+            config,
+            store,
+            request,
+            verified,
+        ),
     )
 
 

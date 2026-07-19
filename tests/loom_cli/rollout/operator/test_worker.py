@@ -23,6 +23,7 @@ from loom_cli.rollout.operator.worker import (
     run_backup_job,
 )
 from loom_cli.rollout.operator.worker import main as worker_main
+from tests.loom_cli.rollout.operator.test_broker import make_config
 from tests.loom_cli.rollout.operator.test_store import (
     make_assessment,
     make_preflight_backup_job,
@@ -318,6 +319,58 @@ def test_backup_worker_publishes_only_verified_cas_state(tmp_path: Path) -> None
     assert state.manifest_sha256 == "d" * 64
     assert state.lease_digest == "e" * 64
     assert state.preflight_attestation_sha256 == "f" * 64
+
+
+def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
+    tmp_path: Path,
+) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    config = make_config(tmp_path)
+
+    class LaunchLifecycle:
+        def __init__(self) -> None:
+            self.launched: list[DriverEnvelope] = []
+
+        def launch(self, envelope: DriverEnvelope) -> ActivePointer:
+            self.launched.append(envelope)
+            return ActivePointer(
+                request_id=envelope.request_id,
+                attempt_number=envelope.attempt_number,
+                unit_name=f"loom-staging-rollout-{envelope.request_id}-1.service",
+                status="pending",
+            )
+
+    lifecycle = LaunchLifecycle()
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=lifecycle,
+        run_driver=lambda _path, _resume: 0,
+        run_backup=lambda _request, _job, _cancelled: VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
+        ),
+        finalize_backup=lambda request, verified: worker_module._finalize_verified_backup(  # type: ignore[attr-defined]
+            config,
+            store,
+            request,
+            verified,
+        ),
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 0
+
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.LAUNCH_RUNNING
+    request = store.read_request(REQUEST_ID)
+    envelope = store.read_attempt_envelope(REQUEST_ID, 1)
+    assert request.preflight_attestation_sha256 == "f" * 64
+    assert envelope.backup_manifest_sha256 == "d" * 64
+    assert envelope.preflight_attestation_sha256 == "f" * 64
+    assert lifecycle.launched == [envelope]
 
 
 def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path) -> None:
