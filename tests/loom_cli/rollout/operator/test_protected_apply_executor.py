@@ -10,6 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.gb10_convergence import (
+    GB10ConvergenceState,
+    GB10FleetCandidateObservation,
+    GB10HostCandidateObservation,
+)
 from loom_cli.rollout.operator.protected_apply_executor import (
     KubernetesProtectedConvergenceExecutor,
     MigrationEpochProtectedApplyExecutor,
@@ -89,6 +94,38 @@ class Runner:
     plan_digest: str
 
 
+class GB10Fleet:
+    def __init__(self, *, exact: bool = False) -> None:
+        self.exact = exact
+        self.calls: list[str] = []
+
+    def observe(self, plan):
+        self.calls.append("gb10-read")
+        return GB10FleetCandidateObservation(
+            hosts={
+                host: GB10HostCandidateObservation(
+                    host=host,
+                    boot_id=boot_id,
+                    baseline_ready=True,
+                    candidate_source_exact=True,
+                    checkout_exact=self.exact,
+                    environment_exact=self.exact,
+                    units_exact=self.exact,
+                    legacy_absent=self.exact,
+                    service_timer_exact=self.exact,
+                    evidence_digest="b" * 64,
+                )
+                for host, boot_id in plan.gb10_boot_ids.items()
+            },
+            candidate_source_digest=plan.gb10_unit_digest,
+        )
+
+    def apply(self, _plan, convergence):
+        assert convergence.state is GB10ConvergenceState.READY
+        self.calls.append("gb10-apply")
+        self.exact = True
+
+
 def _attempt(state_root: Path) -> None:
     state_root.mkdir(mode=0o700, exist_ok=True)
     state_root.chmod(0o700)
@@ -137,6 +174,7 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
+        gb10_transport=GB10Fleet(),
         production_defaults_request=_defaults_request,
     )
 
@@ -168,6 +206,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
+        gb10_transport=GB10Fleet(),
         production_defaults_request=_defaults_request,
     )
 
@@ -179,7 +218,8 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[0].name == "00-database-migration"
     assert roots[1].name == "01-mutation-epoch-claim"
     assert roots[2].name == "02-staging-manifests"
-    assert roots[3].name == "03-production-defaults"
+    assert roots[3].name == "03-gb10-candidate"
+    assert roots[4].name == "04-production-defaults"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
@@ -187,6 +227,7 @@ def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
         state_root=tmp_path,
         service_uid=os.geteuid(),
         runner=Runner(revision="0066", epoch=7),
+        gb10_transport=GB10Fleet(),
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.browser", CheckOperation.VERIFY, _plan(tmp_path))
@@ -198,10 +239,12 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     plan = _plan(tmp_path)
     runner = Runner(revision="0066", epoch=7)
     runner.plan_digest = plan.plan_digest
+    gb10 = GB10Fleet()
     applied = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
+        gb10_transport=gb10,
         production_defaults_request=_defaults_request,
     )("final.protected-apply", CheckOperation.APPLY, plan)
     assert applied.ready
@@ -210,6 +253,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     result = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
         runner=runner,
+        gb10_transport=gb10,
         production_defaults_request=_defaults_request,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
@@ -233,6 +277,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
     result = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
         runner=runner,
+        gb10_transport=GB10Fleet(exact=False),
         production_defaults_request=_defaults_request,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
@@ -241,6 +286,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         "database-migration",
         "mutation-epoch-claim",
         "staging-manifests",
+        "gb10-candidate",
         "production-defaults",
     }
     assert all(not call.endswith("-apply") for call in runner.calls)
@@ -250,6 +296,7 @@ def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -
     executor = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
         runner=Runner(revision="0067", epoch=8),
+        gb10_transport=GB10Fleet(exact=True),
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.convergence", CheckOperation.APPLY, _plan(tmp_path))

@@ -32,6 +32,10 @@ from .protected_epoch_component import (
     KubernetesProtectedEpochComponent,
     requires_legacy_epoch_bootstrap,
 )
+from .protected_gb10_component import (
+    ProtectedGB10CandidateComponent,
+    ProtectedGB10FleetTransport,
+)
 from .protected_manifest_component import KubernetesProtectedManifestComponent
 from .protected_migration_component import KubernetesProtectedMigrationComponent
 from .protected_production_defaults_component import (
@@ -218,6 +222,7 @@ class MigrationEpochProtectedApplyExecutor:
     state_root: Path
     service_uid: int
     runner: ProtectedApplyCommandRunner
+    gb10_transport: ProtectedGB10FleetTransport
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
@@ -263,10 +268,14 @@ class MigrationEpochProtectedApplyExecutor:
             epoch_guard=epoch.classify,
             request=self.production_defaults_request,
         ).component(plan)
+        gb10 = ProtectedGB10CandidateComponent(
+            transport=self.gb10_transport,
+            epoch_guard=epoch.classify,
+        ).component(plan)
         components = (
-            (migration, epoch, manifests, production_defaults)
+            (migration, epoch, manifests, gb10, production_defaults)
             if requires_legacy_epoch_bootstrap(plan)
-            else (epoch, migration, manifests, production_defaults)
+            else (epoch, migration, manifests, gb10, production_defaults)
         )
         terminals = ProtectedApplyJournal(
             self.state_root,
@@ -295,6 +304,7 @@ class KubernetesProtectedConvergenceExecutor:
 
     service_uid: int
     runner: ProtectedApplyCommandRunner
+    gb10_transport: ProtectedGB10FleetTransport
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
@@ -331,6 +341,10 @@ class KubernetesProtectedConvergenceExecutor:
                 service_uid=self.service_uid,
                 epoch_guard=epoch.classify,
             ).classify(plan),
+            "gb10-candidate": ProtectedGB10CandidateComponent(
+                transport=self.gb10_transport,
+                epoch_guard=epoch.classify,
+            ).classify(plan),
             "production-defaults": KubernetesProtectedProductionDefaultsComponent(
                 runner=self.runner,
                 environment=environment,
@@ -349,6 +363,8 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["mutation-epoch-claim"] = "protected-epoch-not-exact"
         if observations["staging-manifests"].observed_epoch != expected_epoch:
             blockers["staging-manifests"] = "protected-epoch-not-exact"
+        if observations["gb10-candidate"].observed_epoch != expected_epoch:
+            blockers["gb10-candidate"] = "protected-epoch-not-exact"
         if observations["production-defaults"].observed_epoch != expected_epoch:
             blockers["production-defaults"] = "protected-epoch-not-exact"
         return FinalGateResult(
