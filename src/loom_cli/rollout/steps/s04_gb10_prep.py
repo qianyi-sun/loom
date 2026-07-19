@@ -47,6 +47,14 @@ from loom_cli.rollout.steps.subprocess_util import (
     SubprocessResult,
     run_captured,
 )
+from loom_cli.rollout.systemd_readiness import (
+    NodeAgentTimerState,
+    classify_node_agent_timer,
+    node_agent_service_is_prepared,
+    node_agent_service_status_summary,
+    node_agent_timer_status_summary,
+    parse_systemctl_properties,
+)
 
 _LEGACY_GB10_WORKER_SERVICE = "loom-gb10-worker.service"
 _SIMPLE_SYSTEMD_SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*\.service\Z")
@@ -375,36 +383,9 @@ def _ssh(
     return run_captured(argv, stdin_text=stdin_text)
 
 
-def _parse_systemctl_properties(stdout: str) -> dict[str, str]:
-    props: dict[str, str] = {}
-    for line in stdout.splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            props[key] = value
-    return props
-
-
-def _node_agent_service_is_prepared(props: dict[str, str]) -> bool:
-    return (
-        props.get("LoadState") == "loaded"
-        and props.get("Type") == "oneshot"
-        and props.get("Result") == "success"
-        and props.get("ExecMainStatus") == "0"
-        and props.get("NeedDaemonReload") == "no"
-    )
-
-
-def _node_agent_status_summary(props: dict[str, str]) -> str:
-    keys = (
-        "LoadState",
-        "Type",
-        "Result",
-        "ExecMainStatus",
-        "ActiveState",
-        "SubState",
-        "NeedDaemonReload",
-    )
-    return " ".join(f"{key}={props.get(key, '<missing>')}" for key in keys)
+_parse_systemctl_properties = parse_systemctl_properties
+_node_agent_service_is_prepared = node_agent_service_is_prepared
+_node_agent_status_summary = node_agent_service_status_summary
 
 
 def _node_agent_timer_name(service: str) -> str:
@@ -482,13 +463,7 @@ def _node_agent_timer_is_prepared(
     *,
     service: str,
 ) -> bool:
-    return (
-        props.get("LoadState") == "loaded"
-        and props.get("ActiveState") == "active"
-        and props.get("SubState") == "waiting"
-        and props.get("Unit") == service
-        and props.get("NeedDaemonReload") == "no"
-    )
+    return classify_node_agent_timer(props, service=service) is NodeAgentTimerState.PREPARED
 
 
 def _node_agent_timer_is_transiently_running(
@@ -498,23 +473,11 @@ def _node_agent_timer_is_transiently_running(
 ) -> bool:
     """Recognize only the timer's documented in-flight service state."""
     return (
-        props.get("LoadState") == "loaded"
-        and props.get("ActiveState") == "active"
-        and props.get("SubState") == "running"
-        and props.get("Unit") == service
-        and props.get("NeedDaemonReload") == "no"
+        classify_node_agent_timer(props, service=service) is NodeAgentTimerState.TRANSIENT_RUNNING
     )
 
 
-def _node_agent_timer_status_summary(props: dict[str, str]) -> str:
-    keys = (
-        "LoadState",
-        "ActiveState",
-        "SubState",
-        "Unit",
-        "NeedDaemonReload",
-    )
-    return " ".join(f"{key}={props.get(key, '<missing>')}" for key in keys)
+_node_agent_timer_status_summary = node_agent_timer_status_summary
 
 
 def _legacy_worker_unit_retire_command() -> str:

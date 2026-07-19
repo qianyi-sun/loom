@@ -100,6 +100,14 @@ TTL expires; start rechecks only drift-sensitive inputs. Candidate, config,
 token metadata, epoch, host boot ID, mount, or implementation drift invalidates
 the attestation.
 
+Systemd readiness is single-source as well. The broker-facing Tier 0 probe and
+the final GB10 convergence step consume the same user-manager, oneshot service,
+and timer-state classifiers. The read-only probe binds the manager version,
+`Linger=yes`, host boot ID, and a bounded user-manager RPC latency. Actual
+`systemd-run` activation is not disguised as a static read: it belongs to the
+isolated rehearsal tier, where a request-specific unit and cleanup journal can
+prove launch/cancel latency without mutating protected staging.
+
 The initial contract and coverage manifest are additive foundations. Existing
 broker predicates remain mapped while adapters are converted to the shared
 implementations. The coverage test prevents an unmapped legacy predicate or
