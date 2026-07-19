@@ -18,7 +18,8 @@ from typing import Any, Never, TextIO, cast
 from uuid import uuid4
 
 from loom_cli.rollout.evidence import new_rollout_id
-from loom_cli.rollout.preflight_pipeline import PreflightPipelineResult
+from loom_cli.rollout.lifecycle_protocol import LifecycleAction
+from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
 from .backup import (
     BackupCreator,
@@ -27,6 +28,8 @@ from .backup import (
     VerifiedBackup,
     normalize_backup_public_reason,
 )
+from .backup_job import PreflightBackupJobEnvelope, transition_backup_job
+from .backup_rotation import begin_candidate, fail_candidate
 from .candidate import CandidateBindingError, bind_configured_candidate
 from .checkpoint_inventory_provider import KubernetesLifecycleInventoryProvider
 from .config import OperatorConfig
@@ -37,6 +40,7 @@ from .model import (
     CandidateBinding,
     DriverEnvelope,
     EventStatus,
+    PreflightRequest,
     RequestEvent,
     RequestEventType,
     RolloutRequest,
@@ -127,6 +131,10 @@ class BrokerDependencies:
     stderr: TextIO
     known_secrets: Callable[[], Iterable[str]]
     authorize_preflight: Callable[[CandidateBinding], PreflightPipelineResult] | None = None
+    assess_preflight: Callable[[CandidateBinding, int], PreflightAssessment] | None = None
+    read_mutation_epoch: Callable[[], int] | None = None
+    new_backup_job_id: Callable[[], str] | None = None
+    new_payload_id: Callable[[], str] | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -268,6 +276,228 @@ def _envelope(
     )
 
 
+def _staged_preflight_request(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    candidate: CandidateBinding,
+    assessment: PreflightAssessment,
+    *,
+    request_id: str,
+    rollout_id: str,
+    requested_at: str,
+    mutation_epoch: int,
+    preview: bool,
+) -> PreflightRequest:
+    if not assessment.passed or candidate.resolved_tree is None or mutation_epoch < 0:
+        raise ValueError("pre-backup authority is incomplete")
+    return PreflightRequest(
+        request_id=request_id,
+        rollout_id=rollout_id,
+        caller=caller,
+        candidate=candidate,
+        candidate_tree=candidate.resolved_tree,
+        requested_at=requested_at,
+        runner_config_sha256=dependencies.config.config_sha256,
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+        mutation_epoch=mutation_epoch,
+        environment=dependencies.config.environment,
+        namespace=dependencies.config.namespace,
+        status="preview" if preview else "pending",
+    )
+
+
+def _start_staged(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    dry_run: bool,
+) -> int:
+    """Publish one short-lock detached checkpoint job after Tier 0-2."""
+    assert dependencies.assess_preflight is not None
+    assert dependencies.read_mutation_epoch is not None
+    report = dependencies.preflight()
+    if not report.passed:
+        _write_json(dependencies.stderr, report.to_dict())
+        return 1
+    candidate = dependencies.bind_candidate()
+    mutation_epoch = dependencies.read_mutation_epoch()
+    if type(mutation_epoch) is not int or mutation_epoch < 0:
+        raise ValueError("staging mutation epoch is invalid")
+    assessment = dependencies.assess_preflight(candidate, mutation_epoch)
+    if not assessment.passed:
+        _write_json(dependencies.stderr, assessment.to_dict())
+        return 1
+    request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
+    rollout_id = validate_safe_identifier(
+        dependencies.new_rollout_id(candidate),
+        "rollout_id",
+    )
+    created_at = dependencies.now()
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
+        raise ValueError("broker clock must return a timezone-aware datetime")
+    created_at = created_at.astimezone(UTC)
+    request = _staged_preflight_request(
+        dependencies,
+        caller,
+        candidate,
+        assessment,
+        request_id=request_id,
+        rollout_id=rollout_id,
+        requested_at=created_at.isoformat().replace("+00:00", "Z"),
+        mutation_epoch=mutation_epoch,
+        preview=dry_run,
+    )
+
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_admission_open()
+        _assert_available(dependencies)
+        if dependencies.read_mutation_epoch() != mutation_epoch:
+            raise LifecycleBusyError(
+                "staging mutation epoch changed during preflight",
+                {"reason": "mutation_epoch_drift"},
+            )
+        rotation = dependencies.store.read_backup_rotation()
+        if rotation.candidate is not None or rotation.retirements:
+            raise LifecycleBusyError(
+                "a detached backup or retirement is already pending",
+                {"reason": "backup_lifecycle_busy"},
+            )
+        dependencies.store.create_preflight_request(request)
+        dependencies.store.publish_preflight_assessment(request.request_id, assessment)
+        dependencies.store.append_event(
+            _event(
+                request.request_id,
+                caller,
+                now=lambda: created_at,
+                event="requested",
+                status="preview" if dry_run else "pending",
+            )
+        )
+        if dry_run:
+            dependencies.store.append_event(
+                _event(
+                    request.request_id,
+                    caller,
+                    now=lambda: created_at,
+                    event="preview",
+                    status="preview",
+                )
+            )
+            _write_json(
+                dependencies.stdout,
+                {
+                    "preflight_assessment_sha256": assessment.assessment_digest,
+                    "request_id": request.request_id,
+                    "resolved_sha": candidate.resolved_sha,
+                    "status": "preview",
+                },
+            )
+            return 0
+
+        job_id = validate_safe_identifier(
+            (
+                dependencies.new_backup_job_id()
+                if dependencies.new_backup_job_id is not None
+                else f"job-{uuid4().hex[:16]}"
+            ),
+            "job_id",
+        )
+        payload_id = validate_safe_identifier(
+            (
+                dependencies.new_payload_id()
+                if dependencies.new_payload_id is not None
+                else f"payload-{uuid4().hex[:16]}"
+            ),
+            "payload_id",
+        )
+        bundle_name = BackupCreator.bundle_name(request.request_id, created_at)
+        job = PreflightBackupJobEnvelope(
+            job_id=job_id,
+            request_id=request.request_id,
+            payload_id=payload_id,
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=request.candidate_tree,
+            preflight_assessment_sha256=assessment.assessment_digest,
+            preflight_registry_sha256=assessment.registry_digest,
+            preflight_coverage_sha256=assessment.coverage_digest,
+            mutation_epoch=mutation_epoch,
+            environment=request.environment,
+            namespace=request.namespace,
+            bundle_name=bundle_name,
+            created_at=created_at,
+        )
+        job_path = dependencies.store.publish_preflight_backup_job(job)
+        reservation = begin_candidate(
+            rotation,
+            payload_id=payload_id,
+            request_id=request.request_id,
+            created_at=created_at,
+        )
+        dependencies.store.replace_backup_rotation(
+            reservation.state,
+            expected_generation=rotation.generation,
+        )
+        dependencies.store.append_event(
+            _event(
+                request.request_id,
+                caller,
+                now=lambda: created_at,
+                event="backup_started",
+                status="pending",
+                current_step=bundle_name,
+            )
+        )
+        unit_name = f"loom-staging-backup-{request.request_id}.service"
+        try:
+            dependencies.systemd.start_backup(job_path, unit_name)
+        except Exception:
+            current_job = dependencies.store.read_preflight_backup_job_state(request.request_id)
+            failed_job = transition_backup_job(
+                current_job,
+                LifecycleAction.FAIL_BACKUP,
+                updated_at=created_at,
+                failure_code="backup_launch_failed",
+            )
+            dependencies.store.replace_preflight_backup_job_state(
+                failed_job,
+                expected_sequence=current_job.sequence,
+            )
+            current_rotation = dependencies.store.read_backup_rotation()
+            failed_rotation = fail_candidate(
+                current_rotation,
+                payload_id=payload_id,
+                failure_code="backup_launch_failed",
+            )
+            dependencies.store.replace_backup_rotation(
+                failed_rotation.state,
+                expected_generation=current_rotation.generation,
+            )
+            dependencies.store.append_event(
+                _event(
+                    request.request_id,
+                    caller,
+                    now=lambda: created_at,
+                    event="backup_failed",
+                    status="failed",
+                    reason="backup_launch_failed",
+                )
+            )
+            raise
+    _write_json(
+        dependencies.stdout,
+        {
+            "backup_unit": unit_name,
+            "preflight_assessment_sha256": assessment.assessment_digest,
+            "request_id": request.request_id,
+            "resolved_sha": candidate.resolved_sha,
+            "status": "backup_pending",
+        },
+    )
+    return 0
+
+
 def _start(
     dependencies: BrokerDependencies,
     caller: CallerIdentity,
@@ -276,6 +506,10 @@ def _start(
 ) -> int:
     if dependencies.config.source_mode == "sealed-cumulative" and caller.username != "qianyi":
         return _safe_error(dependencies, "sealed cumulative rollout requires coordinator authority")
+    if dependencies.assess_preflight is not None or dependencies.read_mutation_epoch is not None:
+        if dependencies.assess_preflight is None or dependencies.read_mutation_epoch is None:
+            return _safe_error(dependencies, "detached preflight dependencies are incomplete")
+        return _start_staged(dependencies, caller, dry_run=dry_run)
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
         _assert_available(dependencies)

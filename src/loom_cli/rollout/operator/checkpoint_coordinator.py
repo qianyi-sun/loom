@@ -11,6 +11,7 @@ from .backup import VerifiedBackup
 from .backup_job import PreflightBackupJobEnvelope
 from .backup_lease import BackupLease
 from .backup_rotation import (
+    BackupPayloadPhase,
     BackupRotationResult,
     BackupRotationState,
     acknowledge_retirement,
@@ -164,13 +165,22 @@ class DetachedCheckpointCoordinator:
             raise CheckpointCoordinatorError("backup cancelled before reservation")
         self._drain_retirements(strict=True)
         state = self.store.read_backup_rotation()
-        reservation = begin_candidate(
-            state,
-            payload_id=envelope.payload_id,
-            request_id=request.request_id,
-            created_at=envelope.created_at,
-        )
-        self._publish_rotation(state, reservation)
+        candidate = state.candidate
+        if candidate is None:
+            reservation = begin_candidate(
+                state,
+                payload_id=envelope.payload_id,
+                request_id=request.request_id,
+                created_at=envelope.created_at,
+            )
+            self._publish_rotation(state, reservation)
+        elif (
+            candidate.payload_id != envelope.payload_id
+            or candidate.request_id != request.request_id
+            or candidate.created_at != envelope.created_at
+            or candidate.phase is not BackupPayloadPhase.CREATING
+        ):
+            raise CheckpointCoordinatorError("backup candidate reservation drifted")
         try:
             if cancelled():
                 raise CheckpointCoordinatorError("backup cancelled before checkpoint")

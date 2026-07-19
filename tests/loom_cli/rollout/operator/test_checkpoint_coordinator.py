@@ -8,6 +8,7 @@ import pytest
 
 from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope
+from loom_cli.rollout.operator.backup_rotation import begin_candidate
 from loom_cli.rollout.operator.checkpoint_coordinator import (
     CheckpointCoordinatorError,
     DetachedCheckpointCoordinator,
@@ -166,6 +167,28 @@ def test_detached_checkpoint_promotes_only_after_restore_verified_lease(tmp_path
     assert state.active.lease.evidence_digest == verified.lease_digest
     assert state.candidate is None
     assert store.read_backup_lease(verified.lease_digest) == state.active.lease
+
+
+def test_detached_checkpoint_accepts_exact_short_lock_reservation(tmp_path: Path) -> None:
+    coordinator, creator, store, job = _coordinator(tmp_path)
+    current = store.read_backup_rotation()
+    reservation = begin_candidate(
+        current,
+        payload_id=job.payload_id,
+        request_id=job.request_id,
+        created_at=job.created_at,
+    )
+    store.replace_backup_rotation(
+        reservation.state,
+        expected_generation=current.generation,
+    )
+
+    coordinator(_request(), job, lambda: False)
+
+    state = store.read_backup_rotation()
+    assert creator.calls == [(_request(), NOW)]
+    assert state.active is not None
+    assert state.active.payload_id == job.payload_id
 
 
 def test_restore_failure_preserves_old_active_and_never_publishes_new_lease(

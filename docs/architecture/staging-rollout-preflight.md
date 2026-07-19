@@ -66,6 +66,14 @@ restore rehearsal, publishes the resulting lease by digest, and only then
 atomically promotes the candidate. Cancellation or restore failure seals the
 candidate without replacing the prior active lease. The full request and
 attempt remain unavailable until this coordinator has completed successfully.
+
+The broker performs the expensive Tier 0-2 assessment before acquiring
+`launch.lock`. Under the short lock it rechecks admission and the mutation
+epoch, publishes the preliminary request, complete assessment, immutable backup
+job, and exact payload reservation, then launches one fixed transient backup
+unit. It releases the lock immediately after `systemd-run`; neither checkpoint
+I/O nor rehearsal runs inside it. An epoch change refuses publication, and an
+existing candidate or unacknowledged retirement blocks concurrent admission.
 Tier 3 therefore binds `checkpoint.evidence.sha256`, not a lease digest: asking
 the DB-clone rehearsal to depend on a lease would be circular because the lease
 is intentionally issued only after that rehearsal succeeds. Tier 0 may still

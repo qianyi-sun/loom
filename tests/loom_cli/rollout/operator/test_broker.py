@@ -33,6 +33,13 @@ from loom_cli.rollout.operator.model import (
 )
 from loom_cli.rollout.operator.policy import sanitized_child_environment
 from loom_cli.rollout.operator.preflight import PreflightCheck, PreflightReport
+from loom_cli.rollout.operator.store import RequestStore
+from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
+from loom_cli.rollout.preflight_pipeline import PreflightPipeline
+from tests.loom_cli.rollout.test_preflight_pipeline import (
+    _context as pipeline_context,
+)
+from tests.loom_cli.rollout.test_preflight_pipeline import _registry as pipeline_registry
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 SHA = "a" * 40
@@ -235,6 +242,10 @@ class FakeSystemd:
         self.visible_units: set[str] = set()
         self.terminate_error: Exception | None = None
         self.on_terminate = None
+        self.backup_starts: list[tuple[Path, str]] = []
+
+    def start_backup(self, job_path: Path, unit_name: str) -> None:
+        self.backup_starts.append((job_path, unit_name))
 
     def terminate(self, unit_name: str) -> None:
         if self.on_terminate is not None:
@@ -462,6 +473,93 @@ def test_start_reserves_before_launch_and_returns_detached_request(tmp_path: Pat
     ]
     assert REQUEST_ID in deps.stdout.getvalue()
     assert SHA in deps.stdout.getvalue()
+
+
+def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    store = RequestStore(tmp_path / "staged-state")
+    registry = pipeline_registry()
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "staged-attestations"),
+        now=lambda: NOW,
+    )
+    assessment = pipeline.assess(context=pipeline_context(registry))
+
+    class StagedLifecycle:
+        depth = 0
+
+        @contextmanager
+        def launch_guard(self):  # type: ignore[no-untyped-def]
+            self.depth += 1
+            try:
+                yield
+            finally:
+                self.depth -= 1
+
+        def assert_admission_open(self) -> None:
+            assert self.depth == 1
+
+        def reconcile_active(self) -> ReconciliationResult:
+            return ReconciliationResult(
+                outcome="idle",
+                pointer=None,
+                cleared=False,
+                safe_status={},
+            )
+
+    candidate = replace(
+        deps.candidate.bind(),
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+
+    def assess(found: CandidateBinding, epoch: int):  # type: ignore[no-untyped-def]
+        assert found == candidate
+        assert epoch == 7
+        return assessment
+
+    staged = replace(
+        deps.dependencies,
+        config=replace(
+            deps.config,
+            source_mode="sealed-cumulative",
+            source_commit_sha=SHA,
+            source_tree_sha="b" * 40,
+            source_base_sha="c" * 40,
+        ),
+        authenticate=lambda: CallerIdentity("qianyi", 501),
+        store=store,
+        lifecycle=StagedLifecycle(),
+        bind_candidate=lambda: candidate,
+        assess_preflight=assess,
+        read_mutation_epoch=lambda: 7,
+        new_request_id=lambda: "req-staged0001",
+        new_backup_job_id=lambda: "job-staged0001",
+        new_payload_id=lambda: "payload-staged01",
+    )
+
+    rc = broker_main(["start"], dependencies=staged)
+
+    assert rc == 0, deps.stderr.getvalue()
+    preliminary = store.read_preflight_request("req-staged0001")
+    assert preliminary.candidate == candidate
+    assert preliminary.preflight_assessment_sha256 == assessment.assessment_digest
+    assert store.read_preflight_assessment("req-staged0001") == assessment
+    job = store.read_preflight_backup_job("req-staged0001")
+    assert job.payload_id == "payload-staged01"
+    rotation = store.read_backup_rotation()
+    assert rotation.candidate is not None
+    assert rotation.candidate.payload_id == job.payload_id
+    assert deps.backup.create_count == 0
+    assert deps.systemd.backup_starts == [
+        (
+            tmp_path / "staged-state/requests/req-staged0001/preflight-backup/job.json",
+            "loom-staging-backup-req-staged0001.service",
+        )
+    ]
+    assert '"status":"backup_pending"' in deps.stdout.getvalue()
 
 
 def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) -> None:
