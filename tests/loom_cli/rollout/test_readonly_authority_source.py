@@ -62,7 +62,15 @@ def _rules(*, extra: dict[str, object] | None = None) -> dict[str, object]:
             "incomplete": False,
             "resourceRules": resource_rules,
             "nonResourceRules": [
-                {"nonResourceURLs": ["/api", "/apis", "/healthz"], "verbs": ["get"]},
+                {
+                    "nonResourceURLs": [
+                        "/.well-known/openid-configuration",
+                        "/api",
+                        "/apis",
+                        "/healthz",
+                    ],
+                    "verbs": ["get"],
+                },
             ],
         },
     }
@@ -211,6 +219,33 @@ def test_server_observed_readonly_authority_rejects_incomplete_review() -> None:
     run, _calls = _run_for(rules)
 
     with pytest.raises(ValueError, match="incomplete"):
+        probe_readonly_authority(
+            cast(JsonCommandRunner, run),
+            kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),
+            namespace="loom-staging",
+            application_observation=_application,
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "/.well-known",
+        "/.well-known/../secrets",
+        "/.well-known//openid-configuration",
+        "/.hidden/authority",
+        "/../api",
+    ),
+)
+def test_server_observed_readonly_authority_rejects_unsafe_non_resource_url(
+    url: str,
+) -> None:
+    rules = _rules()
+    status = cast(dict[str, object], rules["status"])
+    status["nonResourceRules"] = [{"nonResourceURLs": [url], "verbs": ["get"]}]
+    run, _calls = _run_for(rules)
+
+    with pytest.raises(ValueError, match="non-resource"):
         probe_readonly_authority(
             cast(JsonCommandRunner, run),
             kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),

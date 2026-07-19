@@ -15,7 +15,9 @@ from loom_cli.rollout.staging_baseline_source import ObjectStoreBaselineEvidence
 
 _MAX_RESPONSE_BYTES = 1 << 20
 _VALUE_RE = re.compile(r"^[a-z0-9*][a-z0-9*/.:-]{0,127}$")
-_NON_RESOURCE_URL_RE = re.compile(r"^/[a-z0-9*][a-z0-9*/.:-]{0,126}$")
+_NON_RESOURCE_URL_RE = re.compile(
+    r"^/(?:\.well-known/)?[a-z0-9*][a-z0-9*/.:-]{0,126}$"
+)
 _SAFE_REVIEW_RESOURCES = frozenset(
     {
         ("authentication.k8s.io", "selfsubjectreviews"),
