@@ -78,6 +78,7 @@ class RehearsalPlan:
 
     candidate_sha: str
     candidate_tree: str
+    checkpoint_request_id: str
     checkpoint_evidence_sha256: str
     checkpoint_manifest_path: Path
     checkpoint_manifest_sha256: str
@@ -104,6 +105,7 @@ class RehearsalPlan:
             or len(self.candidate_tree) != 40
             or any(character not in "0123456789abcdef" for character in self.candidate_tree)
             or self.mutation_epoch < 0
+            or not self.checkpoint_request_id.startswith("req-")
             or any(
                 _SHA256_RE.fullmatch(value) is None
                 for value in (
@@ -156,6 +158,7 @@ class RehearsalPlan:
             "browser_report_schema_sha256": self.browser_report_schema_sha256,
             "candidate_sha": self.candidate_sha,
             "candidate_tree": self.candidate_tree,
+            "checkpoint_request_id": self.checkpoint_request_id,
             "checkpoint_evidence_sha256": self.checkpoint_evidence_sha256,
             "checkpoint_manifest_path": str(self.checkpoint_manifest_path),
             "checkpoint_manifest_sha256": self.checkpoint_manifest_sha256,
@@ -188,6 +191,7 @@ class RehearsalPlan:
             "browser_report_schema_sha256",
             "candidate_sha",
             "candidate_tree",
+            "checkpoint_request_id",
             "checkpoint_evidence_sha256",
             "checkpoint_manifest_path",
             "checkpoint_manifest_sha256",
@@ -228,6 +232,7 @@ class RehearsalPlan:
             "browser_report_schema_sha256",
             "candidate_sha",
             "candidate_tree",
+            "checkpoint_request_id",
             "checkpoint_evidence_sha256",
             "checkpoint_manifest_path",
             "checkpoint_manifest_sha256",
@@ -248,6 +253,7 @@ class RehearsalPlan:
         return cls(
             candidate_sha=str(value["candidate_sha"]),
             candidate_tree=str(value["candidate_tree"]),
+            checkpoint_request_id=str(value["checkpoint_request_id"]),
             checkpoint_evidence_sha256=str(value["checkpoint_evidence_sha256"]),
             checkpoint_manifest_path=Path(str(value["checkpoint_manifest_path"])),
             checkpoint_manifest_sha256=str(value["checkpoint_manifest_sha256"]),
@@ -396,6 +402,7 @@ class RehearsalActionSource:
         return RehearsalPlan(
             candidate_sha=candidate.resolved_sha,
             candidate_tree=candidate.resolved_tree,
+            checkpoint_request_id=checkpoint.request_id,
             checkpoint_evidence_sha256=checkpoint.evidence_digest,
             checkpoint_manifest_path=checkpoint.manifest_path,
             checkpoint_manifest_sha256=checkpoint.manifest_sha256,

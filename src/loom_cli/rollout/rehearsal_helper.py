@@ -9,9 +9,12 @@ import os
 import re
 import sys
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.operator.backup import VerifiedBackup
+from loom_cli.rollout.operator.checkpoint_lease import inspect_critical_checkpoint
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
@@ -58,8 +61,33 @@ def _load_plan(path: Path, expected_digest: str) -> RehearsalPlan:
     expected_parent = Path("/var/lib/loom-staging-rollout/rehearsals") / plan.resources.namespace
     if path != expected_parent / "plan.json":
         raise ValueError("rehearsal helper plan path escaped its authority")
+    _verify_checkpoint(plan)
     _verify_artifact_publication(plan)
     return plan
+
+
+def _verify_checkpoint(plan: RehearsalPlan) -> None:
+    checkpoint = inspect_critical_checkpoint(
+        VerifiedBackup(
+            manifest_path=plan.checkpoint_manifest_path,
+            manifest_sha256=plan.checkpoint_manifest_sha256,
+        ),
+        request_id=plan.checkpoint_request_id,
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.geteuid(),
+        now=datetime.now(UTC),
+    )
+    if (
+        checkpoint.evidence_digest != plan.checkpoint_evidence_sha256
+        or checkpoint.manifest_path != plan.checkpoint_manifest_path
+        or checkpoint.manifest_sha256 != plan.checkpoint_manifest_sha256
+        or checkpoint.mutation_epoch != plan.mutation_epoch
+        or checkpoint.db_snapshot_identity != plan.db_snapshot_identity
+        or checkpoint.object_inventory_root != plan.object_inventory_root
+        or checkpoint.schema_revision != plan.schema_revision
+    ):
+        raise ValueError("rehearsal helper checkpoint identity drifted")
 
 
 def _verify_artifact_publication(plan: RehearsalPlan) -> None:

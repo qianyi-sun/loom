@@ -9,13 +9,19 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan, RehearsalResources
-from loom_cli.rollout.rehearsal_helper import _load_plan, _verify_artifact_publication, main
+from loom_cli.rollout.rehearsal_helper import (
+    _load_plan,
+    _verify_artifact_publication,
+    _verify_checkpoint,
+    main,
+)
 
 
 def _plan() -> RehearsalPlan:
     return RehearsalPlan(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
+        checkpoint_request_id="req-abcdefgh",
         checkpoint_evidence_sha256="c" * 64,
         checkpoint_manifest_path=Path("/data/loom-staging/backups/exact/backup-manifest.json"),
         checkpoint_manifest_sha256="d" * 64,
@@ -67,6 +73,10 @@ def test_helper_loads_exact_plan_and_returns_normalized_blocker(
         "loom_cli.rollout.rehearsal_helper._verify_artifact_publication",
         lambda _plan: None,
     )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper._verify_checkpoint",
+        lambda _plan: None,
+    )
 
     assert (
         main(
@@ -95,6 +105,10 @@ def test_helper_rejects_plan_drift_and_schema_confusion(
     plan, path = _write_plan(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "loom_cli.rollout.rehearsal_helper._verify_artifact_publication",
+        lambda _plan: None,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper._verify_checkpoint",
         lambda _plan: None,
     )
     assert _load_plan(path, plan.plan_digest) == plan
@@ -155,6 +169,35 @@ def test_helper_binds_every_artifact_publication_identity(
     publication.candidate_sha = "9" * 40
     with pytest.raises(ValueError, match="publication drifted"):
         _verify_artifact_publication(replace(plan))
+
+
+def test_helper_revalidates_complete_checkpoint_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan()
+    checkpoint = SimpleNamespace(
+        evidence_digest=plan.checkpoint_evidence_sha256,
+        manifest_path=plan.checkpoint_manifest_path,
+        manifest_sha256=plan.checkpoint_manifest_sha256,
+        mutation_epoch=plan.mutation_epoch,
+        db_snapshot_identity=plan.db_snapshot_identity,
+        object_inventory_root=plan.object_inventory_root,
+        schema_revision=plan.schema_revision,
+    )
+    calls: list[dict[str, object]] = []
+
+    def inspect(backup, **kwargs):
+        calls.append({"backup": backup, **kwargs})
+        return checkpoint
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_helper.inspect_critical_checkpoint", inspect)
+    _verify_checkpoint(plan)
+    assert calls[0]["request_id"] == plan.checkpoint_request_id
+    assert calls[0]["expected_owner_uid"] == os.geteuid()
+
+    checkpoint.mutation_epoch += 1
+    with pytest.raises(ValueError, match="checkpoint identity drifted"):
+        _verify_checkpoint(plan)
 
     record = _plan().to_record()
     record["mutation_epoch"] = True
