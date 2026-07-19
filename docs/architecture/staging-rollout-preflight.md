@@ -252,6 +252,14 @@ has published a restore-verified lease. The pre-backup assessment alone is
 never launch authority; only the complete Tier 0–3 attestation can be promoted
 into the immutable rollout request and driver envelope.
 
+`rehearsal.cleanup` is an explicit always-after-dependencies check. It waits
+for every isolated action to reach a terminal outcome, but it is not suppressed
+when one of those actions fails. This exception is restricted by the reusable
+check contract to dependent Tier 3 isolated cleanup; static, readonly and
+protected checks cannot opt out of ordinary dependency blocking. A failed
+rehearsal therefore still produces cleanup evidence instead of leaking its
+namespace, database clone, object prefix or transient unit.
+
 ### Tier 4: justified final-only checks
 
 Only protected apply, observed live convergence, post-apply attestation drift,

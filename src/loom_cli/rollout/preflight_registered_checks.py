@@ -2130,7 +2130,15 @@ def build_rehearsal_checks(
         "rehearsal.release": ("rehearsal.migration", "images.contract"),
         "rehearsal.api-smoke": ("rehearsal.release",),
         "rehearsal.browser": ("rehearsal.api-smoke", "browser.runtime"),
-        "rehearsal.cleanup": ("rehearsal.browser", "rehearsal.systemd-launch"),
+        "rehearsal.cleanup": (
+            "rehearsal.namespace",
+            "rehearsal.db-clone",
+            "rehearsal.systemd-launch",
+            "rehearsal.migration",
+            "rehearsal.release",
+            "rehearsal.api-smoke",
+            "rehearsal.browser",
+        ),
     }
     failure_codes = {check_id: check_id + ".failed" for check_id in dependencies}
     common_inputs = tuple(sorted(bindings))
@@ -2165,6 +2173,7 @@ def build_rehearsal_checks(
                     freshness_ttl_seconds=3600,
                     remediation=f"restore and clean the exact isolated {check_id} action",
                     secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                    run_after_failed_dependencies=check_id == "rehearsal.cleanup",
                 ),
                 implementation_version="v1",
                 operations={

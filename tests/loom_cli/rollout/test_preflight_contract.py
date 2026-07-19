@@ -32,6 +32,7 @@ def _spec(
     stage: StageCapability = StageCapability.STATIC,
     mutation_class: MutationClass = MutationClass.NONE,
     final_only_justification: str | None = None,
+    run_after_failed_dependencies: bool = False,
 ) -> CheckSpec:
     return CheckSpec(
         check_id=check_id,
@@ -47,6 +48,7 @@ def _spec(
         remediation=f"repair {check_id}",
         secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         final_only_justification=final_only_justification,
+        run_after_failed_dependencies=run_after_failed_dependencies,
     )
 
 
@@ -108,6 +110,58 @@ def test_dag_runs_independent_checks_and_reports_all_failures() -> None:
     }
     browser_launch = next(result for result in results if result.check_id == "browser.launch")
     assert browser_launch.blocked_by == ("browser.token",)
+
+
+def test_dag_runs_isolated_cleanup_after_failed_dependencies() -> None:
+    cleanup_calls: list[str] = []
+
+    def cleanup(_context: CheckContext) -> CheckProbe:
+        cleanup_calls.append("cleanup")
+        return CheckProbe(passed=True, evidence={"status.value": "clean"})
+
+    cleanup_check = RegisteredCheck(
+        spec=_spec(
+            "rehearsal.cleanup",
+            dependencies=("rehearsal.browser",),
+            tier=3,
+            stage=StageCapability.ISOLATED_REHEARSAL,
+            mutation_class=MutationClass.ISOLATED,
+            run_after_failed_dependencies=True,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: cleanup},
+    )
+    browser_check = RegisteredCheck(
+        spec=_spec(
+            "rehearsal.browser",
+            tier=3,
+            stage=StageCapability.ISOLATED_REHEARSAL,
+            mutation_class=MutationClass.ISOLATED,
+        ),
+        implementation_version="v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: CheckProbe(
+                passed=False, evidence={"status.value": "blocked"}
+            )
+        },
+    )
+
+    results = PreflightDag([browser_check, cleanup_check]).run(_context(), through_tier=3)
+
+    assert {result.check_id: result.outcome for result in results} == {
+        "rehearsal.browser": CheckOutcome.FAIL,
+        "rehearsal.cleanup": CheckOutcome.PASS,
+    }
+    assert cleanup_calls == ["cleanup"]
+
+
+def test_failed_dependency_override_is_restricted_to_isolated_cleanup() -> None:
+    with pytest.raises(ValueError, match="reserved for dependent isolated cleanup"):
+        _spec(
+            "unsafe.cleanup",
+            dependencies=("candidate.identity",),
+            run_after_failed_dependencies=True,
+        )
 
 
 def test_dag_executes_independent_wave_concurrently() -> None:

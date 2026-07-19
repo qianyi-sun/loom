@@ -101,6 +101,7 @@ class CheckSpec:
     remediation: str
     secret_redaction_policy: SecretRedactionPolicy
     final_only_justification: str | None = None
+    run_after_failed_dependencies: bool = False
 
     def __post_init__(self) -> None:
         if _ID_RE.fullmatch(self.check_id) is None:
@@ -160,6 +161,14 @@ class CheckSpec:
                 raise ValueError("final-only checks require a technical justification")
         elif self.final_only_justification is not None:
             raise ValueError("only final-only checks may carry a final-only justification")
+        if self.run_after_failed_dependencies and (
+            self.stage is not StageCapability.ISOLATED_REHEARSAL
+            or self.mutation_class is not MutationClass.ISOLATED
+            or not self.dependencies
+        ):
+            raise ValueError(
+                "failed-dependency execution is reserved for dependent isolated cleanup"
+            )
 
     @property
     def contract_digest(self) -> str:
@@ -176,6 +185,7 @@ class CheckSpec:
             "input_keys": self.input_keys,
             "mutation_class": self.mutation_class.value,
             "remediation": self.remediation,
+            "run_after_failed_dependencies": self.run_after_failed_dependencies,
             "secret_redaction_policy": self.secret_redaction_policy.value,
             "stage": self.stage.value,
             "tier": self.tier,
@@ -549,7 +559,7 @@ class PreflightDag:
                     for dependency in check.spec.dependencies
                     if not results[dependency].passed
                 )
-                if blocked_by:
+                if blocked_by and not check.spec.run_after_failed_dependencies:
                     results[check.spec.check_id] = self._blocked_execution(
                         check,
                         context=context,
