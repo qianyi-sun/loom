@@ -547,6 +547,8 @@ def _run(
 
 
 def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> WorkerDependencies:
+    from .installed_detached_preflight import build_installed_detached_preflight_runner
+
     store = RequestStore(config.state_root)
     child_environment = sanitized_child_environment(config, service_uid=service_uid)
     systemd = SystemdUserManager(
@@ -555,6 +557,21 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         run=lambda argv: _run(argv, environment=child_environment),
     )
     lifecycle = LifecycleCoordinator(config, store=store, systemd=systemd)
+
+    def clock() -> datetime:
+        return datetime.now(UTC)
+
+    try:
+        service_gid = pwd.getpwnam(config.service_user).pw_gid
+    except (KeyError, OSError) as exc:
+        raise ValueError("worker service account is unavailable") from exc
+    detached_preflight = build_installed_detached_preflight_runner(
+        config,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        store=store,
+        now=clock,
+    )
 
     def run_driver(envelope_path: Path, resume: bool) -> int:
         from loom_cli.cluster_cmd import dispatch
@@ -573,7 +590,7 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         store=store,
         lifecycle=lifecycle,
         run_driver=run_driver,
-        now=lambda: datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        now=lambda: clock().isoformat().replace("+00:00", "Z"),
         stderr=sys.stderr,
         envelope_path=lambda envelope: (
             config.state_root
@@ -589,6 +606,7 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             effective_uid=service_uid,
         ),
         load_backup_job=lambda path: _load_backup_job(config, store, path),
+        run_backup=detached_preflight,
         finalize_backup=lambda request, verified: _finalize_verified_backup(
             config,
             store,
