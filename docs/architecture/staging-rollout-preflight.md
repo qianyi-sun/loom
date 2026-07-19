@@ -80,6 +80,14 @@ is intentionally issued only after that rehearsal succeeds. Tier 0 may still
 reuse a previously active eligible lease when its complete identity and epoch
 remain unchanged.
 
+The epoch read itself is a single fixed, read-only PostgreSQL query executed
+through the protected staging pod. Its provider requires the exact
+`staging`/`loom-staging` row, rejects missing, duplicate-schema, cross-environment,
+negative, or non-integer authority, and returns no database credentials or
+free-form diagnostics. Broker admission, checkpoint inventory, baseline probes,
+and attestation drift checks must bind this same value rather than inventing a
+process-local epoch.
+
 The pipeline exposes this ordering directly. `assess` publishes Tier 0-2
 evidence; `rehearse` executes and hashes the complete Tier 0-3 DAG without
 publishing an attestation; and `attest` accepts only that unchanged passing
