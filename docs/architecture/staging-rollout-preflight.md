@@ -516,6 +516,17 @@ composition remains deliberately disconnected from the installed final helper
 until every other protected driver mutation is also represented as a journaled
 component; a partial chain is not rollout authority.
 
+The next component consumes the exact Tier 1 `rendered.yaml` publication and
+never invokes the renderer or image builder. It first requires the journaled
+epoch component to classify as exact for this request and plan, then runs a
+bounded server-side `kubectl diff`. Exit zero is exact; exit one is ready to
+converge under the claimed epoch; every command error is fail-closed. Apply uses
+server-side apply with the fixed `loom-staging-rollout` field manager, strict
+validation, and no `--force-conflicts`, then must reclassify to an empty diff.
+Diff output is discarded so a Secret difference cannot enter logs or evidence.
+The component binds the fresh protected-baseline digest, candidate/tree,
+rendered-manifest digest, namespace, and starting epoch in its immutable intent.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:

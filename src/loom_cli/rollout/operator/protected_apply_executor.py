@@ -27,6 +27,7 @@ from .protected_epoch_component import (
     KubernetesProtectedEpochComponent,
     requires_legacy_epoch_bootstrap,
 )
+from .protected_manifest_component import KubernetesProtectedManifestComponent
 from .protected_migration_component import KubernetesProtectedMigrationComponent
 
 PROTECTED_KUBECONFIG_PATH = Path("/var/lib/loom-staging-rollout/kubeconfig")
@@ -53,6 +54,15 @@ class ProtectedApplyCommandRunner(Protocol):
         input_payload: bytes | None,
         timeout_seconds: float,
     ) -> None: ...
+
+    def run_status(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        input_payload: bytes | None,
+        timeout_seconds: float,
+    ) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +122,33 @@ class SubprocessProtectedApplyCommandRunner:
             timeout_seconds=timeout_seconds,
         )
 
+    def run_status(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        input_payload: bytes | None,
+        timeout_seconds: float,
+    ) -> int:
+        command = self._validate_invocation(
+            argv,
+            env=env,
+            input_payload=input_payload,
+            timeout_seconds=timeout_seconds,
+        )
+        result = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            input=input_payload,
+            timeout=timeout_seconds,
+            env=dict(self.environment),
+        )
+        if result.returncode not in {0, 1}:
+            raise RuntimeError("protected apply status subprocess failed safely")
+        return result.returncode
+
     def _run(
         self,
         argv: Sequence[str],
@@ -120,17 +157,13 @@ class SubprocessProtectedApplyCommandRunner:
         input_payload: bytes | None,
         timeout_seconds: float,
     ) -> bytes:
-        command = tuple(argv)
+        command = self._validate_invocation(
+            argv,
+            env=env,
+            input_payload=input_payload,
+            timeout_seconds=timeout_seconds,
+        )
         expected_environment = dict(self.environment)
-        if (
-            not command
-            or command[0] != "kubectl"
-            or any(not item or "\x00" in item or "\n" in item for item in command)
-            or dict(env) != expected_environment
-            or not 0 < timeout_seconds <= 1800
-            or (input_payload is not None and len(input_payload) > self.max_output_bytes)
-        ):
-            raise ValueError("protected apply subprocess invocation is invalid")
         result = subprocess.run(
             command,
             check=False,
@@ -146,6 +179,26 @@ class SubprocessProtectedApplyCommandRunner:
         ):
             raise RuntimeError("protected apply subprocess failed safely")
         return result.stdout
+
+    def _validate_invocation(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        input_payload: bytes | None,
+        timeout_seconds: float,
+    ) -> tuple[str, ...]:
+        command = tuple(argv)
+        if (
+            not command
+            or command[0] != "kubectl"
+            or any(not item or "\x00" in item or "\n" in item for item in command)
+            or dict(env) != dict(self.environment)
+            or not 0 < timeout_seconds <= 1800
+            or (input_payload is not None and len(input_payload) > self.max_output_bytes)
+        ):
+            raise ValueError("protected apply subprocess invocation is invalid")
+        return command
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,8 +237,16 @@ class MigrationEpochProtectedApplyExecutor:
             environment=environment,
             service_uid=self.service_uid,
         ).component(plan)
+        manifests = KubernetesProtectedManifestComponent(
+            runner=self.runner,
+            environment=environment,
+            service_uid=self.service_uid,
+            epoch_guard=epoch.classify,
+        ).component(plan)
         components = (
-            (migration, epoch) if requires_legacy_epoch_bootstrap(plan) else (epoch, migration)
+            (migration, epoch, manifests)
+            if requires_legacy_epoch_bootstrap(plan)
+            else (epoch, migration, manifests)
         )
         terminals = ProtectedApplyJournal(
             self.state_root,

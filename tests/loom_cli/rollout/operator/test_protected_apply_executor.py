@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ class Runner:
         self.epoch = epoch
         self.calls: list[str] = []
         self.environment = {"KUBECONFIG": "/exact"}
+        self.manifest_status = 1
 
     def capture_stdout(self, argv, *, env, timeout_seconds):
         assert env == self.environment
@@ -48,12 +50,23 @@ class Runner:
 
     def run_checked(self, argv, *, env, input_payload, timeout_seconds):
         assert env == self.environment
-        if "apply" in argv:
+        if "--server-side=true" in argv:
+            self.calls.append("manifest-apply")
+            assert input_payload is not None
+            self.manifest_status = 0
+        elif "apply" in argv:
             self.calls.append("migration-apply")
             assert input_payload is not None
         else:
             self.calls.append("migration-wait")
             self.revision = "0067"
+
+    def run_status(self, argv, *, env, input_payload, timeout_seconds):
+        assert env == self.environment
+        assert "diff" in argv
+        assert input_payload is not None
+        self.calls.append("manifest-diff")
+        return self.manifest_status
 
     def _epoch_record(self, variables=None):
         exact = self.epoch in {1, 8}
@@ -98,10 +111,12 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     assert result.observed_epoch == 8
     assert result.protected_mutation
     assert runner.calls.index("epoch-apply") < runner.calls.index("migration-apply")
+    assert runner.calls.index("migration-apply") < runner.calls.index("manifest-apply")
     before = tuple(runner.calls)
     assert executor("final.protected-apply", CheckOperation.APPLY, plan) == result
     assert "epoch-apply" not in runner.calls[len(before) :]
     assert "migration-apply" not in runner.calls[len(before) :]
+    assert "manifest-apply" not in runner.calls[len(before) :]
 
 
 def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path) -> None:
@@ -127,6 +142,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     roots = sorted((state / "requests/req-alpha/attempts/1/protected-apply").iterdir())
     assert roots[0].name == "00-database-migration"
     assert roots[1].name == "01-mutation-epoch-claim"
+    assert roots[2].name == "02-staging-manifests"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
@@ -165,6 +181,18 @@ def test_subprocess_runner_has_fixed_environment_and_redacted_failure(
     assert calls[0][1]["env"] == runner.environment
     assert calls[0][1]["input"] is None
 
+    assert (
+        runner.run_status(
+            ("kubectl", "diff", "-f", "-"),
+            env=runner.environment,
+            input_payload=b"manifest\n",
+            timeout_seconds=5,
+        )
+        == 0
+    )
+    assert calls[1][1]["stdout"] is subprocess.DEVNULL
+    assert calls[1][1]["stderr"] is subprocess.DEVNULL
+
     with pytest.raises(ValueError, match="invocation is invalid"):
         runner.capture_stdout(
             ("sh", "-c", "true"),
@@ -186,3 +214,18 @@ def test_subprocess_runner_has_fixed_environment_and_redacted_failure(
             timeout_seconds=5,
         )
     assert "raw-secret-value" not in str(exc.value)
+
+    def fail_status(_argv, **_kwargs):
+        return SimpleNamespace(returncode=2, stdout=b"", stderr=b"raw-secret-value")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.run",
+        fail_status,
+    )
+    with pytest.raises(RuntimeError, match="status subprocess failed safely"):
+        runner.run_status(
+            ("kubectl", "diff", "-f", "-"),
+            env=runner.environment,
+            input_payload=b"manifest\n",
+            timeout_seconds=5,
+        )
