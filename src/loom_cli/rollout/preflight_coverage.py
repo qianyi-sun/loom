@@ -6,7 +6,8 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from importlib import resources
+from importlib.resources.abc import Traversable
 
 from loom_cli.rollout.preflight_contract import (
     MutationClass,
@@ -14,8 +15,8 @@ from loom_cli.rollout.preflight_contract import (
     StageCapability,
 )
 
-DEFAULT_COVERAGE_MANIFEST = (
-    Path(__file__).resolve().parents[3] / "config/staging-rollout-preflight-coverage.json"
+DEFAULT_COVERAGE_MANIFEST = resources.files("loom_cli.data").joinpath(
+    "staging-rollout-preflight-coverage.json"
 )
 _ID_RE = re.compile(r"^[a-z][a-z0-9.-]{2,95}$")
 
@@ -276,7 +277,7 @@ class CoverageManifest:
                 raise ValueError(f"preflight tier contract drifts from coverage for {check_id}")
 
 
-def load_coverage_manifest(path: Path = DEFAULT_COVERAGE_MANIFEST) -> CoverageManifest:
+def load_coverage_manifest(path: Traversable = DEFAULT_COVERAGE_MANIFEST) -> CoverageManifest:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

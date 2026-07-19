@@ -7,7 +7,8 @@ ID and failure code, then invoked through the operation that applies at that
 stage (`probe`, `plan`, `apply`, or `verify`).
 
 The checked-in coverage authority is
-`config/staging-rollout-preflight-coverage.json`. Every rollout step and every
+`src/loom_cli/data/staging-rollout-preflight-coverage.json`, packaged as
+runtime data in the installed wheel. Every rollout step and every
 legacy broker predicate must map to its earliest possible stage. A newly
 observed rollout failure whose predicate could have run earlier is a preflight
 coverage defect: a regression fixture and an earlier-stage check are required
