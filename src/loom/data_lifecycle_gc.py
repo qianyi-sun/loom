@@ -98,10 +98,15 @@ class ObservedObject:
 class ReconciliationReport:
     registered_missing: tuple[tuple[str, str, str], ...]
     observed_unregistered: tuple[tuple[str, str, str], ...]
+    registered_size_drift: tuple[tuple[str, str, str], ...] = ()
 
     @property
     def clean(self) -> bool:
-        return not self.registered_missing and not self.observed_unregistered
+        return (
+            not self.registered_missing
+            and not self.observed_unregistered
+            and not self.registered_size_drift
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,11 +380,20 @@ def reconcile_object_inventory(
     observed: Iterable[ObservedObject],
 ) -> ReconciliationReport:
     """Report both orphan directions without authorizing either for deletion."""
-    registered_keys = {item.identity for item in registered}
-    observed_keys = {item.identity for item in observed}
+    registered_items = {item.identity: item for item in registered}
+    observed_items = {item.identity: item for item in observed}
+    registered_keys = set(registered_items)
+    observed_keys = set(observed_items)
     return ReconciliationReport(
         registered_missing=tuple(sorted(registered_keys - observed_keys)),
         observed_unregistered=tuple(sorted(observed_keys - registered_keys)),
+        registered_size_drift=tuple(
+            sorted(
+                identity
+                for identity in registered_keys & observed_keys
+                if registered_items[identity].size_bytes != observed_items[identity].size_bytes
+            )
+        ),
     )
 
 

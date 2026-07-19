@@ -223,7 +223,7 @@ def _artifact_object(
         row_id=row.row_id,
         bucket=bucket,
         object_key=object_key,
-        version_id=observed_version if version_id is not None else None,
+        version_id=observed_version,
         content_sha256=observed_sha,
         size_bytes=observed_size,
         created_at=row.created_at,

@@ -133,6 +133,11 @@ GC is staging-only and journaled:
 Runs are retryable and idempotent. Unknown or cross-environment objects are
 quarantined/reported. DB references without objects and objects without DB
 owners are reconciled in both directions; neither class is silently deleted.
+The operator requires every execution bucket as an explicit repeated
+`--bucket` argument, enumerates non-versioned objects or every exact
+version/delete marker as appropriate, and rejects registered-size drift. A
+registered bucket outside that allowlist fails closed instead of disappearing
+from evidence.
 The reusable executor in `loom.data_lifecycle_gc` binds a deterministic plan to
 the current mutation epoch. An unversioned object is deletion-eligible only
 when its exact SHA-256 is registered; a versioned object is addressed by its
@@ -165,6 +170,14 @@ and therefore changes the digest.
 Evidence output can be written once to a new mode-0600 file. `resume` accepts
 only an exact failed run ID and its request authority; it does not rebuild or
 broaden the deletion plan from current prefixes.
+
+```bash
+python scripts/ops/staging_data_lifecycle_gc.py inventory \
+  --namespace loom-staging \
+  --requested-by qianyi \
+  --bucket trajectories \
+  --bucket artifacts
+```
 
 ## Rollout checkpoint versus disaster recovery
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import Engine, text
@@ -11,6 +11,7 @@ from loom.data_lifecycle_gc import (
     AuthorityInventory,
     GcPlan,
     GcScope,
+    ReconciliationReport,
     RegisteredObject,
     build_gc_plan,
 )
@@ -27,13 +28,31 @@ class LifecycleInventorySnapshot:
     authorities: tuple[AuthorityInventory, ...]
     objects: tuple[RegisteredObject, ...]
     unclassified_rows: tuple[tuple[str, int], ...]
+    reconciliation: ReconciliationReport = field(
+        default_factory=lambda: ReconciliationReport((), ())
+    )
 
     @property
     def blockers(self) -> tuple[str, ...]:
-        return tuple(
+        row_blockers = tuple(
             f"{table} contains {count} unclassified execution rows"
             for table, count in self.unclassified_rows
             if count
+        )
+        return (
+            *row_blockers,
+            *(
+                f"registered object is missing: {'/'.join(identity)}"
+                for identity in self.reconciliation.registered_missing
+            ),
+            *(
+                f"observed object is unregistered: {'/'.join(identity)}"
+                for identity in self.reconciliation.observed_unregistered
+            ),
+            *(
+                f"registered object size drifted: {'/'.join(identity)}"
+                for identity in self.reconciliation.registered_size_drift
+            ),
         )
 
     def build_plan(self, *, now: datetime) -> GcPlan:

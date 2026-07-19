@@ -16,6 +16,10 @@ from sqlalchemy import create_engine
 from loom.data_lifecycle_gc import GcScope
 from loom.data_lifecycle_gc_s3 import S3ExactObjectDeleter
 from loom.data_lifecycle_gc_sql import SqlAlchemyGcJournal
+from loom.data_lifecycle_inventory_s3 import (
+    ReconcilingLifecycleInventory,
+    S3ObservedObjectInventory,
+)
 from loom.data_lifecycle_inventory_sql import SqlAlchemyLifecycleInventory
 from loom.data_lifecycle_operator import (
     LifecycleOperatorRequest,
@@ -33,6 +37,12 @@ def _parser() -> argparse.ArgumentParser:
         choices=tuple(action.value for action in OperatorAction),
     )
     parser.add_argument("--namespace", required=True)
+    parser.add_argument(
+        "--bucket",
+        action="append",
+        required=True,
+        help="Exact staging execution bucket to reconcile; repeat for each allowlisted bucket.",
+    )
     parser.add_argument("--requested-by", required=True)
     parser.add_argument("--approved-inventory-digest")
     parser.add_argument("--request-id")
@@ -79,7 +89,11 @@ def main(argv: list[str] | None = None) -> int:
                 resume_run_id=args.resume_run_id,
             ),
             scope=GcScope(environment="staging", namespace=args.namespace),
-            inventory=SqlAlchemyLifecycleInventory(engine),
+            inventory=ReconcilingLifecycleInventory(
+                SqlAlchemyLifecycleInventory(engine),
+                S3ObservedObjectInventory(client),
+                buckets=args.bucket,
+            ),
             journal=SqlAlchemyGcJournal(engine),
             object_deleter=S3ExactObjectDeleter(client),
         )
