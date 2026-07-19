@@ -18,6 +18,7 @@ from loom_cli.rollout.operator.protected_gb10_transport import (
     GB10TransportTarget,
     _remote_apply_source,
     _remote_observation_source,
+    build_fixed_gb10_ssh_transport,
 )
 from tests.loom_cli.rollout.operator.test_protected_migration_component import _published_plan
 
@@ -178,3 +179,18 @@ def test_fixed_transport_target_rejects_path_authority_drift(repo, env_file) -> 
             env_file_path=PurePosixPath(env_file),
             node_agent_service="loom-gb10-node-agent.service",
         )
+
+
+def test_fixed_transport_factory_binds_checked_in_staging_inventory() -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    hosts = tuple(f"trt-gb10-{index}" for index in range(1, 16) if index != 7)
+    transport = build_fixed_gb10_ssh_transport(
+        repo_root / "deploy/environments/staging.cluster.toml",
+        expected_hosts=hosts,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+        max_concurrency=4,
+    )
+
+    assert tuple(target.ssh_target for target in transport.targets) == hosts
+    assert transport.identity == Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
+    assert transport.ssh_config == (repo_root / "deploy/worker-pools/gb10/ssh_config").resolve()

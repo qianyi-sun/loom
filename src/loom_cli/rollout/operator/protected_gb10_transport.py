@@ -33,6 +33,10 @@ _KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
 _SHARED_ROOT = PurePosixPath("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
 _LEGACY_SERVICE = "loom-gb10-worker.service"
 _UNIT_ROOT = PurePosixPath("deploy/worker-pools/gb10")
+_FIXED_REPO = PurePosixPath("/home/qianyi/loom-worker-build-staging")
+_FIXED_ENV_FILE = _FIXED_REPO / ".env"
+_FIXED_NODE_AGENT_SERVICE = "loom-gb10-node-agent.service"
+_FIXED_IDENTITY = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
 _MAX_OUTPUT_BYTES = 64 * 1024
 _MUTATION_ORDER = (
     GB10MutationKind.CHECKOUT,
@@ -73,6 +77,9 @@ class GB10TransportTarget:
             or ".." in env_file.parts
             or env_file.parent != repo
             or env_file.name != ".env"
+            or repo != _FIXED_REPO
+            or env_file != _FIXED_ENV_FILE
+            or self.node_agent_service != _FIXED_NODE_AGENT_SERVICE
         ):
             raise ValueError("GB10 transport target is outside fixed authority")
         object.__setattr__(self, "repo_path", repo)
@@ -633,4 +640,94 @@ def _hash_json(payload: object) -> str:
     ).hexdigest()
 
 
-__all__ = ["FixedGB10SSHTransport", "GB10TransportTarget"]
+def build_fixed_gb10_ssh_transport(
+    cluster_config_path: Path,
+    *,
+    expected_hosts: Sequence[str],
+    run: CommandRunner,
+    max_concurrency: int,
+) -> FixedGB10SSHTransport:
+    """Bind the fixed transport to the exact installed staging inventory."""
+    from loom_cli.cluster_config import load_cluster_config
+
+    if (
+        not cluster_config_path.is_absolute()
+        or ".." in cluster_config_path.parts
+        or not expected_hosts
+        or len(set(expected_hosts)) != len(expected_hosts)
+        or any(_HOST_RE.fullmatch(host) is None for host in expected_hosts)
+    ):
+        raise ValueError("GB10 installed transport input is invalid")
+    try:
+        cluster = load_cluster_config(cluster_config_path)
+    except Exception as exc:
+        raise ValueError("GB10 installed cluster config is unavailable") from exc
+    pool = getattr(cluster, "gb10_pool", None)
+    raw_hosts = getattr(pool, "hosts", None) if pool is not None else None
+    ssh_config_value = getattr(pool, "ssh_config", None) if pool is not None else None
+    identity_value = getattr(pool, "ssh_identity_file", None) if pool is not None else None
+    certificate_value = getattr(pool, "ssh_certificate_file", None) if pool is not None else None
+    if (
+        not isinstance(raw_hosts, Sequence)
+        or isinstance(raw_hosts, (str, bytes))
+        or not isinstance(ssh_config_value, str)
+        or not ssh_config_value
+        or identity_value != str(_FIXED_IDENTITY)
+    ):
+        raise ValueError("GB10 installed cluster authority is incomplete")
+    targets: list[GB10TransportTarget] = []
+    for raw in raw_hosts:
+        if not isinstance(raw, dict) or set(raw) - {
+            "ssh_target",
+            "repo_path",
+            "env_file_path",
+            "repo_url",
+            "node_agent_service",
+        }:
+            raise ValueError("GB10 installed host authority is invalid")
+        ssh_target = raw.get("ssh_target")
+        repo_path = raw.get("repo_path")
+        env_file_path = raw.get("env_file_path")
+        service = raw.get("node_agent_service")
+        if not all(
+            isinstance(value, str) and value
+            for value in (ssh_target, repo_path, env_file_path, service)
+        ):
+            raise ValueError("GB10 installed host fields are invalid")
+        targets.append(
+            GB10TransportTarget(
+                ssh_target=str(ssh_target),
+                repo_path=PurePosixPath(str(repo_path)),
+                env_file_path=PurePosixPath(str(env_file_path)),
+                node_agent_service=str(service),
+            )
+        )
+    if {target.ssh_target for target in targets} != set(expected_hosts):
+        raise ValueError("GB10 installed host inventory drifted")
+    ssh_config = Path(ssh_config_value).expanduser()
+    if not ssh_config.is_absolute():
+        ssh_config = cluster_config_path.parent / ssh_config
+    ssh_config = ssh_config.resolve(strict=False)
+    certificate: Path | None = None
+    if certificate_value:
+        if not isinstance(certificate_value, str):
+            raise ValueError("GB10 installed certificate authority is invalid")
+        certificate = Path(certificate_value).expanduser()
+        if not certificate.is_absolute():
+            certificate = cluster_config_path.parent / certificate
+        certificate = certificate.resolve(strict=False)
+    return FixedGB10SSHTransport(
+        targets=tuple(targets),
+        ssh_config=ssh_config,
+        identity=_FIXED_IDENTITY,
+        certificate=certificate,
+        run=run,
+        max_concurrency=max_concurrency,
+    )
+
+
+__all__ = [
+    "FixedGB10SSHTransport",
+    "GB10TransportTarget",
+    "build_fixed_gb10_ssh_transport",
+]
