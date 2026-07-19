@@ -24,6 +24,7 @@ from loom_cli.rollout.preflight_contract import (
 from loom_cli.rollout.preflight_registered_checks import (
     build_browser_runtime_check,
     build_capacity_high_water_check,
+    build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
     build_rehearsal_checks,
     build_staging_baseline_checks,
@@ -124,6 +125,7 @@ def _rehearsal_result(check_id: str) -> RehearsalResult:
 
 
 def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
+    repo_root = Path(__file__).resolve().parents[3]
     config_digest = "7" * 64
     capacity = build_capacity_high_water_check(
         lambda: StagingCapacity(
@@ -156,6 +158,27 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
         identity=Path("/fixed/identity"),
         settle_attempts=2,
         settle_interval_seconds=0,
+    )
+    candidate_source = build_gb10_candidate_source_check(
+        lambda argv: subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "candidate_sha": _CANDIDATE,
+                    "candidate_tree": "b" * 40,
+                    "unit_sha256": {},
+                }
+            ),
+            "",
+        ),
+        targets=(target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        candidate_root=repo_root,
+        expected_candidate_sha=_CANDIDATE,
+        expected_candidate_tree="c" * 40,
+        image_tag="staging-aaaaaaa",
     )
 
     browser = build_browser_runtime_check(
@@ -247,6 +270,18 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
             ),
         ),
         RegressionReplayCase(
+            "gb10-candidate-source-drift",
+            candidate_source,
+            CheckContext(
+                {
+                    "candidate.sha": _CANDIDATE,
+                    "candidate.tree": "c" * 40,
+                    "gb10.inventory-digest": gb10_target_inventory_digest((target,)),
+                    "runner.config.sha256": config_digest,
+                }
+            ),
+        ),
+        RegressionReplayCase(
             "systemd-user-manager-latency",
             systemd,
             CheckContext({"runner.config.sha256": config_digest, "service.uid": 1001}),
@@ -278,7 +313,7 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
 def test_all_historical_blockers_replay_through_production_checks(tmp_path: Path) -> None:
     evidence = replay_regression_manifest(_cases(tmp_path))
 
-    assert len(evidence.implementation_digests) == 7
+    assert len(evidence.implementation_digests) == 8
     assert set(evidence.implementation_digests) == set(evidence.evidence_hashes)
 
 

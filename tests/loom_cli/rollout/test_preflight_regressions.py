@@ -15,6 +15,7 @@ def test_historical_blockers_are_checked_in_and_earliest_stage_classified() -> N
     assert {fixture.fixture_id for fixture in manifest.fixtures} == {
         "browser-token-authority-mismatch",
         "gb10-timer-transient-state",
+        "gb10-candidate-source-drift",
         "systemd-user-manager-latency",
         "backup-object-inode-growth",
         "release-baseline-drift",
