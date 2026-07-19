@@ -7,12 +7,15 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
 from loom_cli.rollout.image_readiness import ImageArtifactSet
+from loom_cli.rollout.manifest_readiness import ManifestArtifact
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import CandidateBinding
+from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.rehearsal_readiness import (
     REHEARSAL_CHECK_IDS,
     RehearsalAction,
@@ -76,6 +79,7 @@ class RehearsalPlan:
     candidate_sha: str
     candidate_tree: str
     checkpoint_evidence_sha256: str
+    checkpoint_manifest_path: Path
     checkpoint_manifest_sha256: str
     mutation_epoch: int
     db_snapshot_identity: str
@@ -83,6 +87,11 @@ class RehearsalPlan:
     schema_revision: str
     image_digests: Mapping[str, str]
     image_artifact_sha256: str
+    artifact_bundle_sha256: str
+    artifact_descriptor_path: Path
+    rendered_manifest_path: Path
+    manifest_artifact_sha256: str
+    rendered_manifest_sha256: str
     migration_plan_sha256: str
     browser_report_schema_sha256: str
     resources: RehearsalResources
@@ -102,10 +111,25 @@ class RehearsalPlan:
                     self.checkpoint_manifest_sha256,
                     self.object_inventory_root,
                     self.image_artifact_sha256,
+                    self.artifact_bundle_sha256,
+                    self.manifest_artifact_sha256,
+                    self.rendered_manifest_sha256,
                     self.migration_plan_sha256,
                     self.browser_report_schema_sha256,
                 )
             )
+            or not self.checkpoint_manifest_path.is_absolute()
+            or self.checkpoint_manifest_path.name != "backup-manifest.json"
+            or ".." in self.checkpoint_manifest_path.parts
+            or not self.artifact_descriptor_path.is_absolute()
+            or not self.rendered_manifest_path.is_absolute()
+            or ".." in self.artifact_descriptor_path.parts
+            or ".." in self.rendered_manifest_path.parts
+            or self.artifact_descriptor_path.parent != self.rendered_manifest_path.parent
+            or self.artifact_descriptor_path.parent.name != self.artifact_bundle_sha256
+            or self.artifact_descriptor_path.parent.parent.name != "preflight-artifacts"
+            or self.artifact_descriptor_path.name != "artifact.json"
+            or self.rendered_manifest_path.name != "rendered.yaml"
             or not self.db_snapshot_identity.startswith("pgdump-sha256:")
             or not self.schema_revision
             or not image_digests
@@ -127,14 +151,18 @@ class RehearsalPlan:
     def to_record(self) -> dict[str, object]:
         """Return the strict secret-free plan consumed by the installed helper."""
         return {
+            "artifact_bundle_sha256": self.artifact_bundle_sha256,
+            "artifact_descriptor_path": str(self.artifact_descriptor_path),
             "browser_report_schema_sha256": self.browser_report_schema_sha256,
             "candidate_sha": self.candidate_sha,
             "candidate_tree": self.candidate_tree,
             "checkpoint_evidence_sha256": self.checkpoint_evidence_sha256,
+            "checkpoint_manifest_path": str(self.checkpoint_manifest_path),
             "checkpoint_manifest_sha256": self.checkpoint_manifest_sha256,
             "db_snapshot_identity": self.db_snapshot_identity,
             "image_artifact_sha256": self.image_artifact_sha256,
             "image_digests": dict(self.image_digests),
+            "manifest_artifact_sha256": self.manifest_artifact_sha256,
             "migration_plan_sha256": self.migration_plan_sha256,
             "mutation_epoch": self.mutation_epoch,
             "object_inventory_root": self.object_inventory_root,
@@ -145,6 +173,8 @@ class RehearsalPlan:
                 "route": self.resources.route,
                 "systemd_unit": self.resources.systemd_unit,
             },
+            "rendered_manifest_path": str(self.rendered_manifest_path),
+            "rendered_manifest_sha256": self.rendered_manifest_sha256,
             "schema_revision": self.schema_revision,
             "schema_version": 1,
         }
@@ -153,18 +183,24 @@ class RehearsalPlan:
     def from_record(cls, value: Mapping[str, object]) -> RehearsalPlan:
         """Parse the one strict plan schema accepted by the installed helper."""
         expected = {
+            "artifact_bundle_sha256",
+            "artifact_descriptor_path",
             "browser_report_schema_sha256",
             "candidate_sha",
             "candidate_tree",
             "checkpoint_evidence_sha256",
+            "checkpoint_manifest_path",
             "checkpoint_manifest_sha256",
             "db_snapshot_identity",
             "image_artifact_sha256",
             "image_digests",
+            "manifest_artifact_sha256",
             "migration_plan_sha256",
             "mutation_epoch",
             "object_inventory_root",
             "resources",
+            "rendered_manifest_path",
+            "rendered_manifest_sha256",
             "schema_revision",
             "schema_version",
         }
@@ -187,15 +223,21 @@ class RehearsalPlan:
         ):
             raise ValueError("rehearsal plan schema is invalid")
         string_fields = (
+            "artifact_bundle_sha256",
+            "artifact_descriptor_path",
             "browser_report_schema_sha256",
             "candidate_sha",
             "candidate_tree",
             "checkpoint_evidence_sha256",
+            "checkpoint_manifest_path",
             "checkpoint_manifest_sha256",
             "db_snapshot_identity",
             "image_artifact_sha256",
+            "manifest_artifact_sha256",
             "migration_plan_sha256",
             "object_inventory_root",
+            "rendered_manifest_path",
+            "rendered_manifest_sha256",
             "schema_revision",
         )
         if any(not isinstance(value.get(field), str) for field in string_fields) or any(
@@ -207,6 +249,7 @@ class RehearsalPlan:
             candidate_sha=str(value["candidate_sha"]),
             candidate_tree=str(value["candidate_tree"]),
             checkpoint_evidence_sha256=str(value["checkpoint_evidence_sha256"]),
+            checkpoint_manifest_path=Path(str(value["checkpoint_manifest_path"])),
             checkpoint_manifest_sha256=str(value["checkpoint_manifest_sha256"]),
             mutation_epoch=mutation_epoch,
             db_snapshot_identity=str(value["db_snapshot_identity"]),
@@ -214,6 +257,11 @@ class RehearsalPlan:
             schema_revision=str(value["schema_revision"]),
             image_digests={str(key): str(item) for key, item in image_digests.items()},
             image_artifact_sha256=str(value["image_artifact_sha256"]),
+            artifact_bundle_sha256=str(value["artifact_bundle_sha256"]),
+            artifact_descriptor_path=Path(str(value["artifact_descriptor_path"])),
+            rendered_manifest_path=Path(str(value["rendered_manifest_path"])),
+            manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
+            rendered_manifest_sha256=str(value["rendered_manifest_sha256"]),
             migration_plan_sha256=str(value["migration_plan_sha256"]),
             browser_report_schema_sha256=str(value["browser_report_schema_sha256"]),
             resources=RehearsalResources(
@@ -247,6 +295,8 @@ class RehearsalActionSource:
     """Create identity and actions from the same immutable plan implementation."""
 
     image_artifacts: Callable[[], ImageArtifactSet]
+    manifest_artifacts: Callable[[], ManifestArtifact]
+    artifact_store: PreflightArtifactStore
     migration_plan_sha256: str
     browser_report_schema_sha256: str
     route_origin: str
@@ -267,8 +317,15 @@ class RehearsalActionSource:
         checkpoint: CriticalCheckpointEvidence,
     ) -> tuple[str, str]:
         artifacts = self.image_artifacts()
-        isolation_id = self._isolation_id(candidate, checkpoint, artifacts)
-        plan = self._plan(candidate, checkpoint, isolation_id=isolation_id, artifacts=artifacts)
+        manifests = self.manifest_artifacts()
+        isolation_id = self._isolation_id(candidate, checkpoint, artifacts, manifests)
+        plan = self._plan(
+            candidate,
+            checkpoint,
+            isolation_id=isolation_id,
+            artifacts=artifacts,
+            manifests=manifests,
+        )
         return isolation_id, plan.plan_digest
 
     def actions(
@@ -285,6 +342,7 @@ class RehearsalActionSource:
             checkpoint,
             isolation_id=isolation_id,
             artifacts=self.image_artifacts(),
+            manifests=self.manifest_artifacts(),
         )
         if plan.plan_digest != expected_digest:
             raise ValueError("rehearsal plan identity drifted")
@@ -317,6 +375,7 @@ class RehearsalActionSource:
         *,
         isolation_id: str,
         artifacts: ImageArtifactSet,
+        manifests: ManifestArtifact,
     ) -> RehearsalPlan:
         if (
             checkpoint.environment != "staging"
@@ -325,10 +384,20 @@ class RehearsalActionSource:
         ):
             raise ValueError("rehearsal candidate or checkpoint authority is invalid")
         resources = RehearsalResources.derive(isolation_id, route_origin=self.route_origin)
+        publication = self.artifact_store.publish(
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=candidate.resolved_tree,
+            mutation_epoch=checkpoint.mutation_epoch,
+            images=artifacts,
+            manifests=manifests,
+            migration_plan_sha256=self.migration_plan_sha256,
+            browser_report_schema_sha256=self.browser_report_schema_sha256,
+        )
         return RehearsalPlan(
             candidate_sha=candidate.resolved_sha,
             candidate_tree=candidate.resolved_tree,
             checkpoint_evidence_sha256=checkpoint.evidence_digest,
+            checkpoint_manifest_path=checkpoint.manifest_path,
             checkpoint_manifest_sha256=checkpoint.manifest_sha256,
             mutation_epoch=checkpoint.mutation_epoch,
             db_snapshot_identity=checkpoint.db_snapshot_identity,
@@ -336,6 +405,11 @@ class RehearsalActionSource:
             schema_revision=checkpoint.schema_revision,
             image_digests=artifacts.image_digests,
             image_artifact_sha256=artifacts.artifact_digest,
+            artifact_bundle_sha256=publication.bundle_digest,
+            artifact_descriptor_path=publication.descriptor_path,
+            rendered_manifest_path=publication.rendered_manifest_path,
+            manifest_artifact_sha256=publication.manifest_artifact_sha256,
+            rendered_manifest_sha256=publication.rendered_manifest_sha256,
             migration_plan_sha256=self.migration_plan_sha256,
             browser_report_schema_sha256=self.browser_report_schema_sha256,
             resources=resources,
@@ -346,6 +420,7 @@ class RehearsalActionSource:
         candidate: CandidateBinding,
         checkpoint: CriticalCheckpointEvidence,
         artifacts: ImageArtifactSet,
+        manifests: ManifestArtifact,
     ) -> str:
         payload = {
             "browser_report_schema_sha256": self.browser_report_schema_sha256,
@@ -354,6 +429,8 @@ class RehearsalActionSource:
             "checkpoint_evidence_sha256": checkpoint.evidence_digest,
             "checkpoint_manifest_sha256": checkpoint.manifest_sha256,
             "image_artifact_sha256": artifacts.artifact_digest,
+            "manifest_artifact_sha256": manifests.artifact_digest,
+            "rendered_manifest_sha256": manifests.rendered_sha256,
             "migration_plan_sha256": self.migration_plan_sha256,
             "route_origin": self.route_origin,
             "schema_version": 1,

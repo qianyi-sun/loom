@@ -16,6 +16,7 @@ def _plan() -> RehearsalPlan:
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
         checkpoint_evidence_sha256="c" * 64,
+        checkpoint_manifest_path=Path("/data/loom-staging/backups/exact/backup-manifest.json"),
         checkpoint_manifest_sha256="d" * 64,
         mutation_epoch=8,
         db_snapshot_identity="pgdump-sha256:" + "e" * 64,
@@ -23,6 +24,15 @@ def _plan() -> RehearsalPlan:
         schema_revision="0066",
         image_digests={"loom-service": "sha256:" + "1" * 64},
         image_artifact_sha256="2" * 64,
+        artifact_bundle_sha256="6" * 64,
+        artifact_descriptor_path=Path(
+            "/var/lib/loom-staging-rollout/preflight-artifacts/" + "6" * 64 + "/artifact.json"
+        ),
+        rendered_manifest_path=Path(
+            "/var/lib/loom-staging-rollout/preflight-artifacts/" + "6" * 64 + "/rendered.yaml"
+        ),
+        manifest_artifact_sha256="7" * 64,
+        rendered_manifest_sha256="8" * 64,
         migration_plan_sha256="3" * 64,
         browser_report_schema_sha256="4" * 64,
         resources=RehearsalResources.derive(
@@ -106,9 +116,7 @@ def test_runner_accepts_normalized_failure_without_stderr(tmp_path: Path) -> Non
 
     authority, plan = _authority(tmp_path, run)
 
-    assert authority("rehearsal.browser", plan).blockers == {
-        "route": "candidate-mismatch"
-    }
+    assert authority("rehearsal.browser", plan).blockers == {"route": "candidate-mismatch"}
 
 
 @pytest.mark.parametrize(
@@ -121,9 +129,7 @@ def test_runner_accepts_normalized_failure_without_stderr(tmp_path: Path) -> Non
         {"unknown": "field"},
     ],
 )
-def test_runner_rejects_output_contract_drift(
-    tmp_path: Path, mutation: dict[str, object]
-) -> None:
+def test_runner_rejects_output_contract_drift(tmp_path: Path, mutation: dict[str, object]) -> None:
     def run(argv, environment, timeout):
         del environment, timeout
         payload = {
@@ -147,9 +153,7 @@ def test_runner_rejects_output_contract_drift(
 def test_runner_rejects_nonempty_stderr_or_plan_drift(tmp_path: Path) -> None:
     authority, plan = _authority(
         tmp_path,
-        lambda argv, environment, timeout: subprocess.CompletedProcess(
-            argv, 1, "{}", "diagnostic"
-        ),
+        lambda argv, environment, timeout: subprocess.CompletedProcess(argv, 1, "{}", "diagnostic"),
     )
     with pytest.raises(RuntimeError, match="output contract"):
         authority("rehearsal.browser", plan)

@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
@@ -57,7 +58,29 @@ def _load_plan(path: Path, expected_digest: str) -> RehearsalPlan:
     expected_parent = Path("/var/lib/loom-staging-rollout/rehearsals") / plan.resources.namespace
     if path != expected_parent / "plan.json":
         raise ValueError("rehearsal helper plan path escaped its authority")
+    _verify_artifact_publication(plan)
     return plan
+
+
+def _verify_artifact_publication(plan: RehearsalPlan) -> None:
+    state_root = plan.artifact_descriptor_path.parents[2]
+    publication = PreflightArtifactStore(
+        state_root,
+        service_uid=os.geteuid(),
+    ).read(plan.artifact_bundle_sha256)
+    if (
+        publication.candidate_sha != plan.candidate_sha
+        or publication.candidate_tree != plan.candidate_tree
+        or publication.mutation_epoch != plan.mutation_epoch
+        or publication.descriptor_path != plan.artifact_descriptor_path
+        or publication.rendered_manifest_path != plan.rendered_manifest_path
+        or publication.image_artifact_sha256 != plan.image_artifact_sha256
+        or publication.manifest_artifact_sha256 != plan.manifest_artifact_sha256
+        or publication.rendered_manifest_sha256 != plan.rendered_manifest_sha256
+        or publication.migration_plan_sha256 != plan.migration_plan_sha256
+        or publication.browser_report_schema_sha256 != plan.browser_report_schema_sha256
+    ):
+        raise ValueError("rehearsal helper artifact publication drifted")
 
 
 def _record(

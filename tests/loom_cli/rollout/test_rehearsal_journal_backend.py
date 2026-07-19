@@ -17,6 +17,7 @@ def _plan(*, candidate_sha: str = "a" * 40) -> RehearsalPlan:
         candidate_sha=candidate_sha,
         candidate_tree="b" * 40,
         checkpoint_evidence_sha256="c" * 64,
+        checkpoint_manifest_path=Path("/data/loom-staging/backups/exact/backup-manifest.json"),
         checkpoint_manifest_sha256="d" * 64,
         mutation_epoch=7,
         db_snapshot_identity="pgdump-sha256:" + "e" * 64,
@@ -24,6 +25,15 @@ def _plan(*, candidate_sha: str = "a" * 40) -> RehearsalPlan:
         schema_revision="0066",
         image_digests={"loom-service": "sha256:" + "1" * 64},
         image_artifact_sha256="2" * 64,
+        artifact_bundle_sha256="6" * 64,
+        artifact_descriptor_path=Path(
+            "/var/lib/loom-staging-rollout/preflight-artifacts/" + "6" * 64 + "/artifact.json"
+        ),
+        rendered_manifest_path=Path(
+            "/var/lib/loom-staging-rollout/preflight-artifacts/" + "6" * 64 + "/rendered.yaml"
+        ),
+        manifest_artifact_sha256="7" * 64,
+        rendered_manifest_sha256="8" * 64,
         migration_plan_sha256="3" * 64,
         browser_report_schema_sha256="4" * 64,
         resources=RehearsalResources.derive(
@@ -58,7 +68,7 @@ def test_backend_publishes_once_and_reuses_exact_record(tmp_path: Path) -> None:
     assert calls == ["rehearsal.namespace"]
     plan_record = next((tmp_path / "journals").rglob("plan.json"))
     assert plan_record.stat().st_mode & 0o777 == 0o600
-    assert "loom-staging" not in plan_record.read_text()
+    assert '"namespace":"loom-staging"' not in plan_record.read_text()
 
 
 def test_backend_rejects_candidate_drift_against_existing_record(tmp_path: Path) -> None:

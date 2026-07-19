@@ -10,8 +10,10 @@ from loom_cli.rollout.image_readiness import (
     ImageArtifactSet,
     ImageDescriptor,
 )
+from loom_cli.rollout.manifest_readiness import ManifestArtifact
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
+from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.rehearsal_action_source import (
     RehearsalActionSource,
     RehearsalObservation,
@@ -37,7 +39,7 @@ def _candidate() -> CandidateBinding:
 def _checkpoint(tmp_path: Path) -> CriticalCheckpointEvidence:
     return CriticalCheckpointEvidence(
         request_id="req-abcdefgh",
-        manifest_path=tmp_path / "manifest.json",
+        manifest_path=tmp_path / "backup-manifest.json",
         manifest_sha256="1" * 64,
         component_sha256={
             "k8s_secrets": "2" * 64,
@@ -75,6 +77,23 @@ def _artifacts() -> ImageArtifactSet:
     )
 
 
+def _manifests() -> ManifestArtifact:
+    artifacts = _artifacts()
+    rendered = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: exact\n"
+    return ManifestArtifact(
+        rendered_yaml=rendered,
+        rendered_sha256=__import__("hashlib").sha256(rendered.encode()).hexdigest(),
+        resource_count=1,
+        resource_set_digest="d" * 64,
+        image_identities={
+            name: digest
+            for name, digest in artifacts.image_digests.items()
+            if name != "loom-staging-admin-browser-smoke"
+        },
+        artifact_digest="e" * 64,
+    )
+
+
 class Backend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, RehearsalPlan]] = []
@@ -91,9 +110,11 @@ class Backend:
         )
 
 
-def _source(backend: Backend) -> RehearsalActionSource:
+def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
     return RehearsalActionSource(
         image_artifacts=_artifacts,
+        manifest_artifacts=_manifests,
+        artifact_store=PreflightArtifactStore(tmp_path / "state"),
         migration_plan_sha256="b" * 64,
         browser_report_schema_sha256="c" * 64,
         route_origin="https://staging.example.test/dev",
@@ -103,7 +124,7 @@ def _source(backend: Backend) -> RehearsalActionSource:
 
 def test_source_binds_identity_actions_and_isolated_resources(tmp_path: Path) -> None:
     backend = Backend()
-    source = _source(backend)
+    source = _source(backend, tmp_path)
     candidate = _candidate()
     checkpoint = _checkpoint(tmp_path)
 
@@ -128,15 +149,17 @@ def test_source_binds_identity_actions_and_isolated_resources(tmp_path: Path) ->
 
 
 def test_source_rejects_isolation_identity_drift(tmp_path: Path) -> None:
-    source = _source(Backend())
+    source = _source(Backend(), tmp_path)
     with pytest.raises(ValueError, match="isolation identity drifted"):
         source.actions(_candidate(), _checkpoint(tmp_path), "rehearsal-" + "f" * 24)
 
 
 def test_isolation_identity_changes_with_browser_contract(tmp_path: Path) -> None:
-    original = _source(Backend())
+    original = _source(Backend(), tmp_path)
     changed = RehearsalActionSource(
         image_artifacts=_artifacts,
+        manifest_artifacts=_manifests,
+        artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
         migration_plan_sha256="b" * 64,
         browser_report_schema_sha256="d" * 64,
         route_origin="https://staging.example.test/dev",
@@ -183,7 +206,7 @@ def test_backend_cannot_claim_protected_mutation(tmp_path: Path) -> None:
                 blockers={},
             )
 
-    source = _source(UnsafeBackend())
+    source = _source(UnsafeBackend(), tmp_path)
     candidate = _candidate()
     checkpoint = _checkpoint(tmp_path)
     isolation_id, _digest = source.identity(candidate, checkpoint)
