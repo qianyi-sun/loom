@@ -696,6 +696,8 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         state_root=config.state_root,
         service_uid=service_uid,
         run=composition.final_gate_run,
+        read_mutation_epoch=composition.read_mutation_epoch,
+        now=clock,
     )
     final_gates = FinalGateRunner(
         attestation_store=composition.attestation_store,

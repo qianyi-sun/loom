@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import loom_cli.rollout.operator.final_gate_action_source as action_source_module
 from loom_cli.rollout.final_gate_readiness import (
     FINAL_CHECK_IDS,
     PROTECTED_MUTATION_CHECK_IDS,
@@ -174,6 +176,8 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
         state_root=state,
         service_uid=os.geteuid(),
         run=run,
+        read_mutation_epoch=lambda: 8,
+        now=lambda: NOW,
         executable=executable,
         executable_owner_uid=os.geteuid(),
     )
@@ -200,5 +204,45 @@ def test_final_gate_action_source_rejects_attested_publication_mismatch(tmp_path
 
     with pytest.raises(ValueError, match="publication drifted"):
         source(_envelope(attestation), attestation, 7, _admission(attestation))
+
+    assert calls == []
+
+
+def test_final_gate_action_source_runs_post_apply_drift_in_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, attestation, calls = _authority(tmp_path)
+    preflight_plan = SimpleNamespace(candidate="exact-plan")
+    admission = replace(
+        _admission(attestation),
+        preflight_plan=preflight_plan,  # type: ignore[arg-type]
+    )
+    captured: dict[str, object] = {}
+
+    def validate(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(observed_mutation_epoch=8, evidence_digest="d" * 64)
+
+    monkeypatch.setattr(action_source_module, "validate_post_apply_attestation_drift", validate)
+    actions = source(_envelope(attestation), attestation, 7, admission)
+
+    result = actions["final.drift"](CheckOperation.VERIFY)
+
+    assert result.ready
+    assert result.observed_epoch == 8
+    assert not result.protected_mutation
+    assert captured["admission"] is admission
+    assert captured["plan"] is preflight_plan
+    assert captured["current_mutation_epoch"] == 8
+    assert calls == []
+
+
+def test_final_gate_action_source_rejects_unbound_post_apply_plan(tmp_path: Path) -> None:
+    source, attestation, calls = _authority(tmp_path)
+    actions = source(_envelope(attestation), attestation, 7, _admission(attestation))
+
+    with pytest.raises(ValueError, match="unavailable"):
+        actions["final.drift"](CheckOperation.VERIFY)
 
     assert calls == []

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
+from loom_cli.rollout.final_attestation_admission import (
+    FinalAttestationAdmission,
+    validate_post_apply_attestation_drift,
+)
 from loom_cli.rollout.final_gate_command_runner import (
     FINAL_GATE_HELPER_PATH,
     CommandRunner,
@@ -46,6 +50,8 @@ class FinalGateActionSource:
     state_root: Path
     service_uid: int
     run: CommandRunner
+    read_mutation_epoch: Callable[[], int]
+    now: Callable[[], datetime]
     executable: Path = FINAL_GATE_HELPER_PATH
     executable_owner_uid: int = 0
 
@@ -55,6 +61,8 @@ class FinalGateActionSource:
             or ".." in self.state_root.parts
             or self.service_uid < 0
             or self.executable_owner_uid < 0
+            or not callable(self.read_mutation_epoch)
+            or not callable(self.now)
         ):
             raise ValueError("final gate action source authority is invalid")
 
@@ -104,7 +112,33 @@ class FinalGateActionSource:
 
             return execute
 
-        return {check_id: action(check_id) for check_id in FINAL_CHECK_IDS}
+        actions = {check_id: action(check_id) for check_id in FINAL_CHECK_IDS}
+
+        def verify_post_apply_drift(operation: CheckOperation) -> FinalGateResult:
+            if operation is not CheckOperation.VERIFY or admission.preflight_plan is None:
+                raise ValueError("post-apply drift action is unavailable")
+            current_mutation_epoch = self.read_mutation_epoch()
+            if type(current_mutation_epoch) is not int or current_mutation_epoch < 0:
+                raise ValueError("post-apply mutation epoch authority is invalid")
+            evidence = validate_post_apply_attestation_drift(
+                admission=admission,
+                plan=admission.preflight_plan,
+                current_mutation_epoch=current_mutation_epoch,
+                now=self.now(),
+            )
+            return FinalGateResult(
+                check_id="final.drift",
+                operation=operation,
+                candidate_sha=envelope.resolved_sha,
+                attestation_digest=attestation.attestation_digest,
+                observed_epoch=evidence.observed_mutation_epoch,
+                evidence_digest=evidence.evidence_digest,
+                protected_mutation=False,
+                blockers={},
+            )
+
+        actions["final.drift"] = verify_post_apply_drift
+        return actions
 
     def _publication(
         self,

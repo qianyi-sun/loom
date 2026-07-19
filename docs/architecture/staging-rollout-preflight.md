@@ -547,6 +547,9 @@ epoch-independent candidate, runner install, credential metadata and GB10
 mount/boot identities. Those records must remain unexpired and retain their
 attested implementation digests; image builds, Tier 1 artifacts, the changed
 live baseline and backup eligibility are not repeated after mutation.
+The service keeps the exact process-local preflight plan in final admission and
+routes `final.drift` directly to that shared validator after convergence; the
+installed generic helper cannot substitute a second implementation.
 
 ## Immutable attestation
 

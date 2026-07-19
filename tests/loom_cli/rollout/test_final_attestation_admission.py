@@ -280,6 +280,7 @@ def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
     assert all(execution.passed for execution in admission.tier0_executions)
     assert len(admission.tier2_executions) == 6
     assert all(execution.passed for execution in admission.tier2_executions)
+    assert admission.preflight_plan is plan
 
 
 def test_final_admission_rejects_host_boot_or_epoch_drift() -> None:

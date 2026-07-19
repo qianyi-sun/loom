@@ -43,6 +43,7 @@ class FinalAttestationAdmission:
     attestation: PreflightAttestation
     tier0_executions: tuple[CheckExecution, ...]
     tier2_executions: tuple[CheckExecution, ...]
+    preflight_plan: CandidatePreflightPlan | None = None
 
     def __post_init__(self) -> None:
         tier2_by_id = {execution.check_id: execution for execution in self.tier2_executions}
@@ -173,7 +174,7 @@ def validate_final_attestation(
             or execution.evidence_hash != attestation.evidence_hashes.get(execution.check_id)
         ):
             raise ValueError("final admission Tier 2 baseline changed")
-    return FinalAttestationAdmission(attestation, tier0, tier2)
+    return FinalAttestationAdmission(attestation, tier0, tier2, plan)
 
 
 def validate_post_apply_attestation_drift(
