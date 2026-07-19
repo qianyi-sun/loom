@@ -97,6 +97,281 @@ class TeamQuota(Base):
     )
 
 
+class StagingMutationEpoch(Base):
+    """Monotonic authority for protected staging mutations."""
+
+    __tablename__ = "staging_mutation_epochs"
+    __table_args__ = (
+        CheckConstraint(
+            "environment = 'staging'",
+            name="staging_mutation_epochs_env_check",
+        ),
+        CheckConstraint(
+            "namespace <> ''",
+            name="staging_mutation_epochs_namespace_check",
+        ),
+        CheckConstraint("epoch >= 0", name="staging_mutation_epochs_epoch_check"),
+    )
+    environment: Mapped[str] = mapped_column(Text, primary_key=True)
+    namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
+    )
+    reason: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'bootstrap'"),
+        default="bootstrap",
+    )
+    request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class DataLifecycleAuthority(Base):
+    """Typed environment/owner/retention authority for execution data."""
+
+    __tablename__ = "data_lifecycle_authorities"
+    __table_args__ = (
+        CheckConstraint("environment <> ''", name="data_lifecycle_authorities_env_check"),
+        CheckConstraint("namespace <> ''", name="data_lifecycle_authorities_namespace_check"),
+        CheckConstraint(
+            "data_class IN ('run','trial','event','artifact','benchmark','catalog','system')",
+            name="data_lifecycle_authorities_class_check",
+        ),
+        CheckConstraint(
+            "owner_kind IN ('batch','trial','artifact','benchmark','system')",
+            name="data_lifecycle_authorities_owner_kind_check",
+        ),
+        CheckConstraint(
+            "state IN ('active','deleting','quarantined')",
+            name="data_lifecycle_authorities_state_check",
+        ),
+        CheckConstraint(
+            "(pinned AND expires_at IS NULL) OR "
+            "(NOT pinned AND expires_at IS NOT NULL AND expires_at > created_at)",
+            name="data_lifecycle_authorities_retention_check",
+        ),
+        CheckConstraint(
+            "data_class NOT IN ('catalog','system') OR pinned",
+            name="data_lifecycle_authorities_pinned_class_check",
+        ),
+        UniqueConstraint(
+            "environment",
+            "namespace",
+            "data_class",
+            "owner_kind",
+            "owner_id",
+            name="data_lifecycle_authorities_owner_uidx",
+        ),
+        Index(
+            "data_lifecycle_authorities_gc_idx",
+            "environment",
+            "namespace",
+            "state",
+            "expires_at",
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    team_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    data_class: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    pinned: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+        default=False,
+    )
+    state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'active'"),
+        default="active",
+    )
+    deletion_token: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    lifecycle_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+
+
+class DataLifecycleObject(Base):
+    """Exact object-store identity owned by one lifecycle authority."""
+
+    __tablename__ = "data_lifecycle_objects"
+    __table_args__ = (
+        CheckConstraint("environment <> ''", name="data_lifecycle_objects_env_check"),
+        CheckConstraint("namespace <> ''", name="data_lifecycle_objects_namespace_check"),
+        CheckConstraint(
+            "bucket <> '' AND object_key <> ''",
+            name="data_lifecycle_objects_key_check",
+        ),
+        CheckConstraint("size_bytes >= 0", name="data_lifecycle_objects_size_check"),
+        CheckConstraint(
+            "state IN ('active','delete_pending','deleted','quarantined')",
+            name="data_lifecycle_objects_state_check",
+        ),
+        CheckConstraint(
+            "(state = 'deleted') = (verified_deleted_at IS NOT NULL)",
+            name="data_lifecycle_objects_deleted_check",
+        ),
+        Index("data_lifecycle_objects_authority_state_idx", "authority_id", "state"),
+        Index(
+            "data_lifecycle_objects_identity_uidx",
+            "environment",
+            "namespace",
+            "bucket",
+            "object_key",
+            text("COALESCE(version_id, '')"),
+            unique=True,
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    authority_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_authorities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    bucket: Mapped[str] = mapped_column(Text, nullable=False)
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    version_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'active'"),
+        default="active",
+    )
+    deletion_token: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    verified_deleted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+
+
+class DataLifecycleGcRun(Base):
+    """Append-only top-level journal for one staging-only GC transaction."""
+
+    __tablename__ = "data_lifecycle_gc_runs"
+    __table_args__ = (
+        CheckConstraint("environment = 'staging'", name="data_lifecycle_gc_runs_env_check"),
+        CheckConstraint("namespace <> ''", name="data_lifecycle_gc_runs_namespace_check"),
+        CheckConstraint(
+            "mutation_epoch_before >= 0",
+            name="data_lifecycle_gc_runs_epoch_before_check",
+        ),
+        CheckConstraint(
+            "mutation_epoch_after IS NULL OR mutation_epoch_after > mutation_epoch_before",
+            name="data_lifecycle_gc_runs_epoch_after_check",
+        ),
+        CheckConstraint(
+            "state IN ('planned','applying','verifying','completed','failed')",
+            name="data_lifecycle_gc_runs_state_check",
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    mutation_epoch_before: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    mutation_epoch_after: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'planned'"),
+        default="planned",
+    )
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    requested_by: Mapped[str] = mapped_column(Text, nullable=False)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    inventory: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DataLifecycleGcItem(Base):
+    """Retryable exact-object progress in a two-phase GC run."""
+
+    __tablename__ = "data_lifecycle_gc_items"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('marked','object_deleted','verified','metadata_deleted','failed')",
+            name="data_lifecycle_gc_items_state_check",
+        ),
+    )
+    gc_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_gc_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    object_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_objects.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    deletion_token: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'marked'"),
+        default="marked",
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -1347,6 +1622,12 @@ class Batch(Base):
     # NULL keeps pre-profile batches on their original selector semantics.
     # Non-empty lists are an immutable task-selection snapshot for new batches.
     resolved_task_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
 
     @property
     def failure_reason(self) -> str | None:
@@ -1472,6 +1753,12 @@ class Trial(Base):
     # mode. Groups this trial with siblings in the same family so the
     # scheduler predicate can serialise them. NULL for non-family trials.
     family_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
 
 
 class BatchFamilyState(Base):
@@ -1591,6 +1878,12 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
+    lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
 
 
 class ArtifactLineageEdge(Base):
@@ -1693,6 +1986,12 @@ class LlmCall(Base):
     attempt: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1"), default=1,
     )
+    lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
 
 
 class TrialEvent(Base):
@@ -1758,6 +2057,12 @@ class TrialEvent(Base):
         TIMESTAMP(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+    lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
 
 

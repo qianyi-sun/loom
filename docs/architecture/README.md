@@ -68,6 +68,10 @@ there.
 
 ## Storage and Run Library
 
+- **[staging-data-lifecycle.md](staging-data-lifecycle.md)** — typed staging
+  execution-data authority, two-phase DB/object GC, mutation epochs, bounded
+  rollback leases, and the split between rollout checkpoints and asynchronous
+  disaster recovery.
 - **[storage-retention.md](storage-retention.md)** — operator-configurable
   object-store retention policy; provider-neutral rules rendered into
   S3-compatible lifecycle dicts; idempotent apply via
