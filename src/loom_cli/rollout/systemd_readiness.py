@@ -206,9 +206,10 @@ class RehearsalSystemdActivation:
             "--value",
         )
 
-    def ready(self, properties: dict[str, str], *, latency_ms: int) -> bool:
-        """Verify exact identity, sandbox result, and bounded activation latency."""
-        return 0 <= latency_ms <= self.latency_budget_ms and properties == {
+    @property
+    def expected_properties(self) -> dict[str, str]:
+        """Return the sole unit identity safe for verification or cleanup."""
+        return {
             "LoadState": "loaded",
             "ActiveState": "active",
             "SubState": "exited",
@@ -219,6 +220,10 @@ class RehearsalSystemdActivation:
             "Transient": "yes",
             "Description": self.description,
         }
+
+    def ready(self, properties: dict[str, str], *, latency_ms: int) -> bool:
+        """Verify exact identity, sandbox result, and bounded activation latency."""
+        return 0 <= latency_ms <= self.latency_budget_ms and properties == self.expected_properties
 
     @staticmethod
     def absent(properties: dict[str, str] | None) -> bool:

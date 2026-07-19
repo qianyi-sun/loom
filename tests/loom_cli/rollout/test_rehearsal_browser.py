@@ -23,6 +23,7 @@ from loom_cli.rollout.rehearsal_browser import (
     rehearsal_browser_report_ready,
     rehearsal_browser_resource_ready,
 )
+from tests.loom_cli.rollout.rehearsal_fixtures import gb10_rehearsal_authority
 
 
 def _plan(tmp_path: Path) -> RehearsalPlan:
@@ -78,6 +79,7 @@ def _plan(tmp_path: Path) -> RehearsalPlan:
             required_worker_pool="gb10-arm64",
             agent="oracle",
         ),
+        gb10_authority=gb10_rehearsal_authority(),
     )
 
 

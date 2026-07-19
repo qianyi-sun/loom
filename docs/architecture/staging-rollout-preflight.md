@@ -322,6 +322,14 @@ browser acceptance. Cleanup is journaled and verified. Rehearsal credentials
 cannot mutate protected staging, and live MinIO filesystem snapshots remain
 forbidden.
 
+The systemd rehearsal uses the same `RehearsalSystemdActivation` predicate on
+platform-dev and every fixed active GB10 host. It creates only the plan-derived
+`loom-preflight-*` transient unit, binds the observed boot IDs and fleet
+evidence digest, removes the unit immediately on every remote host, and records
+that cleanup in the rehearsal journal. Any inaccessible or identity-drifted
+unit blocks the rehearsal; protected node-agent services and timers are never
+activated by this check.
+
 `RehearsalActionSource` is the sole plan and resource-name authority for these
 actions. Its identity factory and action factory consume the same checkpoint,
 candidate tree, image artifact set, migration plan and manifest artifact,
@@ -692,7 +700,10 @@ and timer-state classifiers. The read-only probe binds the manager version,
 `systemd-run` activation is not disguised as a static read: the checked-in
 `rehearsal.systemd-launch` predicate belongs to the isolated rehearsal tier,
 where a request-specific unit and cleanup journal prove launch/cancel latency
-without mutating protected staging.
+without mutating protected staging. The action also executes that exact
+isolated unit contract across the fixed GB10 inventory after SSH, mount,
+candidate-source and host-readiness checks have passed, then proves every
+remote unit absent before the step can succeed.
 
 Backup and launch admission use the shared `lifecycle_protocol` transition
 table rather than step-local status strings. A request may publish launch only

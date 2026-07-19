@@ -28,6 +28,11 @@ from loom_cli.rollout.rehearsal_browser import (
 from loom_cli.rollout.rehearsal_executor import IsolatedRehearsalExecutor, _default_stream_run
 from loom_cli.rollout.rehearsal_release import RehearsalReleaseArtifact
 from loom_cli.rollout.rehearsal_secret_restore import RehearsalSecretArtifact
+from tests.loom_cli.rollout.rehearsal_fixtures import (
+    PassingGB10RehearsalTransport,
+    gb10_rehearsal_authority,
+    passing_gb10_transport_factory,
+)
 
 
 def _plan() -> RehearsalPlan:
@@ -86,6 +91,7 @@ def _plan() -> RehearsalPlan:
             required_worker_pool="gb10-arm64",
             agent="oracle",
         ),
+        gb10_authority=gb10_rehearsal_authority(),
     )
 
 
@@ -808,11 +814,14 @@ def test_systemd_launch_uses_exact_isolated_transient_unit_and_budget() -> None:
     outcome = IsolatedRehearsalExecutor(
         run=run,
         monotonic=lambda: next(clock),
+        gb10_transport_factory=passing_gb10_transport_factory,
     ).execute("rehearsal.systemd-launch", plan)
 
     assert outcome.passed
     assert outcome.details == {
         "latency-ms": "125",
+        "gb10-evidence-sha256": PassingGB10RehearsalTransport._evidence().evidence_digest,
+        "gb10-host-count": "14",
         "status": "active",
         "unit": plan.resources.systemd_unit,
     }
@@ -934,7 +943,10 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
             return subprocess.CompletedProcess(argv, 0, "deleted\n", "")
         raise AssertionError(argv)
 
-    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.cleanup", plan)
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
 
     assert outcome.passed and outcome.cleanup_verified
     assert outcome.details["status"] == "absent"
@@ -951,7 +963,10 @@ def test_cleanup_refuses_unknown_unit_or_namespace_identity() -> None:
             return subprocess.CompletedProcess(argv, 0, "LoadState=loaded\n", "")
         raise AssertionError("unknown unit must not be deleted")
 
-    unit = IsolatedRehearsalExecutor(run=unit_drift).execute("rehearsal.cleanup", plan)
+    unit = IsolatedRehearsalExecutor(
+        run=unit_drift,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
     assert unit.blockers == {"cleanup": "systemd-identity-drift"}
 
     def namespace_drift(argv, _payload, _timeout):
@@ -968,7 +983,10 @@ def test_cleanup_refuses_unknown_unit_or_namespace_identity() -> None:
             )
         raise AssertionError("unknown namespace must not be deleted")
 
-    namespace = IsolatedRehearsalExecutor(run=namespace_drift).execute("rehearsal.cleanup", plan)
+    namespace = IsolatedRehearsalExecutor(
+        run=namespace_drift,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
     assert namespace.blockers == {"cleanup": "namespace-identity-drift"}
 
 

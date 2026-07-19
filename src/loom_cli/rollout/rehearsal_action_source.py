@@ -14,6 +14,7 @@ from typing import Protocol
 from loom_cli.rollout.admin_smoke_contract import (
     AdminSmokeAuthority as RehearsalSmokeAuthority,
 )
+from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ImageArtifactSet
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
 from loom_cli.rollout.migration_manifest_readiness import MigrationManifestArtifact
@@ -110,6 +111,7 @@ class RehearsalPlan:
     browser_report_schema_sha256: str
     resources: RehearsalResources
     smoke_authority: RehearsalSmokeAuthority
+    gb10_authority: GB10RehearsalAuthority
 
     def __post_init__(self) -> None:
         image_digests = dict(self.image_digests)
@@ -188,6 +190,7 @@ class RehearsalPlan:
             "checkpoint_manifest_path": str(self.checkpoint_manifest_path),
             "checkpoint_manifest_sha256": self.checkpoint_manifest_sha256,
             "db_snapshot_identity": self.db_snapshot_identity,
+            "gb10_authority": self.gb10_authority.to_record(),
             "image_artifact_sha256": self.image_artifact_sha256,
             "image_digests": dict(self.image_digests),
             "image_tag": self.image_tag,
@@ -208,7 +211,7 @@ class RehearsalPlan:
             "production_defaults_path": str(self.production_defaults_path),
             "production_defaults_sha256": self.production_defaults_sha256,
             "schema_revision": self.schema_revision,
-            "schema_version": 4,
+            "schema_version": 5,
             "smoke_authority": self.smoke_authority.to_record(),
         }
 
@@ -227,6 +230,7 @@ class RehearsalPlan:
             "checkpoint_manifest_path",
             "checkpoint_manifest_sha256",
             "db_snapshot_identity",
+            "gb10_authority",
             "image_artifact_sha256",
             "image_digests",
             "image_tag",
@@ -251,7 +255,7 @@ class RehearsalPlan:
         if (
             set(value) != expected
             or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 4
+            or value.get("schema_version") != 5
             or type(mutation_epoch) is not int
             or not isinstance(resources, Mapping)
             or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
@@ -326,6 +330,9 @@ class RehearsalPlan:
                 systemd_unit=str(resources["systemd_unit"]),
             ),
             smoke_authority=RehearsalSmokeAuthority.from_record(smoke_authority),
+            gb10_authority=GB10RehearsalAuthority.from_record(
+                _mapping_field(value, "gb10_authority")
+            ),
         )
 
 
@@ -360,6 +367,7 @@ class RehearsalActionSource:
     cluster_name: str
     route_origin: str
     smoke_authority: RehearsalSmokeAuthority
+    gb10_authority: GB10RehearsalAuthority
     backend: RehearsalBackend
 
     def __post_init__(self) -> None:
@@ -500,6 +508,7 @@ class RehearsalActionSource:
             browser_report_schema_sha256=self.browser_report_schema_sha256,
             resources=resources,
             smoke_authority=self.smoke_authority,
+            gb10_authority=self.gb10_authority,
         )
 
     def _isolation_id(
@@ -528,8 +537,9 @@ class RehearsalActionSource:
             "migration_manifest_sha256": migration.rendered_sha256,
             "migration_target_revision": self.migration_target_revision,
             "route_origin": self.route_origin,
+            "gb10_authority": self.gb10_authority.to_record(),
             "smoke_authority": self.smoke_authority.to_record(),
-            "schema_version": 4,
+            "schema_version": 5,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -545,3 +555,10 @@ __all__ = [
     "RehearsalResources",
     "RehearsalSmokeAuthority",
 ]
+
+
+def _mapping_field(value: Mapping[str, object], field: str) -> Mapping[str, object]:
+    item = value.get(field)
+    if not isinstance(item, Mapping):
+        raise ValueError("rehearsal plan schema is invalid")
+    return item

@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
+from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
 from loom_cli.rollout.manifest_readiness import RenderManifest
 from loom_cli.rollout.operator.backup import SubprocessBackupCommandRunner
 from loom_cli.rollout.preflight_artifact_store import (
@@ -145,6 +146,13 @@ def build_installed_deep_preflight_composition(
                 cluster_name=config.cluster_name,
                 route_origin=route_origin,
                 smoke_authority=smoke_authority,
+                gb10_authority=GB10RehearsalAuthority(
+                    hosts=tuple(target.ssh_target for target in inputs.gb10_targets),
+                    ssh_config=inputs.gb10_ssh_config,
+                    identity=inputs.gb10_identity,
+                    ssh_config_sha256=inputs.gb10_ssh_config_sha256,
+                    identity_metadata_fingerprint=inputs.gb10_identity_metadata_fingerprint,
+                ),
                 backend=rehearsal_backend,
             )
             return source.actions, source.identity

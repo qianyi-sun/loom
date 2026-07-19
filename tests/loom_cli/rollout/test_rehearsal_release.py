@@ -16,6 +16,7 @@ from loom_cli.rollout.rehearsal_action_source import (
     RehearsalSmokeAuthority,
 )
 from loom_cli.rollout.rehearsal_release import build_rehearsal_release_artifact
+from tests.loom_cli.rollout.rehearsal_fixtures import gb10_rehearsal_authority
 
 
 def _deployment(name: str, image: str, *, with_admin_secret: bool) -> dict[str, object]:
@@ -132,6 +133,7 @@ def _plan(tmp_path: Path) -> RehearsalPlan:
             required_worker_pool="gb10-arm64",
             agent="oracle",
         ),
+        gb10_authority=gb10_rehearsal_authority(),
     )
 
 

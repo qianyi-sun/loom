@@ -14,6 +14,7 @@ from loom_cli.rollout.rehearsal_journal_backend import (
     JournaledRehearsalBackend,
     RehearsalStepOutcome,
 )
+from tests.loom_cli.rollout.rehearsal_fixtures import gb10_rehearsal_authority
 
 
 def _plan(*, candidate_sha: str = "a" * 40) -> RehearsalPlan:
@@ -72,6 +73,7 @@ def _plan(*, candidate_sha: str = "a" * 40) -> RehearsalPlan:
             required_worker_pool="gb10-arm64",
             agent="oracle",
         ),
+        gb10_authority=gb10_rehearsal_authority(),
     )
 
 

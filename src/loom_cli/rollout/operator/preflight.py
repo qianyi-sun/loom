@@ -23,12 +23,16 @@ from typing import Protocol
 
 from dotenv import dotenv_values
 
+from loom_cli.rollout import gb10_readiness as gb10_readiness_module
 from loom_cli.rollout.credential_authority import (
     read_trusted_file,
     safe_content_fingerprint,
 )
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
-from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
+from loom_cli.rollout.gb10_readiness import (
+    GB10ProbeTarget,
+    GB10SharedMountReadiness,
+)
 from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
 from loom_cli.rollout.runtime_readiness import ModuleImporter, probe_runtime_readiness
 
@@ -46,11 +50,9 @@ _REQUIRED_ROLLOUT_SUBDIRECTORIES = (
     "backups",
     "environment-state",
 )
-FULL_GB10_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
-TEMPORARILY_EXCLUDED_GB10_HOSTS = frozenset({"trt-gb10-7"})
-ACTIVE_GB10_HOSTS = tuple(
-    host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_GB10_HOSTS
-)
+FULL_GB10_HOSTS = gb10_readiness_module.FULL_GB10_HOSTS
+TEMPORARILY_EXCLUDED_GB10_HOSTS = gb10_readiness_module.TEMPORARILY_EXCLUDED_GB10_HOSTS
+ACTIVE_GB10_HOSTS = gb10_readiness_module.ACTIVE_GB10_HOSTS
 EXPECTED_GB10_SSH_CONFIG_SHA256 = "7ac3cbe20670762590b9efe4daea46126caa823f192e060be109b96350e82b4e"
 _SHARED_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
 _SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2"

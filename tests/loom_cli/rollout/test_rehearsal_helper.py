@@ -19,6 +19,7 @@ from loom_cli.rollout.rehearsal_helper import (
     _verify_checkpoint,
     main,
 )
+from tests.loom_cli.rollout.rehearsal_fixtures import gb10_rehearsal_authority
 
 
 def _plan() -> RehearsalPlan:
@@ -77,6 +78,7 @@ def _plan() -> RehearsalPlan:
             required_worker_pool="gb10-arm64",
             agent="oracle",
         ),
+        gb10_authority=gb10_rehearsal_authority(),
     )
 
 

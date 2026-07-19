@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Protocol
 
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.gb10_rehearsal import (
+    FixedGB10RehearsalTransport,
+    GB10RehearsalAuthority,
+    GB10RehearsalEvidence,
+)
 from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
 from loom_cli.rollout.preflight_credential_paths import REHEARSAL_KUBECONFIG_PATH
 from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
@@ -79,6 +84,15 @@ StreamCommandRunner = Callable[[Sequence[str], Path, int], CommandResult]
 ReleaseArtifactBuilder = Callable[[RehearsalPlan], RehearsalReleaseArtifact]
 SecretArtifactBuilder = Callable[[RehearsalPlan], RehearsalSecretArtifact]
 BrowserArtifactBuilder = Callable[[RehearsalPlan, str], RehearsalBrowserArtifact]
+
+
+class GB10RehearsalTransport(Protocol):
+    def execute(self, contract: RehearsalSystemdActivation) -> GB10RehearsalEvidence: ...
+
+    def cleanup(self, contract: RehearsalSystemdActivation) -> GB10RehearsalEvidence: ...
+
+
+GB10TransportFactory = Callable[[GB10RehearsalAuthority], GB10RehearsalTransport]
 
 
 def _command_environment() -> dict[str, str]:
@@ -208,6 +222,7 @@ class IsolatedRehearsalExecutor:
     browser_artifacts: BrowserArtifactBuilder = _default_browser_artifact
     kubeconfig: Path = REHEARSAL_KUBECONFIG
     monotonic: Callable[[], float] = time.monotonic
+    gb10_transport_factory: GB10TransportFactory | None = None
 
     def __post_init__(self) -> None:
         if not self.kubeconfig.is_absolute() or ".." in self.kubeconfig.parts:
@@ -1092,19 +1107,36 @@ class IsolatedRehearsalExecutor:
             plan_digest=plan.plan_digest,
         )
         existing = self._systemd_properties(contract)
+        latency_ms = 0
         if existing is not None:
-            if contract.ready(existing, latency_ms=0):
-                return _systemd_ready(contract, latency_ms=0)
-            if not contract.absent(existing):
+            if not contract.ready(existing, latency_ms=0) and not contract.absent(existing):
                 return _blocked("systemd", "existing-unit-drift")
-        started_at = self.monotonic()
-        if not self._status(contract.start_argv, timeout=30):
-            return _blocked("systemd", "activation-failed")
-        latency_ms = max(0, round((self.monotonic() - started_at) * 1000))
-        observed = self._systemd_properties(contract)
-        if observed is None or not contract.ready(observed, latency_ms=latency_ms):
-            return _blocked("systemd", "activation-readback-drift")
-        return _systemd_ready(contract, latency_ms=latency_ms)
+        if existing is None or contract.absent(existing):
+            started_at = self.monotonic()
+            if not self._status(contract.start_argv, timeout=30):
+                return _blocked("systemd", "activation-failed")
+            latency_ms = max(0, round((self.monotonic() - started_at) * 1000))
+            observed = self._systemd_properties(contract)
+            if observed is None or not contract.ready(observed, latency_ms=latency_ms):
+                return _blocked("systemd", "activation-readback-drift")
+        fleet = self._gb10_transport(plan).execute(contract)
+        if fleet.blockers:
+            return _gb10_blocked("systemd", fleet)
+        return _systemd_ready(
+            contract,
+            latency_ms=latency_ms,
+            gb10_evidence_digest=fleet.evidence_digest,
+            gb10_host_count=len(fleet.host_boot_ids),
+        )
+
+    def _gb10_transport(self, plan: RehearsalPlan) -> GB10RehearsalTransport:
+        if self.gb10_transport_factory is not None:
+            return self.gb10_transport_factory(plan.gb10_authority)
+        return FixedGB10RehearsalTransport(
+            authority=plan.gb10_authority,
+            service_uid=os.geteuid(),
+            run=lambda argv, timeout: self.run(argv, None, timeout),
+        )
 
     def _systemd_properties(
         self,
@@ -1130,6 +1162,9 @@ class IsolatedRehearsalExecutor:
             unit=plan.resources.systemd_unit,
             plan_digest=plan.plan_digest,
         )
+        fleet = self._gb10_transport(plan).cleanup(contract)
+        if fleet.blockers:
+            return _gb10_blocked("cleanup", fleet)
         properties = self._systemd_properties(contract)
         if properties is not None and not contract.absent(properties):
             if not contract.ready(properties, latency_ms=0):
@@ -1665,11 +1700,15 @@ def _systemd_ready(
     contract: RehearsalSystemdActivation,
     *,
     latency_ms: int,
+    gb10_evidence_digest: str,
+    gb10_host_count: int,
 ) -> RehearsalStepOutcome:
     return RehearsalStepOutcome(
         passed=True,
         details={
             "latency-ms": str(latency_ms),
+            "gb10-evidence-sha256": gb10_evidence_digest,
+            "gb10-host-count": str(gb10_host_count),
             "status": "active",
             "unit": contract.unit,
         },
@@ -1687,6 +1726,18 @@ def _cleanup_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
         },
         blockers={},
         cleanup_verified=True,
+    )
+
+
+def _gb10_blocked(component: str, evidence: GB10RehearsalEvidence) -> RehearsalStepOutcome:
+    return RehearsalStepOutcome(
+        passed=False,
+        details={
+            "gb10-evidence-sha256": evidence.evidence_digest,
+            "component": component,
+            "status": "blocked",
+        },
+        blockers={f"gb10-{host}": reason for host, reason in evidence.blockers.items()},
     )
 
 

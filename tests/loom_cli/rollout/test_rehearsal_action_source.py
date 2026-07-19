@@ -27,6 +27,7 @@ from loom_cli.rollout.rehearsal_action_source import (
     RehearsalSmokeAuthority,
 )
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
+from tests.loom_cli.rollout.rehearsal_fixtures import gb10_rehearsal_authority
 from tests.loom_cli.rollout.test_preflight_artifact_store import _production_defaults
 
 
@@ -147,6 +148,7 @@ def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
         cluster_name="loom-staging",
         route_origin="https://staging.example.test/dev",
         smoke_authority=_smoke_authority(),
+        gb10_authority=gb10_rehearsal_authority(),
         backend=backend,
     )
 
@@ -208,6 +210,7 @@ def test_isolation_identity_changes_with_browser_contract(tmp_path: Path) -> Non
         cluster_name="loom-staging",
         route_origin="https://staging.example.test/dev",
         smoke_authority=_smoke_authority(),
+        gb10_authority=gb10_rehearsal_authority(),
         backend=Backend(),
     )
 
@@ -230,7 +233,24 @@ def test_isolation_identity_changes_with_smoke_authority(tmp_path: Path) -> None
         cluster_name="loom-staging",
         route_origin="https://staging.example.test/dev",
         smoke_authority=replace(_smoke_authority(), agent="codex"),
+        gb10_authority=gb10_rehearsal_authority(),
         backend=Backend(),
+    )
+
+    assert original.identity(_candidate(), _checkpoint(tmp_path)) != changed.identity(
+        _candidate(), _checkpoint(tmp_path)
+    )
+
+
+def test_isolation_identity_changes_with_gb10_transport_authority(tmp_path: Path) -> None:
+    original = _source(Backend(), tmp_path)
+    changed = replace(
+        original,
+        artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
+        gb10_authority=replace(
+            gb10_rehearsal_authority(),
+            identity_metadata_fingerprint="d" * 64,
+        ),
     )
 
     assert original.identity(_candidate(), _checkpoint(tmp_path)) != changed.identity(
