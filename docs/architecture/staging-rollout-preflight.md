@@ -137,6 +137,12 @@ checkpoint. Registry and implementation digests must be byte-identical across
 both processes; no in-memory pending plan or cached live probe is rollout
 authority.
 
+`DetachedPreflightBackupRunner` is the worker-side composition root. It first
+revalidates the persisted assessment against the immutable request, then owns
+the checkpoint, rehearsal, restore proof, lease, attestation, rotation and
+retirement sequence. Restore and attestation each rebuild their attestor from
+recorded authority; only the persisted rehearsal bridges them.
+
 Restore evidence is derived from the immutable rehearsal itself, not from an
 operator assertion. Every Tier 3 action must share one isolation ID, candidate,
 and mutation epoch; every action must report no protected mutation; the DB clone
