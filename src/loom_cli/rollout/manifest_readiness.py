@@ -118,9 +118,10 @@ def inspect_rendered_manifests(
     ):
         raise ValueError("rendered manifest binding is invalid")
     try:
-        resources = list(yaml.safe_load_all(rendered_yaml))
+        documents = list(yaml.safe_load_all(rendered_yaml))
     except yaml.YAMLError as exc:
         raise ValueError("rendered manifest YAML is invalid") from exc
+    resources = [document for document in documents if document is not None]
     if not 1 <= len(resources) <= _MAX_RESOURCES or any(
         not isinstance(resource, dict) for resource in resources
     ):

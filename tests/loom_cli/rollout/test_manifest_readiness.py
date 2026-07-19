@@ -50,6 +50,24 @@ def test_manifest_render_binds_every_local_image_to_exact_id() -> None:
     assert len(artifact.artifact_digest) == 64
 
 
+def test_manifest_render_ignores_only_empty_yaml_documents() -> None:
+    artifact = inspect_rendered_manifests(
+        "---\n---\n" + _rendered() + "---\n",
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    assert artifact.resource_count == 1
+    with pytest.raises(ValueError, match="resource set is invalid"):
+        inspect_rendered_manifests(
+            _rendered() + "---\nscalar\n",
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+        )
+
+
 def test_manifest_render_rejects_missing_or_stale_local_image() -> None:
     missing = _rendered().replace(
         "        - name: loom-worker\n          image: loom-worker:staging-1111111\n",
