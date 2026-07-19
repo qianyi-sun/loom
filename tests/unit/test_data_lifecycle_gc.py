@@ -15,8 +15,10 @@ from loom.data_lifecycle_gc import (
     ObservedObject,
     RegisteredObject,
     build_gc_plan,
+    deserialize_gc_plan,
     execute_gc,
     reconcile_object_inventory,
+    serialize_gc_plan,
 )
 from loom.staging_mutation_epoch import MutationEpochAdvance, MutationEpochState
 
@@ -94,6 +96,16 @@ def test_plan_is_deterministic_and_selects_only_expired_authority() -> None:
     assert plan.authority_ids == (expired.id,)
     assert plan.objects == (deleted,)
     assert plan.inventory_digest == reversed_plan.inventory_digest
+
+
+def test_gc_plan_round_trip_is_exact_and_tampering_fails_closed() -> None:
+    plan = _plan()
+    document = serialize_gc_plan(plan)
+
+    assert deserialize_gc_plan(document) == plan
+    document["mutation_epoch"] = 8
+    with pytest.raises(LifecycleGcPlanError, match="digest"):
+        deserialize_gc_plan(document)
 
 
 @pytest.mark.parametrize(

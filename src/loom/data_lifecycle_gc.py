@@ -241,6 +241,106 @@ def _digest_payload(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def serialize_gc_plan(plan: GcPlan) -> dict[str, object]:
+    """Serialize the exact epoch-bound plan for durable resume evidence."""
+    payload = _inventory_payload(
+        scope=plan.scope,
+        mutation_epoch=plan.mutation_epoch,
+        planned_at=plan.planned_at,
+        authority_ids=plan.authority_ids,
+        objects=plan.objects,
+        blockers=plan.blockers,
+    )
+    if _digest_payload(payload) != plan.inventory_digest:
+        raise LifecycleGcPlanError("GC plan inventory digest is not canonical")
+    return {**payload, "inventory_digest": plan.inventory_digest}
+
+
+def deserialize_gc_plan(document: Mapping[str, object]) -> GcPlan:
+    """Rebuild only an exact canonical plan; tampered resume evidence fails closed."""
+    expected = {
+        "environment",
+        "namespace",
+        "mutation_epoch",
+        "planned_at",
+        "authority_ids",
+        "objects",
+        "blockers",
+        "inventory_digest",
+    }
+    if set(document) != expected:
+        raise LifecycleGcPlanError("GC plan document fields do not match schema")
+    try:
+        scope = GcScope(
+            environment=str(document["environment"]),
+            namespace=str(document["namespace"]),
+        )
+        mutation_epoch = document["mutation_epoch"]
+        if type(mutation_epoch) is not int:
+            raise ValueError("mutation epoch is not an integer")
+        planned_at = datetime.fromisoformat(str(document["planned_at"]))
+        authority_values = document["authority_ids"]
+        object_values = document["objects"]
+        blocker_values = document["blockers"]
+        if (
+            not isinstance(authority_values, list)
+            or not all(isinstance(value, str) for value in authority_values)
+            or not isinstance(object_values, list)
+            or not all(isinstance(value, dict) for value in object_values)
+            or not isinstance(blocker_values, list)
+            or not all(isinstance(value, str) for value in blocker_values)
+            or not isinstance(document["inventory_digest"], str)
+        ):
+            raise ValueError("GC plan collection schema is invalid")
+        authority_ids = tuple(UUID(value) for value in authority_values)
+        objects: list[RegisteredObject] = []
+        object_expected = {
+            "id",
+            "authority_id",
+            "bucket",
+            "object_key",
+            "version_id",
+            "content_sha256",
+            "size_bytes",
+        }
+        for raw in object_values:
+            if set(raw) != object_expected or type(raw["size_bytes"]) is not int:
+                raise ValueError("GC plan object schema is invalid")
+            objects.append(
+                RegisteredObject(
+                    id=UUID(str(raw["id"])),
+                    authority_id=UUID(str(raw["authority_id"])),
+                    environment=scope.environment,
+                    namespace=scope.namespace,
+                    bucket=str(raw["bucket"]),
+                    object_key=str(raw["object_key"]),
+                    version_id=(str(raw["version_id"]) if raw["version_id"] is not None else None),
+                    content_sha256=(
+                        str(raw["content_sha256"]) if raw["content_sha256"] is not None else None
+                    ),
+                    size_bytes=raw["size_bytes"],
+                    state=ObjectLifecycleState.ACTIVE,
+                )
+            )
+    except (TypeError, ValueError) as exc:
+        raise LifecycleGcPlanError("GC plan document is invalid") from exc
+    payload = {key: document[key] for key in expected - {"inventory_digest"}}
+    digest = _digest_payload(payload)
+    if digest != document["inventory_digest"]:
+        raise LifecycleGcPlanError("GC plan document digest does not match")
+    plan = GcPlan(
+        scope=scope,
+        mutation_epoch=mutation_epoch,
+        planned_at=planned_at,
+        authority_ids=authority_ids,
+        objects=tuple(objects),
+        blockers=tuple(blocker_values),
+        inventory_digest=digest,
+    )
+    plan.require_applicable()
+    return plan
+
+
 def reconcile_object_inventory(
     *,
     registered: Iterable[RegisteredObject],

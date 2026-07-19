@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import Engine, bindparam, text
 from sqlalchemy.engine import Connection
 
-from loom.data_lifecycle_gc import GcPlan
+from loom.data_lifecycle_gc import GcPlan, serialize_gc_plan
 from loom.staging_mutation_epoch import (
     MutationEpochAdvance,
     MutationEpochState,
@@ -42,26 +42,7 @@ class ExecutionMetadataPurger:
 
 
 def _plan_inventory(plan: GcPlan) -> dict[str, object]:
-    return {
-        "authority_ids": [str(value) for value in plan.authority_ids],
-        "blockers": list(plan.blockers),
-        "bytes_total": plan.bytes_total,
-        "inventory_digest": plan.inventory_digest,
-        "mutation_epoch": plan.mutation_epoch,
-        "object_count": plan.object_count,
-        "objects": [
-            {
-                "bucket": item.bucket,
-                "content_sha256": item.content_sha256,
-                "id": str(item.id),
-                "object_key": item.object_key,
-                "size_bytes": item.size_bytes,
-                "version_id": item.version_id,
-            }
-            for item in plan.objects
-        ],
-        "planned_at": plan.planned_at.isoformat(),
-    }
+    return serialize_gc_plan(plan)
 
 
 class SqlAlchemyGcJournal:
