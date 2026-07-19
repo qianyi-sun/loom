@@ -24,6 +24,7 @@ from loom_cli.rollout.rehearsal_readiness import (
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ROUTE_RE = re.compile(r"^https://[a-z0-9.-]+/[a-z0-9/-]+$")
+_IMAGE_TAG_RE = re.compile(r"^staging-[a-z0-9][a-z0-9-]{5,63}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,7 @@ class RehearsalPlan:
     object_inventory_root: str
     schema_revision: str
     image_digests: Mapping[str, str]
+    image_tag: str
     image_artifact_sha256: str
     artifact_bundle_sha256: str
     artifact_descriptor_path: Path
@@ -134,6 +136,7 @@ class RehearsalPlan:
             or self.rendered_manifest_path.name != "rendered.yaml"
             or not self.db_snapshot_identity.startswith("pgdump-sha256:")
             or not self.schema_revision
+            or _IMAGE_TAG_RE.fullmatch(self.image_tag) is None
             or not image_digests
             or any(
                 not name or not digest.startswith("sha256:")
@@ -165,6 +168,7 @@ class RehearsalPlan:
             "db_snapshot_identity": self.db_snapshot_identity,
             "image_artifact_sha256": self.image_artifact_sha256,
             "image_digests": dict(self.image_digests),
+            "image_tag": self.image_tag,
             "manifest_artifact_sha256": self.manifest_artifact_sha256,
             "migration_plan_sha256": self.migration_plan_sha256,
             "mutation_epoch": self.mutation_epoch,
@@ -198,6 +202,7 @@ class RehearsalPlan:
             "db_snapshot_identity",
             "image_artifact_sha256",
             "image_digests",
+            "image_tag",
             "manifest_artifact_sha256",
             "migration_plan_sha256",
             "mutation_epoch",
@@ -238,6 +243,7 @@ class RehearsalPlan:
             "checkpoint_manifest_sha256",
             "db_snapshot_identity",
             "image_artifact_sha256",
+            "image_tag",
             "manifest_artifact_sha256",
             "migration_plan_sha256",
             "object_inventory_root",
@@ -262,6 +268,7 @@ class RehearsalPlan:
             object_inventory_root=str(value["object_inventory_root"]),
             schema_revision=str(value["schema_revision"]),
             image_digests={str(key): str(item) for key, item in image_digests.items()},
+            image_tag=str(value["image_tag"]),
             image_artifact_sha256=str(value["image_artifact_sha256"]),
             artifact_bundle_sha256=str(value["artifact_bundle_sha256"]),
             artifact_descriptor_path=Path(str(value["artifact_descriptor_path"])),
@@ -411,6 +418,7 @@ class RehearsalActionSource:
             object_inventory_root=checkpoint.object_inventory_root,
             schema_revision=checkpoint.schema_revision,
             image_digests=artifacts.image_digests,
+            image_tag=candidate.image_tag,
             image_artifact_sha256=artifacts.artifact_digest,
             artifact_bundle_sha256=publication.bundle_digest,
             artifact_descriptor_path=publication.descriptor_path,
@@ -436,6 +444,7 @@ class RehearsalActionSource:
             "checkpoint_evidence_sha256": checkpoint.evidence_digest,
             "checkpoint_manifest_sha256": checkpoint.manifest_sha256,
             "image_artifact_sha256": artifacts.artifact_digest,
+            "image_tag": candidate.image_tag,
             "manifest_artifact_sha256": manifests.artifact_digest,
             "rendered_manifest_sha256": manifests.rendered_sha256,
             "migration_plan_sha256": self.migration_plan_sha256,

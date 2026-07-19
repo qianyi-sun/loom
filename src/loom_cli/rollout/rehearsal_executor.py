@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
@@ -30,6 +32,22 @@ class CommandResult(Protocol):
 
 
 CommandRunner = Callable[[Sequence[str], bytes | None, int], CommandResult]
+StreamCommandRunner = Callable[[Sequence[str], Path, int], CommandResult]
+
+
+def _command_environment() -> dict[str, str]:
+    service_uid = os.geteuid()
+    return {
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{service_uid}/bus",
+        "HOME": "/var/lib/loom-staging-rollout",
+        "KUBECONFIG": str(REHEARSAL_KUBECONFIG),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "LOGNAME": "loom-rollout",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "USER": "loom-rollout",
+        "XDG_RUNTIME_DIR": f"/run/user/{service_uid}",
+    }
 
 
 def _default_run(
@@ -37,7 +55,6 @@ def _default_run(
     payload: bytes | None,
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
-    service_uid = os.geteuid()
     return subprocess.run(
         list(argv),
         input=None if payload is None else payload.decode("utf-8"),
@@ -45,18 +62,75 @@ def _default_run(
         check=False,
         text=True,
         timeout=timeout,
-        env={
-            "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{service_uid}/bus",
-            "HOME": "/var/lib/loom-staging-rollout",
-            "KUBECONFIG": str(REHEARSAL_KUBECONFIG),
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-            "LOGNAME": "loom-rollout",
-            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "USER": "loom-rollout",
-            "XDG_RUNTIME_DIR": f"/run/user/{service_uid}",
-        },
+        env=_command_environment(),
     )
+
+
+def _default_stream_run(
+    argv: Sequence[str],
+    source: Path,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    fd = _open_absolute_regular_no_follow(source)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size <= 0
+        ):
+            raise RuntimeError("rehearsal stream source authority is invalid")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            result = subprocess.run(
+                list(argv),
+                stdin=stream,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=timeout,
+                env=_command_environment(),
+            )
+        after = os.fstat(fd)
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+            raise RuntimeError("rehearsal stream source changed while it was read")
+        return subprocess.CompletedProcess(argv, result.returncode, "", "")
+    finally:
+        os.close(fd)
+
+
+def _open_absolute_regular_no_follow(path: Path) -> int:
+    if not path.is_absolute() or ".." in path.parts or path == Path("/"):
+        raise OSError("rehearsal stream source path is invalid")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_fd = os.open("/", directory_flags)
+    try:
+        parts = path.parts[1:]
+        for component in parts[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        return os.open(parts[-1], file_flags, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +138,7 @@ class IsolatedRehearsalExecutor:
     """Run only allowlisted operations against rehearsal-scoped authority."""
 
     run: CommandRunner = _default_run
+    stream_run: StreamCommandRunner = _default_stream_run
     kubeconfig: Path = REHEARSAL_KUBECONFIG
 
     def __post_init__(self) -> None:
@@ -76,6 +151,8 @@ class IsolatedRehearsalExecutor:
         plan.resources.require_isolated()
         if check_id == "rehearsal.namespace":
             return self._namespace(plan)
+        if check_id == "rehearsal.db-clone":
+            return self._database(plan)
         return RehearsalStepOutcome(
             passed=False,
             details={"status": "blocked"},
@@ -210,6 +287,161 @@ class IsolatedRehearsalExecutor:
             blockers={},
         )
 
+    def _database(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+        image_digest = plan.image_digests.get(REHEARSAL_POSTGRES_IMAGE)
+        if image_digest is None:
+            return _blocked("database", "image-authority-missing")
+        manifest = _database_pod_manifest(plan)
+        applied = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "apply",
+                "--server-side=true",
+                "--field-manager=loom-staging-preflight",
+                "--request-timeout=30s",
+                "-f",
+                "-",
+                "-o",
+                "json",
+            ),
+            _json_bytes(manifest),
+            timeout=45,
+        )
+        if applied is None or not _database_pod_matches(applied, plan, require_ready=False):
+            return _blocked("database", "pod-apply-failed")
+        if not self._status(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "wait",
+                "--for=condition=Ready",
+                "pod/loom-rehearsal-db",
+                "--timeout=180s",
+            ),
+            timeout=195,
+        ):
+            return _blocked("database", "pod-not-ready")
+        observed = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "pod",
+                "loom-rehearsal-db",
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if observed is None or not _database_pod_matches(observed, plan, require_ready=True):
+            return _blocked("database", "pod-readback-drift")
+        existing = self._database_identity(plan)
+        if existing is not None and existing.get("restored") is True:
+            if existing.get("schema_revision") == plan.schema_revision:
+                return _database_ready(plan)
+            return _blocked("database", "existing-restore-drift")
+        dump_path = plan.checkpoint_manifest_path.parent / "postgres" / "loom.dump"
+        restore_argv = (
+            "kubectl",
+            "--kubeconfig",
+            str(self.kubeconfig),
+            "--namespace",
+            plan.resources.namespace,
+            "exec",
+            "-i",
+            "pod/loom-rehearsal-db",
+            "--container",
+            "postgres",
+            "--",
+            "pg_restore",
+            "--exit-on-error",
+            "--no-owner",
+            "--no-privileges",
+            f"--dbname={plan.resources.database}",
+        )
+        try:
+            restored = self.stream_run(restore_argv, dump_path, 1800)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return _blocked("database", "restore-failed")
+        if restored.returncode != 0:
+            return _blocked("database", "restore-failed")
+        identity = self._database_identity(plan)
+        if (
+            identity is None
+            or identity.get("restored") is not True
+            or identity.get("database") != plan.resources.database
+            or identity.get("schema_revision") != plan.schema_revision
+        ):
+            return _blocked("database", "restore-verification-failed")
+        return _database_ready(plan)
+
+    def _database_identity(self, plan: RehearsalPlan) -> dict[str, object] | None:
+        identity = self._psql_json(
+            plan,
+            "SELECT json_build_object('database',current_database(),"
+            "'restored',to_regclass('public.alembic_version') IS NOT NULL)::text;",
+        )
+        if identity is None or identity.get("restored") is not True:
+            return identity
+        revision = self._psql_json(
+            plan,
+            "SELECT json_build_object('schema_revision',version_num)::text "
+            "FROM alembic_version LIMIT 1;",
+        )
+        if revision is None or not isinstance(revision.get("schema_revision"), str):
+            return None
+        return {**identity, "schema_revision": revision["schema_revision"]}
+
+    def _psql_json(self, plan: RehearsalPlan, sql: str) -> dict[str, object] | None:
+        return self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "exec",
+                "pod/loom-rehearsal-db",
+                "--container",
+                "postgres",
+                "--",
+                "psql",
+                "--no-psqlrc",
+                "--tuples-only",
+                "--no-align",
+                "--set=ON_ERROR_STOP=1",
+                f"--dbname={plan.resources.database}",
+                f"--command={sql}",
+            ),
+            None,
+            timeout=30,
+        )
+
+    def _status(self, argv: Sequence[str], *, timeout: int) -> bool:
+        try:
+            result = self.run(argv, None, timeout)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return False
+        return bool(
+            result.returncode == 0
+            and isinstance(result.stdout, str)
+            and isinstance(result.stderr, str)
+            and len(result.stdout.encode()) <= _MAX_OUTPUT_BYTES
+            and len(result.stderr.encode()) <= _MAX_OUTPUT_BYTES
+        )
+
     def _command(
         self,
         argv: Sequence[str],
@@ -339,6 +571,172 @@ def _default_deny_network_policy_matches(value: dict[str, object], plan: Rehears
         and isinstance(annotations, dict)
         and annotations.get("loom.openai.dev/plan-sha256") == plan.plan_digest
         and value.get("spec") == expected["spec"]
+    )
+
+
+def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
+    image = f"{REHEARSAL_POSTGRES_IMAGE}:{plan.image_tag}"
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "annotations": {
+                "loom.openai.dev/image-id": plan.image_digests[REHEARSAL_POSTGRES_IMAGE],
+                "loom.openai.dev/plan-sha256": plan.plan_digest,
+            },
+            "labels": {"loom.openai.dev/component": "rehearsal-database"},
+            "name": "loom-rehearsal-db",
+            "namespace": plan.resources.namespace,
+        },
+        "spec": {
+            "automountServiceAccountToken": False,
+            "containers": [
+                {
+                    "env": [
+                        {"name": "PGDATA", "value": "/var/lib/postgresql/data/pgdata"},
+                        {"name": "POSTGRES_DB", "value": plan.resources.database},
+                        {"name": "POSTGRES_HOST_AUTH_METHOD", "value": "trust"},
+                        {"name": "POSTGRES_USER", "value": "loom_rehearsal"},
+                    ],
+                    "image": image,
+                    "imagePullPolicy": "Never",
+                    "name": "postgres",
+                    "readinessProbe": {
+                        "exec": {
+                            "command": [
+                                "pg_isready",
+                                "--dbname",
+                                plan.resources.database,
+                                "--username",
+                                "loom_rehearsal",
+                            ]
+                        },
+                        "failureThreshold": 30,
+                        "periodSeconds": 2,
+                        "timeoutSeconds": 1,
+                    },
+                    "resources": {
+                        "limits": {
+                            "cpu": "2",
+                            "ephemeral-storage": "55Gi",
+                            "memory": "2Gi",
+                        },
+                        "requests": {
+                            "cpu": "250m",
+                            "ephemeral-storage": "1Gi",
+                            "memory": "512Mi",
+                        },
+                    },
+                    "securityContext": {
+                        "allowPrivilegeEscalation": False,
+                        "capabilities": {"drop": ["ALL"]},
+                        "readOnlyRootFilesystem": True,
+                    },
+                    "volumeMounts": [
+                        {"mountPath": "/var/lib/postgresql/data", "name": "data"},
+                        {"mountPath": "/var/run/postgresql", "name": "socket"},
+                        {"mountPath": "/tmp", "name": "tmp"},
+                    ],
+                }
+            ],
+            "enableServiceLinks": False,
+            "restartPolicy": "Never",
+            "securityContext": {
+                "fsGroup": 999,
+                "runAsGroup": 999,
+                "runAsNonRoot": True,
+                "runAsUser": 999,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+            "serviceAccountName": "default",
+            "terminationGracePeriodSeconds": 30,
+            "volumes": [
+                {"emptyDir": {"sizeLimit": "50Gi"}, "name": "data"},
+                {"emptyDir": {"medium": "Memory", "sizeLimit": "16Mi"}, "name": "socket"},
+                {"emptyDir": {"sizeLimit": "1Gi"}, "name": "tmp"},
+            ],
+        },
+    }
+
+
+def _database_pod_matches(
+    value: dict[str, object], plan: RehearsalPlan, *, require_ready: bool
+) -> bool:
+    expected = _database_pod_manifest(plan)
+    metadata = value.get("metadata")
+    expected_metadata = expected["metadata"]
+    spec = value.get("spec")
+    expected_spec = expected["spec"]
+    if (
+        value.get("apiVersion") != "v1"
+        or value.get("kind") != "Pod"
+        or not isinstance(metadata, dict)
+        or not isinstance(expected_metadata, dict)
+        or not isinstance(spec, dict)
+        or not isinstance(expected_spec, dict)
+    ):
+        return False
+    annotations = metadata.get("annotations")
+    labels = metadata.get("labels")
+    expected_annotations = expected_metadata["annotations"]
+    expected_labels = expected_metadata["labels"]
+    exact_spec_fields = (
+        "automountServiceAccountToken",
+        "containers",
+        "enableServiceLinks",
+        "restartPolicy",
+        "securityContext",
+        "serviceAccountName",
+        "terminationGracePeriodSeconds",
+        "volumes",
+    )
+    if not (
+        metadata.get("name") == expected_metadata["name"]
+        and metadata.get("namespace") == expected_metadata["namespace"]
+        and isinstance(annotations, dict)
+        and isinstance(labels, dict)
+        and isinstance(expected_annotations, dict)
+        and isinstance(expected_labels, dict)
+        and all(annotations.get(key) == item for key, item in expected_annotations.items())
+        and all(labels.get(key) == item for key, item in expected_labels.items())
+        and all(spec.get(key) == expected_spec[key] for key in exact_spec_fields)
+    ):
+        return False
+    if not require_ready:
+        return True
+    status = value.get("status")
+    if not isinstance(status, dict) or status.get("phase") != "Running":
+        return False
+    conditions = status.get("conditions")
+    statuses = status.get("containerStatuses")
+    expected_digest = plan.image_digests[REHEARSAL_POSTGRES_IMAGE]
+    return bool(
+        isinstance(conditions, list)
+        and any(
+            isinstance(condition, dict)
+            and condition.get("type") == "Ready"
+            and condition.get("status") == "True"
+            for condition in conditions
+        )
+        and isinstance(statuses, list)
+        and len(statuses) == 1
+        and isinstance(statuses[0], dict)
+        and statuses[0].get("name") == "postgres"
+        and isinstance(statuses[0].get("imageID"), str)
+        and str(statuses[0]["imageID"]).endswith(expected_digest)
+        and statuses[0].get("ready") is True
+    )
+
+
+def _database_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
+    return RehearsalStepOutcome(
+        passed=True,
+        details={
+            "database": plan.resources.database,
+            "schema-revision": plan.schema_revision,
+            "status": "restored",
+        },
+        blockers={},
     )
 
 

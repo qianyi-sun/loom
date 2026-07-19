@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan, RehearsalResources
-from loom_cli.rollout.rehearsal_executor import IsolatedRehearsalExecutor
+from loom_cli.rollout.rehearsal_executor import IsolatedRehearsalExecutor, _default_stream_run
 
 
 def _plan() -> RehearsalPlan:
@@ -20,7 +23,11 @@ def _plan() -> RehearsalPlan:
         db_snapshot_identity="pgdump-sha256:" + "e" * 64,
         object_inventory_root="f" * 64,
         schema_revision="0066",
-        image_digests={"loom-service": "sha256:" + "1" * 64},
+        image_digests={
+            "loom-rehearsal-postgres": "sha256:" + "9" * 64,
+            "loom-service": "sha256:" + "1" * 64,
+        },
+        image_tag="staging-aaaaaaaa",
         image_artifact_sha256="2" * 64,
         artifact_bundle_sha256="6" * 64,
         artifact_descriptor_path=Path(
@@ -115,6 +122,141 @@ def test_namespace_returns_normalized_blockers_without_command_output() -> None:
     assert blocked.blockers == {"namespace": "network-policy-failed"}
 
 
+def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
+    plan = _plan()
+    calls: list[tuple[tuple[str, ...], bytes | None, int]] = []
+    streams: list[tuple[tuple[str, ...], Path, int]] = []
+    pod: dict[str, object] = {}
+    restored = False
+
+    def run(argv, payload, timeout):
+        nonlocal pod
+        calls.append((tuple(argv), payload, timeout))
+        if payload is not None:
+            pod = json.loads(payload)
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        if "wait" in argv:
+            return subprocess.CompletedProcess(argv, 0, "ready\n", "")
+        if "get" in argv and "pod" in argv:
+            observed = {
+                **pod,
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "containerStatuses": [
+                        {
+                            "imageID": "docker://" + plan.image_digests["loom-rehearsal-postgres"],
+                            "name": "postgres",
+                            "ready": True,
+                        }
+                    ],
+                },
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(observed), "")
+        if "psql" in argv:
+            command = next(item for item in argv if item.startswith("--command="))
+            if "to_regclass" in command:
+                record = {"database": plan.resources.database, "restored": restored}
+            else:
+                record = {"schema_revision": plan.schema_revision}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(record) + "\n", "")
+        raise AssertionError(argv)
+
+    def stream(argv, source, timeout):
+        nonlocal restored
+        streams.append((tuple(argv), source, timeout))
+        restored = True
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    outcome = IsolatedRehearsalExecutor(run=run, stream_run=stream).execute(
+        "rehearsal.db-clone", plan
+    )
+
+    assert outcome.passed
+    assert outcome.details == {
+        "database": plan.resources.database,
+        "schema-revision": plan.schema_revision,
+        "status": "restored",
+    }
+    assert len(streams) == 1
+    assert streams[0][1] == plan.checkpoint_manifest_path.parent / "postgres" / "loom.dump"
+    assert streams[0][2] == 1800
+    manifest = json.loads(calls[0][1] or b"{}")
+    assert manifest["spec"]["automountServiceAccountToken"] is False
+    assert manifest["spec"]["containers"][0]["imagePullPolicy"] == "Never"
+    assert manifest["spec"]["containers"][0]["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+    }
+
+
+def test_database_rejects_missing_exact_image_before_kubernetes() -> None:
+    plan = _plan()
+    plan = RehearsalPlan.from_record(
+        {
+            **plan.to_record(),
+            "image_digests": {"loom-service": "sha256:" + "1" * 64},
+        }
+    )
+    calls: list[object] = []
+
+    outcome = IsolatedRehearsalExecutor(
+        run=lambda *_args: calls.append(object()),  # type: ignore[arg-type,return-value]
+    ).execute("rehearsal.db-clone", plan)
+
+    assert outcome.blockers == {"database": "image-authority-missing"}
+    assert calls == []
+
+
+def test_stream_runner_reads_private_file_without_following_parent_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    source = real / "loom.dump"
+    source.write_bytes(b"exact-dump")
+    source.chmod(0o600)
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+    observed: list[bytes] = []
+
+    def run(*_args, stdin, **_kwargs):
+        observed.append(stdin.read())
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_executor.subprocess.run", run)
+
+    result = _default_stream_run(("consumer",), source, 30)
+    assert result.returncode == 0
+    assert observed == [b"exact-dump"]
+    with pytest.raises(OSError):
+        _default_stream_run(("consumer",), linked / "loom.dump", 30)
+
+
+def test_stream_runner_rejects_mode_and_read_time_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "loom.dump"
+    source.write_bytes(b"exact-dump")
+    source.chmod(0o644)
+    with pytest.raises(RuntimeError, match="authority"):
+        _default_stream_run(("consumer",), source, 30)
+
+    source.chmod(0o600)
+
+    def drift(*_args, stdin, **_kwargs):
+        stdin.read()
+        source.write_bytes(b"changed")
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_executor.subprocess.run", drift)
+    with pytest.raises(RuntimeError, match="changed"):
+        _default_stream_run(("consumer",), source, 30)
+
+    assert os.stat(source).st_mode & 0o777 == 0o600
+
+
 def test_unimplemented_rehearsal_steps_remain_fail_closed() -> None:
-    outcome = IsolatedRehearsalExecutor().execute("rehearsal.db-clone", _plan())
+    outcome = IsolatedRehearsalExecutor().execute("rehearsal.migration", _plan())
     assert outcome.blockers == {"executor": "isolated-action-not-implemented"}

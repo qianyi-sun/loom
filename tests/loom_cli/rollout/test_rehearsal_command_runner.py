@@ -23,7 +23,11 @@ def _plan() -> RehearsalPlan:
         db_snapshot_identity="pgdump-sha256:" + "e" * 64,
         object_inventory_root="f" * 64,
         schema_revision="0066",
-        image_digests={"loom-service": "sha256:" + "1" * 64},
+        image_digests={
+            "loom-rehearsal-postgres": "sha256:" + "9" * 64,
+            "loom-service": "sha256:" + "1" * 64,
+        },
+        image_tag="staging-aaaaaaaa",
         image_artifact_sha256="2" * 64,
         artifact_bundle_sha256="6" * 64,
         artifact_descriptor_path=Path(
