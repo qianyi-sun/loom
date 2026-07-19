@@ -106,6 +106,8 @@ spec:
                   key: secret-store-master-key
             - name: LOOM_ENV
               value: "production"
+            - name: LOOM_NAMESPACE
+              value: "loom"
           ports:
             - containerPort: 9100
           readinessProbe:

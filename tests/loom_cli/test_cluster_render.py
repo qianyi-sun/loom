@@ -678,9 +678,7 @@ def test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical() -> N
         main["metadata"]["annotations"]["nginx.ingress.kubernetes.io/from-to-www-redirect"]
         == "true"
     )
-    assert main["metadata"]["annotations"]["cert-manager.io/cluster-issuer"] == (
-        "letsencrypt-prod"
-    )
+    assert main["metadata"]["annotations"]["cert-manager.io/cluster-issuer"] == ("letsencrypt-prod")
     assert (
         "nginx.ingress.kubernetes.io/from-to-www-redirect"
         not in redirect["metadata"]["annotations"]
@@ -788,9 +786,7 @@ def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
     ]
 
     redirect = ingresses["loom-frontend-prefix-redirect"]
-    assert "nginx.ingress.kubernetes.io/rewrite-target" not in (
-        redirect["metadata"]["annotations"]
-    )
+    assert "nginx.ingress.kubernetes.io/rewrite-target" not in (redirect["metadata"]["annotations"])
     redirect_path = redirect["spec"]["rules"][0]["http"]["paths"][0]
     assert redirect_path["path"] == f"{prefix_expression}$"
     assert redirect_path["pathType"] == "ImplementationSpecific"
@@ -814,8 +810,7 @@ def _rendered_dev_ingress_paths() -> dict[str, str]:
     ingress = next(
         doc
         for doc in docs
-        if doc.get("kind") == "Ingress"
-        and doc["metadata"]["name"] == "loom-ingress"
+        if doc.get("kind") == "Ingress" and doc["metadata"]["name"] == "loom-ingress"
     )
     return {
         path["backend"]["service"]["name"]: path["path"]
@@ -907,8 +902,7 @@ def test_render_prefixed_ingress_regexes_reject_cross_matches_and_empty_segments
 
     for request_path in non_routes:
         assert all(
-            _ingress_nginx_fullmatch(pattern, request_path) is None
-            for pattern in paths.values()
+            _ingress_nginx_fullmatch(pattern, request_path) is None for pattern in paths.values()
         ), request_path
 
 
@@ -963,9 +957,7 @@ def test_trusted_controller_guard_rejects_ambiguous_raw_separators(
 
 
 def test_trusted_controller_guard_ignores_encoded_separator_in_query() -> None:
-    assert not _trusted_controller_guard_rejects(
-        "/dev?next=%2Fmonitor&windows=%5Ctemp"
-    )
+    assert not _trusted_controller_guard_rejects("/dev?next=%2Fmonitor&windows=%5Ctemp")
 
 
 @pytest.mark.parametrize(
@@ -984,6 +976,7 @@ def test_render_profiles_set_backend_runtime_environment(
 
     for deployment in ("loom-control-plane", "loom-service", "loom-llm-gateway"):
         assert _deployment_env_value(docs, deployment, "LOOM_ENV") == runtime_environment
+        assert _deployment_env_value(docs, deployment, "LOOM_NAMESPACE") == cfg.namespace
 
 
 @pytest.mark.parametrize(
@@ -1293,8 +1286,7 @@ def test_render_embeds_config_namespace_in_every_namespaced_object() -> None:
 def test_config_target_is_inferred_when_flags_are_omitted(tmp_path: Path) -> None:
     config_path = tmp_path / "staging.cluster.toml"
     config_path.write_text(
-        'namespace = "loom-staging"\n'
-        'runtime_environment = "staging"\n',
+        'namespace = "loom-staging"\nruntime_environment = "staging"\n',
         encoding="utf-8",
     )
     args = argparse.Namespace(
@@ -1335,8 +1327,7 @@ def test_cluster_commands_reject_explicit_config_target_conflicts_before_cluster
 ) -> None:
     config_path = tmp_path / "team-a.cluster.toml"
     config_path.write_text(
-        'namespace = "loom-team-a"\n'
-        'runtime_environment = "development"\n',
+        'namespace = "loom-team-a"\nruntime_environment = "development"\n',
         encoding="utf-8",
     )
 

@@ -19,6 +19,8 @@ spec:
               value: "/var/run/loom/secrets/admin/secrets.toml"
             - name: LOOM_ENV
               value: "{{ runtime_environment }}"
+            - name: LOOM_NAMESPACE
+              value: "{{ namespace }}"
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin

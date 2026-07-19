@@ -12,6 +12,15 @@ time, and either an expiry or an explicit pin. Unclassified historical rows and
 unknown object keys fail closed: inventory may report or quarantine them, but
 GC may not delete them.
 
+Execution writers obtain this authority through the transactional registry in
+`loom.data_lifecycle_registry`. The runtime environment and namespace are
+injected separately into each service; protected staging/production refuses to
+derive a default namespace. Staging execution owners receive the bounded TTL
+below, while non-staging owners are pinned until that environment has an
+explicit reviewed retention policy. Retried registration reuses one unique
+owner authority only when its team, scope, class, pin and retention facts still
+match; conflicting authority fails the writer transaction.
+
 Staging defaults are:
 
 - ephemeral run, trial, event, and artifact data expires after 7 days;

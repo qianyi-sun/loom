@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,8 +13,10 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
+from loom.data_lifecycle import DataClass, OwnerKind
 from loom.data_lifecycle_gc import (
     AuthorityInventory,
     GcScope,
@@ -25,6 +28,7 @@ from loom.data_lifecycle_gc import (
 )
 from loom.data_lifecycle_gc_sql import SqlAlchemyGcJournal
 from loom.data_lifecycle_inventory_sql import SqlAlchemyLifecycleInventory
+from loom.data_lifecycle_registry import RuntimeLifecycleScope, ensure_lifecycle_authority
 from loom.staging_mutation_epoch import (
     MutationEpochAdvance,
     ProtectedMutationClass,
@@ -354,6 +358,71 @@ def test_sql_inventory_is_read_only_and_binds_unclassified_counts(
     }
     assert plan.mutation_epoch == snapshot.mutation_epoch
     assert gc_runs_after == gc_runs_before
+
+
+def test_execution_authority_registration_is_transactional_and_idempotent(
+    postgres_url_at_0065: str,
+) -> None:
+    team_id = uuid4()
+    owner_id = f"trial-{uuid4()}"
+    created_at = datetime(2026, 7, 20, 3, tzinfo=UTC)
+    engine = create_engine(postgres_url_at_0065)
+    async_engine = create_async_engine(postgres_url_at_0065)
+    with engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO teams (id,name) VALUES (:id,:name)"),
+            {"id": team_id, "name": f"lifecycle-{team_id}"},
+        )
+
+    async def _register() -> tuple[object, object]:
+        sessions = async_sessionmaker(async_engine, expire_on_commit=False)
+        spec = RuntimeLifecycleScope(
+            environment="staging", namespace="loom-staging"
+        ).authority_spec(
+            team_id=team_id,
+            data_class=DataClass.TRIAL,
+            owner_kind=OwnerKind.TRIAL,
+            owner_id=owner_id,
+            created_at=created_at,
+        )
+        async with sessions.begin() as session:
+            first = await ensure_lifecycle_authority(session, spec=spec)
+            second = await ensure_lifecycle_authority(session, spec=spec)
+        return first, second
+
+    try:
+        first, second = asyncio.run(_register())
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT environment,namespace,team_id,data_class,owner_kind,owner_id,"
+                    "created_at,expires_at,pinned,state FROM data_lifecycle_authorities "
+                    "WHERE id=:id"
+                ),
+                {"id": first},
+            ).one()
+        assert first == second
+        assert tuple(row) == (
+            "staging",
+            "loom-staging",
+            team_id,
+            "trial",
+            "trial",
+            owner_id,
+            created_at,
+            created_at + timedelta(days=7),
+            False,
+            "active",
+        )
+    finally:
+        asyncio.run(async_engine.dispose())
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM data_lifecycle_authorities WHERE owner_id=:owner_id"),
+                {"owner_id": owner_id},
+            )
+            connection.execute(text("DELETE FROM teams WHERE id=:id"), {"id": team_id})
+        engine.dispose()
 
 
 def test_downgrade_refuses_to_discard_lifecycle_data(postgres_url_at_0065: str) -> None:
