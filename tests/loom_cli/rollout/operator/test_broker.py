@@ -418,6 +418,94 @@ def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
     assert deps.store.read_events(REQUEST_ID)[-1].event == "preview"
 
 
+def test_preflight_assesses_exact_candidate_without_publishing_request(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    registry = pipeline_registry()
+    assessment = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "preflight-attestations"),
+        now=lambda: NOW,
+    ).assess(context=pipeline_context(registry))
+    expected_candidate = deps.candidate.bind()
+    deps.order.clear()
+
+    def assess(candidate: CandidateBinding, epoch: int):  # type: ignore[no-untyped-def]
+        assert candidate == expected_candidate
+        assert epoch == 7
+        return assessment
+
+    dependencies = replace(
+        deps.dependencies,
+        assess_preflight=assess,
+        read_mutation_epoch=lambda: 7,
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 0
+    assert deps.order == ["preflight", "fetch"]
+    assert deps.store.requests == {}
+    assert deps.backup.create_count == 0
+    assert deps.systemd.start_count == 0
+    result = _last_json(deps.stdout)
+    assert result == {
+        "candidate_sha": SHA,
+        "candidate_tree": None,
+        "coverage_sha256": assessment.coverage_digest,
+        "mutation_epoch": 7,
+        "preflight_assessment_sha256": assessment.assessment_digest,
+        "registry_sha256": assessment.registry_digest,
+        "status": "passed",
+    }
+
+
+def test_preflight_reports_all_deep_blockers_without_publishing_request(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    registry = pipeline_registry(failed_check="candidate.identity")
+    assessment = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "preflight-attestations"),
+        now=lambda: NOW,
+    ).assess(context=pipeline_context(registry))
+    dependencies = replace(
+        deps.dependencies,
+        assess_preflight=lambda _candidate, _epoch: assessment,
+        read_mutation_epoch=lambda: 7,
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 1
+    assert deps.order == ["preflight", "fetch"]
+    assert deps.store.requests == {}
+    assert deps.backup.create_count == 0
+    assert deps.systemd.start_count == 0
+    result = _last_json(deps.stderr)
+    assert result["passed"] is False
+    assert "candidate.identity" in {blocker["check_id"] for blocker in result["blockers"]}
+
+
+def test_sealed_cumulative_preflight_rejects_non_coordinator_without_side_effects(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    dependencies = replace(
+        deps.dependencies,
+        config=replace(
+            deps.config,
+            source_mode="sealed-cumulative",
+            source_commit_sha=SHA,
+            source_tree_sha="b" * 40,
+            source_base_sha="c" * 40,
+        ),
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 1
+    assert deps.order == []
+    assert deps.store.requests == {}
+    assert deps.backup.create_count == 0
+    assert deps.systemd.start_count == 0
+    assert "coordinator authority" in deps.stderr.getvalue()
+
+
 def test_start_refuses_missing_deep_preflight_before_request_or_backup(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     deps.dependencies.authorize_preflight = None

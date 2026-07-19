@@ -95,6 +95,8 @@ def _parser() -> argparse.ArgumentParser:
     start = commands.add_parser("start")
     start.add_argument("--dry-run", action="store_true")
 
+    commands.add_parser("preflight")
+
     status = commands.add_parser("status")
     status.add_argument("request_id", nargs="?")
 
@@ -308,6 +310,45 @@ def _staged_preflight_request(
         namespace=dependencies.config.namespace,
         status="preview" if preview else "pending",
     )
+
+
+def _preflight_only(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+) -> int:
+    """Assess the exact Tier 0-2 graph without publishing request authority."""
+    if dependencies.config.source_mode == "sealed-cumulative" and caller.username != "qianyi":
+        return _safe_error(
+            dependencies,
+            "sealed cumulative preflight requires coordinator authority",
+        )
+    if dependencies.assess_preflight is None or dependencies.read_mutation_epoch is None:
+        return _safe_error(dependencies, "deep rollout preflight is not configured")
+    report = dependencies.preflight()
+    if not report.passed:
+        _write_json(dependencies.stderr, report.to_dict())
+        return 1
+    candidate = dependencies.bind_candidate()
+    mutation_epoch = dependencies.read_mutation_epoch()
+    if type(mutation_epoch) is not int or mutation_epoch < 0:
+        raise ValueError("staging mutation epoch is invalid")
+    assessment = dependencies.assess_preflight(candidate, mutation_epoch)
+    if not assessment.passed:
+        _write_json(dependencies.stderr, assessment.to_dict())
+        return 1
+    _write_json(
+        dependencies.stdout,
+        {
+            "candidate_sha": candidate.resolved_sha,
+            "candidate_tree": candidate.resolved_tree,
+            "coverage_sha256": assessment.coverage_digest,
+            "mutation_epoch": mutation_epoch,
+            "preflight_assessment_sha256": assessment.assessment_digest,
+            "registry_sha256": assessment.registry_digest,
+            "status": "passed",
+        },
+    )
+    return 0
 
 
 def _start_staged(
@@ -1347,6 +1388,8 @@ def _main(
     try:
         deps = dependencies or _default_dependencies()
         caller = deps.authenticate()
+        if args.command == "preflight":
+            return _preflight_only(deps, caller)
         if args.command == "start":
             return _start(deps, caller, dry_run=bool(args.dry_run))
         if args.command == "status":

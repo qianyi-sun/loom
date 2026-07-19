@@ -50,7 +50,7 @@ class FakeSystem:
         self.events: list[str] = []
         self.removed_members: list[str] = []
         self.trust_ready = False
-        self.dry_runs = 0
+        self.preflights = 0
         self.venv = False
         self.package_ready = True
         self.broker_ready = True
@@ -530,8 +530,8 @@ class FakeSystem:
     def gb10_trust_ready(self) -> bool:
         return self.trust_ready
 
-    def run_post_install_dry_run(self) -> None:
-        self.dry_runs += 1
+    def run_post_install_preflight(self) -> None:
+        self.preflights += 1
 
     def check_runtime(
         self,
@@ -789,7 +789,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert system.maintenance_ends == maintenance_ends_after_first
     assert system.maintenance is False
     assert first["post_install_check"] == "awaiting-gb10-trust"
-    assert system.dry_runs == 0
+    assert system.preflights == 0
     generated_template = installer.filesystem.path(host.GENERATED_GB10_ENV_SEED)
     assert generated_template.read_text(encoding="utf-8").endswith(
         "LOOM_WORKER_MINIO_SECRET_KEY=minio-secret\n"
@@ -1776,17 +1776,46 @@ def test_reinstall_upgrades_pre_acl_record_before_acl_mutation(
     assert upgraded["schema_version"] == 3
 
 
-def test_install_runs_dry_run_only_after_all_gb10_trust_is_ready(tmp_path: Path) -> None:
+def test_install_runs_requestless_preflight_only_after_all_gb10_trust_is_ready(
+    tmp_path: Path,
+) -> None:
     installer, system = _installer(tmp_path)
     system.trust_ready = True
 
     result = installer.install(TEAM_ID)
 
     assert result["post_install_check"] == "passed"
-    assert system.dry_runs == 1
+    assert system.preflights == 1
 
 
-def test_unchanged_reinstall_does_not_repeat_post_install_dry_run(tmp_path: Path) -> None:
+def test_post_install_preflight_invokes_requestless_broker_command() -> None:
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs == {}
+            self.calls.append(list(argv))
+            return host.CommandResult(0, "")
+
+    runner = RecordingRunner()
+
+    host.HostSystem(runner).run_post_install_preflight()
+
+    assert runner.calls == [
+        [
+            "sudo",
+            "-n",
+            "-u",
+            "qianyi",
+            "--",
+            str(host.CLIENT_PATH),
+            "preflight",
+        ]
+    ]
+
+
+def test_unchanged_reinstall_does_not_repeat_post_install_preflight(tmp_path: Path) -> None:
     installer, system = _installer(tmp_path)
     system.trust_ready = True
 
@@ -1795,7 +1824,7 @@ def test_unchanged_reinstall_does_not_repeat_post_install_dry_run(tmp_path: Path
 
     assert first["changed"]
     assert second["changed"] == []
-    assert system.dry_runs == 1
+    assert system.preflights == 1
 
 
 def test_unchanged_reinstall_repairs_broken_broker_runtime(tmp_path: Path) -> None:

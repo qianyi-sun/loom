@@ -3350,7 +3350,7 @@ class HostSystem:
             **self._trust_command_kwargs(),
         )
 
-    def run_post_install_dry_run(self) -> None:
+    def run_post_install_preflight(self) -> None:
         self.runner.run(
             [
                 "sudo",
@@ -3359,8 +3359,7 @@ class HostSystem:
                 "qianyi",
                 "--",
                 str(CLIENT_PATH),
-                "start",
-                "--dry-run",
+                "preflight",
             ]
         )
 
@@ -4764,7 +4763,7 @@ class HostInstaller:
             maintenance_enabled = False
         trust_ready = self.system.gb10_trust_ready()
         if trust_ready and changes:
-            self.system.run_post_install_dry_run()
+            self.system.run_post_install_preflight()
         return {
             "ok": True,
             "changed": changes,

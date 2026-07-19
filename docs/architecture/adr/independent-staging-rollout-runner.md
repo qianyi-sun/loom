@@ -38,6 +38,7 @@ Install one root-managed runner on `platform-dev` with a non-login
 `qianyi`, `hongjian`, and `devansh`. The root-owned client exposes only:
 
 ```text
+loom-staging-rollout preflight
 loom-staging-rollout start [--dry-run]
 loom-staging-rollout status [REQUEST_ID]
 loom-staging-rollout logs REQUEST_ID [--follow]
@@ -45,6 +46,13 @@ loom-staging-rollout resume REQUEST_ID
 loom-staging-rollout cancel REQUEST_ID --reason TEXT
 loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
+
+`preflight` is the requestless installation and readiness probe. It binds the
+exact candidate and current staging mutation epoch, runs the complete Tier 0-2
+graph, and emits only safe assessment identities; it does not allocate a
+request, backup, lifecycle pointer, systemd unit, or rollout directory.
+`start --dry-run` remains the explicit operator preview and intentionally
+publishes a non-active preview request for auditability.
 
 The broker derives the caller from the authenticated sudo context and records
 the initiating and attempt operators. It accepts no caller, repository, ref,

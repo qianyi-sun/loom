@@ -50,10 +50,7 @@ def test_integration_jobs_install_terminal_bench_sibling_independent_of_cache() 
             if step.get("name") == "Install project + dev deps + sibling packages"
         )
         assert "if" not in install_step
-        assert (
-            "uv pip install -e packages/loom-benchmark-terminal-bench-2"
-            in install_step["run"]
-        )
+        assert "uv pip install -e packages/loom-benchmark-terminal-bench-2" in install_step["run"]
 
 
 def test_operator_runbook_bootstraps_rollout_extra() -> None:
@@ -68,6 +65,7 @@ def test_independent_staging_operator_runbook_is_merged_only_and_complete() -> N
     runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text(encoding="utf-8")
 
     for command in (
+        "loom-staging-rollout preflight",
         "loom-staging-rollout start --dry-run",
         "loom-staging-rollout start",
         "loom-staging-rollout status REQUEST_ID",
@@ -86,6 +84,9 @@ def test_independent_staging_operator_runbook_is_merged_only_and_complete() -> N
     assert "all 14 active GB10 hosts" in runbook
     assert "#822" in runbook
     assert "merged revert on `dev`" in runbook
+    assert (
+        "The host installer uses only this\ncommand for its post-install readiness check" in runbook
+    )
     assert "staging-gb10-rollout-ed25519" not in runbook
     assert "systemd-run --user" not in runbook
     assert "backup-manifest=/data/loom-staging/backups/latest" not in runbook

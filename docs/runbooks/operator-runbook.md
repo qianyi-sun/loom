@@ -1419,6 +1419,9 @@ The supported `platform-dev` interface is the root-installed broker, not a
 personal checkout or user-owned systemd unit:
 
 ```bash
+# Verify the installed exact candidate without allocating a request.
+loom-staging-rollout preflight
+
 # Preview caller authorization and the freshly fetched merged dev candidate.
 loom-staging-rollout start --dry-run
 
@@ -1450,8 +1453,12 @@ requests, feature branches, tags, historical SHAs, local commits, custom image
 tags, alternate remotes, and target/config/secret overrides are forbidden.
 Rollback is a merged revert on `dev` followed by another normal `start`.
 
-`start --dry-run` writes a non-active preview but creates no backup, systemd
-unit, rollout directory, or staging mutation. A real `start` first writes and
+`preflight` is requestless: it binds the exact candidate and current mutation
+epoch, runs Tier 0-2, and creates no request, lifecycle pointer, backup, systemd
+unit, rollout directory, or staging mutation. The host installer uses only this
+command for its post-install readiness check. `start --dry-run` writes a
+non-active preview request but creates no backup, systemd unit, rollout
+directory, or staging mutation. A real `start` first writes and
 verifies a new immutable backup manifest, then publishes the private request
 envelope and launches a detached `loom-rollout` service unit. It never consumes
 a mutable `backups/latest` pointer. `resume` uses the original request's exact
@@ -2255,6 +2262,10 @@ operator options:
   `loom-staging-rollout start --dry-run`, which performs broker authorization,
   fresh-fetch, binding, singleton, and redaction checks without launching the
   driver.
+- The post-install readiness command is `loom-staging-rollout preflight`. It
+  performs the exact candidate/epoch Tier 0-2 assessment without publishing a
+  preview request and therefore cannot consume a request identifier merely by
+  installing or checking the runner.
 
 ### Candidate-source tooling contract
 
