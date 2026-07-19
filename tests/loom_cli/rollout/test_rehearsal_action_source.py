@@ -117,6 +117,7 @@ def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="c" * 64,
+        cluster_name="loom-staging",
         route_origin="https://staging.example.test/dev",
         backend=backend,
     )
@@ -163,6 +164,7 @@ def test_isolation_identity_changes_with_browser_contract(tmp_path: Path) -> Non
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="d" * 64,
+        cluster_name="loom-staging",
         route_origin="https://staging.example.test/dev",
         backend=Backend(),
     )

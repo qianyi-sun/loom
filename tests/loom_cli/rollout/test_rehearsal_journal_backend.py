@@ -16,6 +16,7 @@ def _plan(*, candidate_sha: str = "a" * 40) -> RehearsalPlan:
     return RehearsalPlan(
         candidate_sha=candidate_sha,
         candidate_tree="b" * 40,
+        cluster_name="loom-staging",
         checkpoint_request_id="req-abcdefgh",
         checkpoint_evidence_sha256="c" * 64,
         checkpoint_manifest_path=Path("/data/loom-staging/backups/exact/backup-manifest.json"),
