@@ -2742,6 +2742,126 @@ def test_gb10_prep_verify_accepts_successful_oneshot_node_agent(
     assert any("systemctl --user show" in call for call in calls)
 
 
+def test_gb10_prep_verify_waits_for_transient_timer_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123", resolved_sha="e" * 40)
+    _write_single_node_agent_gb10_config(ctx, tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    timer_calls = 0
+    service_calls = 0
+    sleeps: list[float] = []
+
+    def fake_ssh(host, remote_cmd):
+        nonlocal timer_calls, service_calls
+        if "systemctl --user show loom-gb10-node-agent.timer" in remote_cmd:
+            timer_calls += 1
+            substate = "running" if timer_calls == 1 else "waiting"
+            stdout = (
+                "LoadState=loaded\n"
+                "ActiveState=active\n"
+                f"SubState={substate}\n"
+                "Unit=loom-gb10-node-agent.service\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user show loom-gb10-node-agent.service" in remote_cmd:
+            service_calls += 1
+            stdout = (
+                "LoadState=loaded\n"
+                "Type=oneshot\n"
+                "Result=success\n"
+                "ExecMainStatus=0\n"
+                f"ActiveState={'active' if service_calls == 1 else 'inactive'}\n"
+                f"SubState={'running' if service_calls == 1 else 'dead'}\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user is-enabled loom-gb10-node-agent.timer" in remote_cmd:
+            stdout = "enabled\n"
+        else:
+            stdout = ""
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep.time.sleep",
+        sleeps.append,
+    )
+
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert outcome is VerifyOutcome.MATCH
+    assert timer_calls == 2
+    assert service_calls == 2
+    assert sleeps == [2.0]
+
+
+def test_gb10_prep_verify_fails_closed_when_timer_never_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123", resolved_sha="e" * 40)
+    _write_single_node_agent_gb10_config(ctx, tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    timer_calls = 0
+    sleeps: list[float] = []
+
+    def fake_ssh(host, remote_cmd):
+        nonlocal timer_calls
+        if "systemctl --user show loom-gb10-node-agent.timer" in remote_cmd:
+            timer_calls += 1
+            stdout = (
+                "LoadState=loaded\n"
+                "ActiveState=active\n"
+                "SubState=running\n"
+                "Unit=loom-gb10-node-agent.service\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user show loom-gb10-node-agent.service" in remote_cmd:
+            stdout = (
+                "LoadState=loaded\n"
+                "Type=oneshot\n"
+                "Result=success\n"
+                "ExecMainStatus=0\n"
+                "ActiveState=active\n"
+                "SubState=running\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user is-enabled loom-gb10-node-agent.timer" in remote_cmd:
+            stdout = "enabled\n"
+        else:
+            stdout = ""
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep.time.sleep",
+        sleeps.append,
+    )
+    step_dir = ev.step_dir(12, "gb10-prep")
+
+    outcome = GB10PrepStep().verify(ctx, step_dir)
+
+    assert outcome is VerifyOutcome.MISMATCH
+    assert timer_calls == 16
+    assert sleeps == [2.0] * 15
+    assert "SubState=running" in step_dir.stderr_path().read_text()
+
+
 @pytest.mark.parametrize(
     "service",
     (

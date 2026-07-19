@@ -51,6 +51,8 @@ from loom_cli.rollout.steps.subprocess_util import (
 _LEGACY_GB10_WORKER_SERVICE = "loom-gb10-worker.service"
 _SIMPLE_SYSTEMD_SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*\.service\Z")
 _GB10_NODE_AGENT_UNIT_DIR = PurePosixPath("deploy/worker-pools/gb10")
+_NODE_AGENT_TIMER_SETTLE_ATTEMPTS = 16
+_NODE_AGENT_TIMER_SETTLE_INTERVAL_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,6 +491,21 @@ def _node_agent_timer_is_prepared(
     )
 
 
+def _node_agent_timer_is_transiently_running(
+    props: dict[str, str],
+    *,
+    service: str,
+) -> bool:
+    """Recognize only the timer's documented in-flight service state."""
+    return (
+        props.get("LoadState") == "loaded"
+        and props.get("ActiveState") == "active"
+        and props.get("SubState") == "running"
+        and props.get("Unit") == service
+        and props.get("NeedDaemonReload") == "no"
+    )
+
+
 def _node_agent_timer_status_summary(props: dict[str, str]) -> str:
     keys = (
         "LoadState",
@@ -909,25 +926,41 @@ class GB10PrepStep(BaseStep):
                         f"state={enabled.stdout.strip() or '<missing>'}\n",
                     )
                     return VerifyOutcome.MISMATCH
-                timer_status = _ssh(
-                    host,
+                timer_status_command = (
                     "systemctl --user show "
                     f"{timer_quoted} "
                     "-p LoadState "
                     "-p ActiveState "
                     "-p SubState "
                     "-p Unit "
-                    "-p NeedDaemonReload",
+                    "-p NeedDaemonReload"
                 )
-                if timer_status.returncode != 0:
-                    if timer_status.returncode == 255:
-                        return VerifyOutcome.UNKNOWN
-                    step_dir.stderr_path().write_text(
-                        "node-agent-timer-status failed on "
-                        f"{host.ssh_target}: rc={timer_status.returncode}\n",
-                    )
-                    return VerifyOutcome.MISMATCH
-                timer_props = _parse_systemctl_properties(timer_status.stdout)
+                timer_props: dict[str, str] = {}
+                observed_transient_run = False
+                for attempt in range(_NODE_AGENT_TIMER_SETTLE_ATTEMPTS):
+                    timer_status = _ssh(host, timer_status_command)
+                    if timer_status.returncode != 0:
+                        if timer_status.returncode == 255:
+                            return VerifyOutcome.UNKNOWN
+                        step_dir.stderr_path().write_text(
+                            "node-agent-timer-status failed on "
+                            f"{host.ssh_target}: rc={timer_status.returncode}\n",
+                        )
+                        return VerifyOutcome.MISMATCH
+                    timer_props = _parse_systemctl_properties(timer_status.stdout)
+                    if _node_agent_timer_is_prepared(
+                        timer_props,
+                        service=host.node_agent_service,
+                    ):
+                        break
+                    if not _node_agent_timer_is_transiently_running(
+                        timer_props,
+                        service=host.node_agent_service,
+                    ):
+                        break
+                    observed_transient_run = True
+                    if attempt + 1 < _NODE_AGENT_TIMER_SETTLE_ATTEMPTS:
+                        time.sleep(_NODE_AGENT_TIMER_SETTLE_INTERVAL_SECONDS)
                 if not _node_agent_timer_is_prepared(
                     timer_props,
                     service=host.node_agent_service,
@@ -938,6 +971,38 @@ class GB10PrepStep(BaseStep):
                         f"{_node_agent_timer_status_summary(timer_props)}\n",
                     )
                     return VerifyOutcome.MISMATCH
+                if observed_transient_run:
+                    # The timer can legitimately report active/running while
+                    # its oneshot is executing.  Once it returns to waiting,
+                    # re-read the service so acceptance is bound to the just-
+                    # completed invocation rather than a previous success.
+                    settled_service = _ssh(
+                        host,
+                        "systemctl --user show "
+                        f"{service} "
+                        "-p LoadState "
+                        "-p Type "
+                        "-p Result "
+                        "-p ExecMainStatus "
+                        "-p ActiveState "
+                        "-p SubState "
+                        "-p NeedDaemonReload",
+                    )
+                    if settled_service.returncode != 0:
+                        if settled_service.returncode == 255:
+                            return VerifyOutcome.UNKNOWN
+                        step_dir.stderr_path().write_text(
+                            "node-agent-settled-status failed on "
+                            f"{host.ssh_target}: rc={settled_service.returncode}\n",
+                        )
+                        return VerifyOutcome.MISMATCH
+                    settled_props = _parse_systemctl_properties(settled_service.stdout)
+                    if not _node_agent_service_is_prepared(settled_props):
+                        step_dir.stderr_path().write_text(
+                            "node-agent-settled-status mismatch on "
+                            f"{host.ssh_target}: {_node_agent_status_summary(settled_props)}\n",
+                        )
+                        return VerifyOutcome.MISMATCH
         return VerifyOutcome.MATCH
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
