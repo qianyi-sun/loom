@@ -24,6 +24,15 @@ REQUIRED_BACKUP_COMPONENTS: tuple[str, ...] = (
     "minio",
     "k8s_secrets",
 )
+ROLLOUT_CHECKPOINT_COMPONENTS: tuple[str, ...] = (
+    "postgres",
+    "object_inventory",
+    "k8s_secrets",
+)
+_BACKUP_COMPONENTS_BY_SCHEMA: dict[int, tuple[str, ...]] = {
+    1: REQUIRED_BACKUP_COMPONENTS,
+    2: ROLLOUT_CHECKPOINT_COMPONENTS,
+}
 PROTECTED_ENVIRONMENTS: frozenset[str] = frozenset(
     {
         "staging",
@@ -1183,6 +1192,7 @@ def write_backup_manifest(
     now: datetime | None = None,
     limits: BackupTraversalLimits | None = None,
     write_output: Callable[[Path, bytes], None] | None = None,
+    schema_version: int = 1,
 ) -> dict[str, Any]:
     """Describe completed, externally quiesced backup artifacts.
 
@@ -1190,7 +1200,12 @@ def write_backup_manifest(
     metadata observations. It is not an atomic filesystem snapshot; callers
     must keep service writers quiesced through manifest persistence.
     """
-    missing = sorted(set(REQUIRED_BACKUP_COMPONENTS) - set(components))
+    required_components = (
+        _BACKUP_COMPONENTS_BY_SCHEMA.get(schema_version) if type(schema_version) is int else None
+    )
+    if required_components is None:
+        raise ValueError("backup manifest schema_version is unsupported")
+    missing = sorted(set(required_components) - set(components))
     if missing:
         raise ValueError(
             "missing required backup component(s): " + ", ".join(missing),
@@ -1206,7 +1221,7 @@ def write_backup_manifest(
     if first_states != second_states:
         raise _ComponentInspectionError("backup components changed during inspection")
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "environment": environment,
         "namespace": namespace,
         "created_at": created_at.isoformat(),
@@ -1216,7 +1231,7 @@ def write_backup_manifest(
         "verification": {
             "status": "verified",
             "checked_at": created_at.isoformat(),
-            "required_components": list(REQUIRED_BACKUP_COMPONENTS),
+            "required_components": list(required_components),
         },
     }
     budget.check_deadline()
@@ -1299,8 +1314,12 @@ def validate_backup_manifest(
     except json.JSONDecodeError as exc:
         return [f"backup manifest is not readable JSON: {type(exc).__name__}: {exc}"]
     problems: list[str] = []
-    if type(manifest.get("schema_version")) is not int or manifest.get("schema_version") != 1:
-        problems.append("backup manifest schema_version must be 1")
+    schema_version = manifest.get("schema_version")
+    if type(schema_version) is not int or schema_version not in _BACKUP_COMPONENTS_BY_SCHEMA:
+        problems.append("backup manifest schema_version must be 1 or 2")
+        required_components: tuple[str, ...] = ()
+    else:
+        required_components = _BACKUP_COMPONENTS_BY_SCHEMA[schema_version]
     if manifest.get("environment") != environment:
         problems.append(
             f"backup manifest environment {manifest.get('environment')!r} "
@@ -1331,12 +1350,14 @@ def validate_backup_manifest(
     verification = manifest.get("verification")
     if not isinstance(verification, dict) or verification.get("status") != "verified":
         problems.append("backup manifest verification.status must be 'verified'")
+    elif verification.get("required_components") != list(required_components):
+        problems.append("backup manifest verification.required_components does not match schema")
     components = manifest.get("components")
     if not isinstance(components, dict):
         problems.append("backup manifest components must be an object")
         return problems
     inspections: dict[str, _InspectedComponent] = {}
-    for name in REQUIRED_BACKUP_COMPONENTS:
+    for name in required_components:
         component = components.get(name)
         if not isinstance(component, dict):
             problems.append(f"backup manifest missing component {name!r}")
@@ -1382,7 +1403,7 @@ def validate_backup_manifest(
             actual_count = actual.get("file_count")
             if type(recorded_count) is not int or recorded_count != actual_count:
                 problems.append(f"backup component {name!r} file_count does not match")
-    if len(inspections) == len(REQUIRED_BACKUP_COMPONENTS):
+    if required_components and len(inspections) == len(required_components):
         first_states = {name: inspection.state for name, inspection in inspections.items()}
         try:
             second_states = _component_states_metadata_only(
