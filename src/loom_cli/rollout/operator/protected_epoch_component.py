@@ -116,7 +116,11 @@ class KubernetesProtectedEpochComponent:
         record = self._query((_READ_SQL,))
         if record is None:
             return ComponentObservation(
-                state=(ComponentState.READY if _allows_bootstrap(plan) else ComponentState.DRIFTED),
+                state=(
+                    ComponentState.READY
+                    if requires_legacy_epoch_bootstrap(plan)
+                    else ComponentState.DRIFTED
+                ),
                 evidence_digest=_hash_json({"status": "missing"}),
                 observed_epoch=plan.starting_mutation_epoch,
             )
@@ -145,7 +149,11 @@ class KubernetesProtectedEpochComponent:
                 "-v",
                 f"expected_epoch={plan.starting_mutation_epoch}",
                 "-v",
-                f"allow_bootstrap={'true' if _allows_bootstrap(plan) else 'false'}",
+                (
+                    "allow_bootstrap=true"
+                    if requires_legacy_epoch_bootstrap(plan)
+                    else "allow_bootstrap=false"
+                ),
                 _ADVANCE_SQL,
             )
         )
@@ -220,7 +228,9 @@ def _expected_identity(plan: FinalGatePlan) -> dict[str, object]:
     }
 
 
-def _allows_bootstrap(plan: FinalGatePlan) -> bool:
+def requires_legacy_epoch_bootstrap(plan: FinalGatePlan) -> bool:
+    """Return whether migration must create the first epoch authority row."""
+
     current = _REVISION_RE.fullmatch(plan.schema_revision)
     target = _REVISION_RE.fullmatch(plan.migration_target_revision)
     return bool(
@@ -238,4 +248,8 @@ def _hash_json(value: Mapping[str, object]) -> str:
     ).hexdigest()
 
 
-__all__ = ["KubernetesProtectedEpochComponent", "ProtectedEpochCommandRunner"]
+__all__ = [
+    "KubernetesProtectedEpochComponent",
+    "ProtectedEpochCommandRunner",
+    "requires_legacy_epoch_bootstrap",
+]

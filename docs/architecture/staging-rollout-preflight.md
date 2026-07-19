@@ -490,6 +490,17 @@ and appends its event. Missing authority for any already-0066 database is
 drift, and a generic migration never seeds a staging row into another
 environment's database.
 
+The migration/epoch composition has one typed command runner and the same
+attempt journal in both orderings. Existing lifecycle authority claims the
+next epoch before the migration Job; the one-time legacy path migrates first
+and then bootstraps/claims epoch one. Commands are argv-only `kubectl`
+invocations under a fixed non-inheriting kubeconfig environment, with bounded
+input/output and redacted failures. Re-entering the composition reclassifies
+terminal records and cannot repeat either the epoch CAS or the migration. This
+composition remains deliberately disconnected from the installed final helper
+until every other protected driver mutation is also represented as a journaled
+component; a partial chain is not rollout authority.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:
