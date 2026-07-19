@@ -53,10 +53,11 @@ def test_only_declared_apply_checks_may_report_protected_mutation() -> None:
     result = _result("final.protected-apply", CheckOperation.APPLY)
     assert result.protected_mutation
     assert _result("final.smoke", CheckOperation.APPLY).protected_mutation
+    assert _result("final.browser", CheckOperation.APPLY).protected_mutation
 
     try:
         FinalGateResult(
-            check_id="final.browser",
+            check_id="final.summary",
             operation=CheckOperation.VERIFY,
             candidate_sha="a" * 40,
             attestation_digest="b" * 64,

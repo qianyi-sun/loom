@@ -387,12 +387,14 @@ must agree before the terminal record can be published.
 ### Tier 4: justified final-only checks
 
 Only protected apply, observed live convergence, post-apply attestation drift,
-and bounded final live-route smoke/browser acceptance remain. Protected apply
-and the live smoke are the only checks classified as protected staging
-mutation: the smoke submits bounded live work, so it cannot be represented as
-a read-only verify operation. Earlier tiers do not weaken these final gates;
-they ensure the final gate is not the first consumer of a token, host
-prerequisite, migration, image, task, or browser contract.
+and bounded final live-route smoke/browser acceptance remain. Protected apply,
+the live smoke, and authenticated browser acceptance are the only checks
+classified as protected staging mutation. The smoke submits bounded live work;
+the browser acceptance creates and revokes its bounded admin session and writes
+the corresponding audit event. Neither may be represented as a read-only
+verify operation. Earlier tiers do not weaken these final gates; they ensure
+the final gate is not the first consumer of a token, host prerequisite,
+migration, image, task, or browser contract.
 
 Immediately before the protected chain, the service worker reloads the
 digest-addressed attestation and rebuilds the shared Tier 0 registry from the
@@ -464,11 +466,11 @@ checkpoint named by the backup lease's source request. Candidate, manifest,
 snapshot, epoch, schema, object-inventory or path drift fails before the
 executor is entered. A successful protected apply must report exactly one
 mutation-epoch advance and protected-mutation evidence. The later live smoke
-also reports protected-mutation evidence, but executes inside that already
-claimed rollout epoch and must observe the same single epoch advance rather
-than incrementing it again. Convergence, drift, browser and summary remain
-read-only. Until a concrete protected executor is installed, the helper is
-intentionally unavailable and exits without mutation.
+and browser acceptance also report protected-mutation evidence, but execute
+inside that already claimed rollout epoch and must observe the same single
+epoch advance rather than incrementing it again. Convergence, drift and summary
+remain read-only. Until a concrete protected executor is installed, the helper
+is intentionally unavailable and exits without mutation.
 
 Protected apply is further divided into an ordered component journal beneath
 the request attempt. Each component publishes an immutable intent before

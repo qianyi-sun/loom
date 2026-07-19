@@ -93,7 +93,7 @@ def test_installed_final_gate_runner_rejects_wrong_operation_or_output(tmp_path:
 
     with pytest.raises(ValueError, match="operation"):
         runner(
-            "final.browser",
+            "final.summary",
             CheckOperation.APPLY,
             candidate_sha="a" * 40,
             attestation_digest="b" * 64,
@@ -101,7 +101,7 @@ def test_installed_final_gate_runner_rejects_wrong_operation_or_output(tmp_path:
         )
     with pytest.raises(ValueError, match="operation"):
         runner(
-            "final.smoke",
+            "final.browser",
             CheckOperation.VERIFY,
             candidate_sha="a" * 40,
             attestation_digest="b" * 64,
@@ -109,7 +109,7 @@ def test_installed_final_gate_runner_rejects_wrong_operation_or_output(tmp_path:
         )
     with pytest.raises(ValueError, match="evidence drifted"):
         runner(
-            "final.browser",
+            "final.summary",
             CheckOperation.VERIFY,
             candidate_sha="a" * 40,
             attestation_digest="b" * 64,

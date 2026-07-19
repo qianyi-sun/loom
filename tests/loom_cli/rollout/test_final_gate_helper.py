@@ -46,7 +46,7 @@ def test_final_gate_helper_loads_exact_plan_and_emits_strict_result(
         [
             "execute",
             "--check-id",
-            "final.browser",
+            "final.convergence",
             "--operation",
             "verify",
             "--plan",
@@ -58,7 +58,7 @@ def test_final_gate_helper_loads_exact_plan_and_emits_strict_result(
     )
 
     assert rc == 0
-    assert '"check_id":"final.browser"' in capsys.readouterr().out
+    assert '"check_id":"final.convergence"' in capsys.readouterr().out
 
 
 def test_final_gate_helper_fails_closed_without_executor_or_on_wrong_operation(

@@ -1,8 +1,8 @@
 """Single-source final-only rollout gate session.
 
 Final checks keep their protected mutation boundary explicit. Probe/plan never
-mutate; the protected convergence and live smoke apply operations may report a
-protected staging mutation under the same rollout epoch.
+mutate; protected convergence, live smoke, and authenticated live browser apply
+operations may report a protected staging mutation under the same rollout epoch.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ FINAL_CHECK_IDS = (
     "final.browser",
     "final.summary",
 )
-PROTECTED_MUTATION_CHECK_IDS = frozenset({"final.protected-apply", "final.smoke"})
+PROTECTED_MUTATION_CHECK_IDS = frozenset({"final.protected-apply", "final.smoke", "final.browser"})
 
 
 @dataclass(frozen=True, slots=True)

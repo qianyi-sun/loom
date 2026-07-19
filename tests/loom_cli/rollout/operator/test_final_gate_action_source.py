@@ -185,10 +185,10 @@ def test_final_gate_action_source_uses_attested_bundle_and_fixed_helper(tmp_path
     envelope = _envelope(attestation)
 
     actions = source(envelope, attestation, 7, _admission(attestation))
-    result = actions["final.browser"](CheckOperation.VERIFY)
+    result = actions["final.browser"](CheckOperation.APPLY)
 
     assert set(actions) == set(FINAL_CHECK_IDS)
-    assert result.ready and not result.protected_mutation
+    assert result.ready and result.protected_mutation
     assert calls[0][0].endswith("final-helper")
     plan = FinalGatePlanStore(tmp_path / "state", request_id="req-alpha", attempt_number=1).read()
     assert plan.artifact_bundle_digest == Path(plan.artifact_descriptor_path).parent.name
