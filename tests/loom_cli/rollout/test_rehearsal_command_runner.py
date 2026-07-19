@@ -48,6 +48,11 @@ def _plan() -> RehearsalPlan:
         rendered_manifest_path=Path(
             "/var/lib/loom-staging-rollout/preflight-artifacts/" + "6" * 64 + "/rendered.yaml"
         ),
+        production_defaults_path=Path(
+            "/var/lib/loom-staging-rollout/preflight-artifacts/"
+            + "6" * 64
+            + "/production-defaults.json"
+        ),
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256="8" * 64,
         production_defaults_sha256="9" * 64,

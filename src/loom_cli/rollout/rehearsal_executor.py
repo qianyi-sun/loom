@@ -15,8 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
 from loom_cli.rollout.preflight_credential_paths import REHEARSAL_KUBECONFIG_PATH
+from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 from loom_cli.rollout.rehearsal_browser import (
     BROWSER_INGRESS_NAME,
@@ -54,6 +56,7 @@ from loom_cli.rollout.systemd_readiness import (
 
 REHEARSAL_KUBECONFIG = REHEARSAL_KUBECONFIG_PATH
 _MAX_OUTPUT_BYTES = 1024 * 1024
+_MAX_PRODUCTION_DEFAULTS_BYTES = 1024 * 1024
 _KUBERNETES_UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -224,6 +227,8 @@ class IsolatedRehearsalExecutor:
             return self._migration(plan)
         if check_id == "rehearsal.release":
             return self._release(plan)
+        if check_id == "rehearsal.production-defaults":
+            return self._production_defaults(plan)
         if check_id == "rehearsal.api-smoke":
             return self._api_smoke(plan)
         if check_id == "rehearsal.browser":
@@ -401,29 +406,76 @@ class IsolatedRehearsalExecutor:
             blockers={},
         )
 
-    def _api_smoke(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+    def _production_defaults(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
         try:
             release = self.release_artifacts(plan)
+            trusted = read_trusted_file(
+                plan.production_defaults_path,
+                service_uid=os.geteuid(),
+                private=True,
+                max_bytes=_MAX_PRODUCTION_DEFAULTS_BYTES,
+                require_nonempty=True,
+            )
+            artifact = ProductionDefaultsArtifact.from_bytes(trusted.payload)
         except (OSError, RuntimeError, ValueError):
-            return _blocked("api-smoke", "artifact-validation-failed")
-        pods = self._command(
+            return _blocked("production-defaults", "artifact-validation-failed")
+        if (
+            artifact.artifact_digest != plan.production_defaults_sha256
+            or artifact.candidate_sha != plan.candidate_sha
+            or artifact.candidate_tree != plan.candidate_tree
+            or artifact.environment != "staging"
+        ):
+            return _blocked("production-defaults", "artifact-binding-drift")
+        pod_name = self._service_pod_name(plan, release)
+        if pod_name is None:
+            return _blocked("production-defaults", "service-pod-readback-drift")
+        result = self._command(
             (
                 "kubectl",
                 "--kubeconfig",
                 str(self.kubeconfig),
                 "--namespace",
                 plan.resources.namespace,
-                "get",
-                "pods",
-                "--selector=" + rehearsal_selector_argument(release, "loom-service"),
-                "--request-timeout=15s",
-                "-o",
-                "json",
+                "exec",
+                "-i",
+                f"pod/{pod_name}",
+                "--container",
+                "loom-service",
+                "--",
+                "python",
+                "-m",
+                "loom_cli.rollout.rehearsal_production_defaults_probe",
+                "--plan-sha256",
+                plan.plan_digest,
+                "--artifact-sha256",
+                plan.production_defaults_sha256,
+                "--candidate-sha",
+                plan.candidate_sha,
+                "--candidate-tree",
+                plan.candidate_tree,
             ),
-            None,
-            timeout=20,
+            trusted.payload,
+            timeout=300,
         )
-        pod_name = _exact_service_pod_name(pods, release=release, plan=plan)
+        if result is None or not _production_defaults_result_ready(result, plan=plan):
+            return _blocked("production-defaults", "probe-failed")
+        return RehearsalStepOutcome(
+            passed=True,
+            details={
+                "artifact-sha256": plan.production_defaults_sha256,
+                "evidence-sha256": str(result["evidence_sha256"]),
+                "mutation-count": str(result["mutation_count"]),
+                "status": "ready",
+            },
+            blockers={},
+        )
+
+    def _api_smoke(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+        try:
+            release = self.release_artifacts(plan)
+        except (OSError, RuntimeError, ValueError):
+            return _blocked("api-smoke", "artifact-validation-failed")
+        pod_name = self._service_pod_name(plan, release)
         if pod_name is None:
             return _blocked("api-smoke", "service-pod-readback-drift")
         authority = plan.smoke_authority
@@ -488,6 +540,30 @@ class IsolatedRehearsalExecutor:
             },
             blockers={},
         )
+
+    def _service_pod_name(
+        self,
+        plan: RehearsalPlan,
+        release: RehearsalReleaseArtifact,
+    ) -> str | None:
+        pods = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "pods",
+                "--selector=" + rehearsal_selector_argument(release, "loom-service"),
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        return _exact_service_pod_name(pods, release=release, plan=plan)
 
     def _namespace(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
         manifest = _namespace_manifest(plan)
@@ -1713,6 +1789,37 @@ def _api_smoke_result_ready(
             and re.fullmatch(r"[0-9a-f]{64}", item) is not None
             for key, item in evidence.items()
         )
+    )
+
+
+def _production_defaults_result_ready(
+    value: dict[str, object],
+    *,
+    plan: RehearsalPlan,
+) -> bool:
+    mutation_count = value.get("mutation_count")
+    return bool(
+        set(value)
+        == {
+            "artifact_sha256",
+            "candidate_sha",
+            "candidate_tree",
+            "evidence_sha256",
+            "mutation_count",
+            "plan_sha256",
+            "schema_version",
+            "status",
+        }
+        and value.get("artifact_sha256") == plan.production_defaults_sha256
+        and value.get("candidate_sha") == plan.candidate_sha
+        and value.get("candidate_tree") == plan.candidate_tree
+        and isinstance(value.get("evidence_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", str(value["evidence_sha256"])) is not None
+        and type(mutation_count) is int
+        and 0 <= mutation_count <= 64
+        and value.get("plan_sha256") == plan.plan_digest
+        and value.get("schema_version") == 1
+        and value.get("status") == "ready"
     )
 
 

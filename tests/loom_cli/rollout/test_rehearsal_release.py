@@ -113,6 +113,7 @@ def _plan(tmp_path: Path) -> RehearsalPlan:
         artifact_bundle_sha256="6" * 64,
         artifact_descriptor_path=artifact_root / "artifact.json",
         rendered_manifest_path=rendered_path,
+        production_defaults_path=artifact_root / "production-defaults.json",
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
         production_defaults_sha256="9" * 64,

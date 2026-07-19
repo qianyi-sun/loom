@@ -11,6 +11,10 @@ from pathlib import Path
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+from loom_cli.rollout.production_defaults_readiness import (
+    ProductionDefaultsArtifact,
+    ProviderPricingDefault,
+)
 from loom_cli.rollout.rehearsal_action_source import (
     RehearsalPlan,
     RehearsalResources,
@@ -58,6 +62,11 @@ def _plan() -> RehearsalPlan:
         ),
         rendered_manifest_path=Path(
             "/var/lib/loom-staging-rollout/preflight-artifacts/" + "6" * 64 + "/rendered.yaml"
+        ),
+        production_defaults_path=Path(
+            "/var/lib/loom-staging-rollout/preflight-artifacts/"
+            + "6" * 64
+            + "/production-defaults.json"
         ),
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256="8" * 64,
@@ -615,6 +624,108 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
         "python",
         "-m",
         "loom_cli.rollout.rehearsal_smoke_probe",
+    )
+    assert "loom_admin_" not in " ".join(probe)
+
+
+def test_production_defaults_streams_exact_artifact_to_candidate_probe(tmp_path: Path) -> None:
+    base = _plan()
+    provider = ProviderPricingDefault(
+        name="hosted-openai",
+        pricing_source="tokens-only",
+        rate_card_provider=None,
+        required=True,
+    )
+    artifact_payload = {
+        "schema_version": 1,
+        "candidate_sha": base.candidate_sha,
+        "candidate_tree": base.candidate_tree,
+        "environment": "staging",
+        "yibuapi_sync": None,
+        "providers": [provider.to_dict()],
+    }
+    digest = hashlib.sha256(
+        json.dumps(artifact_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    artifact = ProductionDefaultsArtifact(
+        schema_version=1,
+        candidate_sha=base.candidate_sha,
+        candidate_tree=base.candidate_tree,
+        environment="staging",
+        yibuapi_sync=None,
+        providers=(provider,),
+        artifact_digest=digest,
+    )
+    root = tmp_path / "preflight-artifacts" / base.artifact_bundle_sha256
+    root.mkdir(parents=True)
+    path = root / "production-defaults.json"
+    path.write_bytes(artifact.to_bytes())
+    path.chmod(0o600)
+    plan = replace(
+        base,
+        artifact_descriptor_path=root / "artifact.json",
+        rendered_manifest_path=root / "rendered.yaml",
+        production_defaults_path=path,
+        production_defaults_sha256=digest,
+    )
+    release = _release_artifact(plan)
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    def run(argv, payload, _timeout):
+        command = tuple(argv)
+        calls.append((command, payload))
+        if "get" in command and "pods" in command:
+            value = {
+                "items": [
+                    {
+                        "metadata": {
+                            "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+                            "labels": {"app": "loom-service"},
+                            "name": "loom-service-abc123",
+                        },
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {
+                                    "imageID": "docker-pullable://loom-service@"
+                                    + plan.image_digests["loom-service"],
+                                    "name": "loom-service",
+                                    "ready": True,
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+        if "exec" in command:
+            value = {
+                "artifact_sha256": digest,
+                "candidate_sha": plan.candidate_sha,
+                "candidate_tree": plan.candidate_tree,
+                "evidence_sha256": "e" * 64,
+                "mutation_count": 1,
+                "plan_sha256": plan.plan_digest,
+                "schema_version": 1,
+                "status": "ready",
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+    ).execute("rehearsal.production-defaults", plan)
+
+    assert outcome.passed
+    probe, payload = next(item for item in calls if "exec" in item[0])
+    assert payload == artifact.to_bytes()
+    assert "-i" in probe
+    assert probe[probe.index("--") + 1 : probe.index("--") + 4] == (
+        "python",
+        "-m",
+        "loom_cli.rollout.rehearsal_production_defaults_probe",
     )
     assert "loom_admin_" not in " ".join(probe)
 

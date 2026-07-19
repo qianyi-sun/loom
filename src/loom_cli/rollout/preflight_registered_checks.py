@@ -2433,7 +2433,8 @@ def build_rehearsal_checks(
         ),
         "rehearsal.migration": ("rehearsal.db-clone", "migration.plan"),
         "rehearsal.release": ("rehearsal.migration", "images.contract"),
-        "rehearsal.api-smoke": ("rehearsal.release",),
+        "rehearsal.production-defaults": ("rehearsal.release", "production-defaults.plan"),
+        "rehearsal.api-smoke": ("rehearsal.production-defaults",),
         "rehearsal.browser": ("rehearsal.api-smoke", "browser.runtime"),
         "rehearsal.cleanup": (
             "rehearsal.namespace",
@@ -2441,6 +2442,7 @@ def build_rehearsal_checks(
             "rehearsal.systemd-launch",
             "rehearsal.migration",
             "rehearsal.release",
+            "rehearsal.production-defaults",
             "rehearsal.api-smoke",
             "rehearsal.browser",
         ),

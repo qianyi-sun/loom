@@ -15,6 +15,24 @@ from loom_llm_gateway.yibuapi_pricing import DEFAULT_YIBUAPI_PRICING_URL
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_PROVIDER_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+PRODUCTION_DEFAULTS_ADMIN_ACTOR = "rollout-production-defaults"
+YIBUAPI_RATE_CARD_INVENTORY_SQL = """
+SELECT jsonb_build_object(
+  'rate_cards', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'id', id,
+      'source_url', "table"->>'source_url',
+      'group', "table"->>'group'
+    ) ORDER BY captured_at DESC, id)
+    FROM rate_cards
+    WHERE "table"->>'provider' = 'yibuapi'
+  ), '[]'::jsonb)
+)::text;
+""".strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +171,202 @@ class ProductionDefaultsArtifact:
             providers=tuple(parsed),
             artifact_digest=_string(raw, "artifact_digest"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionDefaultsMutation:
+    """One exact Service API mutation derived by the shared classifier."""
+
+    operation: str
+    method: str
+    path: str
+    payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        payload = dict(self.payload)
+        valid = (
+            self.operation == "sync-yibuapi"
+            and self.method == "POST"
+            and self.path == "/api/v1/rate-cards/sync/yibuapi"
+            and set(payload) == {"group", "source_url"}
+            and all(isinstance(value, str) and value for value in payload.values())
+        ) or (
+            self.operation == "update-provider"
+            and self.method == "PATCH"
+            and self.path.startswith("/api/v1/provider-connections/")
+            and _PROVIDER_ID_RE.fullmatch(self.path.rsplit("/", 1)[-1]) is not None
+            and set(payload) in ({"pricing_source"}, {"pricing_source", "rate_card_provider"})
+            and payload.get("pricing_source") in {"rate-card", "tokens-only"}
+            and (
+                "rate_card_provider" not in payload
+                or (
+                    isinstance(payload["rate_card_provider"], str)
+                    and bool(payload["rate_card_provider"])
+                )
+            )
+        )
+        if not valid:
+            raise ValueError("production defaults mutation authority is invalid")
+        object.__setattr__(self, "payload", MappingProxyType(payload))
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionDefaultsConvergencePlan:
+    """Secret-free shared classification used by rehearsal and final apply."""
+
+    state: str
+    relevant_inventory: Mapping[str, object]
+    mutations: tuple[ProductionDefaultsMutation, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.state not in {"ready", "exact", "drifted"}
+            or (self.state == "exact" and self.mutations)
+            or (self.state == "drifted" and self.mutations)
+            or (self.state == "ready" and not self.mutations)
+        ):
+            raise ValueError("production defaults convergence plan is invalid")
+        object.__setattr__(
+            self,
+            "relevant_inventory",
+            MappingProxyType(dict(self.relevant_inventory)),
+        )
+
+
+def plan_production_defaults_convergence(
+    artifact: ProductionDefaultsArtifact,
+    inventory: Mapping[str, object],
+) -> ProductionDefaultsConvergencePlan:
+    """Classify one authorized inventory and derive the only allowed mutations."""
+    providers = inventory.get("providers")
+    rate_cards = inventory.get("rate_cards")
+    if not isinstance(providers, list) or not isinstance(rate_cards, list):
+        raise ValueError("production defaults inventory lists are invalid")
+    indexed: dict[str, list[dict[str, object]]] = {}
+    for row in providers:
+        parsed = _provider_inventory_row(row)
+        indexed.setdefault(str(parsed["name"]), []).append(parsed)
+    selected: dict[str, dict[str, object]] = {}
+    for desired in artifact.providers:
+        matches = indexed.get(desired.name, [])
+        if len(matches) != 1:
+            return ProductionDefaultsConvergencePlan(
+                state="drifted",
+                relevant_inventory={"providers": {}, "rate_card_exact": False},
+                mutations=(),
+            )
+        selected[desired.name] = matches[0]
+
+    rate_card_exact = artifact.yibuapi_sync is None
+    if artifact.yibuapi_sync is not None:
+        parsed_cards = tuple(_rate_card_inventory_row(row) for row in rate_cards)
+        rate_card_exact = bool(
+            parsed_cards
+            and parsed_cards[0]["group"] == artifact.yibuapi_sync["group"]
+            and parsed_cards[0]["source_url"] == artifact.yibuapi_sync["source_url"]
+        )
+    mutations: list[ProductionDefaultsMutation] = []
+    if artifact.yibuapi_sync is not None and not rate_card_exact:
+        mutations.append(
+            ProductionDefaultsMutation(
+                operation="sync-yibuapi",
+                method="POST",
+                path="/api/v1/rate-cards/sync/yibuapi",
+                payload=dict(artifact.yibuapi_sync),
+            )
+        )
+    for desired in artifact.providers:
+        observed = selected[desired.name]
+        if _provider_inventory_exact(desired, observed):
+            continue
+        payload: dict[str, object] = {"pricing_source": desired.pricing_source}
+        if desired.rate_card_provider is not None:
+            payload["rate_card_provider"] = desired.rate_card_provider
+        mutations.append(
+            ProductionDefaultsMutation(
+                operation="update-provider",
+                method="PATCH",
+                path=f"/api/v1/provider-connections/{observed['id']}",
+                payload=payload,
+            )
+        )
+    relevant: dict[str, object] = {
+        "providers": {name: selected[name] for name in sorted(selected)},
+        "rate_card_exact": rate_card_exact,
+    }
+    return ProductionDefaultsConvergencePlan(
+        state="ready" if mutations else "exact",
+        relevant_inventory=relevant,
+        mutations=tuple(mutations),
+    )
+
+
+def production_defaults_inventory(
+    provider_response: Mapping[str, object],
+    rate_cards: object,
+) -> dict[str, object]:
+    """Normalize the only inventory shape accepted by the shared classifier."""
+    provider_items = provider_response.get("items")
+    if not isinstance(provider_items, list) or not isinstance(rate_cards, list):
+        raise ValueError("production defaults inventory is invalid")
+    return {
+        "providers": [
+            {
+                "id": item.get("id") if isinstance(item, Mapping) else None,
+                "name": item.get("name") if isinstance(item, Mapping) else None,
+                "pricing_source": (
+                    item.get("pricing_source") if isinstance(item, Mapping) else None
+                ),
+                "rate_card_provider": (
+                    item.get("rate_card_provider") if isinstance(item, Mapping) else None
+                ),
+            }
+            for item in provider_items
+        ],
+        "rate_cards": rate_cards,
+    }
+
+
+def _provider_inventory_row(value: object) -> dict[str, object]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"id", "name", "pricing_source", "rate_card_provider"}
+        or not all(isinstance(value[key], str) and value[key] for key in ("id", "name"))
+        or _PROVIDER_ID_RE.fullmatch(str(value["id"])) is None
+        or value["pricing_source"] not in {"rate-card", "tokens-only", "operator-supplied"}
+        or (
+            value["rate_card_provider"] is not None
+            and (
+                not isinstance(value["rate_card_provider"], str) or not value["rate_card_provider"]
+            )
+        )
+    ):
+        raise ValueError("production defaults provider inventory is invalid")
+    return dict(value)
+
+
+def _rate_card_inventory_row(value: object) -> dict[str, str]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"id", "source_url", "group"}
+        or not all(isinstance(value[key], str) and value[key] for key in value)
+    ):
+        raise ValueError("production defaults rate-card inventory is invalid")
+    return {key: str(value[key]) for key in value}
+
+
+def _provider_inventory_exact(
+    desired: ProviderPricingDefault,
+    observed: Mapping[str, object],
+) -> bool:
+    return bool(
+        observed.get("name") == desired.name
+        and observed.get("pricing_source") == desired.pricing_source
+        and (
+            desired.rate_card_provider is None
+            or observed.get("rate_card_provider") == desired.rate_card_provider
+        )
+    )
 
 
 def build_production_defaults_artifact(

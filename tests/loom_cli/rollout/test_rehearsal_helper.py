@@ -54,6 +54,11 @@ def _plan() -> RehearsalPlan:
         rendered_manifest_path=Path(
             "/var/lib/loom-staging-rollout/preflight-artifacts/" + "6" * 64 + "/rendered.yaml"
         ),
+        production_defaults_path=Path(
+            "/var/lib/loom-staging-rollout/preflight-artifacts/"
+            + "6" * 64
+            + "/production-defaults.json"
+        ),
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256="8" * 64,
         production_defaults_sha256="9" * 64,
@@ -173,6 +178,7 @@ def test_helper_binds_every_artifact_publication_identity(
         mutation_epoch=plan.mutation_epoch,
         descriptor_path=plan.artifact_descriptor_path,
         rendered_manifest_path=plan.rendered_manifest_path,
+        production_defaults_path=plan.production_defaults_path,
         image_artifact_sha256=plan.image_artifact_sha256,
         manifest_artifact_sha256=plan.manifest_artifact_sha256,
         rendered_manifest_sha256=plan.rendered_manifest_sha256,

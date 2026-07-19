@@ -15,6 +15,7 @@ REHEARSAL_CHECK_IDS = (
     "rehearsal.systemd-launch",
     "rehearsal.migration",
     "rehearsal.release",
+    "rehearsal.production-defaults",
     "rehearsal.api-smoke",
     "rehearsal.browser",
     "rehearsal.cleanup",

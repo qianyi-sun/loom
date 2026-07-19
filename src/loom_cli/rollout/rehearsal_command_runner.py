@@ -25,6 +25,7 @@ _TIMEOUTS = {
     "rehearsal.systemd-launch": 120,
     "rehearsal.migration": 900,
     "rehearsal.release": 900,
+    "rehearsal.production-defaults": 300,
     "rehearsal.api-smoke": 600,
     "rehearsal.browser": 900,
     "rehearsal.cleanup": 900,
@@ -119,14 +120,15 @@ class InstalledRehearsalStepRunner:
             or type(record.get("cleanup_verified")) is not bool
             or not isinstance(details, dict)
             or not isinstance(blockers, dict)
-            or not all(isinstance(key, str) and isinstance(value, str) for key, value in details.items())
+            or not all(
+                isinstance(key, str) and isinstance(value, str) for key, value in details.items()
+            )
             or not all(
                 isinstance(key, str) and isinstance(value, str) for key, value in blockers.items()
             )
             or (result.returncode == 0) is not (record["passed"] is True)
-            or (record["cleanup_verified"] is True) != (
-                check_id == "rehearsal.cleanup" and record["passed"] is True
-            )
+            or (record["cleanup_verified"] is True)
+            != (check_id == "rehearsal.cleanup" and record["passed"] is True)
         ):
             raise ValueError("installed rehearsal helper evidence drifted")
         return RehearsalStepOutcome(

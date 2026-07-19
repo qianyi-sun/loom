@@ -101,6 +101,7 @@ class RehearsalPlan:
     artifact_bundle_sha256: str
     artifact_descriptor_path: Path
     rendered_manifest_path: Path
+    production_defaults_path: Path
     manifest_artifact_sha256: str
     rendered_manifest_sha256: str
     production_defaults_sha256: str
@@ -140,13 +141,17 @@ class RehearsalPlan:
             or ".." in self.checkpoint_manifest_path.parts
             or not self.artifact_descriptor_path.is_absolute()
             or not self.rendered_manifest_path.is_absolute()
+            or not self.production_defaults_path.is_absolute()
             or ".." in self.artifact_descriptor_path.parts
             or ".." in self.rendered_manifest_path.parts
+            or ".." in self.production_defaults_path.parts
             or self.artifact_descriptor_path.parent != self.rendered_manifest_path.parent
+            or self.artifact_descriptor_path.parent != self.production_defaults_path.parent
             or self.artifact_descriptor_path.parent.name != self.artifact_bundle_sha256
             or self.artifact_descriptor_path.parent.parent.name != "preflight-artifacts"
             or self.artifact_descriptor_path.name != "artifact.json"
             or self.rendered_manifest_path.name != "rendered.yaml"
+            or self.production_defaults_path.name != "production-defaults.json"
             or not self.db_snapshot_identity.startswith("pgdump-sha256:")
             or _REVISION_RE.fullmatch(self.schema_revision) is None
             or _REVISION_RE.fullmatch(self.migration_target_revision) is None
@@ -200,9 +205,10 @@ class RehearsalPlan:
             },
             "rendered_manifest_path": str(self.rendered_manifest_path),
             "rendered_manifest_sha256": self.rendered_manifest_sha256,
+            "production_defaults_path": str(self.production_defaults_path),
             "production_defaults_sha256": self.production_defaults_sha256,
             "schema_revision": self.schema_revision,
-            "schema_version": 3,
+            "schema_version": 4,
             "smoke_authority": self.smoke_authority.to_record(),
         }
 
@@ -232,6 +238,7 @@ class RehearsalPlan:
             "resources",
             "rendered_manifest_path",
             "rendered_manifest_sha256",
+            "production_defaults_path",
             "production_defaults_sha256",
             "schema_revision",
             "schema_version",
@@ -244,7 +251,7 @@ class RehearsalPlan:
         if (
             set(value) != expected
             or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 3
+            or value.get("schema_version") != 4
             or type(mutation_epoch) is not int
             or not isinstance(resources, Mapping)
             or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
@@ -277,6 +284,7 @@ class RehearsalPlan:
             "object_inventory_root",
             "rendered_manifest_path",
             "rendered_manifest_sha256",
+            "production_defaults_path",
             "production_defaults_sha256",
             "schema_revision",
         )
@@ -303,6 +311,7 @@ class RehearsalPlan:
             artifact_bundle_sha256=str(value["artifact_bundle_sha256"]),
             artifact_descriptor_path=Path(str(value["artifact_descriptor_path"])),
             rendered_manifest_path=Path(str(value["rendered_manifest_path"])),
+            production_defaults_path=Path(str(value["production_defaults_path"])),
             manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
             rendered_manifest_sha256=str(value["rendered_manifest_sha256"]),
             production_defaults_sha256=str(value["production_defaults_sha256"]),
@@ -482,6 +491,7 @@ class RehearsalActionSource:
             artifact_bundle_sha256=publication.bundle_digest,
             artifact_descriptor_path=publication.descriptor_path,
             rendered_manifest_path=publication.rendered_manifest_path,
+            production_defaults_path=publication.production_defaults_path,
             manifest_artifact_sha256=publication.manifest_artifact_sha256,
             rendered_manifest_sha256=publication.rendered_manifest_sha256,
             production_defaults_sha256=publication.production_defaults_sha256,
@@ -519,7 +529,7 @@ class RehearsalActionSource:
             "migration_target_revision": self.migration_target_revision,
             "route_origin": self.route_origin,
             "smoke_authority": self.smoke_authority.to_record(),
-            "schema_version": 3,
+            "schema_version": 4,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

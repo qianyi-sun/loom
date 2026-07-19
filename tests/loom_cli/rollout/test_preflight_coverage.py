@@ -76,6 +76,7 @@ def test_known_late_failures_are_shifted_before_final_only() -> None:
         "capacity.high-water",
         "staging.release-baseline",
         "rehearsal.migration",
+        "rehearsal.production-defaults",
         "rehearsal.api-smoke",
         "rehearsal.browser",
     ):
