@@ -59,7 +59,7 @@ def test_collector_aggregates_exact_objects_and_statvfs(monkeypatch, tmp_path: P
             ObservedObject("artifacts", "a", None, 3),
             ObservedObject("trajectories", "b", "v1", 7),
         ],
-        filesystem_path=tmp_path,
+        filesystem_paths=[tmp_path],
         observed_at=NOW,
     )
 

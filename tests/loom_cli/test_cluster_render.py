@@ -323,6 +323,7 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # + web + gateway-router + egress-xds + egress-proxy + pgbouncer
     # + family-orchestrator = 12.
     assert kinds.count("NetworkPolicy") == 12
+    assert kinds.count("CronJob") == 0
     # Grafana dashboards ConfigMap + egress-proxy bootstrap ConfigMap.
     assert kinds.count("ConfigMap") == 2
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -54,14 +54,30 @@ def collect_staging_capacity(
     *,
     namespace: str,
     objects: Iterable[ObservedObject],
-    filesystem_path: Path,
+    filesystem_paths: Sequence[Path],
     observed_at: datetime,
 ) -> StagingCapacityEvidence:
-    """Collect exact object totals plus filesystem byte/inode headroom."""
-    resolved = filesystem_path.resolve(strict=True)
-    stats = os.statvfs(resolved)
-    if stats.f_blocks <= 0 or stats.f_files <= 0:
-        raise RuntimeError("staging capacity filesystem totals are unavailable")
+    """Collect exact object totals plus the lowest backing-store headroom.
+
+    Distributed MinIO owns one PVC per replica.  Admission must fail closed on
+    the most constrained member instead of sampling one convenient mount.
+    Callers therefore have to provide every authoritative filesystem path.
+    """
+    if not filesystem_paths:
+        raise RuntimeError("staging capacity filesystem paths are unavailable")
+    stats = []
+    filesystem_identities: set[tuple[int, int]] = set()
+    for path in filesystem_paths:
+        resolved = path.resolve(strict=True)
+        stat = resolved.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if identity in filesystem_identities:
+            raise RuntimeError("staging capacity filesystem identities are duplicated")
+        filesystem_identities.add(identity)
+        value = os.statvfs(resolved)
+        if value.f_blocks <= 0 or value.f_files <= 0:
+            raise RuntimeError("staging capacity filesystem totals are unavailable")
+        stats.append(value)
     observed = tuple(objects)
     identities = [item.identity for item in observed]
     if len(identities) != len(set(identities)):
@@ -69,8 +85,8 @@ def collect_staging_capacity(
     capacity = StagingCapacity(
         object_count=len(observed),
         bytes_used=sum(item.size_bytes for item in observed),
-        disk_free_percent=(stats.f_bavail * 100) // stats.f_blocks,
-        inode_free_percent=(stats.f_favail * 100) // stats.f_files,
+        disk_free_percent=min((item.f_bavail * 100) // item.f_blocks for item in stats),
+        inode_free_percent=min((item.f_favail * 100) // item.f_files for item in stats),
     )
     return StagingCapacityEvidence(
         namespace=namespace,

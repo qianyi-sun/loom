@@ -38,6 +38,7 @@ spec:
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
         - podSelector: { matchLabels: { app: loom-service } }
         - podSelector: { matchLabels: { app: loom-migration } }
+        - podSelector: { matchLabels: { app: loom-staging-data-lifecycle } }
 {% if pgbouncer.enabled %}
         - podSelector: { matchLabels: { app: loom-pgbouncer } }
 {% endif %}
@@ -80,6 +81,7 @@ spec:
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
         - podSelector: { matchLabels: { app: loom-service } }
         - podSelector: { matchLabels: { app: loom-migration } }
+        - podSelector: { matchLabels: { app: loom-staging-data-lifecycle } }
 {% if pgbouncer.enabled %}
         - podSelector: { matchLabels: { app: loom-pgbouncer } }
 {% endif %}
@@ -162,6 +164,7 @@ spec:
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
         - podSelector: { matchLabels: { app: loom-minio } }
         - podSelector: { matchLabels: { app: loom-family-orchestrator } }
+        - podSelector: { matchLabels: { app: loom-staging-data-lifecycle } }
       ports:
         - { port: 9000, protocol: TCP }
   egress:
@@ -179,6 +182,38 @@ spec:
         - podSelector: { matchLabels: { app: loom-minio } }
       ports:
         - { port: 9000, protocol: TCP }
+
+{% if runtime_environment == "staging" %}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-staging-data-lifecycle
+spec:
+  podSelector:
+    matchLabels: { app: loom-staging-data-lifecycle }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: loom-postgres } }
+        - podSelector: { matchLabels: { cnpg.io/cluster: loom-postgres } }
+      ports:
+        - { port: 5432, protocol: TCP }
+    - to:
+        - podSelector: { matchLabels: { app: loom-minio } }
+      ports:
+        - { port: 9000, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+{% endif %}
 
 ---
 apiVersion: networking.k8s.io/v1

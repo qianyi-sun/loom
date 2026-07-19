@@ -22,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--bucket", action="append", required=True)
-    parser.add_argument("--filesystem-path", type=Path, required=True)
+    parser.add_argument("--filesystem-path", action="append", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         evidence = collect_staging_capacity(
             namespace=args.namespace,
             objects=objects,
-            filesystem_path=args.filesystem_path,
+            filesystem_paths=args.filesystem_path,
             observed_at=observed_at,
         )
         SqlAlchemyStagingCapacityStore(engine).publish(evidence)

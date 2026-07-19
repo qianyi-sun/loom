@@ -27,6 +27,9 @@ spec:
           app: loom-migration
     - podSelector:
         matchLabels:
+          app: loom-staging-data-lifecycle
+    - podSelector:
+        matchLabels:
           app: loom-pgbouncer
     - podSelector:
         matchLabels:
@@ -77,6 +80,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-family-orchestrator
+    - podSelector:
+        matchLabels:
+          app: loom-staging-data-lifecycle
     ports:
     - port: 9000
       protocol: TCP
