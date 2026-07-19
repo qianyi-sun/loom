@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ from loom_cli.rollout.final_gate_readiness import (
 from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.checkpoint_lease import inspect_critical_checkpoint
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
+from loom_cli.rollout.operator.model import DriverEnvelope
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import CheckOperation
 
@@ -70,7 +72,42 @@ def _load_plan(path: Path, expected_digest: str) -> FinalGatePlan:
         raise ValueError("final gate helper plan path or identity drifted")
     _verify_artifacts(plan)
     _verify_checkpoint(plan)
+    _verify_driver_envelope(plan)
     return plan
+
+
+def _verify_driver_envelope(plan: FinalGatePlan) -> None:
+    path = (
+        _STATE_ROOT
+        / "requests"
+        / plan.request_id
+        / "attempts"
+        / str(plan.attempt_number)
+        / "envelope.json"
+    )
+    trusted = read_trusted_file(
+        path,
+        service_uid=os.geteuid(),
+        private=True,
+        max_bytes=_MAX_PLAN_BYTES,
+        require_nonempty=True,
+    )
+    envelope = DriverEnvelope.from_dict(_strict_json_object(trusted.payload.rstrip(b"\n")))
+    if (
+        hashlib.sha256(trusted.payload).hexdigest() != plan.request_envelope_sha256
+        or envelope.request_id != plan.request_id
+        or envelope.rollout_id != plan.rollout_id
+        or envelope.attempt_number != plan.attempt_number
+        or envelope.resolved_sha != plan.candidate_sha
+        or (
+            plan.source_mode == "sealed-cumulative"
+            and envelope.resolved_tree != plan.candidate_tree
+        )
+        or (plan.source_mode == "merged-dev" and envelope.resolved_tree is not None)
+        or envelope.runner_config_sha256 != plan.runner_config_hash
+        or envelope.preflight_attestation_sha256 != plan.attestation_digest
+    ):
+        raise ValueError("final gate helper driver envelope drifted")
 
 
 def _verify_artifacts(plan: FinalGatePlan) -> None:

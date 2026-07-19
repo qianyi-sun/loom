@@ -17,7 +17,7 @@ from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublicati
 from loom_cli.rollout.preflight_contract import PreflightAttestation
 
 from .backup_lease import BackupLease, component_set_digest
-from .model import DriverEnvelope, validate_safe_identifier
+from .model import DriverEnvelope, driver_envelope_sha256, validate_safe_identifier
 from .protected_apply_baseline import ProtectedApplyBaseline
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -49,6 +49,7 @@ class FinalGatePlan:
     request_id: str
     rollout_id: str
     attempt_number: int
+    request_envelope_sha256: str
     source_mode: str
     candidate_sha: str
     candidate_tree: str
@@ -121,6 +122,7 @@ class FinalGatePlan:
         elif self.approved_base_sha is not None:
             raise ValueError("merged final gate plan cannot bind an approved base")
         digest_fields = (
+            self.request_envelope_sha256,
             self.attestation_digest,
             self.registry_digest,
             self.coverage_digest,
@@ -157,9 +159,8 @@ class FinalGatePlan:
             raise ValueError("final gate preflight artifact roots differ")
         if Path(self.artifact_descriptor_path).parent != Path(self.migration_manifest_path).parent:
             raise ValueError("final gate migration artifact root differs")
-        if (
-            not self.migration_job_name
-            or self.migration_image_id != self.image_digests.get("loom-control-plane")
+        if not self.migration_job_name or self.migration_image_id != self.image_digests.get(
+            "loom-control-plane"
         ):
             raise ValueError("final gate migration artifact identity is invalid")
         if not self.migration_target_revision or not self.db_snapshot_identity:
@@ -272,8 +273,7 @@ class FinalGatePlan:
             or artifacts.candidate_tree != bindings.candidate_tree
             or artifacts.mutation_epoch != bindings.staging_mutation_epoch
             or artifacts.migration_plan_sha256 != bindings.migration_plan_digest
-            or artifacts.migration_image_id
-            != bindings.image_digests.get("loom-control-plane")
+            or artifacts.migration_image_id != bindings.image_digests.get("loom-control-plane")
             or artifacts.browser_report_schema_sha256 != bindings.browser_report_schema
             or lease.lease_id != bindings.backup_lease_id
             or lease.evidence_digest != bindings.backup_lease_digest
@@ -295,6 +295,7 @@ class FinalGatePlan:
             "request_id": envelope.request_id,
             "rollout_id": envelope.rollout_id,
             "attempt_number": envelope.attempt_number,
+            "request_envelope_sha256": driver_envelope_sha256(envelope),
             "source_mode": envelope.source_mode,
             "candidate_sha": bindings.candidate_sha,
             "candidate_tree": bindings.candidate_tree,
@@ -358,6 +359,7 @@ class FinalGatePlan:
             request_id=_string(value, "request_id"),
             rollout_id=_string(value, "rollout_id"),
             attempt_number=_integer(value, "attempt_number"),
+            request_envelope_sha256=_string(value, "request_envelope_sha256"),
             source_mode=_string(value, "source_mode"),
             candidate_sha=_string(value, "candidate_sha"),
             candidate_tree=_string(value, "candidate_tree"),
@@ -372,9 +374,7 @@ class FinalGatePlan:
             rendered_manifest_sha256=_string(value, "rendered_manifest_sha256"),
             migration_manifest_path=_string(value, "migration_manifest_path"),
             migration_manifest_sha256=_string(value, "migration_manifest_sha256"),
-            migration_manifest_artifact_sha256=_string(
-                value, "migration_manifest_artifact_sha256"
-            ),
+            migration_manifest_artifact_sha256=_string(value, "migration_manifest_artifact_sha256"),
             migration_job_name=_string(value, "migration_job_name"),
             migration_image_id=_string(value, "migration_image_id"),
             image_digests=_string_map(value, "image_digests"),

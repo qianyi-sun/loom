@@ -14,7 +14,7 @@ from loom_cli.rollout.operator.final_gate_plan import (
     FinalGatePlanError,
     FinalGatePlanStore,
 )
-from loom_cli.rollout.operator.model import DriverEnvelope
+from loom_cli.rollout.operator.model import DriverEnvelope, driver_envelope_sha256
 from loom_cli.rollout.operator.protected_apply_baseline import ProtectedApplyBaseline
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import (
@@ -219,6 +219,7 @@ def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Pa
 
     assert FinalGatePlan.from_dict(plan.to_dict()) == plan
     assert plan.candidate_tree == "b" * 40
+    assert plan.request_envelope_sha256 == driver_envelope_sha256(_envelope(_attestation()))
     assert plan.artifact_bundle_digest == "e" * 64
     assert plan.backup_lease_id == _lease().lease_id
     assert plan.backup_source_request_id == "req-source01"

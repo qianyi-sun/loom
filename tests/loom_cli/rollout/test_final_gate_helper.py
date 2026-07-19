@@ -5,6 +5,7 @@ from pathlib import Path
 from loom_cli.rollout import final_gate_helper as helper
 from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
+from loom_cli.rollout.operator.model import driver_envelope_bytes
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_final_gate_action_source import _authority
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope
@@ -17,6 +18,9 @@ def _prepared(tmp_path: Path, monkeypatch):
     source(envelope, attestation, 7, _admission(attestation))
     state = tmp_path / "state"
     path = state / "requests/req-alpha/attempts/1/final-gate-plan.json"
+    envelope_path = path.with_name("envelope.json")
+    envelope_path.write_bytes(driver_envelope_bytes(envelope))
+    envelope_path.chmod(0o600)
     digest = FinalGatePlanStore(state, request_id="req-alpha", attempt_number=1).read().plan_digest
     monkeypatch.setattr(helper, "_STATE_ROOT", state)
     monkeypatch.setattr(helper, "_verify_checkpoint", lambda _plan: None)
@@ -101,6 +105,36 @@ def test_final_gate_helper_rejects_plan_digest_drift(
                 str(path),
                 "--plan-sha256",
                 "f" * 64,
+            ]
+        )
+        == 2
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_final_gate_helper_rejects_driver_envelope_byte_drift(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _attestation, path, digest = _prepared(tmp_path, monkeypatch)
+    envelope_path = path.with_name("envelope.json")
+    payload = envelope_path.read_bytes()
+    envelope_path.write_bytes(payload.replace(b'"attempt_uid":501', b'"attempt_uid":502'))
+    envelope_path.chmod(0o600)
+
+    assert (
+        helper.main(
+            [
+                "execute",
+                "--check-id",
+                "final.summary",
+                "--operation",
+                "verify",
+                "--plan",
+                str(path),
+                "--plan-sha256",
+                digest,
             ]
         )
         == 2

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
@@ -317,9 +319,7 @@ class CandidateBinding:
                 _require_sha(data["resolved_tree"], "resolved_tree") if sealed else None
             ),
             approved_base_sha=(
-                _require_sha(data["approved_base_sha"], "approved_base_sha")
-                if sealed
-                else None
+                _require_sha(data["approved_base_sha"], "approved_base_sha") if sealed else None
             ),
         )
 
@@ -823,11 +823,18 @@ class DriverEnvelope:
                 _require_sha(data["resolved_tree"], "resolved_tree") if sealed else None
             ),
             approved_base_sha=(
-                _require_sha(data["approved_base_sha"], "approved_base_sha")
-                if sealed
-                else None
+                _require_sha(data["approved_base_sha"], "approved_base_sha") if sealed else None
             ),
         )
+
+
+def driver_envelope_bytes(envelope: DriverEnvelope) -> bytes:
+    """Return the exact immutable store representation for one driver envelope."""
+    return (json.dumps(envelope.to_dict(), sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def driver_envelope_sha256(envelope: DriverEnvelope) -> str:
+    return hashlib.sha256(driver_envelope_bytes(envelope)).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

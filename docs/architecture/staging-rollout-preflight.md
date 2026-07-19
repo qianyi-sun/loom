@@ -324,7 +324,11 @@ schema-v4 check set, exact route, candidate identity, represented user, audit
 event, Chromium identity, and logout proof; they differ only in the typed
 rollout-envelope or rehearsal-plan binding. The attested report-schema digest
 is computed from that same contract, so adding or weakening a consumed field
-cannot leave an unchanged digest behind.
+cannot leave an unchanged digest behind. The final plan also carries the
+SHA-256 of the exact immutable driver-envelope bytes; the installed helper
+reopens that sibling envelope with the private-file authority reader and
+revalidates request, attempt, candidate, config and attestation identities
+before a live browser session may cite the digest.
 
 The Tier 3 API probe runs from the exact `loom-service` image with a fixed
 module invocation. It reads a dedicated root-owned mode-`0440` regular-file
