@@ -423,6 +423,14 @@ fails closed. Installed actions receive only this fixed plan path and digest;
 they do not resolve Git refs, reread ambient configuration, or rediscover
 preflight artifacts.
 
+`FinalGateActionSource` obtains the artifact bundle identity only from the
+immutable passing `artifacts.publish` execution in the request's Tier 0–3
+rehearsal. Its implementation and evidence hashes must match the attestation,
+and all four artifact digests must match the digest-addressed publication.
+Only then does it publish the plan and construct the complete six-action map
+around the fixed installed helper. Directory scanning, newest-artifact
+selection, ambient argv and partial action maps are not accepted.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:
