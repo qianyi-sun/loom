@@ -14,7 +14,7 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -640,6 +640,14 @@ class AttestationBindings:
             raise ValueError("attestation GB10 boot binding is invalid")
         if not self.secret_metadata_fingerprints:
             raise ValueError("attestation secret metadata binding is missing")
+        if any(
+            not name
+            or not isinstance(value, str)
+            or not value.startswith("sha256:")
+            or len(value) > 96
+            for name, value in self.secret_metadata_fingerprints.items()
+        ):
+            raise ValueError("attestation secret metadata fingerprint is invalid")
         object.__setattr__(self, "image_digests", MappingProxyType(image_digests))
         object.__setattr__(
             self,
@@ -652,6 +660,57 @@ class AttestationBindings:
             MappingProxyType(dict(self.gb10_boot_ids)),
         )
 
+    def to_dict(self) -> dict[str, object]:
+        return _attestation_bindings_payload(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> AttestationBindings:
+        expected = {field.name for field in fields(cls)}
+        if set(data) != expected:
+            raise ValueError("attestation bindings fields are invalid")
+
+        def require_string(name: str) -> str:
+            value = data[name]
+            if not isinstance(value, str):
+                raise ValueError(f"attestation binding {name} must be a string")
+            return value
+
+        def require_string_map(name: str) -> dict[str, str]:
+            value = data[name]
+            if not isinstance(value, Mapping) or not all(
+                isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+            ):
+                raise ValueError(f"attestation binding {name} must be a string map")
+            return dict(value)
+
+        epoch = data["staging_mutation_epoch"]
+        if type(epoch) is not int:
+            raise ValueError("attestation staging epoch must be an integer")
+        return cls(
+            candidate_sha=require_string("candidate_sha"),
+            candidate_tree=require_string("candidate_tree"),
+            image_digests=require_string_map("image_digests"),
+            runner_source_sha=require_string("runner_source_sha"),
+            runner_source_tree=require_string("runner_source_tree"),
+            runner_install_hash=require_string("runner_install_hash"),
+            runner_config_hash=require_string("runner_config_hash"),
+            staging_mutation_epoch=epoch,
+            backup_lease_id=require_string("backup_lease_id"),
+            db_snapshot_identity=require_string("db_snapshot_identity"),
+            schema_revision=require_string("schema_revision"),
+            migration_plan_digest=require_string("migration_plan_digest"),
+            environment=require_string("environment"),
+            namespace=require_string("namespace"),
+            route=require_string("route"),
+            secret_metadata_fingerprints=require_string_map("secret_metadata_fingerprints"),
+            gb10_inventory_digest=require_string("gb10_inventory_digest"),
+            gb10_boot_ids=require_string_map("gb10_boot_ids"),
+            gb10_mount_digest=require_string("gb10_mount_digest"),
+            gb10_unit_digest=require_string("gb10_unit_digest"),
+            browser_image_digest=require_string("browser_image_digest"),
+            browser_report_schema=require_string("browser_report_schema"),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PreflightAttestation:
@@ -662,6 +721,31 @@ class PreflightAttestation:
     issued_at: datetime
     expires_at: datetime
     attestation_digest: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("preflight attestation schema is unsupported")
+        if not isinstance(self.bindings, AttestationBindings):
+            raise ValueError("preflight attestation bindings are invalid")
+        if self.issued_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("preflight attestation timestamps must be timezone-aware")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("preflight attestation expiry is invalid")
+        implementation = _validate_digest_map(
+            self.check_implementation_digests,
+            "implementation",
+        )
+        evidence = _validate_digest_map(self.evidence_hashes, "evidence")
+        if implementation.keys() != evidence.keys():
+            raise ValueError("preflight attestation check maps differ")
+        if _SHA256_RE.fullmatch(self.attestation_digest) is None:
+            raise ValueError("preflight attestation digest is invalid")
+        object.__setattr__(
+            self,
+            "check_implementation_digests",
+            MappingProxyType(implementation),
+        )
+        object.__setattr__(self, "evidence_hashes", MappingProxyType(evidence))
 
     @classmethod
     def issue(
@@ -707,6 +791,58 @@ class PreflightAttestation:
             attestation_digest=_hash_json(payload),
         )
 
+    def to_dict(self) -> dict[str, object]:
+        payload = _preflight_attestation_payload(self)
+        payload["attestation_digest"] = self.attestation_digest
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> PreflightAttestation:
+        expected = {
+            "schema_version",
+            "bindings",
+            "check_implementation_digests",
+            "evidence_hashes",
+            "issued_at",
+            "expires_at",
+            "attestation_digest",
+        }
+        if set(data) != expected:
+            raise ValueError("preflight attestation fields are invalid")
+        schema_version = data["schema_version"]
+        raw_bindings = data["bindings"]
+        raw_implementation = data["check_implementation_digests"]
+        raw_evidence = data["evidence_hashes"]
+        raw_issued = data["issued_at"]
+        raw_expires = data["expires_at"]
+        raw_digest = data["attestation_digest"]
+        if type(schema_version) is not int or not isinstance(raw_bindings, Mapping):
+            raise ValueError("preflight attestation schema or bindings are invalid")
+        if not isinstance(raw_issued, str) or not isinstance(raw_expires, str):
+            raise ValueError("preflight attestation timestamps are invalid")
+        if not isinstance(raw_digest, str):
+            raise ValueError("preflight attestation digest is invalid")
+        try:
+            issued_at = datetime.fromisoformat(raw_issued)
+            expires_at = datetime.fromisoformat(raw_expires)
+        except ValueError as exc:
+            raise ValueError("preflight attestation timestamps are invalid") from exc
+        attestation = cls(
+            schema_version=schema_version,
+            bindings=AttestationBindings.from_dict(raw_bindings),
+            check_implementation_digests=_validate_digest_map(
+                raw_implementation,
+                "implementation",
+            ),
+            evidence_hashes=_validate_digest_map(raw_evidence, "evidence"),
+            issued_at=issued_at,
+            expires_at=expires_at,
+            attestation_digest=raw_digest,
+        )
+        if _hash_json(_preflight_attestation_payload(attestation)) != raw_digest:
+            raise ValueError("preflight attestation digest does not match its payload")
+        return attestation
+
     def valid_for(self, bindings: AttestationBindings, *, now: datetime) -> bool:
         if now.tzinfo is None:
             raise ValueError("attestation validation time must be timezone-aware")
@@ -717,15 +853,42 @@ class PreflightAttestation:
 
 def _attestation_bindings_payload(bindings: AttestationBindings) -> dict[str, object]:
     payload: dict[str, object] = {}
-    for name in bindings.__dataclass_fields__:
-        value = getattr(bindings, name)
-        payload[name] = dict(value) if isinstance(value, Mapping) else value
+    for field in fields(bindings):
+        value = getattr(bindings, field.name)
+        payload[field.name] = dict(value) if isinstance(value, Mapping) else value
     _assert_secret_safe_mapping(
         payload,
         policy=SecretRedactionPolicy.METADATA_FINGERPRINTS_ONLY,
         allow_redaction=False,
     )
     return payload
+
+
+def _validate_digest_map(value: object, label: str) -> dict[str, str]:
+    if not isinstance(value, Mapping) or not value or len(value) > 128:
+        raise ValueError(f"preflight attestation {label} map is invalid")
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or _ID_RE.fullmatch(key) is None
+            or not isinstance(item, str)
+            or _SHA256_RE.fullmatch(item) is None
+        ):
+            raise ValueError(f"preflight attestation {label} map is invalid")
+        result[key] = item
+    return result
+
+
+def _preflight_attestation_payload(attestation: PreflightAttestation) -> dict[str, object]:
+    return {
+        "schema_version": attestation.schema_version,
+        "bindings": attestation.bindings.to_dict(),
+        "check_implementation_digests": dict(attestation.check_implementation_digests),
+        "evidence_hashes": dict(attestation.evidence_hashes),
+        "issued_at": attestation.issued_at.isoformat(),
+        "expires_at": attestation.expires_at.isoformat(),
+    }
 
 
 __all__ = [

@@ -285,6 +285,49 @@ def test_attestation_binds_all_evidence_and_invalidates_drift() -> None:
     assert not attestation.valid_for(_bindings(), now=NOW + timedelta(minutes=11))
 
 
+def test_attestation_round_trip_preserves_exact_digest_and_immutable_maps() -> None:
+    result = PreflightDag([_check("candidate.identity")]).run(
+        _context(),
+        now=lambda: NOW,
+    )
+    attestation = PreflightAttestation.issue(
+        bindings=_bindings(),
+        executions=result,
+        issued_at=NOW,
+    )
+
+    decoded = PreflightAttestation.from_dict(attestation.to_dict())
+
+    assert decoded == attestation
+    assert decoded.attestation_digest == attestation.attestation_digest
+    with pytest.raises(TypeError):
+        decoded.evidence_hashes["other.check"] = "0" * 64  # type: ignore[index]
+
+
+def test_attestation_round_trip_rejects_payload_and_digest_tampering() -> None:
+    result = PreflightDag([_check("candidate.identity")]).run(
+        _context(),
+        now=lambda: NOW,
+    )
+    attestation = PreflightAttestation.issue(
+        bindings=_bindings(),
+        executions=result,
+        issued_at=NOW,
+    )
+    payload = attestation.to_dict()
+    bindings = dict(payload["bindings"])  # type: ignore[arg-type]
+    bindings["staging_mutation_epoch"] = 8
+    payload["bindings"] = bindings
+
+    with pytest.raises(ValueError, match="digest does not match"):
+        PreflightAttestation.from_dict(payload)
+
+    payload = attestation.to_dict()
+    payload["attestation_digest"] = "f" * 64
+    with pytest.raises(ValueError, match="digest does not match"):
+        PreflightAttestation.from_dict(payload)
+
+
 def test_attestation_rejects_incomplete_or_expired_results() -> None:
     failed = PreflightDag([_check("candidate.identity", passed=False)]).run(
         _context(),

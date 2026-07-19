@@ -100,6 +100,16 @@ TTL expires; start rechecks only drift-sensitive inputs. Candidate, config,
 token metadata, epoch, host boot ID, mount, or implementation drift invalidates
 the attestation.
 
+The canonical JSON form is strict-schema, duplicate-key rejecting, and
+digest-addressed. It round-trips every binding and per-check digest before
+publication. `PreflightAttestationStore` publishes the result exactly once
+under the private service-owned state root using a mode-`0600` temporary file,
+fsync, hard-link no-replace publication, and directory fsync. Reads traverse
+with no-follow descriptors, revalidate file authority and read stability, and
+recompute the payload digest. An existing exact digest may be reused; a
+collision, symlink, mode/owner drift, unknown field, timestamp drift, or payload
+change fails closed.
+
 Systemd readiness is single-source as well. The broker-facing Tier 0 probe and
 the final GB10 convergence step consume the same user-manager, oneshot service,
 and timer-state classifiers. The read-only probe binds the manager version,
