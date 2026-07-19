@@ -120,6 +120,15 @@ baseline from hiding mutation-epoch or infrastructure drift. Build-once image
 artifacts remain owned by their exact candidate session and are re-inspected,
 not rebuilt, when the refreshed checks consume them.
 
+`PreflightRuntimeSources` is the typed composition root for those checks. It
+accepts only the low-level command/probe boundaries and exact expected
+identities, derives every context input from the same registered-check helpers,
+and assembles the entire Tier 0–2 coverage set. A fresh-checkpoint sentinel is
+explicit and cannot claim lease reuse; an active lease must instead supply its
+complete manifest, component, epoch, snapshot, schema, environment, namespace,
+and inventory identity. The composition root shares one candidate image-build
+session while refreshing baseline and metadata probes between stages.
+
 Restore evidence is derived from the immutable rehearsal itself, not from an
 operator assertion. Every Tier 3 action must share one isolation ID, candidate,
 and mutation epoch; every action must report no protected mutation; the DB clone
