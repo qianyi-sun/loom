@@ -120,6 +120,42 @@ def test_contract_classifies_nonrecoverable_and_terminal_results() -> None:
     assert contract.validate_terminal_batch(succeeded) is None
 
 
+def test_contract_validates_exact_admitted_batch_without_terminal_claim() -> None:
+    authority = _authority()
+    contract = AdminSmokeContract(authority)
+    persisted = {
+        "id": "batch-1",
+        "name": "rehearsal-abc123",
+        "team_id": authority.team_id,
+        "submitted_by_user": {
+            "username": "DEVANSH",
+            "team_id": authority.team_id,
+        },
+        "task_filter": {"task_ids": [authority.task_id]},
+        "required_worker_pools": ["gb10-arm64"],
+        "state": "pending",
+        "result_status": None,
+        "failure_reason": None,
+        "fanout_errors": None,
+    }
+
+    assert (
+        contract.validate_admitted_batch(
+            persisted,
+            batch_id="batch-1",
+            batch_name="rehearsal-abc123",
+        )
+        is None
+    )
+    assert "worker-pool" in str(
+        contract.validate_admitted_batch(
+            {**persisted, "required_worker_pools": []},
+            batch_id="batch-1",
+            batch_name="rehearsal-abc123",
+        )
+    )
+
+
 def test_decode_json_object_rejects_non_objects_and_invalid_json() -> None:
     assert decode_json_object(json.dumps({"status": "ok"}).encode()) == {"status": "ok"}
     assert decode_json_object(b"[]") is None

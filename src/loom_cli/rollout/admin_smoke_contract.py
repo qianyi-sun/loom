@@ -204,6 +204,53 @@ class AdminSmokeContract:
             parts.append("fanout_errors=" + _compact_redacted_json(fanout_errors, limit=1000))
         return "; ".join(parts)
 
+    def validate_admitted_batch(
+        self,
+        value: object,
+        *,
+        batch_id: str,
+        batch_name: str,
+    ) -> str | None:
+        """Validate exact persisted admission without requiring worker completion."""
+        if _BATCH_NAME_RE.fullmatch(batch_name) is None or not batch_id:
+            raise ValueError("admin smoke batch identity is invalid")
+        payload = _mapping(value)
+        if payload is None:
+            return "admin smoke batch response is not JSON"
+        submitted_by_user = payload.get("submitted_by_user")
+        task_filter = payload.get("task_filter")
+        required_worker_pools = payload.get("required_worker_pools")
+        expected_pools = (
+            [self.authority.required_worker_pool]
+            if self.authority.required_worker_pool is not None
+            else []
+        )
+        if payload.get("id") != batch_id:
+            return "admin smoke persisted batch id drifted"
+        if payload.get("name") != batch_name:
+            return "admin smoke persisted batch name drifted"
+        if payload.get("team_id") != self.authority.team_id:
+            return "admin smoke persisted team identity drifted"
+        if not isinstance(submitted_by_user, Mapping):
+            return "admin smoke persisted batch has no represented submitter"
+        if (
+            not _same_username(
+                submitted_by_user.get("username"),
+                self.authority.represented_username,
+            )
+            or submitted_by_user.get("team_id") != self.authority.team_id
+        ):
+            return "admin smoke persisted represented identity drifted"
+        if not isinstance(task_filter, Mapping) or task_filter.get("task_ids") != [
+            self.authority.task_id
+        ]:
+            return "admin smoke persisted task authority drifted"
+        if required_worker_pools != expected_pools:
+            return "admin smoke persisted worker-pool authority drifted"
+        if payload.get("state") not in {"pending", "running", "finished"}:
+            return "admin smoke persisted batch state is invalid"
+        return self.nonrecoverable_failure(payload)
+
     def validate_terminal_batch(self, value: object) -> str | None:
         payload = _mapping(value)
         if payload is None:

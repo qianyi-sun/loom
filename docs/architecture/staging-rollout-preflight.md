@@ -275,6 +275,15 @@ isolated namespace cannot safely borrow a protected GB10 worker or its Docker
 authority; the final gate consumes the same identity, payload, fanout-failure
 and terminal-result predicates and is not weakened.
 
+The Tier 3 API probe runs from the exact `loom-service` image with a fixed
+module invocation. It reads a dedicated root-owned mode-`0440` regular-file
+projection of the cloned admin secret with `O_NOFOLLOW`, stable metadata and a
+bounded TOML parser; no token, response body, or token fingerprint is emitted.
+It records only bounded response hashes and the non-secret batch identity, then
+requires an exact immediate API readback from the cloned database. A queued
+batch is valid rehearsal evidence, but it is never reported as terminal worker
+success.
+
 Tier 3 is therefore the first stage after the request-specific backup worker
 has published a restore-verified lease. The pre-backup assessment alone is
 never launch authority; only the complete Tier 0–3 attestation can be promoted

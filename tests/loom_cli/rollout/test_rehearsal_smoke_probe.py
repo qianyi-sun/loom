@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from loom_cli.rollout.admin_smoke_contract import AdminSmokeAuthority
+from loom_cli.rollout.rehearsal_smoke_probe import (
+    RehearsalSmokeProbeError,
+    load_rehearsal_admin_token,
+    run_probe,
+)
+
+
+def _authority() -> AdminSmokeAuthority:
+    return AdminSmokeAuthority(
+        represented_username="devansh",
+        team_id="11111111-1111-4111-8111-111111111111",
+        admin_actor="loom-staging-rollout",
+        task_id="loom-smoke/gb10-oracle-hello-world",
+        required_worker_pool="gb10-arm64",
+        agent="oracle",
+    )
+
+
+def _secret(tmp_path: Path) -> Path:
+    path = tmp_path / "secrets.toml"
+    path.write_text('[admin]\ntoken = "loom_admin_' + "s" * 40 + '"\n', encoding="utf-8")
+    path.chmod(0o440)
+    return path
+
+
+def test_probe_validates_admission_and_returns_only_hashed_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = _secret(tmp_path)
+    authority = _authority()
+    requests: list[tuple[str, str]] = []
+    batch = {
+        "id": "batch-1",
+        "name": "rehearsal-abc123",
+        "team_id": authority.team_id,
+        "submitted_by_user": {"username": "Devansh", "team_id": authority.team_id},
+        "task_filter": {"task_ids": [authority.task_id]},
+        "required_worker_pools": ["gb10-arm64"],
+        "state": "pending",
+        "result_status": None,
+        "failure_reason": None,
+        "fanout_errors": None,
+    }
+
+    def http(method, path, *, token, payload=None, headers=None):
+        assert token.startswith("loom_admin_")
+        requests.append((method, path))
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token", "scopes": []}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{"id": "loom-smoke"}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": authority.task_id}
+        elif path.startswith("/api/v1/batches?"):
+            value = {"items": []}
+        elif path == "/api/v1/admin/batches/on-behalf":
+            assert payload == {
+                "name": "rehearsal-abc123",
+                "represented_username": "devansh",
+                "team_id": authority.team_id,
+                "task_filter": {"task_ids": [authority.task_id]},
+                "trial_config": {"agent_name": "oracle", "agent_model": None},
+                "n_per_task": 1,
+                "required_worker_pools": ["gb10-arm64"],
+            }
+            assert headers == {"X-Loom-Admin-Actor": "loom-staging-rollout"}
+            return 201, b'{"batch_id":"batch-1"}'
+        elif path == "/api/v1/batches/batch-1":
+            value = batch
+        else:
+            raise AssertionError(path)
+        return 200, json.dumps(value).encode()
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_smoke_probe._http", http)
+    result = run_probe(
+        plan_sha256="a" * 64,
+        batch_name="rehearsal-abc123",
+        authority=authority,
+        admin_secret_path=secret,
+        expected_owner_uid=os.geteuid(),
+        allowed_group_gid=os.getegid(),
+    )
+
+    assert result["status"] == "ready"
+    assert result["batch_id"] == "batch-1"
+    assert result["persisted"] is True
+    serialized = json.dumps(result, sort_keys=True)
+    assert "loom_admin_" not in serialized
+    assert "Devansh" not in serialized
+    assert ("POST", "/api/v1/admin/batches/on-behalf") in requests
+
+
+def test_secret_reader_rejects_symlink_mode_owner_and_read_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = _secret(tmp_path)
+    link = tmp_path / "linked.toml"
+    link.symlink_to(secret)
+    with pytest.raises(RehearsalSmokeProbeError, match="opened safely"):
+        load_rehearsal_admin_token(
+            link,
+            expected_owner_uid=os.geteuid(),
+            allowed_group_gid=os.getegid(),
+        )
+
+    secret.chmod(0o444)
+    with pytest.raises(RehearsalSmokeProbeError, match="metadata"):
+        load_rehearsal_admin_token(
+            secret,
+            expected_owner_uid=os.geteuid(),
+            allowed_group_gid=os.getegid(),
+        )
+
+
+def test_probe_rejects_persisted_authority_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = _secret(tmp_path)
+    authority = _authority()
+
+    def http(method, path, *, token, payload=None, headers=None):
+        del method, token, payload, headers
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token"}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": authority.task_id}
+        elif path.startswith("/api/v1/batches?"):
+            value = {
+                "items": [
+                    {
+                        "id": "batch-1",
+                        "name": "rehearsal-abc123",
+                        "team_id": authority.team_id,
+                        "submitted_by_user": {
+                            "username": "devansh",
+                            "team_id": authority.team_id,
+                        },
+                        "task_filter": {"task_ids": [authority.task_id]},
+                    }
+                ]
+            }
+        else:
+            value = {
+                "id": "batch-1",
+                "name": "rehearsal-abc123",
+                "team_id": authority.team_id,
+                "submitted_by_user": {
+                    "username": "devansh",
+                    "team_id": authority.team_id,
+                },
+                "task_filter": {"task_ids": [authority.task_id]},
+                "required_worker_pools": [],
+                "state": "pending",
+            }
+        return 200, json.dumps(value).encode()
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_smoke_probe._http", http)
+    with pytest.raises(RehearsalSmokeProbeError, match="worker-pool"):
+        run_probe(
+            plan_sha256="a" * 64,
+            batch_name="rehearsal-abc123",
+            authority=authority,
+            admin_secret_path=secret,
+            expected_owner_uid=os.geteuid(),
+            allowed_group_gid=os.getegid(),
+        )
