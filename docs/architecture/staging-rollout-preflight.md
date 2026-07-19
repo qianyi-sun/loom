@@ -169,7 +169,13 @@ in-flight cancellation, backup failure, and forbidden early-launch sequences
 against that same implementation. The probe is static; it does not create a
 request, unit, backup, or protected-staging mutation.
 
-The GB10 Tier 0 host check runs one fixed read-only probe per declared host
+The GB10 Tier 0 path first runs `gb10.ssh-topology` with the exact SSH-config
+digest, no-follow identity metadata, strict known-hosts policy, and BatchMode.
+It probes every declared host concurrently and reports the full reachable and
+failed sets without admitting remote diagnostics. Shared-mount identity is a
+separate dependent predicate, so connectivity cannot mask a mount blocker.
+
+The subsequent host check runs one fixed read-only probe per declared host
 with bounded concurrency. It validates the manager version, linger, boot ID,
 completed oneshot result, enabled timer, and only the documented
 `active/running` to `active/waiting` transient transition. All hosts are

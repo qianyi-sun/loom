@@ -8,6 +8,7 @@ from pathlib import Path
 from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
     probe_gb10_fleet_readonly,
+    probe_gb10_ssh_topology,
     remote_probe_command,
 )
 
@@ -139,3 +140,41 @@ def test_fleet_probe_fails_closed_when_transient_never_settles() -> None:
     assert result.failed_hosts == ("trt-gb10-1",)
     assert result.transient_hosts == ("trt-gb10-1",)
     assert calls == 3
+
+
+def test_ssh_topology_reports_every_host_without_remote_diagnostics() -> None:
+    targets = tuple(GB10ProbeTarget(host, "loom-gb10-node-agent.service") for host in BOOT_IDS)
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        host = argv[-2]
+        assert argv[-1] == "true"
+        assert "StrictHostKeyChecking=yes" in argv
+        assert "BatchMode=yes" in argv
+        return subprocess.CompletedProcess(argv, 0 if host == "trt-gb10-1" else 255, "", "")
+
+    result = probe_gb10_ssh_topology(
+        run,
+        targets,
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        max_concurrency=2,
+    )
+
+    assert not result.ready
+    assert result.reachable_hosts == ("trt-gb10-1",)
+    assert result.failed_hosts == ("trt-gb10-2",)
+    assert len(result.evidence_digest) == 64
+
+
+def test_ssh_topology_rejects_nonempty_remote_output() -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+
+    result = probe_gb10_ssh_topology(
+        lambda argv: subprocess.CompletedProcess(argv, 0, "unexpected", ""),
+        (target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+    )
+
+    assert not result.ready
+    assert result.failed_hosts == ("trt-gb10-1",)

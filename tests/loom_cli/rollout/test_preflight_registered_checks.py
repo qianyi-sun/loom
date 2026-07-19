@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
-from loom_cli.rollout.credential_authority import safe_content_fingerprint
+from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
@@ -36,6 +37,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_credentials_metadata_check,
     build_docker_runtime_check,
     build_gb10_host_readiness_check,
+    build_gb10_ssh_topology_check,
     build_kubernetes_client_check,
     build_lifecycle_launch_cancel_check,
     build_systemd_user_manager_check,
@@ -738,6 +740,104 @@ def test_registered_gb10_readiness_check_rejects_inventory_drift_without_ssh() -
 
     assert not result.passed
     assert result.evidence["failed-hosts"] == {"trt-gb10-1": "gb10.host-readiness.failed"}
+    assert calls == []
+
+
+def test_registered_gb10_ssh_topology_binds_files_and_reports_all_hosts(
+    tmp_path: Path,
+) -> None:
+    targets = (
+        GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service"),
+        GB10ProbeTarget("trt-gb10-2", "loom-gb10-node-agent.service"),
+    )
+    ssh_config = tmp_path / "ssh-config"
+    identity = tmp_path / "identity"
+    ssh_config.write_bytes(b"Host trt-gb10-*\n  User qianyi\n")
+    identity.write_bytes(b"private-test-material")
+    ssh_config.chmod(0o600)
+    identity.chmod(0o600)
+    service_uid = os.getuid()
+    config_digest = hashlib.sha256(ssh_config.read_bytes()).hexdigest()
+    identity_metadata = read_trusted_file(
+        identity,
+        service_uid=service_uid,
+        private=True,
+        require_nonempty=True,
+    ).metadata_fingerprint
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        host = argv[-2]
+        return subprocess.CompletedProcess(argv, 0 if host == "trt-gb10-1" else 255, "", "")
+
+    check = build_gb10_ssh_topology_check(
+        run,
+        targets=targets,
+        ssh_config=ssh_config,
+        identity=identity,
+        service_uid=service_uid,
+        expected_ssh_config_sha256=config_digest,
+        expected_identity_metadata_fingerprint=identity_metadata,
+        max_concurrency=2,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "service.uid": service_uid,
+            "gb10.inventory-digest": gb10_target_inventory_digest(targets),
+            "gb10.ssh-config.sha256": config_digest,
+            "gb10.identity.metadata-fingerprint": identity_metadata,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("credentials.metadata"),
+            _passing_dependency("tools.runtime"),
+            check,
+        )
+    )
+
+    result = next(item for item in dag.run(context) if item.check_id == check.spec.check_id)
+
+    assert not result.passed
+    assert result.evidence["reachable-hosts"] == {"trt-gb10-1": "reachable"}
+    assert result.evidence["failed-hosts"] == {"trt-gb10-2": "unreachable"}
+
+
+def test_registered_gb10_ssh_topology_rejects_binding_drift_without_ssh(
+    tmp_path: Path,
+) -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    calls: list[tuple[str, ...]] = []
+    check = build_gb10_ssh_topology_check(
+        lambda argv: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
+        targets=(target,),
+        ssh_config=tmp_path / "missing-config",
+        identity=tmp_path / "missing-identity",
+        service_uid=os.getuid(),
+        expected_ssh_config_sha256="a" * 64,
+        expected_identity_metadata_fingerprint="b" * 64,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "service.uid": os.getuid(),
+            "gb10.inventory-digest": "f" * 64,
+            "gb10.ssh-config.sha256": "a" * 64,
+            "gb10.identity.metadata-fingerprint": "b" * 64,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("credentials.metadata"),
+            _passing_dependency("tools.runtime"),
+            check,
+        )
+    )
+
+    result = next(item for item in dag.run(context) if item.check_id == check.spec.check_id)
+
+    assert not result.passed
+    assert result.evidence["failed-hosts"] == {"trt-gb10-1": "unreachable"}
     assert calls == []
 
 

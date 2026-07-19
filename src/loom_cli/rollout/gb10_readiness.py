@@ -81,6 +81,35 @@ class GB10FleetReadiness:
         return hashlib.sha256(payload).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class GB10SshTopology:
+    reachable_hosts: tuple[str, ...]
+    failed_hosts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        hosts = (*self.reachable_hosts, *self.failed_hosts)
+        if (
+            not hosts
+            or len(set(hosts)) != len(hosts)
+            or any(_HOST_RE.fullmatch(host) is None for host in hosts)
+        ):
+            raise ValueError("GB10 SSH topology evidence is inconsistent")
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.reachable_hosts) and not self.failed_hosts
+
+    @property
+    def evidence_digest(self) -> str:
+        payload = {
+            "failed": self.failed_hosts,
+            "reachable": self.reachable_hosts,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
 def _remote_probe_source(service: str) -> str:
     """Return a fixed Python probe that emits only an allowlisted JSON object."""
     if _SERVICE_RE.fullmatch(service) is None:
@@ -160,6 +189,78 @@ def _ssh_argv(
         "UpdateHostKeys=no",
         target.ssh_target,
         remote_probe_command(target.node_agent_service),
+    )
+
+
+def _ssh_topology_argv(
+    target: GB10ProbeTarget,
+    *,
+    ssh_config: Path,
+    identity: Path,
+) -> tuple[str, ...]:
+    return (
+        "ssh",
+        "-F",
+        str(ssh_config),
+        "-i",
+        str(identity),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={_KNOWN_HOSTS}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        "UpdateHostKeys=no",
+        target.ssh_target,
+        "true",
+    )
+
+
+def probe_gb10_ssh_topology(
+    run: CommandRunner,
+    targets: Sequence[GB10ProbeTarget],
+    *,
+    ssh_config: Path,
+    identity: Path,
+    max_concurrency: int = 8,
+) -> GB10SshTopology:
+    """Test fixed batch-mode trust concurrently without remote diagnostics."""
+    if (
+        not targets
+        or len({target.ssh_target for target in targets}) != len(targets)
+        or not 1 <= max_concurrency <= 16
+    ):
+        raise ValueError("GB10 SSH topology bounds are invalid")
+
+    def probe(target: GB10ProbeTarget) -> bool:
+        try:
+            result = run(_ssh_topology_argv(target, ssh_config=ssh_config, identity=identity))
+        except Exception:
+            return False
+        return result.returncode == 0 and result.stdout == ""
+
+    outcomes: dict[str, bool] = {}
+    with ThreadPoolExecutor(
+        max_workers=min(max_concurrency, len(targets)),
+        thread_name_prefix="loom-gb10-ssh-topology",
+    ) as executor:
+        futures = {executor.submit(probe, target): target for target in targets}
+        for future in as_completed(futures):
+            target = futures[future]
+            try:
+                outcomes[target.ssh_target] = future.result()
+            except Exception:
+                outcomes[target.ssh_target] = False
+    return GB10SshTopology(
+        reachable_hosts=tuple(sorted(host for host, ready in outcomes.items() if ready)),
+        failed_hosts=tuple(sorted(host for host, ready in outcomes.items() if not ready)),
     )
 
 
@@ -269,6 +370,8 @@ __all__ = [
     "DEFAULT_SETTLE_INTERVAL_SECONDS",
     "GB10FleetReadiness",
     "GB10ProbeTarget",
+    "GB10SshTopology",
     "probe_gb10_fleet_readonly",
+    "probe_gb10_ssh_topology",
     "remote_probe_command",
 ]

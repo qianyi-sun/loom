@@ -18,7 +18,11 @@ from loom_cli.rollout.credential_authority import (
 )
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
-from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, probe_gb10_fleet_readonly
+from loom_cli.rollout.gb10_readiness import (
+    GB10ProbeTarget,
+    probe_gb10_fleet_readonly,
+    probe_gb10_ssh_topology,
+)
 from loom_cli.rollout.install_attestation import (
     INSTALL_ATTESTATION_PATH,
     verify_runner_install,
@@ -994,6 +998,132 @@ def gb10_target_inventory_digest(targets: tuple[GB10ProbeTarget, ...]) -> str:
     ).hexdigest()
 
 
+def build_gb10_ssh_topology_check(
+    run: CommandRunner,
+    *,
+    targets: tuple[GB10ProbeTarget, ...],
+    ssh_config: Path,
+    identity: Path,
+    service_uid: int,
+    expected_ssh_config_sha256: str,
+    expected_identity_metadata_fingerprint: str,
+    max_concurrency: int = 8,
+) -> RegisteredCheck:
+    """Build the Tier 0 fixed SSH topology and batch-mode trust invariant."""
+    expected_inventory_digest = gb10_target_inventory_digest(targets)
+    for value in (expected_ssh_config_sha256, expected_identity_metadata_fingerprint):
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("GB10 SSH topology digest is invalid")
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["gb10.inventory-digest"] != expected_inventory_digest
+            or context.bindings["gb10.ssh-config.sha256"] != expected_ssh_config_sha256
+            or context.bindings["gb10.identity.metadata-fingerprint"]
+            != expected_identity_metadata_fingerprint
+            or context.bindings["service.uid"] != service_uid
+        ):
+            return _empty_gb10_ssh_probe(
+                targets,
+                expected_ssh_config_sha256,
+                expected_identity_metadata_fingerprint,
+            )
+        try:
+            config_read = read_trusted_file(
+                ssh_config,
+                service_uid=service_uid,
+                private=False,
+                require_nonempty=True,
+            )
+            identity_read = read_trusted_file(
+                identity,
+                service_uid=service_uid,
+                private=True,
+                allow_qianyi_owner=True,
+                require_nonempty=True,
+            )
+            config_digest = hashlib.sha256(config_read.payload).hexdigest()
+            if (
+                config_digest != expected_ssh_config_sha256
+                or identity_read.metadata_fingerprint != expected_identity_metadata_fingerprint
+            ):
+                raise ValueError("GB10 SSH input drift")
+            topology = probe_gb10_ssh_topology(
+                run,
+                targets,
+                ssh_config=ssh_config,
+                identity=identity,
+                max_concurrency=max_concurrency,
+            )
+        except (OSError, ValueError):
+            return _empty_gb10_ssh_probe(
+                targets,
+                expected_ssh_config_sha256,
+                expected_identity_metadata_fingerprint,
+            )
+        return CheckProbe(
+            passed=topology.ready,
+            evidence={
+                "reachable-hosts": {host: "reachable" for host in topology.reachable_hosts},
+                "failed-hosts": {host: "unreachable" for host in topology.failed_hosts},
+                "host-count": len(targets),
+                "ssh-config-digest": config_digest,
+                "identity-metadata-fingerprint": identity_read.metadata_fingerprint,
+                "topology-digest": topology.evidence_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="gb10.ssh-topology",
+            failure_code="gb10.ssh-topology.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("credentials.metadata", "tools.runtime"),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "gb10.identity.metadata-fingerprint",
+                "gb10.inventory-digest",
+                "gb10.ssh-config.sha256",
+                "runner.config.sha256",
+                "service.uid",
+            ),
+            evidence_schema=(
+                EvidenceField("reachable-hosts", "string-map"),
+                EvidenceField("failed-hosts", "string-map"),
+                EvidenceField("host-count", "integer"),
+                EvidenceField("ssh-config-digest", "sha256"),
+                EvidenceField("identity-metadata-fingerprint", "sha256"),
+                EvidenceField("topology-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=120,
+            remediation="restore the exact GB10 SSH config, identity authority, known hosts, and batch trust",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_gb10_ssh_probe(
+    targets: tuple[GB10ProbeTarget, ...],
+    ssh_config_digest: str,
+    identity_metadata_fingerprint: str,
+) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "reachable-hosts": {},
+            "failed-hosts": {target.ssh_target: "unreachable" for target in targets},
+            "host-count": len(targets),
+            "ssh-config-digest": ssh_config_digest,
+            "identity-metadata-fingerprint": identity_metadata_fingerprint,
+            "topology-digest": "0" * 64,
+        },
+    )
+
+
 def build_gb10_host_readiness_check(
     run: CommandRunner,
     *,
@@ -1094,6 +1224,7 @@ __all__ = [
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
     "build_gb10_host_readiness_check",
+    "build_gb10_ssh_topology_check",
     "build_kubernetes_client_check",
     "build_lifecycle_launch_cancel_check",
     "build_runner_install_check",
