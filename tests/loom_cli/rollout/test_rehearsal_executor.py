@@ -30,9 +30,14 @@ def _plan() -> RehearsalPlan:
         schema_revision="0066",
         image_digests={
             "loom-control-plane": "sha256:" + "8" * 64,
+            "loom-egress-xds": "sha256:" + "3" * 64,
+            "loom-family-orchestrator": "sha256:" + "4" * 64,
+            "loom-llm-gateway": "sha256:" + "5" * 64,
             "loom-rehearsal-postgres": "sha256:" + "9" * 64,
             "loom-service": "sha256:" + "1" * 64,
+            "loom-staging-admin-browser-smoke": "sha256:" + "6" * 64,
             "loom-web": "sha256:" + "2" * 64,
+            "loom-worker": "sha256:" + "7" * 64,
         },
         image_tag="staging-aaaaaaaa",
         image_artifact_sha256="2" * 64,
@@ -314,22 +319,15 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     assert manifest["spec"]["containers"][1]["command"] == ["/bin/sleep", "infinity"]
 
 
-def test_database_rejects_missing_exact_image_before_kubernetes() -> None:
+def test_plan_rejects_missing_exact_image_before_executor() -> None:
     plan = _plan()
-    plan = RehearsalPlan.from_record(
-        {
-            **plan.to_record(),
-            "image_digests": {"loom-service": "sha256:" + "1" * 64},
-        }
-    )
-    calls: list[object] = []
-
-    outcome = IsolatedRehearsalExecutor(
-        run=lambda *_args: calls.append(object()),  # type: ignore[arg-type,return-value]
-    ).execute("rehearsal.db-clone", plan)
-
-    assert outcome.blockers == {"database": "image-authority-missing"}
-    assert calls == []
+    with pytest.raises(ValueError, match="identity"):
+        RehearsalPlan.from_record(
+            {
+                **plan.to_record(),
+                "image_digests": {"loom-service": "sha256:" + "1" * 64},
+            }
+        )
 
 
 def test_migration_runs_exact_candidate_against_restored_database() -> None:

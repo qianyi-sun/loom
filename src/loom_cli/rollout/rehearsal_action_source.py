@@ -11,7 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
-from loom_cli.rollout.image_readiness import ImageArtifactSet
+from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ImageArtifactSet
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import CandidateBinding
@@ -144,6 +144,7 @@ class RehearsalPlan:
             or _REVISION_RE.fullmatch(self.migration_target_revision) is None
             or _IMAGE_TAG_RE.fullmatch(self.image_tag) is None
             or not image_digests
+            or set(image_digests) != {name for name, _path in ALL_BUILD_IMAGES}
             or any(
                 not name or not digest.startswith("sha256:")
                 for name, digest in image_digests.items()
