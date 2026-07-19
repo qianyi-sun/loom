@@ -92,6 +92,12 @@ revision, and immutable-object inventory root. Pre-backup reuse evidence cannot
 silently substitute for a newly restored lease; the post-rehearsal binding is
 constructed from the published `BackupLease` itself.
 
+The detached worker's verified state records the exact manifest digest, lease
+digest, and attestation digest as one compare-and-swap transition. A later
+request promotion cannot select an unrelated or merely pre-existing
+attestation, and failure to publish the attestation leaves the new payload
+unpromoted.
+
 ## Tiers
 
 ### Tier 0: admission, under two minutes

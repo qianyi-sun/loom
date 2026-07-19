@@ -70,6 +70,7 @@ def test_worker_success_uses_shared_lifecycle_and_exact_verified_digests() -> No
         updated_at=NOW,
         manifest_sha256="d" * 64,
         lease_digest="e" * 64,
+        preflight_attestation_sha256="f" * 64,
     )
     state = transition_backup_job(state, LifecycleAction.PUBLISH_LAUNCH, updated_at=NOW)
 
@@ -77,6 +78,7 @@ def test_worker_success_uses_shared_lifecycle_and_exact_verified_digests() -> No
     assert state.sequence == 3
     assert state.manifest_sha256 == "d" * 64
     assert state.lease_digest == "e" * 64
+    assert state.preflight_attestation_sha256 == "f" * 64
 
 
 def test_cancel_is_short_state_transition_and_cannot_publish_launch() -> None:
@@ -104,11 +106,11 @@ def test_cancel_and_worker_failure_seal_normalized_failure_code() -> None:
     assert state.failure_code == "backup_cancelled"
 
 
-def test_verification_without_exact_manifest_and_lease_fails_closed() -> None:
+def test_verification_without_exact_manifest_lease_and_attestation_fails_closed() -> None:
     state = BackupJobState(job_id="job-12345678", request_id="req-12345678")
     state = transition_backup_job(state, LifecycleAction.START_BACKUP, updated_at=NOW)
 
-    with pytest.raises(ValueError, match="manifest and lease"):
+    with pytest.raises(ValueError, match="manifest, lease and attestation"):
         transition_backup_job(state, LifecycleAction.VERIFY_BACKUP, updated_at=NOW)
 
 

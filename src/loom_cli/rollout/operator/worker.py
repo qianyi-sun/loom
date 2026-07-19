@@ -64,6 +64,7 @@ class VerifiedBackupJob:
     manifest_path: Path
     manifest_sha256: str
     lease_digest: str
+    preflight_attestation_sha256: str
 
     def __post_init__(self) -> None:
         if (
@@ -73,8 +74,11 @@ class VerifiedBackupJob:
             or len(self.lease_digest) != 64
             or any(
                 character not in "0123456789abcdef"
-                for character in (self.manifest_sha256 + self.lease_digest)
+                for character in (
+                    self.manifest_sha256 + self.lease_digest + self.preflight_attestation_sha256
+                )
             )
+            or len(self.preflight_attestation_sha256) != 64
         ):
             raise ValueError("verified backup job identity is invalid")
 
@@ -165,11 +169,7 @@ def _load_backup_job(
     if len(relative.parts) != 4:
         raise ValueError("backup job path does not identify one immutable job")
     requests_dir, request_id, backup_dir, filename = relative.parts
-    if (
-        requests_dir != "requests"
-        or backup_dir != "preflight-backup"
-        or filename != "job.json"
-    ):
+    if requests_dir != "requests" or backup_dir != "preflight-backup" or filename != "job.json":
         raise ValueError("backup job path does not identify one immutable job")
     return store.read_preflight_backup_job(request_id)
 
@@ -422,6 +422,7 @@ def run_backup_job(
         updated_at=_worker_now(dependencies),
         manifest_sha256=verified.manifest_sha256,
         lease_digest=verified.lease_digest,
+        preflight_attestation_sha256=verified.preflight_attestation_sha256,
     )
     dependencies.store.replace_preflight_backup_job_state(
         completed,

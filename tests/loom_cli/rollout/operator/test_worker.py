@@ -306,6 +306,7 @@ def test_backup_worker_publishes_only_verified_cas_state(tmp_path: Path) -> None
             manifest_path=tmp_path / "backup-manifest.json",
             manifest_sha256="d" * 64,
             lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
         ),
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=io.StringIO(),
@@ -316,6 +317,7 @@ def test_backup_worker_publishes_only_verified_cas_state(tmp_path: Path) -> None
     assert state.phase is LifecyclePhase.BACKUP_VERIFIED
     assert state.manifest_sha256 == "d" * 64
     assert state.lease_digest == "e" * 64
+    assert state.preflight_attestation_sha256 == "f" * 64
 
 
 def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path) -> None:
@@ -336,6 +338,7 @@ def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path
             manifest_path=tmp_path / "backup-manifest.json",
             manifest_sha256="d" * 64,
             lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
         )
 
     deps = WorkerDependencies(

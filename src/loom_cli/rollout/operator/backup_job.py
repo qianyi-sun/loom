@@ -260,6 +260,7 @@ class BackupJobState:
     updated_at: datetime | None = None
     manifest_sha256: str | None = None
     lease_digest: str | None = None
+    preflight_attestation_sha256: str | None = None
     failure_code: str | None = None
 
     def __post_init__(self) -> None:
@@ -279,8 +280,9 @@ class BackupJobState:
         if verified != (
             _SHA256_RE.fullmatch(self.manifest_sha256 or "") is not None
             and _SHA256_RE.fullmatch(self.lease_digest or "") is not None
+            and _SHA256_RE.fullmatch(self.preflight_attestation_sha256 or "") is not None
         ):
-            raise ValueError("verified backup job state requires manifest and lease digests")
+            raise ValueError("verified backup job state requires manifest, lease and attestation")
         if self.phase is LifecyclePhase.BACKUP_FAILED:
             if not self.failure_code:
                 raise ValueError("failed backup job state requires a failure code")
@@ -293,6 +295,7 @@ class BackupJobState:
             "job_id": self.job_id,
             "lease_digest": self.lease_digest,
             "manifest_sha256": self.manifest_sha256,
+            "preflight_attestation_sha256": self.preflight_attestation_sha256,
             "phase": self.phase.value,
             "request_id": self.request_id,
             "schema_version": 1,
@@ -309,6 +312,7 @@ class BackupJobState:
             "job_id",
             "lease_digest",
             "manifest_sha256",
+            "preflight_attestation_sha256",
             "phase",
             "request_id",
             "schema_version",
@@ -338,6 +342,11 @@ class BackupJobState:
             lease_digest=(
                 _string(data, "lease_digest") if data["lease_digest"] is not None else None
             ),
+            preflight_attestation_sha256=(
+                _string(data, "preflight_attestation_sha256")
+                if data["preflight_attestation_sha256"] is not None
+                else None
+            ),
             failure_code=(
                 _string(data, "failure_code") if data["failure_code"] is not None else None
             ),
@@ -351,6 +360,7 @@ def transition_backup_job(
     updated_at: datetime,
     manifest_sha256: str | None = None,
     lease_digest: str | None = None,
+    preflight_attestation_sha256: str | None = None,
     failure_code: str | None = None,
 ) -> BackupJobState:
     """Apply the shared lifecycle transition without inventing a second graph."""
@@ -366,11 +376,13 @@ def transition_backup_job(
         if (
             _SHA256_RE.fullmatch(manifest_sha256 or "") is None
             or _SHA256_RE.fullmatch(lease_digest or "") is None
+            or _SHA256_RE.fullmatch(preflight_attestation_sha256 or "") is None
         ):
-            raise ValueError("backup verification requires exact manifest and lease digests")
+            raise ValueError("backup verification requires manifest, lease and attestation digests")
     else:
         manifest_sha256 = state.manifest_sha256
         lease_digest = state.lease_digest
+        preflight_attestation_sha256 = state.preflight_attestation_sha256
     if transitioned.phase is LifecyclePhase.BACKUP_FAILED:
         if not failure_code or failure_code != failure_code.strip() or len(failure_code) > 96:
             raise ValueError("backup failure code must be normalized and bounded")
@@ -384,6 +396,7 @@ def transition_backup_job(
         updated_at=updated_at,
         manifest_sha256=manifest_sha256,
         lease_digest=lease_digest,
+        preflight_attestation_sha256=preflight_attestation_sha256,
         failure_code=failure_code,
     )
 

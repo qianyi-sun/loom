@@ -70,6 +70,10 @@ class DetachedCheckpointCoordinator:
         [CriticalCheckpointEvidence, PreflightRequest, Callable[[], bool]],
         RestoreVerificationEvidence,
     ]
+    publish_attestation: Callable[
+        [CriticalCheckpointEvidence, BackupLease, PreflightRequest],
+        str,
+    ]
     now: Callable[[], datetime]
     lease_ttl: timedelta
     referenced_payload_ids: Callable[[], frozenset[str]] = frozenset
@@ -174,6 +178,11 @@ class DetachedCheckpointCoordinator:
                 expires_at=self.now() + self.lease_ttl,
             )
             self.store.publish_backup_lease(lease)
+            attestation_digest = self.publish_attestation(checkpoint, lease, request)
+            if len(attestation_digest) != 64 or any(
+                character not in "0123456789abcdef" for character in attestation_digest
+            ):
+                raise CheckpointCoordinatorError("preflight attestation digest is invalid")
             current = self.store.read_backup_rotation()
             restored = record_restore_verified(
                 current,
@@ -195,6 +204,7 @@ class DetachedCheckpointCoordinator:
                 manifest_path=checkpoint.manifest_path,
                 manifest_sha256=checkpoint.manifest_sha256,
                 lease_digest=lease.evidence_digest,
+                preflight_attestation_sha256=attestation_digest,
             )
         except BaseException:
             self._fail_reserved_candidate(envelope.payload_id, "checkpoint_or_restore_failed")
