@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Mapping
+from pathlib import Path
+
+import pytest
+
+from loom_cli.rollout.operator.readonly_database_client import (
+    open_readonly_database_query,
+)
+from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredential
+
+
+class Process:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        assert timeout is None or timeout <= 5
+        if self.returncode is None:
+            raise AssertionError("wait before stop")
+        return self.returncode
+
+
+class Cursor:
+    def __init__(self, rows: tuple[Mapping[str, object], ...] = ()) -> None:
+        self.rows = rows
+
+    def fetchall(self) -> tuple[Mapping[str, object], ...]:
+        return self.rows
+
+
+class Connection:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.closed = False
+
+    def execute(self, query: str, params=None) -> Cursor:
+        assert params is None
+        self.calls.append(query)
+        return Cursor(({"value": 1},) if query == "SELECT 1 AS value" else ())
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _private(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+
+def _paths(tmp_path: Path) -> tuple[Path, Path, ReadonlyDatabaseCredential]:
+    kubeconfig = tmp_path / "readonly-kubeconfig"
+    credential_path = tmp_path / "readonly-database.json"
+    credential = ReadonlyDatabaseCredential(
+        role="loom_rollout_readonly",
+        database="loom",
+        password="a" * 64,
+    )
+    _private(kubeconfig, b"exact-kubeconfig")
+    _private(credential_path, credential.to_bytes())
+    return kubeconfig, credential_path, credential
+
+
+def test_client_binds_exact_transport_and_keeps_password_out_of_process(tmp_path: Path) -> None:
+    kubeconfig, credential_path, credential = _paths(tmp_path)
+    process = Process()
+    connection = Connection()
+    spawns: list[tuple[tuple[str, ...], Mapping[str, str]]] = []
+    connections: list[tuple[str, int, ReadonlyDatabaseCredential]] = []
+
+    with open_readonly_database_query(
+        service_uid=os.getuid(),
+        kubeconfig_path=kubeconfig,
+        credential_path=credential_path,
+        spawn=lambda argv, env: spawns.append((tuple(argv), dict(env))) or process,
+        connect=lambda host, port, exact: connections.append((host, port, exact)) or connection,
+        allocate_port=lambda: 15432,
+        wait_ready=lambda exact_process, port: (
+            (exact_process is process and port == 15432)
+            or (_ for _ in ()).throw(AssertionError("wrong tunnel"))
+        ),
+    ) as query:
+        assert query("SELECT 1 AS value") == ({"value": 1},)
+
+    assert spawns == [
+        (
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(kubeconfig),
+                "--namespace",
+                "loom-staging",
+                "port-forward",
+                "pod/loom-postgres-0",
+                "127.0.0.1:15432:5432",
+                "--pod-running-timeout=15s",
+            ),
+            {
+                "HOME": "/var/lib/loom-staging-rollout",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "USER": "loom-rollout",
+            },
+        )
+    ]
+    assert connections == [("127.0.0.1", 15432, credential)]
+    assert credential.password not in json.dumps(spawns)
+    assert connection.calls == [
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        "SELECT 1 AS value",
+        "ROLLBACK",
+    ]
+    assert connection.closed
+    assert process.terminated and not process.killed
+
+
+def test_client_rolls_back_and_stops_exact_tunnel_on_query_failure(tmp_path: Path) -> None:
+    kubeconfig, credential_path, _credential = _paths(tmp_path)
+    process = Process()
+    connection = Connection()
+
+    with pytest.raises(RuntimeError, match="probe failed"):
+        with open_readonly_database_query(
+            service_uid=os.getuid(),
+            kubeconfig_path=kubeconfig,
+            credential_path=credential_path,
+            spawn=lambda _argv, _env: process,
+            connect=lambda _host, _port, _exact: connection,
+            allocate_port=lambda: 15433,
+            wait_ready=lambda _process, _port: None,
+        ):
+            raise RuntimeError("probe failed")
+
+    assert connection.calls == [
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        "ROLLBACK",
+    ]
+    assert connection.closed and process.terminated
+
+
+def test_client_rejects_public_or_symlinked_credential(tmp_path: Path) -> None:
+    kubeconfig, credential_path, _credential = _paths(tmp_path)
+    credential_path.chmod(0o644)
+    with pytest.raises(ValueError, match="is unsafe"):
+        with open_readonly_database_query(
+            service_uid=os.getuid(),
+            kubeconfig_path=kubeconfig,
+            credential_path=credential_path,
+        ):
+            raise AssertionError("unreachable")
+
+    credential_path.unlink()
+    target = tmp_path / "target"
+    _private(target, b"{}")
+    credential_path.symlink_to(target)
+    with pytest.raises(ValueError, match="is unsafe"):
+        with open_readonly_database_query(
+            service_uid=os.getuid(),
+            kubeconfig_path=kubeconfig,
+            credential_path=credential_path,
+        ):
+            raise AssertionError("unreachable")
