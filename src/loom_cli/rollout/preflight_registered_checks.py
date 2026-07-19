@@ -148,6 +148,7 @@ class CredentialProbeSource:
             "readonly-probe",
             "readonly-kubeconfig",
             "readonly-database",
+            "readonly-minio",
             "rehearsal-kubeconfig",
             "server-dry-run-kubeconfig",
         }:

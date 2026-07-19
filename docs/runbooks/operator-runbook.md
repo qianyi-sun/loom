@@ -1746,6 +1746,18 @@ credential check reports only authority metadata and expiry; the deep-preflight
 attestation retains only metadata fingerprints and evidence hashes, never a
 token value.
 
+The same install transaction creates or reuses a separate root-owned MinIO
+credential and converges one fixed list-only policy for
+`loom-staging-trajectories` and `loom-staging-artifacts`. The service copy is a
+single-link mode-0600 file under the credential directory. Its policy permits
+only bucket location/versioning and object/version enumeration; object reads,
+writes and deletes are absent. The readonly TokenRequest may port-forward only
+to `loom-minio-0` and `loom-postgres-0`. `check` independently compares the
+server-side policy document and user binding, and Tier 0 then proves it by
+enumerating the exact buckets and measuring `/data/loom-staging/minio` as
+`loom-rollout`. Do not replace this with the application MinIO secret or a
+privileged `kubectl exec` inventory.
+
 ```bash
 INSTALLER_CHECKOUT=/root/loom-staging-installer
 sudo /bin/sh -c 'umask 077; exec /usr/bin/git "$@"' loom-staging-git \

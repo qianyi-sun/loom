@@ -126,6 +126,7 @@ def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Pat
         service_uid=os.getuid(),
         kubernetes_run=kubernetes,
         database_evidence=_database,
+        capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
         public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
         kubeconfig_path=tmp_path / "readonly-kubeconfig",
@@ -172,8 +173,43 @@ def test_authority_exposes_no_database_credential_in_evidence(tmp_path: Path) ->
         service_uid=os.getuid(),
         kubernetes_run=lambda _argv, _stdin: _Result(1, ""),
         database_evidence=_database,
+        capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
         kubeconfig_path=tmp_path / "readonly-kubeconfig",
     )
     assert authority.capacity() == StagingCapacity(1, 2, 80, 90)
     assert "password" not in repr(authority.capacity()).lower()
+
+
+def test_authority_uses_fresh_live_capacity_before_schema_0067(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    cluster, _token = _write_authority(tmp_path)
+    object.__setattr__(config, "cluster_config_path", cluster)
+    legacy = ReadonlyDatabaseEvidence(
+        schema_revision="0065",
+        mutation_epoch=0,
+        epoch_authority="legacy-pre-0066",
+        baseline_counts={
+            "agents": 0,
+            "provider_models": 0,
+            "tasks": 0,
+            "teams": 0,
+            "users": 0,
+        },
+        capacity=None,
+        evidence_sha256="c" * 64,
+    )
+    live = StagingCapacity(12, 34, 56, 78)
+    calls: list[object] = []
+    authority = ReadonlyPreflightAuthority(
+        config=config,
+        service_uid=os.getuid(),
+        kubernetes_run=lambda _argv, _stdin: _Result(1, ""),
+        database_evidence=lambda: legacy,
+        capacity_source=lambda: calls.append(object()) or live,
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
+        kubeconfig_path=tmp_path / "readonly-kubeconfig",
+    )
+
+    assert authority.capacity() == live
+    assert len(calls) == 1

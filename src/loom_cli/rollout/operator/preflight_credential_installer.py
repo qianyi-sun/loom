@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ from loom_cli.rollout.preflight_credential_paths import (
     PREFLIGHT_CREDENTIAL_ROOT,
     READONLY_DATABASE_CREDENTIAL_PATH,
     READONLY_KUBECONFIG_PATH,
+    READONLY_MINIO_CREDENTIAL_PATH,
     READONLY_TOKEN_PATH,
     REHEARSAL_KUBECONFIG_PATH,
 )
@@ -37,6 +39,14 @@ from loom_cli.rollout.readonly_database_bootstrap import (
     ReadonlyDatabaseCredential,
     render_readonly_role_sql,
 )
+from loom_cli.rollout.readonly_minio_bootstrap import (
+    READONLY_MINIO_ACCESS_KEY,
+    READONLY_MINIO_POLICY_NAME,
+    ReadonlyMinioCredential,
+    readonly_minio_policy,
+    readonly_minio_policy_bytes,
+    readonly_minio_policy_digest,
+)
 
 _ROOT_KUBECONFIG = Path("/root/.kube/config")
 _RUNNER_REPO = Path("/opt/loom-staging-runner/source")
@@ -44,6 +54,7 @@ _READONLY_MANIFEST = _RUNNER_REPO / "deploy/k8s/staging-rollout-readonly.yaml"
 _REHEARSAL_MANIFEST = _RUNNER_REPO / "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
 _APPLICATION_TOKEN_SOURCE = Path("/etc/loom/staging-rollout-readonly-probe-token")
 _DATABASE_CREDENTIAL_SOURCE = Path("/etc/loom/staging-rollout-readonly-db.json")
+_MINIO_CREDENTIAL_SOURCE = Path("/etc/loom/staging-rollout-readonly-minio.json")
 _SERVICE_USER = "loom-rollout"
 _TOKEN_DURATION = "6h"
 _TOKEN_AUDIENCE = "https://kubernetes.default.svc.cluster.local"
@@ -152,9 +163,11 @@ class CredentialPaths:
     rehearsal_manifest: Path = _REHEARSAL_MANIFEST
     application_token_source: Path = _APPLICATION_TOKEN_SOURCE
     database_credential_source: Path = _DATABASE_CREDENTIAL_SOURCE
+    minio_credential_source: Path = _MINIO_CREDENTIAL_SOURCE
     credential_root: Path = PREFLIGHT_CREDENTIAL_ROOT
     readonly_kubeconfig: Path = READONLY_KUBECONFIG_PATH
     readonly_database_credential: Path = READONLY_DATABASE_CREDENTIAL_PATH
+    readonly_minio_credential: Path = READONLY_MINIO_CREDENTIAL_PATH
     readonly_token: Path = READONLY_TOKEN_PATH
     rehearsal_kubeconfig: Path = REHEARSAL_KUBECONFIG_PATH
 
@@ -199,11 +212,14 @@ class PreflightCredentialInstaller:
             self._apply_authority(manifest)
         database_credential = self._load_or_create_database_credential()
         self._converge_database_role(database_credential)
+        minio_credential = self._load_or_create_minio_credential()
+        self._converge_minio_authority(minio_credential)
         application_token = self._load_or_create_application_token()
         self._converge_application_probe(application_token, team_id=team_id)
         existing = self.check()
         installed_application_token: bytes | None = None
         installed_database_credential: ReadonlyDatabaseCredential | None = None
+        installed_minio_credential: ReadonlyMinioCredential | None = None
         if existing["ok"]:
             installed_application_token = self._read_private(
                 self.paths.readonly_token,
@@ -217,10 +233,18 @@ class PreflightCredentialInstaller:
                     expected_gid=self.service_gid,
                 )
             )
+            installed_minio_credential = ReadonlyMinioCredential.from_bytes(
+                self._read_private(
+                    self.paths.readonly_minio_credential,
+                    expected_uid=self.service_uid,
+                    expected_gid=self.service_gid,
+                )
+            )
         if (
             existing["ok"]
             and installed_application_token == application_token
             and installed_database_credential == database_credential
+            and installed_minio_credential == minio_credential
         ):
             return {"ok": True, "changed": [], "authority": existing["authority"]}
         readonly = self._request_kubeconfig(
@@ -246,6 +270,10 @@ class PreflightCredentialInstaller:
             str(self.paths.readonly_database_credential): self._atomic_write(
                 self.paths.readonly_database_credential,
                 database_credential.to_bytes(),
+            ),
+            str(self.paths.readonly_minio_credential): self._atomic_write(
+                self.paths.readonly_minio_credential,
+                minio_credential.to_bytes(),
             ),
             str(self.paths.rehearsal_kubeconfig): self._atomic_write(
                 self.paths.rehearsal_kubeconfig,
@@ -382,6 +410,22 @@ class PreflightCredentialInstaller:
             }
         except (CredentialInstallError, ValueError):
             failures.append("readonly-database")
+        try:
+            minio_credential = ReadonlyMinioCredential.from_bytes(
+                self._read_private(
+                    self.paths.readonly_minio_credential,
+                    expected_uid=self.service_uid,
+                    expected_gid=self.service_gid,
+                )
+            )
+            self._check_minio_authority(minio_credential)
+            authority["readonly-minio"] = {
+                "credential-metadata-digest": minio_credential.metadata_digest,
+                "policy-digest": readonly_minio_policy_digest(),
+                "schema-version": 1,
+            }
+        except (CredentialInstallError, ValueError):
+            failures.append("readonly-minio")
         return {"ok": not failures, "failures": sorted(failures), "authority": authority}
 
     def _load_or_create_database_credential(self) -> ReadonlyDatabaseCredential:
@@ -442,6 +486,115 @@ class PreflightCredentialInstaller:
             timeout=60,
             require_output=False,
         )
+
+    def _load_or_create_minio_credential(self) -> ReadonlyMinioCredential:
+        path = self.paths.minio_credential_source
+        if path.exists() or path.is_symlink():
+            try:
+                return ReadonlyMinioCredential.from_bytes(
+                    self._read_private(
+                        path,
+                        expected_uid=self.root_uid,
+                        expected_gid=self.root_gid,
+                    )
+                )
+            except ValueError as exc:
+                raise CredentialInstallError(
+                    "readonly MinIO credential authority is invalid"
+                ) from exc
+        self._require_root_directory(path.parent)
+        credential = ReadonlyMinioCredential(
+            access_key=READONLY_MINIO_ACCESS_KEY,
+            secret_key=secrets.token_urlsafe(48),
+        )
+        self._atomic_write_private(
+            path,
+            credential.to_bytes(),
+            uid=self.root_uid,
+            gid=self.root_gid,
+            parent=path.parent,
+        )
+        return credential
+
+    @staticmethod
+    def _minio_admin_prefix() -> tuple[str, ...]:
+        return (
+            "kubectl",
+            "--kubeconfig",
+            str(_ROOT_KUBECONFIG),
+            "--namespace",
+            "loom-staging",
+            "exec",
+            "pod/loom-minio-0",
+            "--",
+            "/bin/sh",
+            "-eu",
+            "-c",
+        )
+
+    def _converge_minio_authority(self, credential: ReadonlyMinioCredential) -> None:
+        policy_payload = base64.b64encode(readonly_minio_policy_bytes()).decode("ascii")
+        script = "\n".join(
+            (
+                "IFS= read -r access_key",
+                "IFS= read -r secret_key",
+                'test -n "${MINIO_ROOT_USER:-}"',
+                'test -n "${MINIO_ROOT_PASSWORD:-}"',
+                "umask 077",
+                "policy=$(mktemp)",
+                "trap 'rm -f -- \"$policy\"' EXIT HUP INT TERM",
+                f'printf %s {policy_payload!r} | base64 -d >"$policy"',
+                'export MC_HOST_rollout="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@127.0.0.1:9000"',
+                f'/usr/bin/mc admin policy create rollout {READONLY_MINIO_POLICY_NAME!r} "$policy" >/dev/null',
+                'printf "%s\\n%s\\n" "$access_key" "$secret_key" | /usr/bin/mc admin user add rollout >/dev/null',
+                f'/usr/bin/mc admin policy attach rollout {READONLY_MINIO_POLICY_NAME!r} --user "$access_key" >/dev/null',
+            )
+        )
+        self._command(
+            (*self._minio_admin_prefix(), script),
+            input=f"{credential.access_key}\n{credential.secret_key}\n",
+            timeout=60,
+            require_output=False,
+        )
+        self._check_minio_authority(credential)
+
+    def _check_minio_authority(self, credential: ReadonlyMinioCredential) -> None:
+        script = "\n".join(
+            (
+                'test -n "${MINIO_ROOT_USER:-}"',
+                'test -n "${MINIO_ROOT_PASSWORD:-}"',
+                'export MC_HOST_rollout="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@127.0.0.1:9000"',
+                f"/usr/bin/mc admin user info rollout {credential.access_key!r} --json",
+                f"/usr/bin/mc admin policy info rollout {READONLY_MINIO_POLICY_NAME!r} --json",
+            )
+        )
+        result = self._command(
+            (*self._minio_admin_prefix(), script),
+            timeout=60,
+        )
+        lines = tuple(line for line in result.stdout.splitlines() if line.strip())
+        if len(lines) != 2:
+            raise CredentialInstallError("readonly MinIO authority evidence is invalid")
+        try:
+            user = json.loads(lines[0])
+            policy = json.loads(lines[1])
+        except json.JSONDecodeError as exc:
+            raise CredentialInstallError("readonly MinIO authority evidence is invalid") from exc
+        if not isinstance(user, dict) or user.get("status") != "success":
+            raise CredentialInstallError("readonly MinIO user authority drifted")
+        policy_name = user.get("policyName", user.get("policy"))
+        if policy_name != READONLY_MINIO_POLICY_NAME:
+            raise CredentialInstallError("readonly MinIO user authority drifted")
+        if not isinstance(policy, dict) or policy.get("status") != "success":
+            raise CredentialInstallError("readonly MinIO policy authority drifted")
+        policy_info = policy.get("policyInfo")
+        if (
+            policy.get("policy") != READONLY_MINIO_POLICY_NAME
+            or not isinstance(policy_info, dict)
+            or policy_info.get("PolicyName") != READONLY_MINIO_POLICY_NAME
+            or policy_info.get("Policy") != readonly_minio_policy()
+        ):
+            raise CredentialInstallError("readonly MinIO policy authority drifted")
 
     def _minified_source_kubeconfig(self) -> bytes:
         self._read_private(

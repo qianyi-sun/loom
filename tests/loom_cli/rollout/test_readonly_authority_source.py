@@ -51,7 +51,7 @@ def _rules(*, extra: dict[str, object] | None = None) -> dict[str, object]:
         {
             "apiGroups": [""],
             "resources": ["pods/portforward"],
-            "resourceNames": ["loom-postgres-0"],
+            "resourceNames": ["loom-minio-0", "loom-postgres-0"],
             "verbs": ["create"],
         },
     ]
@@ -192,7 +192,7 @@ def test_object_store_probe_uses_only_exact_health_proxy() -> None:
         {
             "apiGroups": [""],
             "resources": ["pods/portforward"],
-            "resourceNames": ["loom-postgres-0"],
+            "resourceNames": ["loom-minio-0", "loom-postgres-0"],
             "verbs": ["get", "create"],
         },
         {"apiGroups": ["*"], "resources": ["*"], "verbs": ["get"]},

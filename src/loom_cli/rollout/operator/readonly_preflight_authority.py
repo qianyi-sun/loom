@@ -7,7 +7,6 @@ import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 from loom.data_lifecycle import StagingCapacity
 from loom_cli.rollout.credential_authority import read_trusted_file
@@ -82,6 +81,7 @@ class ReadonlyPreflightAuthority:
     service_uid: int
     kubernetes_run: JsonRunner
     database_evidence: Callable[[], ReadonlyDatabaseEvidence]
+    capacity_source: Callable[[], StagingCapacity]
     object_store_probe: ObjectStoreProbe
     public_http_get: PublicHttpGet = bounded_public_http_get
     kubeconfig_path: Path = READONLY_KUBECONFIG_PATH
@@ -103,15 +103,7 @@ class ReadonlyPreflightAuthority:
         return self.database_evidence().mutation_epoch
 
     def capacity(self) -> StagingCapacity:
-        raw = self.database_evidence().capacity
-        if raw is None:
-            raise ValueError("readonly capacity authority is unavailable")
-        return StagingCapacity(
-            object_count=cast(int, raw["object_count"]),
-            bytes_used=cast(int, raw["bytes_used"]),
-            disk_free_percent=cast(int, raw["disk_free_percent"]),
-            inode_free_percent=cast(int, raw["inode_free_percent"]),
-        )
+        return self.capacity_source()
 
     def baseline_probes(self, mutation_epoch: int) -> Mapping[str, ReadonlyProbe]:
         database = self.database_evidence()

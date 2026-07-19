@@ -20,6 +20,10 @@ from loom_cli.rollout.operator.preflight_credential_installer import (
     render_readonly_probe_sql,
 )
 from loom_cli.rollout.preflight_kubeconfig_authority import render_token_request_kubeconfig
+from loom_cli.rollout.readonly_minio_bootstrap import (
+    READONLY_MINIO_POLICY_NAME,
+    readonly_minio_policy,
+)
 
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 TEAM_ID = UUID("9b1de3bf-9655-489a-813f-e8a7adf81290")
@@ -53,6 +57,33 @@ class Runner:
             account = command[command.index("token") + 1]
             namespace = command[command.index("--namespace") + 1]
             return Result(stdout=_token(namespace, account) + "\n")
+        if "pod/loom-minio-0" in command:
+            script = command[-1]
+            if "admin user info" in script:
+                return Result(
+                    stdout="\n".join(
+                        (
+                            json.dumps(
+                                {
+                                    "status": "success",
+                                    "policyName": READONLY_MINIO_POLICY_NAME,
+                                }
+                            ),
+                            json.dumps(
+                                {
+                                    "status": "success",
+                                    "policy": READONLY_MINIO_POLICY_NAME,
+                                    "policyInfo": {
+                                        "PolicyName": READONLY_MINIO_POLICY_NAME,
+                                        "Policy": readonly_minio_policy(),
+                                    },
+                                }
+                            ),
+                        )
+                    )
+                    + "\n"
+                )
+            return Result(stdout="")
         return Result()
 
 
@@ -119,10 +150,12 @@ def _installer(tmp_path: Path) -> tuple[PreflightCredentialInstaller, Runner]:
         rehearsal_manifest=tmp_path / "repo/rehearsal.yaml",
         application_token_source=tmp_path / "etc/readonly-token",
         database_credential_source=tmp_path / "etc/readonly-db.json",
+        minio_credential_source=tmp_path / "etc/readonly-minio.json",
         credential_root=tmp_path / "state/credentials",
         readonly_kubeconfig=tmp_path / "state/credentials/readonly-kubeconfig",
         readonly_token=tmp_path / "state/credentials/readonly-probe-token",
         readonly_database_credential=tmp_path / "state/credentials/readonly-database.json",
+        readonly_minio_credential=tmp_path / "state/credentials/readonly-minio.json",
         rehearsal_kubeconfig=tmp_path / "state/credentials/rehearsal-kubeconfig",
     )
     source = _source()
@@ -156,7 +189,7 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     result = installer.install(TEAM_ID)
 
     assert result["ok"] is True
-    assert len(result["changed"]) == 4
+    assert len(result["changed"]) == 5
     assert installer.check()["ok"] is True
     assert sum("apply" in command for command, _ in runner.calls) == 2
     assert sum("token" in command for command, _ in runner.calls) == 2
@@ -188,12 +221,19 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
         for path in (
             installer.paths.readonly_kubeconfig,
             installer.paths.readonly_database_credential,
+            installer.paths.readonly_minio_credential,
             installer.paths.readonly_token,
             installer.paths.rehearsal_kubeconfig,
         )
     )
     assert installer.paths.credential_root.stat().st_mode & 0o777 == 0o700
     assert installer.paths.database_credential_source.stat().st_mode & 0o777 == 0o600
+    assert installer.paths.minio_credential_source.stat().st_mode & 0o777 == 0o600
+    assert any("admin policy create" in command[-1] for command, _ in runner.calls)
+    assert any("admin user info" in command[-1] for command, _ in runner.calls)
+    minio_secret = json.loads(installer.paths.minio_credential_source.read_bytes())["secret_key"]
+    assert minio_secret not in rendered
+    assert all(minio_secret not in item for command, _ in runner.calls for item in command)
 
 
 def test_install_creates_exact_root_probe_authority_without_exposing_token(
@@ -303,6 +343,44 @@ def test_install_accepts_silent_success_only_for_mutating_convergence(
 
     assert installer.install(TEAM_ID)["ok"] is True
     assert installer.check()["ok"] is True
+
+
+def test_check_rejects_extra_or_rebound_minio_policy(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    original_run = runner.__call__
+
+    def drifted_policy(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        command = tuple(argv)
+        if "pod/loom-minio-0" in command and "admin user info" in command[-1]:
+            return Result(
+                stdout="\n".join(
+                    (
+                        json.dumps({"status": "success", "policyName": "readonly,writeonly"}),
+                        json.dumps(
+                            {
+                                "status": "success",
+                                "policy": READONLY_MINIO_POLICY_NAME,
+                                "policyInfo": {
+                                    "PolicyName": READONLY_MINIO_POLICY_NAME,
+                                    "Policy": readonly_minio_policy(),
+                                },
+                            }
+                        ),
+                    )
+                )
+                + "\n"
+            )
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = drifted_policy
+
+    assert installer.check()["failures"] == ["readonly-minio"]
 
 
 def test_install_rejects_silent_success_for_required_token_output(tmp_path: Path) -> None:

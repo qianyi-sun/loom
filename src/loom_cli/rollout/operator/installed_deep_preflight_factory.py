@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -38,6 +39,7 @@ from .installed_preflight_inputs import InstalledPreflightInputs
 from .model import CandidateBinding
 from .policy import sanitized_child_environment
 from .preflight import probe_gb10_shared_mount_readonly
+from .readonly_capacity_client import InstalledReadonlyCapacitySource
 from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
 from .readonly_preflight_authority import JsonRunner, ReadonlyPreflightAuthority
 from .staging_smoke_authority import staging_smoke_authority
@@ -61,6 +63,15 @@ def build_installed_deep_preflight_composition(
     database_evidence = InstalledReadonlyDatabaseEvidenceSource(
         service_uid=service_uid,
     )
+    cluster = load_cluster_config(config.cluster_config_path)
+    minio_filesystem_path = Path(cluster.persistent_storage_host_path_root) / "minio"
+    if minio_filesystem_path != Path("/data/loom-staging/minio"):
+        raise ValueError("installed staging MinIO filesystem authority drifted")
+    capacity_source = InstalledReadonlyCapacitySource(
+        service_uid=service_uid,
+        filesystem_paths=(minio_filesystem_path,),
+        buckets=tuple(sorted((cluster.artifacts_bucket, cluster.trajectories_bucket))),
+    )
     inventory_source = ReadonlyLifecycleInventoryProvider(
         config,
         evidence_source=database_evidence,
@@ -70,6 +81,7 @@ def build_installed_deep_preflight_composition(
         service_uid=service_uid,
         kubernetes_run=cast(JsonRunner, commands.readonly_json),
         database_evidence=database_evidence,
+        capacity_source=capacity_source,
         object_store_probe=lambda: probe_readonly_object_store_health(
             cast(JsonRunner, commands.readonly_json),
             kubeconfig=readonly.kubeconfig_path,
@@ -87,7 +99,6 @@ def build_installed_deep_preflight_composition(
             now=now(),
         )
 
-    cluster = load_cluster_config(config.cluster_config_path)
     manifest_image_names = frozenset(
         name
         for name, _path in ROLLOUT_IMAGES

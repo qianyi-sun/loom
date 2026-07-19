@@ -13,6 +13,7 @@ from loom_cli.rollout.install_attestation import VerifiedRunnerInstall, verify_r
 from loom_cli.rollout.preflight_credential_paths import (
     READONLY_DATABASE_CREDENTIAL_PATH,
     READONLY_KUBECONFIG_PATH,
+    READONLY_MINIO_CREDENTIAL_PATH,
     READONLY_TOKEN_PATH,
     REHEARSAL_KUBECONFIG_PATH,
 )
@@ -197,6 +198,10 @@ def _credential_sources(
             CredentialProbeSource(
                 label="readonly-database",
                 path=READONLY_DATABASE_CREDENTIAL_PATH,
+            ),
+            CredentialProbeSource(
+                label="readonly-minio",
+                path=READONLY_MINIO_CREDENTIAL_PATH,
             ),
             CredentialProbeSource(
                 label="rehearsal-kubeconfig",

@@ -222,9 +222,11 @@ service-owned 0600 copy. The password is never placed in argv, stdout,
 install evidence, or an attestation. Reinstall revokes table and sequence
 authority before granting SELECT back to the fixed allowlist, so privilege
 drift cannot silently accumulate.
-The concurrent DAG shares one process-local, single-flight database snapshot;
-Tier 0 capacity, Tier 2 baseline, capability evidence, and mutation-epoch
-binding cannot race through separate transactions. The critical checkpoint's
+The concurrent DAG shares one process-local, single-flight database snapshot
+for Tier 2 baseline, capability evidence, mutation-epoch binding, and critical
+checkpoint inventory. Tier 0 capacity separately shares one fresh,
+single-flight list-only MinIO/filesystem snapshot, so pre-0067 staging remains
+measurable without weakening database schema authority. The critical checkpoint's
 pinned benchmark/catalog/system inventory is derived from that same snapshot,
 never from a privileged `kubectl exec`. A pre-0066 snapshot binds an explicitly
 empty legacy inventory because typed object authority does not exist yet;
@@ -306,6 +308,16 @@ credential metadata, SSH topology, GB10 mount/boot/service readiness, capacity
 high-water limits, lifecycle launch/cancel behavior, and backup lease
 eligibility. Browser token owner/mode/ACL/no-follow/read-stability and the GB10
 timer/transient-unit classifier belong here, not at final acceptance.
+
+`capacity.high-water` always consumes one fresh, process-local single-flight
+snapshot from the installed list-only MinIO authority and the canonical
+staging MinIO filesystem. The same predicate and policy digest therefore work
+before and after migration `0067`; a database capacity row is not substituted
+for live object, byte, disk, or inode observation. The dedicated S3 policy
+allows only bucket location/versioning and list/version-list operations for the
+two execution buckets, while the TokenRequest permits port-forward only to the
+exact MinIO and PostgreSQL pods. Credentials and object keys never enter DAG
+evidence.
 
 Lease eligibility is an admission decision, not a requirement that a reusable
 lease already exist. An exact, fresh, restore-verified active lease selects

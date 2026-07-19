@@ -51,6 +51,19 @@ free percentage, inode free percentage, the GC trigger decision, and the final
 admission decision together. A missing inventory or policy-digest drift denies
 admission before request publication or backup.
 
+The rollout Tier 0 collector does not depend on migration `0067` already being
+live. Its installed Kubernetes TokenRequest may open localhost transports only
+to the exact `loom-minio-0` and `loom-postgres-0` pods. MinIO independently
+authenticates a fixed list-only user whose one exact policy can read bucket
+location/versioning and enumerate versions in only the staging trajectories
+and artifacts buckets; it cannot read object payloads or write/delete anything.
+The collector inventories those exact buckets and measures the canonical
+`/data/loom-staging/minio` backing filesystem directly under the rollout
+service account. This fresh snapshot is the single source for
+`capacity.high-water` on both legacy and migrated staging. The `0067` row
+remains runtime run-admission authority, but a missing legacy row can no longer
+hide a real byte, object, disk, or inode blocker from rollout preflight.
+
 Migration `0067` persists the same exact capacity authority for runtime run
 admission. `scripts/ops/staging_data_lifecycle_capacity.py` enumerates every
 explicitly allowlisted execution bucket, measures the configured staging data
