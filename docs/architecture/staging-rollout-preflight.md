@@ -153,8 +153,16 @@ validated by the server-observed review before any Tier 2 call.
 The TokenRequest is rendered into a minified kubeconfig with no inherited
 client certificate or root credential. The shared renderer accepts only the
 exact service-account subject, a non-empty API audience, a lifetime no longer
-than 24 hours, and at least two hours of remaining validity. Installed
-preflight treats the readonly application token, readonly kubeconfig,
+than 24 hours, and at least two hours of remaining validity. PostgreSQL
+baseline evidence is collected in one `REPEATABLE READ, READ ONLY`
+transaction as `loom_rollout_readonly`; the role is required to be
+non-superuser, `NOINHERIT`, `NOCREATEROLE`, `NOCREATEDB`, `NOREPLICATION` and
+`NOBYPASSRLS`. A pre-0066 database has no mutation-epoch table, so the source
+accepts only its exact four-digit Alembic revision and binds the one-time
+bootstrap epoch `0` to that revision. Revision 0066 and later must provide the
+exact staging epoch row; revision 0067 and later must also provide exact
+capacity authority. A missing newer table never falls back to legacy mode.
+Installed preflight treats the readonly application token, readonly kubeconfig,
 rehearsal kubeconfig, and server-dry-run kubeconfig as distinct private
 credential authorities; all four must pass the same stable-read, owner, mode,
 ACL, and metadata-fingerprint gate. Token values never enter an attestation or
