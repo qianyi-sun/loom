@@ -92,6 +92,7 @@ def test_rehearsal_activation_contract_binds_fixed_sandbox_and_exact_readback() 
     assert "--property=NoNewPrivileges=yes" in contract.start_argv
     assert "--property=ProtectSystem=strict" in contract.start_argv
     assert "--property=IPAddressDeny=any" in contract.start_argv
+    assert contract.load_state_argv[-2:] == ("--property=LoadState", "--value")
     properties = {
         "LoadState": "loaded",
         "ActiveState": "active",

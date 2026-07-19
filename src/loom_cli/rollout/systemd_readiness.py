@@ -195,6 +195,17 @@ class RehearsalSystemdActivation:
     def reset_argv(self) -> tuple[str, ...]:
         return ("systemctl", "--user", "reset-failed", self.unit)
 
+    @property
+    def load_state_argv(self) -> tuple[str, ...]:
+        return (
+            "systemctl",
+            "--user",
+            "show",
+            self.unit,
+            "--property=LoadState",
+            "--value",
+        )
+
     def ready(self, properties: dict[str, str], *, latency_ms: int) -> bool:
         """Verify exact identity, sandbox result, and bounded activation latency."""
         return 0 <= latency_ms <= self.latency_budget_ms and properties == {
@@ -211,8 +222,8 @@ class RehearsalSystemdActivation:
 
     @staticmethod
     def absent(properties: dict[str, str] | None) -> bool:
-        """Accept only an absent transient unit after cleanup."""
-        return properties is None or properties == {"LoadState": "not-found"}
+        """Accept only an absent transient unit before activation."""
+        return properties is None or properties.get("LoadState") == "not-found"
 
 
 def parse_systemctl_properties(stdout: str) -> dict[str, str]:

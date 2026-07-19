@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import time
@@ -23,6 +24,10 @@ from loom_cli.rollout.systemd_readiness import (
 
 REHEARSAL_KUBECONFIG = Path("/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig")
 _MAX_OUTPUT_BYTES = 1024 * 1024
+_KUBERNETES_UID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
+)
+_RESOURCE_VERSION_RE = re.compile(r"[1-9][0-9]{0,31}\Z")
 
 
 class CommandResult(Protocol):
@@ -163,6 +168,8 @@ class IsolatedRehearsalExecutor:
             return self._systemd_launch(plan)
         if check_id == "rehearsal.migration":
             return self._migration(plan)
+        if check_id == "rehearsal.cleanup":
+            return self._cleanup(plan)
         return RehearsalStepOutcome(
             passed=False,
             details={"status": "blocked"},
@@ -502,6 +509,122 @@ class IsolatedRehearsalExecutor:
         properties = parse_systemctl_properties(result.stdout)
         return properties or None
 
+    def _cleanup(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+        contract = RehearsalSystemdActivation(
+            unit=plan.resources.systemd_unit,
+            plan_digest=plan.plan_digest,
+        )
+        properties = self._systemd_properties(contract)
+        if properties is not None and not contract.absent(properties):
+            if not contract.ready(properties, latency_ms=0):
+                return _blocked("cleanup", "systemd-identity-drift")
+            if not self._status(contract.stop_argv, timeout=30):
+                return _blocked("cleanup", "systemd-stop-failed")
+            if not self._status(contract.reset_argv, timeout=30):
+                return _blocked("cleanup", "systemd-reset-failed")
+        if self._systemd_load_state(contract) != "not-found":
+            return _blocked("cleanup", "systemd-remains")
+
+        observed = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "get",
+                "namespace",
+                plan.resources.namespace,
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if observed is None:
+            return _cleanup_ready(plan)
+        if not _namespace_matches(observed, plan):
+            return _blocked("cleanup", "namespace-identity-drift")
+        metadata = observed.get("metadata")
+        if not isinstance(metadata, dict):  # covered by _namespace_matches
+            return _blocked("cleanup", "namespace-identity-drift")
+        uid = metadata.get("uid")
+        resource_version = metadata.get("resourceVersion")
+        if (
+            not isinstance(uid, str)
+            or _KUBERNETES_UID_RE.fullmatch(uid) is None
+            or not isinstance(resource_version, str)
+            or _RESOURCE_VERSION_RE.fullmatch(resource_version) is None
+        ):
+            return _blocked("cleanup", "namespace-delete-precondition-missing")
+        delete_options: dict[str, object] = {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "preconditions": {"resourceVersion": resource_version, "uid": uid},
+            "propagationPolicy": "Foreground",
+        }
+        if not self._status_with_payload(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "delete",
+                "--raw",
+                f"/api/v1/namespaces/{plan.resources.namespace}",
+                "-f",
+                "-",
+            ),
+            _json_bytes(delete_options),
+            timeout=30,
+        ):
+            return _blocked("cleanup", "namespace-delete-failed")
+        if not self._status(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "wait",
+                "--for=delete",
+                f"namespace/{plan.resources.namespace}",
+                "--timeout=300s",
+            ),
+            timeout=315,
+        ):
+            return _blocked("cleanup", "namespace-delete-timeout")
+        final = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "get",
+                "namespace",
+                plan.resources.namespace,
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if final is not None:
+            return _blocked("cleanup", "namespace-remains")
+        return _cleanup_ready(plan)
+
+    def _systemd_load_state(self, contract: RehearsalSystemdActivation) -> str:
+        try:
+            result = self.run(contract.load_state_argv, None, 15)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return "unavailable"
+        if (
+            result.returncode not in {0, 4}
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or len(result.stdout.encode()) > 64
+            or len(result.stderr.encode()) > _MAX_OUTPUT_BYTES
+        ):
+            return "unavailable"
+        value = result.stdout.strip()
+        return value if value in {"loaded", "not-found"} else "unavailable"
+
     def _psql_json(self, plan: RehearsalPlan, sql: str) -> dict[str, object] | None:
         return self._command(
             (
@@ -530,6 +653,25 @@ class IsolatedRehearsalExecutor:
     def _status(self, argv: Sequence[str], *, timeout: int) -> bool:
         try:
             result = self.run(argv, None, timeout)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return False
+        return bool(
+            result.returncode == 0
+            and isinstance(result.stdout, str)
+            and isinstance(result.stderr, str)
+            and len(result.stdout.encode()) <= _MAX_OUTPUT_BYTES
+            and len(result.stderr.encode()) <= _MAX_OUTPUT_BYTES
+        )
+
+    def _status_with_payload(
+        self,
+        argv: Sequence[str],
+        payload: bytes,
+        *,
+        timeout: int,
+    ) -> bool:
+        try:
+            result = self.run(argv, payload, timeout)
         except (OSError, RuntimeError, subprocess.SubprocessError):
             return False
         return bool(
@@ -895,6 +1037,19 @@ def _systemd_ready(
             "unit": contract.unit,
         },
         blockers={},
+    )
+
+
+def _cleanup_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
+    return RehearsalStepOutcome(
+        passed=True,
+        details={
+            "namespace": plan.resources.namespace,
+            "status": "absent",
+            "unit": plan.resources.systemd_unit,
+        },
+        blockers={},
+        cleanup_verified=True,
     )
 
 

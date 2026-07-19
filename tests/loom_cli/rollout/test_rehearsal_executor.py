@@ -374,6 +374,120 @@ def test_systemd_launch_rejects_existing_drift_and_latency_overrun() -> None:
     assert outcome.blockers == {"systemd": "activation-readback-drift"}
 
 
+def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> None:
+    plan = _plan()
+    namespace = {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            **json.loads(
+                json.dumps(
+                    {
+                        "annotations": {
+                            "loom.openai.dev/candidate-sha": plan.candidate_sha,
+                            "loom.openai.dev/candidate-tree": plan.candidate_tree,
+                            "loom.openai.dev/mutation-epoch": str(plan.mutation_epoch),
+                            "loom.openai.dev/plan-sha256": plan.plan_digest,
+                        },
+                        "labels": {
+                            "loom.openai.dev/authority": "staging-preflight",
+                            "loom.openai.dev/isolation": plan.resources.namespace.removeprefix(
+                                "loom-rehearsal-"
+                            ),
+                            "pod-security.kubernetes.io/audit": "restricted",
+                            "pod-security.kubernetes.io/enforce": "restricted",
+                            "pod-security.kubernetes.io/enforce-version": "latest",
+                            "pod-security.kubernetes.io/warn": "restricted",
+                        },
+                        "name": plan.resources.namespace,
+                    }
+                )
+            ),
+            "resourceVersion": "42",
+            "uid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        },
+    }
+    unit_active = True
+    namespace_present = True
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    def run(argv, payload, _timeout):
+        nonlocal unit_active, namespace_present
+        command = tuple(argv)
+        calls.append((command, payload))
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(
+                    argv, 0, "loaded\n" if unit_active else "not-found\n", ""
+                )
+            if not unit_active:
+                return subprocess.CompletedProcess(argv, 4, "", "")
+            description = f"Loom isolated rehearsal {plan.plan_digest}"
+            output = (
+                "LoadState=loaded\nActiveState=active\nSubState=exited\nType=oneshot\n"
+                "Result=success\nExecMainStatus=0\nNeedDaemonReload=no\nTransient=yes\n"
+                f"Description={description}\n"
+            )
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        if command[:3] == ("systemctl", "--user", "stop"):
+            unit_active = False
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "reset-failed"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "get" in command and "namespace" in command:
+            if not namespace_present:
+                return subprocess.CompletedProcess(argv, 1, "", "not found")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(namespace), "")
+        if "delete" in command and "--raw" in command:
+            options = json.loads(payload or b"{}")
+            assert options["preconditions"] == {
+                "resourceVersion": "42",
+                "uid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            }
+            namespace_present = False
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        if "wait" in command:
+            return subprocess.CompletedProcess(argv, 0, "deleted\n", "")
+        raise AssertionError(argv)
+
+    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.cleanup", plan)
+
+    assert outcome.passed and outcome.cleanup_verified
+    assert outcome.details["status"] == "absent"
+    delete = next(command for command, _payload in calls if "--raw" in command)
+    assert delete[-2:] == ("-f", "-")
+    assert plan.resources.namespace in delete[-3]
+
+
+def test_cleanup_refuses_unknown_unit_or_namespace_identity() -> None:
+    plan = _plan()
+
+    def unit_drift(argv, _payload, _timeout):
+        if argv[:3] == ("systemctl", "--user", "show"):
+            return subprocess.CompletedProcess(argv, 0, "LoadState=loaded\n", "")
+        raise AssertionError("unknown unit must not be deleted")
+
+    unit = IsolatedRehearsalExecutor(run=unit_drift).execute("rehearsal.cleanup", plan)
+    assert unit.blockers == {"cleanup": "systemd-identity-drift"}
+
+    def namespace_drift(argv, _payload, _timeout):
+        if argv[:3] == ("systemctl", "--user", "show"):
+            if argv[-1] == "--value":
+                return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+            return subprocess.CompletedProcess(argv, 4, "", "")
+        if "get" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                '{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"other"}}',
+                "",
+            )
+        raise AssertionError("unknown namespace must not be deleted")
+
+    namespace = IsolatedRehearsalExecutor(run=namespace_drift).execute("rehearsal.cleanup", plan)
+    assert namespace.blockers == {"cleanup": "namespace-identity-drift"}
+
+
 def test_stream_runner_reads_private_file_without_following_parent_symlinks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
