@@ -32,6 +32,9 @@ from loom_cli.rollout.operator.model import (
     RolloutRequest,
 )
 from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
+from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
+from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipeline
+from tests.loom_cli.rollout.test_preflight_pipeline import _context, _registry
 
 REQUEST_ID = "stg-20260713-abcdef12"
 RESOLVED_SHA = "abcdef1234567890abcdef1234567890abcdef12"
@@ -252,6 +255,15 @@ def make_preflight_backup_job() -> PreflightBackupJobEnvelope:
     )
 
 
+def make_assessment(tmp_path: Path) -> PreflightAssessment:
+    registry = _registry()
+    return PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "attestations"),
+        now=lambda: datetime(2026, 7, 13, 20, tzinfo=UTC),
+    ).assess(context=_context(registry))
+
+
 def test_create_request_is_private_and_no_replace(tmp_path: Path) -> None:
     store = RequestStore(tmp_path)
     request = make_request()
@@ -272,9 +284,21 @@ def test_preflight_request_backup_and_promotion_are_separate_immutable_authoriti
     tmp_path: Path,
 ) -> None:
     store = RequestStore(tmp_path)
-    preliminary = make_preflight_request()
+    assessment = make_assessment(tmp_path)
+    preliminary = replace(
+        make_preflight_request(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
     path = store.create_preflight_request(preliminary)
-    job = make_preflight_backup_job()
+    store.publish_preflight_assessment(REQUEST_ID, assessment)
+    job = replace(
+        make_preflight_backup_job(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
 
     job_path = store.publish_preflight_backup_job(job)
     state = store.read_preflight_backup_job_state(REQUEST_ID)
@@ -298,6 +322,8 @@ def test_preflight_request_backup_and_promotion_are_separate_immutable_authoriti
     promoted = replace(
         make_backup_job_request(),
         preflight_attestation_sha256="7" * 64,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
     )
     request_path = store.promote_preflight_request(promoted)
 
@@ -310,15 +336,34 @@ def test_preflight_request_backup_and_promotion_are_separate_immutable_authoriti
 
 def test_preflight_promotion_and_backup_reject_identity_drift(tmp_path: Path) -> None:
     store = RequestStore(tmp_path)
-    store.create_preflight_request(make_preflight_request())
+    assessment = make_assessment(tmp_path)
+    preliminary = replace(
+        make_preflight_request(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    store.create_preflight_request(preliminary)
+    store.publish_preflight_assessment(REQUEST_ID, assessment)
 
     with pytest.raises(RequestStoreError, match="preflight request binding"):
         store.publish_preflight_backup_job(
-            replace(make_preflight_backup_job(), mutation_epoch=5)
+            replace(
+                make_preflight_backup_job(),
+                preflight_assessment_sha256=assessment.assessment_digest,
+                preflight_registry_sha256=assessment.registry_digest,
+                preflight_coverage_sha256=assessment.coverage_digest,
+                mutation_epoch=5,
+            )
         )
     with pytest.raises(RequestStoreError, match="preflight authority"):
         store.promote_preflight_request(
-            replace(make_backup_job_request(), runner_config_sha256="8" * 64)
+            replace(
+                make_backup_job_request(),
+                runner_config_sha256="8" * 64,
+                preflight_registry_sha256=assessment.registry_digest,
+                preflight_coverage_sha256=assessment.coverage_digest,
+            )
         )
 
 

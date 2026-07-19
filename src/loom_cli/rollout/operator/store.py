@@ -10,8 +10,11 @@ import stat
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from loom_cli.rollout.preflight_pipeline import PreflightAssessment
 
 from .backup_job import (
     BackupJobEnvelope,
@@ -396,6 +399,44 @@ class RequestStore:
             raise RequestStoreError("preflight.json request_id does not match its directory")
         return request
 
+    def publish_preflight_assessment(
+        self,
+        request_id: str,
+        assessment: PreflightAssessment,
+    ) -> Path:
+        """Publish complete Tier 0-2 evidence after its identity is reserved."""
+        preliminary = self.read_preflight_request(request_id)
+        if (
+            not assessment.passed
+            or assessment.assessment_digest != preliminary.preflight_assessment_sha256
+            or assessment.registry_digest != preliminary.preflight_registry_sha256
+            or assessment.coverage_digest != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("preflight assessment does not match request authority")
+        return _publish_immutable(
+            self._require_preflight_request_directory(request_id) / "assessment.json",
+            assessment.to_record(),
+        )
+
+    def read_preflight_assessment(self, request_id: str) -> PreflightAssessment:
+        from loom_cli.rollout.preflight_pipeline import PreflightAssessment
+
+        directory = self._require_preflight_request_directory(request_id)
+        try:
+            assessment = PreflightAssessment.from_record(
+                _read_json(directory / "assessment.json", "preflight assessment")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        preliminary = self.read_preflight_request(request_id)
+        if (
+            assessment.assessment_digest != preliminary.preflight_assessment_sha256
+            or assessment.registry_digest != preliminary.preflight_registry_sha256
+            or assessment.coverage_digest != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("preflight assessment does not match request authority")
+        return assessment
+
     def promote_preflight_request(self, request: RolloutRequest) -> Path:
         """Publish final Tier 0-3 authority without replacing preliminary evidence."""
         preliminary = self.read_preflight_request(request.request_id)
@@ -480,13 +521,14 @@ class RequestStore:
     def publish_preflight_backup_job(self, envelope: PreflightBackupJobEnvelope) -> Path:
         """Publish one detached job bound to immutable Tier 0-2 authority."""
         request = self.read_preflight_request(envelope.request_id)
+        assessment = self.read_preflight_assessment(envelope.request_id)
         if request.status != "pending":
             raise RequestStoreError("preview request cannot publish a backup job")
         if (
             request.candidate.resolved_sha != envelope.candidate_sha
             or request.candidate_tree != envelope.candidate_tree
-            or request.preflight_assessment_sha256
-            != envelope.preflight_assessment_sha256
+            or request.preflight_assessment_sha256 != envelope.preflight_assessment_sha256
+            or assessment.assessment_digest != envelope.preflight_assessment_sha256
             or request.preflight_registry_sha256 != envelope.preflight_registry_sha256
             or request.preflight_coverage_sha256 != envelope.preflight_coverage_sha256
             or request.mutation_epoch != envelope.mutation_epoch

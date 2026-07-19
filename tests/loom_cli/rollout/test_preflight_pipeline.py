@@ -17,7 +17,7 @@ from loom_cli.rollout.preflight_contract import (
     SecretRedactionPolicy,
 )
 from loom_cli.rollout.preflight_coverage import load_coverage_manifest
-from loom_cli.rollout.preflight_pipeline import PreflightPipeline
+from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipeline
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
 
@@ -201,3 +201,25 @@ def test_tier_two_assessment_rejects_input_drift_before_attestation(tmp_path: Pa
             bindings=_bindings(),
             assessment=assessment,
         )
+
+
+def test_assessment_record_round_trips_and_rejects_evidence_tampering(tmp_path: Path) -> None:
+    registry = _registry()
+    assessment = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    ).assess(context=_context(registry))
+
+    record = assessment.to_record()
+    assert PreflightAssessment.from_record(record) == assessment
+
+    executions = record["executions"]
+    assert isinstance(executions, list)
+    first = executions[0]
+    assert isinstance(first, dict)
+    evidence = first["evidence"]
+    assert isinstance(evidence, dict)
+    evidence["result"] = "tampered"
+    with pytest.raises(ValueError, match="evidence hash"):
+        PreflightAssessment.from_record(record)

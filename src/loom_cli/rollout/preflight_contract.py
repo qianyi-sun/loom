@@ -275,6 +275,121 @@ class CheckExecution:
     def passed(self) -> bool:
         return self.outcome is CheckOutcome.PASS
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "blocked_by": list(self.blocked_by),
+            "check_id": self.check_id,
+            "evidence": dict(self.evidence),
+            "evidence_hash": self.evidence_hash,
+            "expires_at": self.expires_at.isoformat(),
+            "failure_code": self.failure_code,
+            "finished_at": self.finished_at.isoformat(),
+            "implementation_digest": self.implementation_digest,
+            "input_fingerprint": self.input_fingerprint,
+            "operation": self.operation.value,
+            "outcome": self.outcome.value,
+            "remediation": self.remediation,
+            "stage": self.stage.value,
+            "started_at": self.started_at.isoformat(),
+            "tier": self.tier,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> CheckExecution:
+        expected = {
+            "blocked_by",
+            "check_id",
+            "evidence",
+            "evidence_hash",
+            "expires_at",
+            "failure_code",
+            "finished_at",
+            "implementation_digest",
+            "input_fingerprint",
+            "operation",
+            "outcome",
+            "remediation",
+            "stage",
+            "started_at",
+            "tier",
+        }
+        if set(data) != expected:
+            raise ValueError("check execution fields are invalid")
+        check_id = data["check_id"]
+        failure_code = data["failure_code"]
+        tier = data["tier"]
+        evidence = data["evidence"]
+        blocked_by = data["blocked_by"]
+        remediation = data["remediation"]
+        if (
+            not isinstance(check_id, str)
+            or _ID_RE.fullmatch(check_id) is None
+            or not isinstance(failure_code, str)
+            or _ID_RE.fullmatch(failure_code) is None
+            or type(tier) is not int
+            or tier not in {0, 1, 2, 3, 4}
+            or not isinstance(evidence, Mapping)
+            or not all(
+                isinstance(key, str) and _is_evidence_value(value)
+                for key, value in evidence.items()
+            )
+            or not isinstance(blocked_by, list)
+            or not all(isinstance(value, str) and _ID_RE.fullmatch(value) for value in blocked_by)
+            or (remediation is not None and not isinstance(remediation, str))
+        ):
+            raise ValueError("check execution identity or evidence is invalid")
+        try:
+            stage = StageCapability(cast(str, data["stage"]))
+            operation = CheckOperation(cast(str, data["operation"]))
+            outcome = CheckOutcome(cast(str, data["outcome"]))
+            started_at = datetime.fromisoformat(cast(str, data["started_at"]))
+            finished_at = datetime.fromisoformat(cast(str, data["finished_at"]))
+            expires_at = datetime.fromisoformat(cast(str, data["expires_at"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("check execution enum or timestamp is invalid") from exc
+        if (
+            any(
+                value.tzinfo is None or value.utcoffset() is None
+                for value in (
+                    started_at,
+                    finished_at,
+                    expires_at,
+                )
+            )
+            or not started_at <= finished_at <= expires_at
+        ):
+            raise ValueError("check execution timestamps are invalid")
+        stage_tiers = {
+            StageCapability.STATIC: {0, 1},
+            StageCapability.BASELINE_LIVE_READONLY: {2},
+            StageCapability.ISOLATED_REHEARSAL: {3},
+            StageCapability.FINAL_ONLY: {4},
+        }
+        raw_evidence = dict(cast(Mapping[str, EvidenceValue], evidence))
+        for field in ("input_fingerprint", "implementation_digest", "evidence_hash"):
+            value = data[field]
+            if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+                raise ValueError("check execution digest is invalid")
+        if _hash_json(raw_evidence) != data["evidence_hash"] or tier not in stage_tiers[stage]:
+            raise ValueError("check execution evidence hash or stage is invalid")
+        return cls(
+            check_id=check_id,
+            failure_code=failure_code,
+            tier=tier,
+            stage=stage,
+            operation=operation,
+            outcome=outcome,
+            input_fingerprint=cast(str, data["input_fingerprint"]),
+            implementation_digest=cast(str, data["implementation_digest"]),
+            evidence=MappingProxyType(raw_evidence),
+            evidence_hash=data["evidence_hash"],
+            started_at=started_at,
+            finished_at=finished_at,
+            expires_at=expires_at,
+            remediation=remediation,
+            blocked_by=tuple(cast(list[str], blocked_by)),
+        )
+
 
 def _hash_json(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()

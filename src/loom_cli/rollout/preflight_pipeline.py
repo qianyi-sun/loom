@@ -12,6 +12,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 from loom_cli.rollout.preflight_attestation_store import (
     PreflightAttestationStore,
@@ -85,6 +86,70 @@ class PreflightAssessment:
             "registry_digest": self.registry_digest,
             "through_tier": self.through_tier,
         }
+
+    def to_record(self) -> dict[str, object]:
+        """Serialize complete evidence for immutable cross-process continuation."""
+        return {
+            "assessment_digest": self.assessment_digest,
+            "coverage_digest": self.coverage_digest,
+            "executions": [execution.to_dict() for execution in self.executions],
+            "registry_digest": self.registry_digest,
+            "schema_version": 1,
+            "through_tier": self.through_tier,
+        }
+
+    @classmethod
+    def from_record(cls, data: Mapping[str, object]) -> PreflightAssessment:
+        expected = {
+            "assessment_digest",
+            "coverage_digest",
+            "executions",
+            "registry_digest",
+            "schema_version",
+            "through_tier",
+        }
+        if set(data) != expected:
+            raise ValueError("preflight assessment fields are invalid")
+        raw_executions = data["executions"]
+        if (
+            data["schema_version"] != 1
+            or data["through_tier"] != 2
+            or not isinstance(data["registry_digest"], str)
+            or not isinstance(data["coverage_digest"], str)
+            or not isinstance(data["assessment_digest"], str)
+            or not isinstance(raw_executions, list)
+            or not raw_executions
+            or not all(isinstance(item, Mapping) for item in raw_executions)
+        ):
+            raise ValueError("preflight assessment identity is invalid")
+        executions = tuple(
+            CheckExecution.from_dict(cast(Mapping[str, object], item)) for item in raw_executions
+        )
+        if len({execution.check_id for execution in executions}) != len(executions) or any(
+            execution.tier > 2 for execution in executions
+        ):
+            raise ValueError("preflight assessment coverage is invalid")
+        digest = _assessment_digest(
+            through_tier=2,
+            registry_digest=data["registry_digest"],
+            coverage_digest=data["coverage_digest"],
+            executions=executions,
+        )
+        if digest != data["assessment_digest"]:
+            raise ValueError("preflight assessment digest is invalid")
+        blockers = tuple(
+            PreflightBlocker.from_execution(execution)
+            for execution in executions
+            if not execution.passed
+        )
+        return cls(
+            through_tier=2,
+            registry_digest=data["registry_digest"],
+            coverage_digest=data["coverage_digest"],
+            executions=executions,
+            blockers=blockers,
+            assessment_digest=digest,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,8 +373,7 @@ class PreflightPipeline:
             if (
                 execution.expires_at <= now
                 or not execution.passed
-                or attestation.evidence_hashes.get(execution.check_id)
-                != execution.evidence_hash
+                or attestation.evidence_hashes.get(execution.check_id) != execution.evidence_hash
                 or attestation.check_implementation_digests.get(execution.check_id)
                 != execution.implementation_digest
             ):

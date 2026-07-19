@@ -50,8 +50,10 @@ which clone rehearsal needed a verified lease while the broker demanded the
 rehearsal attestation before it could create that lease.
 
 Persistence makes that distinction explicit. `preflight.json` reserves the
-candidate/tree, epoch, config, registry, coverage, and assessment identity.
-The detached `preflight-backup/job.json` may bind only that preliminary
+candidate/tree, epoch, config, registry, coverage, and assessment identity;
+the complete per-check evidence is separately published as immutable
+`assessment.json` and must round-trip to that digest. The detached
+`preflight-backup/job.json` may bind only that preliminary
 authority. After restore verification and Tier 3, `request.json` is published
 beside (never over) the preliminary record and binds the complete attestation.
 Attempt envelopes and protected launch refuse a directory that contains only
