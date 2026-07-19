@@ -22,6 +22,11 @@ from .model import (
 _RESOLVED_SHA_OUTPUT_RE = re.compile(r"^(?P<sha>[0-9a-f]{40})\n?$")
 _FETCH_REFSPEC = "+refs/heads/dev:refs/remotes/origin/dev"
 _RESOLVE_REF = "refs/remotes/origin/dev^{commit}"
+# The root-side sealed-source validator lives outside the installed Python
+# package.  Keep this runtime admission bound locked to the same value with a
+# cross-layer contract test so the broker cannot reject a source the installer
+# already accepted.
+MAX_CUMULATIVE_COMMITS = 64
 
 
 class CommandResult(Protocol):
@@ -304,7 +309,7 @@ def bind_configured_candidate(
             raise CandidateBindingError("sealed candidate history is not linear")
         expected_parent = fields[0]
     if (
-        not 1 <= len(history) <= 32
+        not 1 <= len(history) <= MAX_CUMULATIVE_COMMITS
         or expected_parent != config.source_commit_sha
     ):
         raise CandidateBindingError("sealed candidate history does not match config")

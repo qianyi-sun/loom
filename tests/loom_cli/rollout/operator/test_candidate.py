@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from scripts.ops import staging_rollout_sealed_source as sealed_source
 
 from loom_cli.rollout.operator import candidate
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -51,6 +52,10 @@ def make_config(runner_repo: Path) -> OperatorConfig:
 
 def fixed_now() -> datetime:
     return FETCHED_AT
+
+
+def test_cumulative_history_bound_matches_root_sealed_source_validator() -> None:
+    assert candidate.MAX_CUMULATIVE_COMMITS == sealed_source.MAX_CUMULATIVE_COMMITS == 64
 
 
 def _git(repo: Path, *args: str) -> str:
