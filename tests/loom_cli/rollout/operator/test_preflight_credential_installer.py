@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 import yaml  # type: ignore[import-untyped]
@@ -15,9 +17,11 @@ from loom_cli.rollout.operator.preflight_credential_installer import (
     CredentialInstallError,
     CredentialPaths,
     PreflightCredentialInstaller,
+    render_readonly_probe_sql,
 )
 
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+TEAM_ID = UUID("9b1de3bf-9655-489a-813f-e8a7adf81290")
 
 
 @dataclass
@@ -142,7 +146,7 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
 ) -> None:
     installer, runner = _installer(tmp_path)
 
-    result = installer.install()
+    result = installer.install(TEAM_ID)
 
     assert result["ok"] is True
     assert len(result["changed"]) == 4
@@ -154,9 +158,10 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
         for command, stdin in runner.calls
         if "statefulset/loom-postgres" in command
     ]
-    assert len(database_calls) == 1
-    assert database_calls[0][1] is not None
-    assert "PASSWORD" in database_calls[0][1]
+    assert len(database_calls) == 2
+    assert all(stdin is not None for _command, stdin in database_calls)
+    assert any("PASSWORD" in (stdin or "") for _command, stdin in database_calls)
+    assert any("readonly_probe" in (stdin or "") for _command, stdin in database_calls)
     assert all(
         "--duration=6h" in command and "--audience=https://kubernetes.default.svc" in command
         for command, _ in runner.calls
@@ -182,6 +187,44 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     assert installer.paths.database_credential_source.stat().st_mode & 0o777 == 0o600
 
 
+def test_install_creates_exact_root_probe_authority_without_exposing_token(
+    tmp_path: Path,
+) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.paths.application_token_source.unlink()
+
+    result = installer.install(TEAM_ID)
+
+    raw = installer.paths.application_token_source.read_bytes().strip()
+    sql = next(
+        stdin
+        for command, stdin in runner.calls
+        if "statefulset/loom-postgres" in command
+        and stdin is not None
+        and "readonly_probe" in stdin
+    )
+    assert result["ok"] is True
+    assert raw.startswith(b"loom_readonly_probe_")
+    assert installer.paths.application_token_source.stat().st_mode & 0o777 == 0o600
+    assert raw.decode() not in sql
+    assert hashlib.sha256(raw).hexdigest() in sql
+    assert str(TEAM_ID) in sql
+    assert "competing readonly probe authority exists" in sql
+    assert raw.decode() not in json.dumps(result, sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    ("token_hash", "team_id"),
+    (("0" * 63, TEAM_ID), ("0" * 64, UUID(int=0))),
+)
+def test_readonly_probe_sql_rejects_invalid_identity(
+    token_hash: str,
+    team_id: UUID,
+) -> None:
+    with pytest.raises(CredentialInstallError, match="SQL authority"):
+        render_readonly_probe_sql(token_hash=token_hash, team_id=team_id)
+
+
 def test_install_accepts_silent_success_only_for_mutating_convergence(
     tmp_path: Path,
 ) -> None:
@@ -202,7 +245,7 @@ def test_install_accepts_silent_success_only_for_mutating_convergence(
 
     installer.run = silent_mutations
 
-    assert installer.install()["ok"] is True
+    assert installer.install(TEAM_ID)["ok"] is True
     assert installer.check()["ok"] is True
 
 
@@ -225,13 +268,13 @@ def test_install_rejects_silent_success_for_required_token_output(tmp_path: Path
     installer.run = missing_token
 
     with pytest.raises(CredentialInstallError, match="returned no output"):
-        installer.install()
+        installer.install(TEAM_ID)
 
 
 def test_install_is_idempotent_only_while_bounded_tokens_are_unchanged(tmp_path: Path) -> None:
     installer, _runner = _installer(tmp_path)
-    installer.install()
-    second = installer.install()
+    installer.install(TEAM_ID)
+    second = installer.install(TEAM_ID)
 
     assert second["changed"] == []
     assert second["ok"] is True
@@ -239,7 +282,7 @@ def test_install_is_idempotent_only_while_bounded_tokens_are_unchanged(tmp_path:
 
 def test_check_fails_closed_after_token_freshness_expires(tmp_path: Path) -> None:
     installer, _runner = _installer(tmp_path)
-    installer.install()
+    installer.install(TEAM_ID)
     installer.now = lambda: NOW + timedelta(hours=5)
 
     result = installer.check()
@@ -252,12 +295,12 @@ def test_install_requires_root_and_rejects_unsafe_source_mode(tmp_path: Path) ->
     installer, _runner = _installer(tmp_path)
     installer.euid = 501
     with pytest.raises(CredentialInstallError, match="requires root"):
-        installer.install()
+        installer.install(TEAM_ID)
 
     installer.euid = 0
     installer.paths.application_token_source.chmod(0o644)
     with pytest.raises(CredentialInstallError, match="authority is unsafe"):
-        installer.install()
+        installer.install(TEAM_ID)
 
 
 def test_install_rejects_corrupt_or_public_database_credential(tmp_path: Path) -> None:
@@ -265,8 +308,8 @@ def test_install_rejects_corrupt_or_public_database_credential(tmp_path: Path) -
     _private(installer.paths.database_credential_source, b'{"password":"exposed"}\n')
 
     with pytest.raises(CredentialInstallError, match="database credential authority"):
-        installer.install()
+        installer.install(TEAM_ID)
 
     installer.paths.database_credential_source.chmod(0o644)
     with pytest.raises(CredentialInstallError, match="authority is unsafe"):
-        installer.install()
+        installer.install(TEAM_ID)

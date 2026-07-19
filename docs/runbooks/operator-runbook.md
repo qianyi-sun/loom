@@ -1709,15 +1709,16 @@ Create the fixed invocation checkout as root with a deterministic umask. On a
 later update, require a clean checkout, fetch `dev`, and detach at the fetched
 remote head. Do not force over local drift:
 
-Before `install`, provision the dedicated database-backed application probe at
-the fixed root-only path
-`/etc/loom/staging-rollout-readonly-probe-token`. The corresponding database
-row must be the deployment-managed `readonly_probe` principal for the exact
-smoke team, with only `read:own`, no creating user, and no admin/submit scope.
-The file must be root:root `0600`, single-link, and non-empty. This is a
-bootstrap authority, not an operator token: never reuse the admin, service,
-worker, browser, or smoke credential and never pass the value through argv,
-environment variables, install records, or rollout evidence.
+During `install`, the credential installer atomically creates or reuses the
+dedicated database-backed application probe at the fixed root-only path
+`/etc/loom/staging-rollout-readonly-probe-token`. It converges exactly one
+deployment-managed `readonly_probe` row for the exact smoke team, with only
+`read:own`, no creating user, and no admin/submit scope; authority drift or a
+second active probe fails closed. The file is root:root `0600`, single-link,
+and non-empty. This is a bootstrap authority, not an operator token: never
+reuse the admin, service, worker, browser, or smoke credential and never pass
+the value through argv, environment variables, install records, or rollout
+evidence.
 
 During installation, the exact candidate applies the checked-in readonly and
 rehearsal RBAC/admission manifests with the root kubeconfig, then obtains

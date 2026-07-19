@@ -3043,8 +3043,9 @@ class HostSystem:
             return False
         return isinstance(payload, dict) and payload.get("ok") is True
 
-    def ensure_preflight_credentials(self) -> bool:
+    def ensure_preflight_credentials(self, team_id: str) -> bool:
         """Apply fixed RBAC and publish fresh bounded TokenRequest kubeconfigs."""
+        _validate_team_id(team_id)
         before = self.preflight_credentials_ready()
         result = self.runner.run(
             [
@@ -3052,6 +3053,8 @@ class HostSystem:
                 "-m",
                 "loom_cli.rollout.operator.preflight_credential_installer",
                 "install",
+                "--team-id",
+                team_id,
             ],
             env={
                 "HOME": "/root",
@@ -4463,7 +4466,7 @@ class HostInstaller:
         ):
             self.system.sync_venv(self.source_root)
             changes.append("venv")
-        if self.system.ensure_preflight_credentials():
+        if self.system.ensure_preflight_credentials(team_id):
             changes.append("preflight-credentials")
         if self.system.ensure_service_key():
             created_service_key = True

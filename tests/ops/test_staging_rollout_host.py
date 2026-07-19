@@ -369,7 +369,8 @@ class FakeSystem:
     def preflight_credentials_ready(self) -> bool:
         return self.preflight_credentials
 
-    def ensure_preflight_credentials(self) -> bool:
+    def ensure_preflight_credentials(self, team_id: str) -> bool:
+        assert team_id in {TEAM_ID, TEAM_ID_2}
         changed = not self.preflight_credentials
         self.preflight_credentials = True
         for path in (

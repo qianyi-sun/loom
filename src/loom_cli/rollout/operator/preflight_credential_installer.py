@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pwd
@@ -17,6 +18,7 @@ from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 import yaml  # type: ignore[import-untyped]
 
@@ -45,6 +47,8 @@ _DATABASE_CREDENTIAL_SOURCE = Path("/etc/loom/staging-rollout-readonly-db.json")
 _SERVICE_USER = "loom-rollout"
 _TOKEN_DURATION = "6h"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{32,1024}$")
+_READONLY_PROBE_NAME = "staging-rollout-readonly-probe"
+_READONLY_PROBE_ACTOR = "deployment:staging-rollout"
 _CHILD_ENVIRONMENT = {
     "HOME": "/root",
     "LANG": "C.UTF-8",
@@ -56,6 +60,61 @@ _CHILD_ENVIRONMENT = {
 
 class CredentialInstallError(RuntimeError):
     """Fail-closed preflight credential convergence error."""
+
+
+def render_readonly_probe_sql(*, token_hash: str, team_id: UUID) -> str:
+    """Render one exact deployment-owned readonly-probe convergence transaction."""
+    if re.fullmatch(r"[0-9a-f]{64}", token_hash) is None or team_id.int == 0:
+        raise CredentialInstallError("readonly probe SQL authority is invalid")
+    return (
+        f"""
+\\set ON_ERROR_STOP on
+BEGIN;
+INSERT INTO tokens (
+  token_hash, name, type, scopes, team_id, created_by_user_id,
+  created_by_actor, issued_at, expires_at, revoked_at, last_used_at, last_seen_at
+)
+VALUES (
+  decode('{token_hash}', 'hex'), '{_READONLY_PROBE_NAME}', 'readonly_probe',
+  ARRAY['read:own']::varchar[], '{team_id}'::uuid, NULL, '{_READONLY_PROBE_ACTOR}',
+  CURRENT_TIMESTAMP, NULL, NULL, NULL, NULL
+)
+ON CONFLICT (token_hash) DO NOTHING;
+DO $loom$
+DECLARE
+  exact_rows integer;
+  competing_rows integer;
+BEGIN
+  SELECT count(*) INTO exact_rows
+  FROM tokens
+  WHERE token_hash = decode('{token_hash}', 'hex')
+    AND name = '{_READONLY_PROBE_NAME}'
+    AND type = 'readonly_probe'
+    AND scopes = ARRAY['read:own']::varchar[]
+    AND team_id = '{team_id}'::uuid
+    AND created_by_user_id IS NULL
+    AND created_by_actor = '{_READONLY_PROBE_ACTOR}'
+    AND expires_at IS NULL
+    AND revoked_at IS NULL;
+  IF exact_rows <> 1 THEN
+    RAISE EXCEPTION 'readonly probe authority drifted';
+  END IF;
+  SELECT count(*) INTO competing_rows
+  FROM tokens
+  WHERE type = 'readonly_probe'
+    AND team_id = '{team_id}'::uuid
+    AND revoked_at IS NULL
+    AND token_hash <> decode('{token_hash}', 'hex');
+  IF competing_rows <> 0 THEN
+    RAISE EXCEPTION 'competing readonly probe authority exists';
+  END IF;
+END
+$loom$;
+COMMIT;
+SELECT 'readonly-probe-converged-v1';
+""".strip()
+        + "\n"
+    )
 
 
 class CommandResult(Protocol):
@@ -129,25 +188,18 @@ class PreflightCredentialInstaller:
             if not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts:
                 raise CredentialInstallError("preflight credential path authority is invalid")
 
-    def install(self) -> dict[str, object]:
+    def install(self, team_id: UUID) -> dict[str, object]:
         if self.euid != 0:
             raise CredentialInstallError("preflight credential install requires root")
+        if team_id.int == 0:
+            raise CredentialInstallError("readonly probe team authority is invalid")
         source_kubeconfig = self._minified_source_kubeconfig()
         for manifest in (self.paths.readonly_manifest, self.paths.rehearsal_manifest):
             self._apply_authority(manifest)
         database_credential = self._load_or_create_database_credential()
         self._converge_database_role(database_credential)
-        application_token = self._read_private(
-            self.paths.application_token_source,
-            expected_uid=self.root_uid,
-            expected_gid=self.root_gid,
-        ).strip()
-        try:
-            rendered_token = application_token.decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise CredentialInstallError("readonly application token is not ASCII") from exc
-        if _TOKEN_RE.fullmatch(rendered_token) is None:
-            raise CredentialInstallError("readonly application token payload is invalid")
+        application_token = self._load_or_create_application_token()
+        self._converge_application_probe(application_token, team_id=team_id)
         existing = self.check()
         installed_application_token: bytes | None = None
         installed_database_credential: ReadonlyDatabaseCredential | None = None
@@ -207,6 +259,61 @@ class PreflightCredentialInstaller:
             "changed": sorted(path for path, value in changed.items() if value),
             "authority": result["authority"],
         }
+
+    def _load_or_create_application_token(self) -> bytes:
+        path = self.paths.application_token_source
+        if path.exists() or path.is_symlink():
+            payload = self._read_private(
+                path,
+                expected_uid=self.root_uid,
+                expected_gid=self.root_gid,
+            ).strip()
+        else:
+            self._require_root_directory(path.parent)
+            payload = f"loom_readonly_probe_{secrets.token_urlsafe(32)}".encode("ascii")
+            self._atomic_write_private(
+                path,
+                payload + b"\n",
+                uid=self.root_uid,
+                gid=self.root_gid,
+                parent=path.parent,
+            )
+        try:
+            rendered = payload.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise CredentialInstallError("readonly application token is not ASCII") from exc
+        if _TOKEN_RE.fullmatch(rendered) is None:
+            raise CredentialInstallError("readonly application token payload is invalid")
+        return payload
+
+    def _converge_application_probe(self, token: bytes, *, team_id: UUID) -> None:
+        token_hash = hashlib.sha256(token).hexdigest()
+        self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.paths.root_kubeconfig),
+                "--namespace",
+                "loom-staging",
+                "exec",
+                "statefulset/loom-postgres",
+                "--",
+                "psql",
+                "--no-psqlrc",
+                "-AtX",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-U",
+                "loom",
+                "-d",
+                "loom",
+                "-f",
+                "-",
+            ),
+            input=render_readonly_probe_sql(token_hash=token_hash, team_id=team_id),
+            timeout=60,
+            require_output=False,
+        )
 
     def check(self) -> dict[str, object]:
         now = self.now()
@@ -550,14 +657,22 @@ class PreflightCredentialInstaller:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("command", choices=("install", "check"))
+    parser.add_argument("--team-id", type=UUID)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
-        command = _parser().parse_args(list(argv) if argv is not None else None).command
+        args = _parser().parse_args(list(argv) if argv is not None else None)
         installer = PreflightCredentialInstaller()
-        result = installer.install() if command == "install" else installer.check()
+        if args.command == "install":
+            if args.team_id is None:
+                raise CredentialInstallError("credential install requires exact team ID")
+            result = installer.install(args.team_id)
+        else:
+            if args.team_id is not None:
+                raise CredentialInstallError("credential check rejects team override")
+            result = installer.check()
         sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
         return 0 if result["ok"] else 1
     except CredentialInstallError as exc:
@@ -574,4 +689,5 @@ __all__ = [
     "CredentialPaths",
     "PreflightCredentialInstaller",
     "main",
+    "render_readonly_probe_sql",
 ]
