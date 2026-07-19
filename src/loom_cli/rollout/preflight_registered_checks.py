@@ -24,6 +24,15 @@ from loom_cli.rollout.gb10_readiness import (
     probe_gb10_fleet_readonly,
     probe_gb10_ssh_topology,
 )
+from loom_cli.rollout.image_readiness import (
+    BROWSER_IMAGE,
+    ImageArtifactSet,
+    ImageBuildSession,
+    image_plan_digest,
+)
+from loom_cli.rollout.image_readiness import (
+    DockerRunner as ImageDockerRunner,
+)
 from loom_cli.rollout.install_attestation import (
     INSTALL_ATTESTATION_PATH,
     verify_runner_install,
@@ -1478,6 +1487,119 @@ def _empty_systemd_render_probe() -> CheckProbe:
     )
 
 
+def build_image_preflight_checks(
+    run: ImageDockerRunner,
+    *,
+    candidate_root: Path,
+    image_tag: str,
+    expected_candidate_sha: str,
+) -> tuple[RegisteredCheck, RegisteredCheck]:
+    """Build the Tier 1 build-once and immutable image contract checks."""
+    expected_plan_digest = image_plan_digest()
+    session = ImageBuildSession(
+        run,
+        candidate_root=candidate_root,
+        image_tag=image_tag,
+        resolved_sha=expected_candidate_sha,
+    )
+
+    def probe_build(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != expected_candidate_sha
+            or context.bindings["image.plan.sha256"] != expected_plan_digest
+        ):
+            return _empty_image_probe()
+        try:
+            artifact = session.build()
+        except (OSError, RuntimeError, ValueError):
+            return _empty_image_probe()
+        return _image_probe(artifact)
+
+    def probe_contract(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != expected_candidate_sha
+            or context.bindings["image.plan.sha256"] != expected_plan_digest
+        ):
+            return _empty_image_probe()
+        try:
+            artifact = session.verify()
+        except (OSError, RuntimeError, ValueError):
+            return _empty_image_probe()
+        return _image_probe(artifact)
+
+    common_inputs = ("candidate.sha", "image.plan.sha256")
+    common_evidence = (
+        EvidenceField("image-digests", "string-map"),
+        EvidenceField("image-count", "integer"),
+        EvidenceField("plan-digest", "sha256"),
+        EvidenceField("artifact-digest", "sha256"),
+        EvidenceField("browser-image-id", "string"),
+    )
+    build = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="images.build",
+            failure_code="images.build.failed",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("docker.runtime", "candidate.identity"),
+            mutation_class=MutationClass.NONE,
+            input_keys=common_inputs,
+            evidence_schema=common_evidence,
+            timeout_seconds=3600,
+            freshness_ttl_seconds=86400,
+            remediation="restore Docker capacity and build every exact candidate image once",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe_build},
+    )
+    contract = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="images.contract",
+            failure_code="images.contract.invalid",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("images.build",),
+            mutation_class=MutationClass.NONE,
+            input_keys=common_inputs,
+            evidence_schema=common_evidence,
+            timeout_seconds=60,
+            freshness_ttl_seconds=3600,
+            remediation="restore exact image IDs, labels, architectures and browser entrypoint",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe_contract},
+    )
+    return build, contract
+
+
+def _image_probe(artifact: ImageArtifactSet) -> CheckProbe:
+    return CheckProbe(
+        passed=True,
+        evidence={
+            "image-digests": dict(artifact.image_digests),
+            "image-count": len(artifact.descriptors),
+            "plan-digest": artifact.plan_digest,
+            "artifact-digest": artifact.artifact_digest,
+            "browser-image-id": artifact.descriptors[BROWSER_IMAGE].image_id,
+        },
+    )
+
+
+def _empty_image_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "image-digests": {},
+            "image-count": 0,
+            "plan-digest": "0" * 64,
+            "artifact-digest": "0" * 64,
+            "browser-image-id": "unavailable",
+        },
+    )
+
+
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
@@ -1488,6 +1610,7 @@ __all__ = [
     "build_gb10_host_readiness_check",
     "build_gb10_shared_mount_check",
     "build_gb10_ssh_topology_check",
+    "build_image_preflight_checks",
     "build_kubernetes_client_check",
     "build_lifecycle_launch_cancel_check",
     "build_migration_plan_check",

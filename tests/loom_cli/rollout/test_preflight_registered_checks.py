@@ -12,6 +12,13 @@ import pytest
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
+from loom_cli.rollout.image_readiness import (
+    ALL_BUILD_IMAGES,
+    BROWSER_ENTRYPOINT,
+    BROWSER_IMAGE,
+    REVISION_LABEL,
+    image_plan_digest,
+)
 from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
@@ -39,6 +46,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_gb10_host_readiness_check,
     build_gb10_shared_mount_check,
     build_gb10_ssh_topology_check,
+    build_image_preflight_checks,
     build_kubernetes_client_check,
     build_lifecycle_launch_cancel_check,
     build_migration_plan_check,
@@ -1188,4 +1196,96 @@ def test_registered_systemd_render_rejects_candidate_drift_without_verifier() ->
 
     assert not result.passed
     assert result.evidence["unit-count"] == 0
+    assert calls == []
+
+
+def _image_inspect_payload(name: str, revision: str) -> str:
+    image_id = hashlib.sha256(name.encode()).hexdigest()
+    return json.dumps(
+        [
+            {
+                "Id": f"sha256:{image_id}",
+                "Os": "linux",
+                "Architecture": "amd64",
+                "Config": {
+                    "Labels": {REVISION_LABEL: revision},
+                    "Entrypoint": list(BROWSER_ENTRYPOINT) if name == BROWSER_IMAGE else [],
+                },
+            }
+        ]
+    )
+
+
+def test_registered_image_checks_build_once_then_reinspect_exact_ids(tmp_path: Path) -> None:
+    revision = "1" * 40
+    inspect_calls: list[str] = []
+
+    def run(argv, cwd):
+        command = tuple(argv)
+        assert command[:3] == ("docker", "image", "inspect")
+        assert cwd is None
+        name = command[-1].split(":", 1)[0]
+        inspect_calls.append(name)
+        return subprocess.CompletedProcess(argv, 0, _image_inspect_payload(name, revision), "")
+
+    build, contract = build_image_preflight_checks(
+        run,
+        candidate_root=tmp_path,
+        image_tag="staging-1111111",
+        expected_candidate_sha=revision,
+    )
+    context = CheckContext(
+        {
+            "candidate.sha": revision,
+            "image.plan.sha256": image_plan_digest(),
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("docker.runtime"),
+            _passing_dependency("candidate.identity"),
+            build,
+            contract,
+        )
+    )
+
+    results = dag.run(context, through_tier=1)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["images.build"].passed
+    assert by_id["images.contract"].passed
+    assert (
+        by_id["images.build"].evidence["image-digests"]
+        == by_id["images.contract"].evidence["image-digests"]
+    )
+    assert len(inspect_calls) == len(ALL_BUILD_IMAGES) * 2
+
+
+def test_registered_image_build_rejects_candidate_drift_without_docker(tmp_path: Path) -> None:
+    calls: list[object] = []
+    build, _contract = build_image_preflight_checks(
+        lambda *_args: calls.append(object()),  # type: ignore[arg-type,return-value]
+        candidate_root=tmp_path,
+        image_tag="staging-1111111",
+        expected_candidate_sha="1" * 40,
+    )
+    context = CheckContext(
+        {
+            "candidate.sha": "2" * 40,
+            "image.plan.sha256": image_plan_digest(),
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("docker.runtime"),
+            _passing_dependency("candidate.identity"),
+            build,
+        )
+    )
+
+    result = next(
+        item for item in dag.run(context, through_tier=1) if item.check_id == "images.build"
+    )
+    assert not result.passed
     assert calls == []
