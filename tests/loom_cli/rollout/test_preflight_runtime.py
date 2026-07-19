@@ -179,3 +179,51 @@ def test_runtime_rejects_missing_input_candidate_or_checkpoint_drift(tmp_path: P
             rehearsal_actions=runtime.rehearsal_actions,
             rehearsal_identity=runtime.rehearsal_identity,
         )
+
+
+def test_runtime_refreshes_probe_sessions_without_changing_check_identity(tmp_path: Path) -> None:
+    original = _runtime(tmp_path)
+    calls = 0
+
+    def refresh():
+        nonlocal calls
+        calls += 1
+        return _checks(0), _checks(1), _checks(2)
+
+    runtime = CandidatePreflightRuntime(
+        candidate=original.candidate,
+        tier0=original.tier0,
+        tier1=original.tier1,
+        tier2=original.tier2,
+        bindings=original.bindings,
+        rehearsal_actions=original.rehearsal_actions,
+        rehearsal_identity=original.rehearsal_identity,
+        refresh_static_checks=refresh,
+    )
+    after_init = calls
+    prebackup = runtime.prebackup_plan(runtime.candidate)
+    checkpoint_plan = runtime.checkpoint_plan(runtime.candidate, _checkpoint(tmp_path))
+
+    assert calls == after_init + 2
+    assert prebackup.registry.registry_digest == checkpoint_plan.registry.registry_digest
+
+
+def test_runtime_rejects_refreshed_check_contract_drift(tmp_path: Path) -> None:
+    original = _runtime(tmp_path)
+
+    def drifted():
+        tier0 = list(_checks(0))
+        object.__setattr__(tier0[0], "implementation_version", "drifted-v2")
+        return tuple(tier0), _checks(1), _checks(2)
+
+    with pytest.raises(ValueError, match="changed implementation identity"):
+        CandidatePreflightRuntime(
+            candidate=original.candidate,
+            tier0=original.tier0,
+            tier1=original.tier1,
+            tier2=original.tier2,
+            bindings=original.bindings,
+            rehearsal_actions=original.rehearsal_actions,
+            rehearsal_identity=original.rehearsal_identity,
+            refresh_static_checks=drifted,
+        )

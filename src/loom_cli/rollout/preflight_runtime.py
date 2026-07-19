@@ -28,6 +28,14 @@ RehearsalIdentityFactory = Callable[
     [CandidateBinding, CriticalCheckpointEvidence],
     tuple[str, str],
 ]
+StaticCheckFactory = Callable[
+    [],
+    tuple[
+        tuple[RegisteredCheck, ...],
+        tuple[RegisteredCheck, ...],
+        tuple[RegisteredCheck, ...],
+    ],
+]
 
 
 def _candidate_bindings(candidate: CandidateBinding) -> dict[str, SafeValue]:
@@ -80,6 +88,7 @@ class CandidatePreflightRuntime:
     bindings: Mapping[str, SafeValue]
     rehearsal_actions: RehearsalActionFactory
     rehearsal_identity: RehearsalIdentityFactory
+    refresh_static_checks: StaticCheckFactory | None = None
 
     def __post_init__(self) -> None:
         groups = {0: self.tier0, 1: self.tier1, 2: self.tier2}
@@ -109,6 +118,7 @@ class CandidatePreflightRuntime:
         ):
             raise ValueError("preflight runtime mutation epoch is invalid")
         object.__setattr__(self, "bindings", MappingProxyType(normalized))
+        self._static_checks()
 
     def prebackup_plan(self, candidate: CandidateBinding) -> CandidatePreflightPlan:
         """Return the complete registry used for Tier 0-2 admission."""
@@ -172,6 +182,7 @@ class CandidatePreflightRuntime:
         isolation_id: str,
         actions: Mapping[str, RehearsalAction],
     ) -> CandidatePreflightPlan:
+        tier0, tier1, tier2 = self._static_checks()
         tier3 = build_rehearsal_checks(
             actions,
             isolation_id=isolation_id,
@@ -181,7 +192,7 @@ class CandidatePreflightRuntime:
             rehearsal_plan_digest=rehearsal_plan_digest,
         )
         registry = PreflightRegistry.build(
-            self.tier0 + self.tier1 + self.tier2 + tier3,
+            tier0 + tier1 + tier2 + tier3,
             through_tier=3,
         )
         context = CheckContext(
@@ -197,9 +208,44 @@ class CandidatePreflightRuntime:
             context=context,
         )
 
+    def _static_checks(
+        self,
+    ) -> tuple[
+        tuple[RegisteredCheck, ...],
+        tuple[RegisteredCheck, ...],
+        tuple[RegisteredCheck, ...],
+    ]:
+        groups = (
+            (self.tier0, self.tier1, self.tier2)
+            if self.refresh_static_checks is None
+            else self.refresh_static_checks()
+        )
+        if len(groups) != 3:
+            raise ValueError("preflight runtime check factory is invalid")
+        declared = self.tier0 + self.tier1 + self.tier2
+        refreshed = groups[0] + groups[1] + groups[2]
+        declared_identity = {
+            check.spec.check_id: (check.spec.contract_digest, check.implementation_digest)
+            for check in declared
+        }
+        refreshed_identity = {
+            check.spec.check_id: (check.spec.contract_digest, check.implementation_digest)
+            for check in refreshed
+        }
+        if (
+            len(refreshed_identity) != len(refreshed)
+            or refreshed_identity != declared_identity
+            or any(
+                check.spec.tier != tier for tier, checks in enumerate(groups) for check in checks
+            )
+        ):
+            raise ValueError("preflight runtime check factory changed implementation identity")
+        return groups
+
 
 __all__ = [
     "CandidatePreflightRuntime",
     "RehearsalActionFactory",
     "RehearsalIdentityFactory",
+    "StaticCheckFactory",
 ]

@@ -113,6 +113,13 @@ rehearsal plan digest. Missing input keys, candidate drift, cross-environment
 checkpoint identity, or a registry digest change fail before rehearsal or
 request promotion.
 
+Runtime plan refresh creates new probe sessions for every assessment and
+checkpoint-bound rehearsal while requiring each refreshed check to retain the
+same contract and implementation digests. This prevents a cached Tier 2
+baseline from hiding mutation-epoch or infrastructure drift. Build-once image
+artifacts remain owned by their exact candidate session and are re-inspected,
+not rebuilt, when the refreshed checks consume them.
+
 Restore evidence is derived from the immutable rehearsal itself, not from an
 operator assertion. Every Tier 3 action must share one isolation ID, candidate,
 and mutation epoch; every action must report no protected mutation; the DB clone
