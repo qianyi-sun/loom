@@ -44,6 +44,12 @@ GC is staging-only and journaled:
 Runs are retryable and idempotent. Unknown or cross-environment objects are
 quarantined/reported. DB references without objects and objects without DB
 owners are reconciled in both directions; neither class is silently deleted.
+The reusable executor in `loom.data_lifecycle_gc` binds a deterministic plan to
+the current mutation epoch. An unversioned object is deletion-eligible only
+when its exact SHA-256 is registered; a versioned object is addressed by its
+exact version. Object deletion, absence verification, business-metadata
+removal, and the epoch increment are distinct journaled transitions. A dry run
+records its inventory digest but cannot call the object-store deleter.
 
 ## Rollout checkpoint versus disaster recovery
 
