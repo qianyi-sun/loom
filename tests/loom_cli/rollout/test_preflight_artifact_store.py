@@ -65,6 +65,7 @@ def _publish(store: PreflightArtifactStore):
         images=images,
         manifests=_manifests(images),
         migration_plan_sha256="1" * 64,
+        migration_target_revision="0067",
         browser_report_schema_sha256="2" * 64,
     )
 
@@ -127,5 +128,21 @@ def test_store_rejects_cross_artifact_image_drift(tmp_path: Path) -> None:
             images=images,
             manifests=drifted,
             migration_plan_sha256="1" * 64,
+            migration_target_revision="0067",
+            browser_report_schema_sha256="2" * 64,
+        )
+
+
+def test_store_rejects_unbounded_migration_target(tmp_path: Path) -> None:
+    images = _images()
+    with pytest.raises(PreflightArtifactStoreError, match="input binding"):
+        PreflightArtifactStore(tmp_path / "state").publish(
+            candidate_sha="a" * 40,
+            candidate_tree="f" * 40,
+            mutation_epoch=8,
+            images=images,
+            manifests=_manifests(images),
+            migration_plan_sha256="1" * 64,
+            migration_target_revision="head",
             browser_report_schema_sha256="2" * 64,
         )

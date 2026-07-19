@@ -30,6 +30,7 @@ def _plan() -> RehearsalPlan:
         object_inventory_root="f" * 64,
         schema_revision="0066",
         image_digests={
+            "loom-control-plane": "sha256:" + "8" * 64,
             "loom-rehearsal-postgres": "sha256:" + "9" * 64,
             "loom-service": "sha256:" + "1" * 64,
         },
@@ -45,6 +46,7 @@ def _plan() -> RehearsalPlan:
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256="8" * 64,
         migration_plan_sha256="3" * 64,
+        migration_target_revision="0067",
         browser_report_schema_sha256="4" * 64,
         resources=RehearsalResources.derive(
             "rehearsal-" + "5" * 24,
@@ -155,6 +157,7 @@ def test_helper_binds_every_artifact_publication_identity(
         manifest_artifact_sha256=plan.manifest_artifact_sha256,
         rendered_manifest_sha256=plan.rendered_manifest_sha256,
         migration_plan_sha256=plan.migration_plan_sha256,
+        migration_target_revision=plan.migration_target_revision,
         browser_report_schema_sha256=plan.browser_report_schema_sha256,
     )
 

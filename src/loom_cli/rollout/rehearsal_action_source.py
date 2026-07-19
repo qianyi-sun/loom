@@ -25,6 +25,7 @@ from loom_cli.rollout.rehearsal_readiness import (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ROUTE_RE = re.compile(r"^https://[a-z0-9.-]+/[a-z0-9/-]+$")
 _IMAGE_TAG_RE = re.compile(r"^staging-[a-z0-9][a-z0-9-]{5,63}$")
+_REVISION_RE = re.compile(r"^[0-9]{4}(?:_[a-z0-9_]+)?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +97,7 @@ class RehearsalPlan:
     manifest_artifact_sha256: str
     rendered_manifest_sha256: str
     migration_plan_sha256: str
+    migration_target_revision: str
     browser_report_schema_sha256: str
     resources: RehearsalResources
 
@@ -135,7 +137,8 @@ class RehearsalPlan:
             or self.artifact_descriptor_path.name != "artifact.json"
             or self.rendered_manifest_path.name != "rendered.yaml"
             or not self.db_snapshot_identity.startswith("pgdump-sha256:")
-            or not self.schema_revision
+            or _REVISION_RE.fullmatch(self.schema_revision) is None
+            or _REVISION_RE.fullmatch(self.migration_target_revision) is None
             or _IMAGE_TAG_RE.fullmatch(self.image_tag) is None
             or not image_digests
             or any(
@@ -171,6 +174,7 @@ class RehearsalPlan:
             "image_tag": self.image_tag,
             "manifest_artifact_sha256": self.manifest_artifact_sha256,
             "migration_plan_sha256": self.migration_plan_sha256,
+            "migration_target_revision": self.migration_target_revision,
             "mutation_epoch": self.mutation_epoch,
             "object_inventory_root": self.object_inventory_root,
             "resources": {
@@ -205,6 +209,7 @@ class RehearsalPlan:
             "image_tag",
             "manifest_artifact_sha256",
             "migration_plan_sha256",
+            "migration_target_revision",
             "mutation_epoch",
             "object_inventory_root",
             "resources",
@@ -246,6 +251,7 @@ class RehearsalPlan:
             "image_tag",
             "manifest_artifact_sha256",
             "migration_plan_sha256",
+            "migration_target_revision",
             "object_inventory_root",
             "rendered_manifest_path",
             "rendered_manifest_sha256",
@@ -276,6 +282,7 @@ class RehearsalPlan:
             manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
             rendered_manifest_sha256=str(value["rendered_manifest_sha256"]),
             migration_plan_sha256=str(value["migration_plan_sha256"]),
+            migration_target_revision=str(value["migration_target_revision"]),
             browser_report_schema_sha256=str(value["browser_report_schema_sha256"]),
             resources=RehearsalResources(
                 database=str(resources["database"]),
@@ -311,6 +318,7 @@ class RehearsalActionSource:
     manifest_artifacts: Callable[[], ManifestArtifact]
     artifact_store: PreflightArtifactStore
     migration_plan_sha256: str
+    migration_target_revision: str
     browser_report_schema_sha256: str
     route_origin: str
     backend: RehearsalBackend
@@ -318,6 +326,7 @@ class RehearsalActionSource:
     def __post_init__(self) -> None:
         if (
             _SHA256_RE.fullmatch(self.migration_plan_sha256) is None
+            or _REVISION_RE.fullmatch(self.migration_target_revision) is None
             or _SHA256_RE.fullmatch(self.browser_report_schema_sha256) is None
             or not self.route_origin.startswith("https://")
             or self.route_origin.endswith("/")
@@ -404,6 +413,7 @@ class RehearsalActionSource:
             images=artifacts,
             manifests=manifests,
             migration_plan_sha256=self.migration_plan_sha256,
+            migration_target_revision=self.migration_target_revision,
             browser_report_schema_sha256=self.browser_report_schema_sha256,
         )
         return RehearsalPlan(
@@ -426,6 +436,7 @@ class RehearsalActionSource:
             manifest_artifact_sha256=publication.manifest_artifact_sha256,
             rendered_manifest_sha256=publication.rendered_manifest_sha256,
             migration_plan_sha256=self.migration_plan_sha256,
+            migration_target_revision=self.migration_target_revision,
             browser_report_schema_sha256=self.browser_report_schema_sha256,
             resources=resources,
         )
@@ -448,6 +459,7 @@ class RehearsalActionSource:
             "manifest_artifact_sha256": manifests.artifact_digest,
             "rendered_manifest_sha256": manifests.rendered_sha256,
             "migration_plan_sha256": self.migration_plan_sha256,
+            "migration_target_revision": self.migration_target_revision,
             "route_origin": self.route_origin,
             "schema_version": 1,
         }

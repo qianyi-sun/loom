@@ -24,6 +24,7 @@ def _plan() -> RehearsalPlan:
         object_inventory_root="f" * 64,
         schema_revision="0066",
         image_digests={
+            "loom-control-plane": "sha256:" + "8" * 64,
             "loom-rehearsal-postgres": "sha256:" + "9" * 64,
             "loom-service": "sha256:" + "1" * 64,
         },
@@ -39,6 +40,7 @@ def _plan() -> RehearsalPlan:
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256="8" * 64,
         migration_plan_sha256="3" * 64,
+        migration_target_revision="0067",
         browser_report_schema_sha256="4" * 64,
         resources=RehearsalResources.derive(
             "rehearsal-" + "5" * 24,
@@ -148,7 +150,12 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
                             "imageID": "docker://" + plan.image_digests["loom-rehearsal-postgres"],
                             "name": "postgres",
                             "ready": True,
-                        }
+                        },
+                        {
+                            "imageID": "docker://" + plan.image_digests["loom-control-plane"],
+                            "name": "migration",
+                            "ready": True,
+                        },
                     ],
                 },
             }
@@ -189,6 +196,8 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
         "capabilities": {"drop": ["ALL"]},
         "readOnlyRootFilesystem": True,
     }
+    assert manifest["spec"]["containers"][1]["image"] == ("loom-control-plane:" + plan.image_tag)
+    assert manifest["spec"]["containers"][1]["command"] == ["/bin/sleep", "infinity"]
 
 
 def test_database_rejects_missing_exact_image_before_kubernetes() -> None:
@@ -207,6 +216,76 @@ def test_database_rejects_missing_exact_image_before_kubernetes() -> None:
 
     assert outcome.blockers == {"database": "image-authority-missing"}
     assert calls == []
+
+
+def test_migration_runs_exact_candidate_against_restored_database() -> None:
+    plan = _plan()
+    revision = plan.schema_revision
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _payload, _timeout):
+        nonlocal revision
+        command = tuple(argv)
+        calls.append(command)
+        if "psql" in command:
+            sql = next(item for item in command if item.startswith("--command="))
+            record = (
+                {"database": plan.resources.database, "restored": True}
+                if "to_regclass" in sql
+                else {"schema_revision": revision}
+            )
+            return subprocess.CompletedProcess(argv, 0, json.dumps(record), "")
+        if "alembic" in command:
+            revision = plan.migration_target_revision
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.migration", plan)
+
+    assert outcome.passed
+    assert outcome.details == {
+        "plan-sha256": plan.migration_plan_sha256,
+        "schema-revision": plan.migration_target_revision,
+        "status": "migrated",
+    }
+    migration = next(command for command in calls if "alembic" in command)
+    assert "--container" in migration
+    assert migration[migration.index("--container") + 1] == "migration"
+    db_url = next(item for item in migration if item.startswith("LOOM_DB_URL="))
+    assert plan.resources.database in db_url
+    assert "loom-staging" not in db_url
+
+
+def test_migration_is_idempotent_and_rejects_unexpected_baseline() -> None:
+    plan = _plan()
+    revision = plan.migration_target_revision
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        calls.append(command)
+        if "psql" not in command:
+            raise AssertionError(argv)
+        sql = next(item for item in command if item.startswith("--command="))
+        record = (
+            {"database": plan.resources.database, "restored": True}
+            if "to_regclass" in sql
+            else {"schema_revision": revision}
+        )
+        return subprocess.CompletedProcess(argv, 0, json.dumps(record), "")
+
+    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.migration", plan)
+    assert outcome.passed
+    assert all("alembic" not in command for command in calls)
+
+    revision = "unexpected"
+    blocked = IsolatedRehearsalExecutor(run=run).execute("rehearsal.migration", plan)
+    assert blocked.blockers == {"migration": "database-baseline-drift"}
+
+    record = plan.to_record()
+    record["migration_target_revision"] = "head"
+    with pytest.raises(ValueError, match="identity"):
+        RehearsalPlan.from_record(record)
 
 
 def test_stream_runner_reads_private_file_without_following_parent_symlinks(
@@ -258,5 +337,5 @@ def test_stream_runner_rejects_mode_and_read_time_drift(
 
 
 def test_unimplemented_rehearsal_steps_remain_fail_closed() -> None:
-    outcome = IsolatedRehearsalExecutor().execute("rehearsal.migration", _plan())
+    outcome = IsolatedRehearsalExecutor().execute("rehearsal.release", _plan())
     assert outcome.blockers == {"executor": "isolated-action-not-implemented"}

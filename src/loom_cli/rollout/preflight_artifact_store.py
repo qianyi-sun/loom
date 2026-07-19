@@ -19,6 +19,7 @@ from loom_cli.rollout.manifest_readiness import ManifestArtifact
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_REVISION_RE = re.compile(r"^[0-9]{4}(?:_[a-z0-9_]+)?$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _MAX_DESCRIPTOR_BYTES = 1024 * 1024
@@ -36,6 +37,7 @@ class _ParsedDescriptor(TypedDict):
     image_artifact_sha256: str
     manifest_artifact_sha256: str
     migration_plan_sha256: str
+    migration_target_revision: str
     mutation_epoch: int
     rendered_manifest_sha256: str
     resource_set_digest: str
@@ -55,6 +57,7 @@ class PreflightArtifactPublication:
     manifest_artifact_sha256: str
     rendered_manifest_sha256: str
     migration_plan_sha256: str
+    migration_target_revision: str
     browser_report_schema_sha256: str
 
     def __post_init__(self) -> None:
@@ -75,6 +78,7 @@ class PreflightArtifactPublication:
                 )
             )
             or not self.descriptor_path.is_absolute()
+            or _REVISION_RE.fullmatch(self.migration_target_revision) is None
             or not self.rendered_manifest_path.is_absolute()
             or ".." in self.descriptor_path.parts
             or ".." in self.rendered_manifest_path.parts
@@ -106,6 +110,7 @@ class PreflightArtifactStore:
         images: ImageArtifactSet,
         manifests: ManifestArtifact,
         migration_plan_sha256: str,
+        migration_target_revision: str,
         browser_report_schema_sha256: str,
     ) -> PreflightArtifactPublication:
         descriptor = _descriptor(
@@ -115,6 +120,7 @@ class PreflightArtifactStore:
             images=images,
             manifests=manifests,
             migration_plan_sha256=migration_plan_sha256,
+            migration_target_revision=migration_target_revision,
             browser_report_schema_sha256=browser_report_schema_sha256,
         )
         bundle_digest = _hash_json(descriptor)
@@ -132,6 +138,7 @@ class PreflightArtifactStore:
             manifest_artifact_sha256=manifests.artifact_digest,
             rendered_manifest_sha256=manifests.rendered_sha256,
             migration_plan_sha256=migration_plan_sha256,
+            migration_target_revision=migration_target_revision,
             browser_report_schema_sha256=browser_report_schema_sha256,
         )
         self._ensure_roots()
@@ -206,6 +213,7 @@ class PreflightArtifactStore:
             manifest_artifact_sha256=descriptor["manifest_artifact_sha256"],
             rendered_manifest_sha256=descriptor["rendered_manifest_sha256"],
             migration_plan_sha256=descriptor["migration_plan_sha256"],
+            migration_target_revision=descriptor["migration_target_revision"],
             browser_report_schema_sha256=descriptor["browser_report_schema_sha256"],
         )
 
@@ -222,6 +230,7 @@ def _descriptor(
     images: ImageArtifactSet,
     manifests: ManifestArtifact,
     migration_plan_sha256: str,
+    migration_target_revision: str,
     browser_report_schema_sha256: str,
 ) -> dict[str, object]:
     if (
@@ -230,6 +239,7 @@ def _descriptor(
         or any(character not in "0123456789abcdef" for character in candidate_tree)
         or mutation_epoch < 0
         or _SHA256_RE.fullmatch(migration_plan_sha256) is None
+        or _REVISION_RE.fullmatch(migration_target_revision) is None
         or _SHA256_RE.fullmatch(browser_report_schema_sha256) is None
         or manifests.image_identities
         != {
@@ -247,6 +257,7 @@ def _descriptor(
         "image_digests": dict(images.image_digests),
         "manifest_artifact_sha256": manifests.artifact_digest,
         "migration_plan_sha256": migration_plan_sha256,
+        "migration_target_revision": migration_target_revision,
         "mutation_epoch": mutation_epoch,
         "rendered_manifest_sha256": manifests.rendered_sha256,
         "resource_set_digest": manifests.resource_set_digest,
@@ -264,6 +275,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "image_digests",
         "manifest_artifact_sha256",
         "migration_plan_sha256",
+        "migration_target_revision",
         "mutation_epoch",
         "rendered_manifest_sha256",
         "resource_set_digest",
@@ -292,6 +304,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "image_artifact_sha256",
         "manifest_artifact_sha256",
         "migration_plan_sha256",
+        "migration_target_revision",
         "rendered_manifest_sha256",
         "resource_set_digest",
     )
@@ -304,6 +317,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         image_artifact_sha256=str(value["image_artifact_sha256"]),
         manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
         migration_plan_sha256=str(value["migration_plan_sha256"]),
+        migration_target_revision=str(value["migration_target_revision"]),
         mutation_epoch=mutation_epoch,
         rendered_manifest_sha256=str(value["rendered_manifest_sha256"]),
         resource_set_digest=str(value["resource_set_digest"]),

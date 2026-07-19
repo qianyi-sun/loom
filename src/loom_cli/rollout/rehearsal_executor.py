@@ -153,6 +153,8 @@ class IsolatedRehearsalExecutor:
             return self._namespace(plan)
         if check_id == "rehearsal.db-clone":
             return self._database(plan)
+        if check_id == "rehearsal.migration":
+            return self._migration(plan)
         return RehearsalStepOutcome(
             passed=False,
             details={"status": "blocked"},
@@ -288,8 +290,10 @@ class IsolatedRehearsalExecutor:
         )
 
     def _database(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
-        image_digest = plan.image_digests.get(REHEARSAL_POSTGRES_IMAGE)
-        if image_digest is None:
+        if any(
+            plan.image_digests.get(name) is None
+            for name in (REHEARSAL_POSTGRES_IMAGE, "loom-control-plane")
+        ):
             return _blocked("database", "image-authority-missing")
         manifest = _database_pod_manifest(plan)
         applied = self._command(
@@ -403,6 +407,53 @@ class IsolatedRehearsalExecutor:
         if revision is None or not isinstance(revision.get("schema_revision"), str):
             return None
         return {**identity, "schema_revision": revision["schema_revision"]}
+
+    def _migration(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+        identity = self._database_identity(plan)
+        if identity is None or identity.get("database") != plan.resources.database:
+            return _blocked("migration", "database-unavailable")
+        observed_revision = identity.get("schema_revision")
+        if identity.get("restored") is not True or not isinstance(observed_revision, str):
+            return _blocked("migration", "database-baseline-missing")
+        if observed_revision == plan.migration_target_revision:
+            return _migration_ready(plan)
+        if observed_revision != plan.schema_revision:
+            return _blocked("migration", "database-baseline-drift")
+        db_url = "postgresql+psycopg://loom_rehearsal@127.0.0.1:5432/" + plan.resources.database
+        migrated = self._status(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "exec",
+                "pod/loom-rehearsal-db",
+                "--container",
+                "migration",
+                "--",
+                "env",
+                f"LOOM_DB_URL={db_url}",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "alembic",
+                "-c",
+                "migrations/alembic.ini",
+                "upgrade",
+                "head",
+            ),
+            timeout=900,
+        )
+        if not migrated:
+            return _blocked("migration", "upgrade-failed")
+        verified = self._database_identity(plan)
+        if (
+            verified is None
+            or verified.get("database") != plan.resources.database
+            or verified.get("restored") is not True
+            or verified.get("schema_revision") != plan.migration_target_revision
+        ):
+            return _blocked("migration", "upgrade-verification-failed")
+        return _migration_ready(plan)
 
     def _psql_json(self, plan: RehearsalPlan, sql: str) -> dict[str, object] | None:
         return self._command(
@@ -576,12 +627,14 @@ def _default_deny_network_policy_matches(value: dict[str, object], plan: Rehears
 
 def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
     image = f"{REHEARSAL_POSTGRES_IMAGE}:{plan.image_tag}"
+    migration_image = f"loom-control-plane:{plan.image_tag}"
     return {
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {
             "annotations": {
                 "loom.openai.dev/image-id": plan.image_digests[REHEARSAL_POSTGRES_IMAGE],
+                "loom.openai.dev/migration-image-id": plan.image_digests["loom-control-plane"],
                 "loom.openai.dev/plan-sha256": plan.plan_digest,
             },
             "labels": {"loom.openai.dev/component": "rehearsal-database"},
@@ -637,7 +690,31 @@ def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
                         {"mountPath": "/var/run/postgresql", "name": "socket"},
                         {"mountPath": "/tmp", "name": "tmp"},
                     ],
-                }
+                },
+                {
+                    "command": ["/bin/sleep", "infinity"],
+                    "env": [
+                        {"name": "HOME", "value": "/tmp"},
+                        {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+                    ],
+                    "image": migration_image,
+                    "imagePullPolicy": "Never",
+                    "name": "migration",
+                    "resources": {
+                        "limits": {"cpu": "1", "ephemeral-storage": "1Gi", "memory": "1Gi"},
+                        "requests": {
+                            "cpu": "100m",
+                            "ephemeral-storage": "128Mi",
+                            "memory": "256Mi",
+                        },
+                    },
+                    "securityContext": {
+                        "allowPrivilegeEscalation": False,
+                        "capabilities": {"drop": ["ALL"]},
+                        "readOnlyRootFilesystem": True,
+                    },
+                    "volumeMounts": [{"mountPath": "/tmp", "name": "tmp"}],
+                },
             ],
             "enableServiceLinks": False,
             "restartPolicy": "Never",
@@ -709,7 +786,10 @@ def _database_pod_matches(
         return False
     conditions = status.get("conditions")
     statuses = status.get("containerStatuses")
-    expected_digest = plan.image_digests[REHEARSAL_POSTGRES_IMAGE]
+    expected_digests = {
+        "migration": plan.image_digests["loom-control-plane"],
+        "postgres": plan.image_digests[REHEARSAL_POSTGRES_IMAGE],
+    }
     return bool(
         isinstance(conditions, list)
         and any(
@@ -719,12 +799,15 @@ def _database_pod_matches(
             for condition in conditions
         )
         and isinstance(statuses, list)
-        and len(statuses) == 1
-        and isinstance(statuses[0], dict)
-        and statuses[0].get("name") == "postgres"
-        and isinstance(statuses[0].get("imageID"), str)
-        and str(statuses[0]["imageID"]).endswith(expected_digest)
-        and statuses[0].get("ready") is True
+        and len(statuses) == 2
+        and all(isinstance(status, dict) for status in statuses)
+        and {str(status["name"]) for status in statuses} == set(expected_digests)
+        and all(
+            isinstance(status.get("imageID"), str)
+            and str(status["imageID"]).endswith(expected_digests[str(status["name"])])
+            and status.get("ready") is True
+            for status in statuses
+        )
     )
 
 
@@ -735,6 +818,18 @@ def _database_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
             "database": plan.resources.database,
             "schema-revision": plan.schema_revision,
             "status": "restored",
+        },
+        blockers={},
+    )
+
+
+def _migration_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
+    return RehearsalStepOutcome(
+        passed=True,
+        details={
+            "plan-sha256": plan.migration_plan_sha256,
+            "schema-revision": plan.migration_target_revision,
+            "status": "migrated",
         },
         blockers={},
     )

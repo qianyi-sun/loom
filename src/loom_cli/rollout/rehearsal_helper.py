@@ -107,6 +107,7 @@ def _verify_artifact_publication(plan: RehearsalPlan) -> None:
         or publication.manifest_artifact_sha256 != plan.manifest_artifact_sha256
         or publication.rendered_manifest_sha256 != plan.rendered_manifest_sha256
         or publication.migration_plan_sha256 != plan.migration_plan_sha256
+        or publication.migration_target_revision != plan.migration_target_revision
         or publication.browser_report_schema_sha256 != plan.browser_report_schema_sha256
     ):
         raise ValueError("rehearsal helper artifact publication drifted")
