@@ -540,6 +540,14 @@ request-owned single epoch advance and an empty server-side manifest diff. It
 does not call any component apply method, rerender a manifest or rebuild an
 image; drift is returned as bounded per-component blocker evidence.
 
+The post-apply drift check never tries to compare the intentionally changed
+live baseline with its pre-apply evidence. It requires the epoch claimed by
+the exact request, then reruns the same final-admission implementations for the
+epoch-independent candidate, runner install, credential metadata and GB10
+mount/boot identities. Those records must remain unexpired and retain their
+attested implementation digests; image builds, Tier 1 artifacts, the changed
+live baseline and backup eligibility are not repeated after mutation.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from loom_cli.rollout.final_attestation_admission import validate_final_attestation
+from loom_cli.rollout.final_attestation_admission import (
+    validate_final_attestation,
+    validate_post_apply_attestation_drift,
+)
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_contract import (
@@ -310,5 +314,101 @@ def test_final_admission_rejects_tier2_baseline_drift() -> None:
             candidate=_candidate(),
             plan=drifted_plan,
             current_mutation_epoch=7,
+            now=NOW,
+        )
+
+
+def test_post_apply_drift_reuses_exact_admission_without_baseline_replay() -> None:
+    plan = _plan(_checks())
+    admission = validate_final_attestation(
+        attestation=_attestation(plan),
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    evidence = validate_post_apply_attestation_drift(
+        admission=admission,
+        plan=plan,
+        current_mutation_epoch=8,
+        now=NOW,
+    )
+
+    assert evidence.observed_mutation_epoch == 8
+    assert {execution.check_id for execution in evidence.executions} == {
+        "candidate.identity",
+        "runner.install",
+        "credentials.metadata",
+        "gb10.shared-mount",
+        "gb10.host-readiness",
+    }
+    assert len(evidence.evidence_digest) == 64
+
+
+def test_post_apply_drift_rejects_wrong_epoch_or_expired_attestation() -> None:
+    plan = _plan(_checks())
+    admission = validate_final_attestation(
+        attestation=_attestation(plan),
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    with pytest.raises(ValueError, match="mutation epoch"):
+        validate_post_apply_attestation_drift(
+            admission=admission,
+            plan=plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
+    with pytest.raises(ValueError, match="mutation epoch or attestation drifted"):
+        validate_post_apply_attestation_drift(
+            admission=admission,
+            plan=plan,
+            current_mutation_epoch=8,
+            now=NOW + timedelta(minutes=31),
+        )
+
+
+def test_post_apply_drift_reruns_and_rejects_changed_host_identity() -> None:
+    plan = _plan(_checks())
+    admission = validate_final_attestation(
+        attestation=_attestation(plan),
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+    drifted_plan = _plan(_checks(boot_id="boot-2"))
+
+    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+        validate_post_apply_attestation_drift(
+            admission=admission,
+            plan=drifted_plan,
+            current_mutation_epoch=8,
+            now=NOW,
+        )
+
+
+def test_post_apply_drift_rejects_route_or_config_context_drift() -> None:
+    plan = _plan(_checks())
+    admission = validate_final_attestation(
+        attestation=_attestation(plan),
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+    drifted_bindings = dict(plan.context.bindings)
+    drifted_bindings["route"] = "https://yylx.world/other"
+    drifted_plan = replace(plan, context=CheckContext(drifted_bindings))
+
+    with pytest.raises(ValueError, match="context binding drifted"):
+        validate_post_apply_attestation_drift(
+            admission=admission,
+            plan=drifted_plan,
+            current_mutation_epoch=8,
             now=NOW,
         )
