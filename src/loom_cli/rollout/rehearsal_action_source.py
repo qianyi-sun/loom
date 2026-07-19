@@ -5,13 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
+from loom_cli.rollout.admin_smoke_contract import (
+    AdminSmokeAuthority as RehearsalSmokeAuthority,
+)
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ImageArtifactSet
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
@@ -28,8 +30,6 @@ _ROUTE_RE = re.compile(r"^https://[a-z0-9.-]+/[a-z0-9/-]+$")
 _IMAGE_TAG_RE = re.compile(r"^staging-[a-z0-9][a-z0-9-]{5,63}$")
 _CLUSTER_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _REVISION_RE = re.compile(r"^[0-9]{4}(?:_[a-z0-9_]+)?$")
-_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,60 +76,6 @@ class RehearsalResources:
             or not self.systemd_unit.endswith(".service")
         ):
             raise ValueError("rehearsal resource escaped isolated authority")
-
-
-@dataclass(frozen=True, slots=True)
-class RehearsalSmokeAuthority:
-    """Non-secret represented-user smoke inputs bound into the isolation ID."""
-
-    represented_username: str
-    team_id: str
-    admin_actor: str
-    task_id: str
-    required_worker_pool: str
-    agent: str
-
-    def __post_init__(self) -> None:
-        try:
-            parsed_team = uuid.UUID(self.team_id)
-        except ValueError as exc:
-            raise ValueError("rehearsal smoke team identity is invalid") from exc
-        if (
-            parsed_team.version != 4
-            or str(parsed_team) != self.team_id
-            or _SAFE_NAME_RE.fullmatch(self.represented_username) is None
-            or _SAFE_NAME_RE.fullmatch(self.admin_actor) is None
-            or _TASK_ID_RE.fullmatch(self.task_id) is None
-            or _SAFE_NAME_RE.fullmatch(self.required_worker_pool) is None
-            or _SAFE_NAME_RE.fullmatch(self.agent) is None
-        ):
-            raise ValueError("rehearsal smoke authority is invalid")
-
-    def to_record(self) -> dict[str, str]:
-        return {
-            "admin_actor": self.admin_actor,
-            "agent": self.agent,
-            "represented_username": self.represented_username,
-            "required_worker_pool": self.required_worker_pool,
-            "task_id": self.task_id,
-            "team_id": self.team_id,
-        }
-
-    @classmethod
-    def from_record(cls, value: Mapping[str, object]) -> RehearsalSmokeAuthority:
-        expected = {
-            "admin_actor",
-            "agent",
-            "represented_username",
-            "required_worker_pool",
-            "task_id",
-            "team_id",
-        }
-        if set(value) != expected or any(
-            not isinstance(value.get(field), str) for field in expected
-        ):
-            raise ValueError("rehearsal smoke authority schema is invalid")
-        return cls(**{field: str(value[field]) for field in expected})
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +147,7 @@ class RehearsalPlan:
             or _REVISION_RE.fullmatch(self.schema_revision) is None
             or _REVISION_RE.fullmatch(self.migration_target_revision) is None
             or _IMAGE_TAG_RE.fullmatch(self.image_tag) is None
+            or self.smoke_authority.required_worker_pool is None
             or not image_digests
             or set(image_digests) != {name for name, _path in ALL_BUILD_IMAGES}
             or any(

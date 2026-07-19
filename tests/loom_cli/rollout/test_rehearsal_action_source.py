@@ -220,7 +220,7 @@ def test_isolation_identity_changes_with_smoke_authority(tmp_path: Path) -> None
     ],
 )
 def test_smoke_authority_rejects_unsafe_identity(field: str, value: str) -> None:
-    with pytest.raises(ValueError, match=r"smoke (team identity|authority) is invalid"):
+    with pytest.raises(ValueError, match=r"admin smoke (team identity|authority) is invalid"):
         replace(_smoke_authority(), **{field: value})
 
 
