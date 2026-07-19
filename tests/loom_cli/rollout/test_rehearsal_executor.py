@@ -42,17 +42,24 @@ def _plan() -> RehearsalPlan:
 
 def test_namespace_uses_fixed_scoped_apply_and_exact_readback() -> None:
     calls: list[tuple[tuple[str, ...], bytes | None, int]] = []
+    records: dict[str, object] = {}
 
     def run(argv, payload, timeout):
         calls.append((tuple(argv), payload, timeout))
-        record = json.loads(payload if payload is not None else calls[0][1] or b"{}")
+        if payload is not None:
+            record = json.loads(payload)
+            records[str(record["kind"])] = record
+        elif "rolebinding" in argv:
+            record = records["RoleBinding"]
+        else:
+            record = records["Namespace"]
         return subprocess.CompletedProcess(argv, 0, json.dumps(record), "")
 
     plan = _plan()
     outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.namespace", plan)
 
     assert outcome.passed
-    assert len(calls) == 2
+    assert len(calls) == 4
     assert calls[0][0] == (
         "kubectl",
         "--kubeconfig",
@@ -66,7 +73,9 @@ def test_namespace_uses_fixed_scoped_apply_and_exact_readback() -> None:
         "-o",
         "json",
     )
-    assert calls[1][0][3:6] == ("get", "namespace", plan.resources.namespace)
+    assert calls[1][0][3:6] == ("--namespace", plan.resources.namespace, "apply")
+    assert calls[2][0][3:6] == ("get", "namespace", plan.resources.namespace)
+    assert calls[3][0][3:6] == ("--namespace", plan.resources.namespace, "get")
     namespace = json.loads(calls[0][1] or b"{}")
     assert namespace["metadata"]["annotations"]["loom.openai.dev/plan-sha256"] == plan.plan_digest
     assert namespace["metadata"]["labels"]["loom.openai.dev/authority"] == "staging-preflight"
@@ -92,7 +101,7 @@ def test_namespace_returns_normalized_blockers_without_command_output() -> None:
         return subprocess.CompletedProcess(argv, 0, '{"apiVersion":"v1","kind":"Namespace"}', "")
 
     blocked = IsolatedRehearsalExecutor(run=drift).execute("rehearsal.namespace", plan)
-    assert blocked.blockers == {"namespace": "readback-drift"}
+    assert blocked.blockers == {"namespace": "observer-binding-failed"}
 
 
 def test_unimplemented_rehearsal_steps_remain_fail_closed() -> None:

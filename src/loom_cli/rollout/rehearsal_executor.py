@@ -103,6 +103,28 @@ class IsolatedRehearsalExecutor:
         )
         if apply is None or not _namespace_matches(apply, plan):
             return _blocked("namespace", "apply-failed")
+        binding_manifest = _observer_binding_manifest(plan)
+        binding = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "apply",
+                "--server-side=true",
+                "--field-manager=loom-staging-preflight",
+                "--request-timeout=30s",
+                "-f",
+                "-",
+                "-o",
+                "json",
+            ),
+            _json_bytes(binding_manifest),
+            timeout=45,
+        )
+        if binding is None or not _observer_binding_matches(binding, plan):
+            return _blocked("namespace", "observer-binding-failed")
         observed = self._command(
             (
                 "kubectl",
@@ -120,6 +142,25 @@ class IsolatedRehearsalExecutor:
         )
         if observed is None or not _namespace_matches(observed, plan):
             return _blocked("namespace", "readback-drift")
+        observed_binding = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "rolebinding",
+                "loom-rollout-rehearsal-observer",
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if observed_binding is None or not _observer_binding_matches(observed_binding, plan):
+            return _blocked("namespace", "observer-readback-drift")
         return RehearsalStepOutcome(
             passed=True,
             details={"namespace": plan.resources.namespace, "status": "ready"},
@@ -193,6 +234,49 @@ def _namespace_matches(value: dict[str, object], plan: RehearsalPlan) -> bool:
         and isinstance(expected_annotations, dict)
         and all(labels.get(key) == item for key, item in expected_labels.items())
         and all(annotations.get(key) == item for key, item in expected_annotations.items())
+    )
+
+
+def _observer_binding_manifest(plan: RehearsalPlan) -> dict[str, object]:
+    return {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "metadata": {
+            "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+            "name": "loom-rollout-rehearsal-observer",
+            "namespace": plan.resources.namespace,
+        },
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "ClusterRole",
+            "name": "loom-rollout-rehearsal-observer",
+        },
+        "subjects": [
+            {
+                "kind": "ServiceAccount",
+                "name": "loom-rollout-rehearsal",
+                "namespace": "loom-rollout-system",
+            }
+        ],
+    }
+
+
+def _observer_binding_matches(value: dict[str, object], plan: RehearsalPlan) -> bool:
+    expected = _observer_binding_manifest(plan)
+    metadata = value.get("metadata")
+    expected_metadata = expected["metadata"]
+    if not isinstance(metadata, dict) or not isinstance(expected_metadata, dict):
+        return False
+    annotations = metadata.get("annotations")
+    return bool(
+        value.get("apiVersion") == expected["apiVersion"]
+        and value.get("kind") == expected["kind"]
+        and metadata.get("name") == expected_metadata["name"]
+        and metadata.get("namespace") == expected_metadata["namespace"]
+        and isinstance(annotations, dict)
+        and annotations.get("loom.openai.dev/plan-sha256") == plan.plan_digest
+        and value.get("roleRef") == expected["roleRef"]
+        and value.get("subjects") == expected["subjects"]
     )
 
 

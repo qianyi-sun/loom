@@ -160,6 +160,9 @@ def test_sealed_context_binds_source_identities_into_inputs(tmp_path: Path) -> N
         source_mode="sealed-cumulative",
         resolved_tree="b" * 40,
         approved_base_sha="c" * 40,
+        preflight_attestation_sha256="d" * 64,
+        preflight_registry_sha256="e" * 64,
+        preflight_coverage_sha256="f" * 64,
     )
 
     inputs = ctx.to_inputs_dict()
