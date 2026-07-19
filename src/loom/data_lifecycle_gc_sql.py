@@ -10,7 +10,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import Engine, bindparam, text
 from sqlalchemy.engine import Connection
 
-from loom.data_lifecycle_gc import GcPlan, serialize_gc_plan
+from loom.data_lifecycle_gc import (
+    GcPlan,
+    GcResumeSnapshot,
+    deserialize_gc_plan,
+    serialize_gc_plan,
+)
 from loom.staging_mutation_epoch import (
     MutationEpochAdvance,
     MutationEpochState,
@@ -281,6 +286,65 @@ class SqlAlchemyGcJournal:
                 ),
                 {"run_id": run_id, "reason": reason[:500]},
             )
+
+    def load_resume(self, run_id: UUID) -> GcResumeSnapshot:
+        with self._engine.connect() as connection:
+            run = connection.execute(
+                text(
+                    "SELECT state, dry_run, inventory FROM data_lifecycle_gc_runs WHERE id=:run_id"
+                ),
+                {"run_id": run_id},
+            ).one_or_none()
+            if run is None or run[1] or run[0] != "failed":
+                raise RuntimeError("GC run is not resumable")
+            inventory = run[2]
+            if not isinstance(inventory, dict):
+                raise RuntimeError("GC run inventory is unavailable")
+            plan = deserialize_gc_plan(inventory)
+            rows = connection.execute(
+                text(
+                    "SELECT object_id, deletion_token, state "
+                    "FROM data_lifecycle_gc_items WHERE gc_run_id=:run_id "
+                    "ORDER BY object_id"
+                ),
+                {"run_id": run_id},
+            ).all()
+        tokens = {row[1] for row in rows}
+        if len(tokens) != 1:
+            raise RuntimeError("GC run deletion token authority is invalid")
+        return GcResumeSnapshot(
+            run_id=run_id,
+            deletion_token=tokens.pop(),
+            plan=plan,
+            item_states=tuple((row[0], row[2]) for row in rows),
+        )
+
+    def begin_resume(self, *, run_id: UUID, deletion_token: UUID) -> None:
+        """Claim one failed run before continuing its exact journaled phases."""
+        with self._engine.begin() as connection:
+            token_count = connection.execute(
+                text(
+                    "SELECT count(*) FROM data_lifecycle_gc_items "
+                    "WHERE gc_run_id=:run_id AND deletion_token=:token"
+                ),
+                {"run_id": run_id, "token": deletion_token},
+            ).scalar_one()
+            total_count = connection.execute(
+                text("SELECT count(*) FROM data_lifecycle_gc_items WHERE gc_run_id=:run_id"),
+                {"run_id": run_id},
+            ).scalar_one()
+            if token_count == 0 or token_count != total_count:
+                raise RuntimeError("GC resume deletion token authority is stale")
+            result = connection.execute(
+                text(
+                    "UPDATE data_lifecycle_gc_runs "
+                    "SET state='applying', failure_reason=NULL, finished_at=NULL "
+                    "WHERE id=:run_id AND state='failed' AND dry_run=false"
+                ),
+                {"run_id": run_id},
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("GC resume claim is stale")
 
     def _insert_run(
         self,

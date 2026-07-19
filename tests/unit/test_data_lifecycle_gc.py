@@ -18,6 +18,7 @@ from loom.data_lifecycle_gc import (
     deserialize_gc_plan,
     execute_gc,
     reconcile_object_inventory,
+    resume_gc,
     serialize_gc_plan,
 )
 from loom.staging_mutation_epoch import MutationEpochAdvance, MutationEpochState
@@ -244,6 +245,20 @@ class _Journal:
     def fail_apply(self, *, run_id: UUID, reason: str) -> None:
         self.events.append(("failed", (run_id, reason)))
 
+    def load_resume(self, run_id: UUID):
+        from loom.data_lifecycle_gc import GcResumeSnapshot
+
+        plan = _plan()
+        return GcResumeSnapshot(
+            run_id=run_id,
+            deletion_token=UUID(int=42),
+            plan=plan,
+            item_states=((plan.objects[0].id, "object_deleted"),),
+        )
+
+    def begin_resume(self, *, run_id: UUID, deletion_token: UUID) -> None:
+        self.events.append(("resume", (run_id, deletion_token)))
+
 
 class _Deleter:
     def __init__(self, *, verify: bool = True) -> None:
@@ -340,3 +355,30 @@ def test_apply_requires_exact_mutation_authority_before_deletion() -> None:
 
     assert journal.events == []
     assert deleter.deleted == []
+
+
+def test_resume_continues_from_exact_object_phase_without_redeleting() -> None:
+    journal = _Journal()
+
+    class ResumeDeleter:
+        def delete_exact(self, item: RegisteredObject) -> None:
+            raise AssertionError("already-deleted object must not be deleted again")
+
+        def exact_absent(self, item: RegisteredObject) -> bool:
+            return True
+
+    result = resume_gc(
+        run_id=journal.run_id,
+        request_id="req-gcresume0",
+        completed_at=NOW,
+        journal=journal,
+        object_deleter=ResumeDeleter(),
+    )
+
+    assert result.mutation_epoch_after == 8
+    assert [event[0] for event in journal.events] == [
+        "resume",
+        "verified",
+        "metadata",
+        "complete",
+    ]

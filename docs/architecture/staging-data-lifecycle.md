@@ -61,6 +61,13 @@ when its exact SHA-256 is registered; a versioned object is addressed by its
 exact version. Object deletion, absence verification, business-metadata
 removal, and the epoch increment are distinct journaled transitions. A dry run
 records its inventory digest but cannot call the object-store deleter.
+After a failed apply, resume reconstructs the canonical epoch-bound plan from
+the journal, verifies one exact deletion token across every item, and claims
+the failed run with a compare-and-swap transition before doing more work. It
+continues from each item's recorded phase, so an already deleted object is
+verified rather than deleted again and already removed metadata is not replayed.
+An active, dry-run, completed, mixed-token, or tampered-inventory run cannot be
+resumed. A second resumer loses the claim and fails closed.
 
 ## Rollout checkpoint versus disaster recovery
 

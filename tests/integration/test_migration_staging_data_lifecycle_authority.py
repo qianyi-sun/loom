@@ -17,9 +17,11 @@ from testcontainers.postgres import PostgresContainer
 from loom.data_lifecycle_gc import (
     AuthorityInventory,
     GcScope,
+    LifecycleGcExecutionError,
     RegisteredObject,
     build_gc_plan,
     execute_gc,
+    resume_gc,
 )
 from loom.data_lifecycle_gc_sql import SqlAlchemyGcJournal
 from loom.staging_mutation_epoch import (
@@ -228,13 +230,14 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
 
     class Deleter:
         deleted = False
+        verify = False
 
         def delete_exact(self, item) -> None:
             assert item.id == object_id
             self.deleted = True
 
         def exact_absent(self, item) -> bool:
-            return self.deleted and item.id == object_id
+            return self.verify and self.deleted and item.id == object_id
 
     try:
         with engine.begin() as connection:
@@ -267,17 +270,33 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
                     "created_at": now - timedelta(days=8),
                 },
             )
-        result = execute_gc(
-            plan=plan,
-            requested_by="qianyi",
-            journal=SqlAlchemyGcJournal(
-                engine,
-                metadata_purger=NoBusinessRows(),
-            ),
-            object_deleter=Deleter(),
-            dry_run=False,
+        journal = SqlAlchemyGcJournal(engine, metadata_purger=NoBusinessRows())
+        deleter = Deleter()
+        with pytest.raises(LifecycleGcExecutionError, match="still present"):
+            execute_gc(
+                plan=plan,
+                requested_by="qianyi",
+                journal=journal,
+                object_deleter=deleter,
+                dry_run=False,
+                request_id="req-gcinteg00",
+                completed_at=now,
+            )
+        with engine.connect() as connection:
+            run_id = connection.execute(
+                text(
+                    "SELECT id FROM data_lifecycle_gc_runs "
+                    "WHERE inventory->>'inventory_digest'=:digest"
+                ),
+                {"digest": plan.inventory_digest},
+            ).scalar_one()
+        deleter.verify = True
+        result = resume_gc(
+            run_id=run_id,
             request_id="req-gcinteg00",
             completed_at=now,
+            journal=journal,
+            object_deleter=deleter,
         )
         with engine.connect() as connection:
             run = connection.execute(

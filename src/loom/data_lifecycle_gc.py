@@ -140,6 +140,25 @@ class GcExecutionResult:
     dry_run: bool
 
 
+@dataclass(frozen=True, slots=True)
+class GcResumeSnapshot:
+    run_id: UUID
+    deletion_token: UUID
+    plan: GcPlan
+    item_states: tuple[tuple[UUID, str], ...]
+
+    def __post_init__(self) -> None:
+        expected_ids = {item.id for item in self.plan.objects}
+        actual_ids = {object_id for object_id, _state in self.item_states}
+        allowed = {"marked", "object_deleted", "verified", "metadata_deleted"}
+        if (
+            expected_ids != actual_ids
+            or len(self.item_states) != len(actual_ids)
+            or any(state not in allowed for _object_id, state in self.item_states)
+        ):
+            raise ValueError("GC resume snapshot item authority is invalid")
+
+
 class ExactObjectDeleter(Protocol):
     """Object adapter that never broadens an exact registered identity."""
 
@@ -194,6 +213,10 @@ class GcJournal(Protocol):
     ) -> MutationEpochState: ...
 
     def fail_apply(self, *, run_id: UUID, reason: str) -> None: ...
+
+    def load_resume(self, run_id: UUID) -> GcResumeSnapshot: ...
+
+    def begin_resume(self, *, run_id: UUID, deletion_token: UUID) -> None: ...
 
 
 def _normalized_sha256(value: str | None) -> str | None:
@@ -551,6 +574,83 @@ def execute_gc(
     return GcExecutionResult(
         run_id=run_id,
         deletion_token=deletion_token,
+        mutation_epoch_before=plan.mutation_epoch,
+        mutation_epoch_after=epoch_state.epoch,
+        deleted_objects=plan.object_count,
+        deleted_bytes=plan.bytes_total,
+        dry_run=False,
+    )
+
+
+def resume_gc(
+    *,
+    run_id: UUID,
+    request_id: str,
+    completed_at: datetime,
+    journal: GcJournal,
+    object_deleter: ExactObjectDeleter,
+) -> GcExecutionResult:
+    """Resume the exact journaled phase without broadening or repeating metadata work."""
+    snapshot = journal.load_resume(run_id)
+    if snapshot.run_id != run_id:
+        raise LifecycleGcExecutionError("GC resume journal returned another run")
+    plan = snapshot.plan
+    plan.require_applicable()
+    journal.begin_resume(run_id=run_id, deletion_token=snapshot.deletion_token)
+    mutation = MutationEpochAdvance(
+        environment=plan.scope.environment,
+        namespace=plan.scope.namespace,
+        expected_epoch=plan.mutation_epoch,
+        mutation_class=ProtectedMutationClass.LIFECYCLE_GC,
+        request_id=request_id,
+        evidence_sha256=plan.inventory_digest,
+        occurred_at=completed_at,
+    )
+    states = dict(snapshot.item_states)
+    try:
+        for item in plan.objects:
+            state = states[item.id]
+            if state == "marked":
+                object_deleter.delete_exact(item)
+                journal.record_object_deleted(
+                    run_id=run_id,
+                    object_id=item.id,
+                    deletion_token=snapshot.deletion_token,
+                )
+                state = "object_deleted"
+            if state == "object_deleted":
+                if not object_deleter.exact_absent(item):
+                    raise LifecycleGcExecutionError(
+                        f"object still present during resume: {item.bucket}/{item.object_key}"
+                    )
+                journal.record_object_verified(
+                    run_id=run_id,
+                    object_id=item.id,
+                    deletion_token=snapshot.deletion_token,
+                )
+                states[item.id] = "verified"
+        phases = set(states.values())
+        if phases == {"verified"}:
+            journal.delete_business_metadata(
+                run_id=run_id,
+                authority_ids=plan.authority_ids,
+                deletion_token=snapshot.deletion_token,
+            )
+        elif phases != {"metadata_deleted"}:
+            raise LifecycleGcExecutionError("GC resume contains mixed metadata phases")
+        epoch_state = journal.complete_apply(
+            run_id=run_id,
+            mutation=mutation,
+            deletion_token=snapshot.deletion_token,
+        )
+    except Exception as exc:
+        journal.fail_apply(run_id=run_id, reason=f"{type(exc).__name__}: {exc}")
+        if isinstance(exc, LifecycleGcExecutionError):
+            raise
+        raise LifecycleGcExecutionError(f"{type(exc).__name__}: {exc}") from exc
+    return GcExecutionResult(
+        run_id=run_id,
+        deletion_token=snapshot.deletion_token,
         mutation_epoch_before=plan.mutation_epoch,
         mutation_epoch_after=epoch_state.epoch,
         deleted_objects=plan.object_count,
