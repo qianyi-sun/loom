@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.staging_baseline_readiness import (
     BaselineProbeResult,
@@ -197,6 +198,61 @@ def read_staging_mutation_epoch(
     return epoch
 
 
+def read_staging_capacity(
+    *,
+    route: str,
+    token_path: Path,
+    service_uid: int,
+    http_get: HttpGet = bounded_http_get,
+) -> StagingCapacity:
+    """Read exact freshness-validated capacity through the readonly API."""
+    canonical, _hostname, _port = _validated_route(route)
+    response = http_get(
+        canonical + _API_PATHS["ready"],
+        _read_readonly_token(token_path, service_uid=service_uid),
+    )
+    raw = response.body.get("capacity")
+    if (
+        response.status_code not in {200, 503}
+        or response.body.get("environment") != "staging"
+        or response.body.get("namespace") != "loom-staging"
+        or response.body.get("capacity_ready") is not True
+        or not isinstance(raw, dict)
+        or set(raw)
+        != {
+            "object_count",
+            "bytes_used",
+            "disk_free_percent",
+            "inode_free_percent",
+            "policy_sha256",
+            "evidence_sha256",
+        }
+        or raw.get("policy_sha256") != staging_capacity_policy_digest()
+        or any(
+            type(raw.get(name)) is not int
+            for name in (
+                "object_count",
+                "bytes_used",
+                "disk_free_percent",
+                "inode_free_percent",
+            )
+        )
+    ):
+        raise ValueError("readonly capacity evidence is invalid")
+    try:
+        capacity = StagingCapacity(
+            object_count=raw["object_count"],
+            bytes_used=raw["bytes_used"],
+            disk_free_percent=raw["disk_free_percent"],
+            inode_free_percent=raw["inode_free_percent"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("readonly capacity evidence is invalid") from exc
+    if raw["evidence_sha256"] != capacity.evidence_digest:
+        raise ValueError("readonly capacity evidence is invalid")
+    return capacity
+
+
 class StagingBaselineProbeSource:
     """Build the five fixed Tier 2 probes from one bounded authority."""
 
@@ -328,6 +384,7 @@ class StagingBaselineProbeSource:
             and body.get("namespace") == "loom-staging"
             and observed_epoch == self._epoch
         )
+        capacity_ready = body.get("capacity_ready") is True
         blockers: dict[str, str] = {}
         if not postgres_ready:
             blockers["postgres"] = "postgres-readiness-failed"
@@ -337,6 +394,8 @@ class StagingBaselineProbeSource:
             blockers["evidence"] = "dependency-evidence-invalid"
         if not exact_binding:
             blockers["epoch"] = "dependency-epoch-drift"
+        if not capacity_ready:
+            blockers["capacity"] = "dependency-capacity-unready"
         if response.status_code not in {200, 503}:
             blockers["http"] = "dependency-readiness-unreachable"
         return self._result(
@@ -346,6 +405,7 @@ class StagingBaselineProbeSource:
                 "object_store": object_store_ready,
                 "postgres": postgres_ready,
                 "epoch_bound": exact_binding,
+                "capacity_ready": capacity_ready,
                 "server_digest": digest if valid_digest else "invalid",
             },
             blockers=blockers,
@@ -380,5 +440,6 @@ __all__ = [
     "TlsRouteEvidence",
     "bounded_http_get",
     "probe_tls_route",
+    "read_staging_capacity",
     "read_staging_mutation_epoch",
 ]

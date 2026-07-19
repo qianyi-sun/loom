@@ -6,10 +6,14 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom.data_lifecycle_capacity import StagingCapacityEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +25,8 @@ class DependencyReadiness:
     environment: str
     namespace: str
     mutation_epoch: int
+    capacity: StagingCapacity | None
+    capacity_ready: bool
     resource_digest: str
     blockers: tuple[str, ...]
 
@@ -36,6 +42,19 @@ class DependencyReadiness:
             "environment": self.environment,
             "namespace": self.namespace,
             "mutation_epoch": self.mutation_epoch,
+            "capacity": (
+                None
+                if self.capacity is None
+                else {
+                    "object_count": self.capacity.object_count,
+                    "bytes_used": self.capacity.bytes_used,
+                    "disk_free_percent": self.capacity.disk_free_percent,
+                    "inode_free_percent": self.capacity.inode_free_percent,
+                    "policy_sha256": staging_capacity_policy_digest(),
+                    "evidence_sha256": self.capacity.evidence_digest,
+                }
+            ),
+            "capacity_ready": self.capacity_ready,
             "resource_digest": self.resource_digest,
             "blockers": list(self.blockers),
         }
@@ -96,6 +115,44 @@ async def probe_dependencies(
             blockers.append("mutation-epoch-unavailable")
             mutation_epoch = -1
 
+    capacity: StagingCapacity | None = None
+    capacity_ready = False
+    if postgres_ready:
+        try:
+            row = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT object_count, bytes_used, disk_free_percent, "
+                            "inode_free_percent, policy_sha256, evidence_sha256, "
+                            "source, observed_at FROM staging_lifecycle_capacity "
+                            "WHERE environment = 'staging' "
+                            "AND namespace = 'loom-staging'"
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            capacity = StagingCapacity(
+                object_count=int(row["object_count"]),
+                bytes_used=int(row["bytes_used"]),
+                disk_free_percent=int(row["disk_free_percent"]),
+                inode_free_percent=int(row["inode_free_percent"]),
+            )
+            evidence = StagingCapacityEvidence(
+                namespace=namespace,
+                capacity=capacity,
+                policy_sha256=str(row["policy_sha256"]),
+                evidence_sha256=str(row["evidence_sha256"]),
+                observed_at=row["observed_at"],
+                source=str(row["source"]),
+            )
+            evidence.require_fresh_admission(now=datetime.now(UTC))
+            capacity_ready = True
+        except Exception:  # pragma: no cover - DB/provider classes vary
+            blockers.append("capacity-evidence-unavailable")
+
     object_store_ready = True
     for bucket in normalized_buckets:
         try:
@@ -113,6 +170,10 @@ async def probe_dependencies(
                 "environment": environment,
                 "namespace": namespace,
                 "mutation_epoch": mutation_epoch,
+                "capacity_digest": (
+                    "unavailable" if capacity is None else capacity.evidence_digest
+                ),
+                "capacity_ready": capacity_ready,
                 "version": "v1",
             },
             sort_keys=True,
@@ -125,6 +186,8 @@ async def probe_dependencies(
         environment=environment,
         namespace=namespace,
         mutation_epoch=mutation_epoch,
+        capacity=capacity,
+        capacity_ready=capacity_ready,
         resource_digest=digest,
         blockers=tuple(sorted(blockers)),
     )

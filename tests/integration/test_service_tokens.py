@@ -17,7 +17,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
-from loom.db.schema import StagingMutationEpoch, Team, Token
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom.data_lifecycle_capacity import CAPACITY_SOURCE
+from loom.db.schema import StagingLifecycleCapacity, StagingMutationEpoch, Team, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.test_service_auth_sessions import (
@@ -293,6 +295,19 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
             namespace="loom-staging",
             epoch=9,
             reason="bootstrap",
+        ))
+        capacity = StagingCapacity(1, 2, 80, 90)
+        await session.execute(insert(StagingLifecycleCapacity).values(
+            environment="staging",
+            namespace="loom-staging",
+            object_count=capacity.object_count,
+            bytes_used=capacity.bytes_used,
+            disk_free_percent=capacity.disk_free_percent,
+            inode_free_percent=capacity.inode_free_percent,
+            policy_sha256=staging_capacity_policy_digest(),
+            evidence_sha256=capacity.evidence_digest,
+            source=CAPACITY_SOURCE,
+            observed_at=datetime.now(UTC),
         ))
         await session.commit()
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_service.readiness import probe_dependencies
 
 
@@ -14,21 +17,46 @@ class _Scalar:
         return self._value
 
 
+class _Mappings:
+    def __init__(self, value: dict[str, Any]) -> None:
+        self._value = value
+
+    def mappings(self) -> _Mappings:
+        return self
+
+    def one(self) -> dict[str, Any]:
+        return self._value
+
+
 class _Session:
     def __init__(
         self,
         *,
         values: tuple[int, ...] = (1, 8),
+        capacity: dict[str, Any] | None = None,
         error: Exception | None = None,
     ) -> None:
         self.values = list(values)
+        exact_capacity = StagingCapacity(1, 2, 80, 90)
+        self.capacity = capacity or {
+            "object_count": exact_capacity.object_count,
+            "bytes_used": exact_capacity.bytes_used,
+            "disk_free_percent": exact_capacity.disk_free_percent,
+            "inode_free_percent": exact_capacity.inode_free_percent,
+            "policy_sha256": staging_capacity_policy_digest(),
+            "evidence_sha256": exact_capacity.evidence_digest,
+            "source": CAPACITY_SOURCE,
+            "observed_at": datetime.now(UTC),
+        }
         self.error = error
         self.statements: list[str] = []
 
-    async def execute(self, statement: Any) -> _Scalar:
+    async def execute(self, statement: Any) -> _Scalar | _Mappings:
         self.statements.append(str(statement))
         if self.error is not None:
             raise self.error
+        if "staging_lifecycle_capacity" in str(statement):
+            return _Mappings(self.capacity)
         return _Scalar(self.values.pop(0))
 
 
@@ -62,10 +90,15 @@ def test_dependency_readiness_is_read_only_and_secret_free() -> None:
         "SELECT 1",
         "SELECT epoch FROM staging_mutation_epochs WHERE environment = "
         "'staging' AND namespace = 'loom-staging'",
+        "SELECT object_count, bytes_used, disk_free_percent, "
+        "inode_free_percent, policy_sha256, evidence_sha256, source, observed_at "
+        "FROM staging_lifecycle_capacity WHERE environment = 'staging' "
+        "AND namespace = 'loom-staging'",
     ]
     assert minio.calls == [("HEAD", "artifacts"), ("HEAD", "trajectories")]
     assert result.to_dict()["blockers"] == []
     assert result.mutation_epoch == 8
+    assert result.capacity_ready
     assert len(result.resource_digest) == 64
 
 

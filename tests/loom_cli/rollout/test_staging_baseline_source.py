@@ -6,10 +6,12 @@ from typing import Any
 
 import pytest
 
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.staging_baseline_source import (
     BaselineHttpResponse,
     StagingBaselineProbeSource,
     TlsRouteEvidence,
+    read_staging_capacity,
     read_staging_mutation_epoch,
 )
 
@@ -29,6 +31,7 @@ def _body(name: str) -> dict[str, Any]:
             "readonly_authority_version": "v1",
         }
     if name == "ready":
+        capacity = StagingCapacity(1, 2, 80, 90)
         return {
             "status": "ready",
             "postgres": "ready",
@@ -37,6 +40,15 @@ def _body(name: str) -> dict[str, Any]:
             "environment": "staging",
             "namespace": "loom-staging",
             "mutation_epoch": 9,
+            "capacity": {
+                "object_count": capacity.object_count,
+                "bytes_used": capacity.bytes_used,
+                "disk_free_percent": capacity.disk_free_percent,
+                "inode_free_percent": capacity.inode_free_percent,
+                "policy_sha256": staging_capacity_policy_digest(),
+                "evidence_sha256": capacity.evidence_digest,
+            },
+            "capacity_ready": True,
             "blockers": [],
         }
     if name == "tasks":
@@ -98,6 +110,8 @@ def test_source_reports_all_catalog_and_dependency_blockers(token_path: Path) ->
                     "environment": "staging",
                     "namespace": "loom-staging",
                     "mutation_epoch": 9,
+                    "capacity": None,
+                    "capacity_ready": False,
                     "blockers": ["redacted"],
                 },
             )
@@ -125,6 +139,7 @@ def test_source_reports_all_catalog_and_dependency_blockers(token_path: Path) ->
     assert probes["staging.storage-db"]().blockers == {
         "postgres": "postgres-readiness-failed",
         "object-store": "object-store-readiness-failed",
+        "capacity": "dependency-capacity-unready",
     }
     assert probes["staging.network"]().blockers == {
         "route": "dns-tls-authentication-failed"
@@ -167,6 +182,18 @@ def test_mutation_epoch_uses_same_readonly_endpoint(token_path: Path) -> None:
     assert calls == [
         (f"{ROUTE}/api/v1/health/ready", "loom_readonly_exact")
     ]
+
+
+def test_capacity_uses_same_readonly_endpoint(token_path: Path) -> None:
+    capacity = read_staging_capacity(
+        route=ROUTE,
+        token_path=token_path,
+        service_uid=os.getuid(),
+        http_get=lambda _url, _token: BaselineHttpResponse(
+            200, "HTTP/2", _body("ready")
+        ),
+    )
+    assert capacity == StagingCapacity(1, 2, 80, 90)
 
 
 def _body_names() -> tuple[str, ...]:
