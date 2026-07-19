@@ -1610,6 +1610,21 @@ path with a fresh single-link inode, detaching it from every pre-existing alias.
 The installed broker wrapper also uses `-I -B -m`, preventing caller
 working-directory module shadowing and bytecode writes.
 
+The complete install transaction and trust/ACL ledger remains root-only at
+`/etc/loom/staging-rollout.install.json` (`root:root`, `0600`). A successful
+ready install additionally publishes
+`/etc/loom/staging-rollout.install-attestation.json` as a single-link
+`root:loom-rollout` `0640` file. This second file contains no credential value,
+team identifier, ACL ledger, or key fingerprint: it contains only the exact
+source identity, a digest of the private record, and SHA-256 digests of the
+fixed client, broker, config, trust tool, known-hosts, mount unit, and tmpfiles
+assets. The sudoers policy remains root-only and is verified directly
+by host `check`; it is not exposed to the service reader. Host `check`
+regenerates and compares the statement from the private authority; Tier 0
+independently re-hashes every service-readable live asset. Do not copy,
+edit, chmod, or synthesize this attestation by hand—rerun the exact sealed host
+installer and `check` when it is absent or drifted.
+
 The service user-manager probe also constructs its clean
 `XDG_RUNTIME_DIR`/D-Bus/`PATH` environment *after* `sudo -u loom-rollout` via
 fixed `/usr/bin/env -i` and `/usr/bin/systemctl` paths. Ubuntu `sudo` may reset

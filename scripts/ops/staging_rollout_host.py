@@ -86,6 +86,7 @@ ROOT_KUBECONFIG = Path("/root/.kube/config")
 ROOT_KUBECONFIG_SNAPSHOT_PARENT = Path("/root")
 SERVICE_KEY = STATE_ROOT / "gb10-deploy-ed25519"
 INSTALL_RECORD = Path("/etc/loom/staging-rollout.install.json")
+INSTALL_ATTESTATION = Path("/etc/loom/staging-rollout.install-attestation.json")
 TRUST_REVOCATION_LEDGER = Path("/etc/loom/staging-rollout-gb10-trust-revocation.json")
 TRUST_REVOCATION_TOMBSTONE = Path("/etc/loom/.staging-rollout-gb10-trust-revocation.finalizing")
 TRUST_LIFECYCLE_LOCK = Path("/etc/loom/staging-rollout-gb10-trust.lock")
@@ -159,6 +160,65 @@ _REQUIRED_GB10_ENV_KEYS = frozenset(
 
 class InstallError(RuntimeError):
     """Fail-closed installation or convergence error."""
+
+
+_INSTALL_ATTESTATION_ASSETS = frozenset(
+    {
+        "broker",
+        "client",
+        "config",
+        "gb10-known-hosts",
+        "gb10-trust-tool",
+        "shared-work2-mount-unit",
+        "tmpfiles",
+    }
+)
+
+
+def _runner_install_attestation_payload(
+    record: dict[str, object],
+    assets: dict[str, bytes],
+) -> bytes:
+    """Render the minimal root-issued statement readable by the service broker."""
+    if (
+        record.get("installation_state") != "ready"
+        or record.get("admission_enabled") is not True
+        or record.get("maintenance_enabled") is not False
+        or set(assets) != _INSTALL_ATTESTATION_ASSETS
+    ):
+        raise InstallError("runner install attestation inputs are incomplete")
+    source_sha = record.get("source_sha")
+    source_mode = record.get("source_mode", "merged-dev")
+    if not isinstance(source_sha, str) or _SHA_RE.fullmatch(source_sha) is None:
+        raise InstallError("runner install attestation source SHA is invalid")
+    if source_mode == "sealed-cumulative":
+        source_tree_sha = record.get("source_tree_sha")
+        source_base_sha = record.get("source_base_sha")
+        if (
+            not isinstance(source_tree_sha, str)
+            or _SHA_RE.fullmatch(source_tree_sha) is None
+            or not isinstance(source_base_sha, str)
+            or _SHA_RE.fullmatch(source_base_sha) is None
+        ):
+            raise InstallError("runner install attestation sealed identity is invalid")
+    elif source_mode == "merged-dev":
+        source_tree_sha = "none"
+        source_base_sha = "none"
+    else:
+        raise InstallError("runner install attestation source mode is invalid")
+    record_payload = (json.dumps(record, sort_keys=True) + "\n").encode()
+    value = {
+        "asset_sha256": {
+            label: hashlib.sha256(payload).hexdigest() for label, payload in sorted(assets.items())
+        },
+        "install_record_sha256": hashlib.sha256(record_payload).hexdigest(),
+        "schema_version": 1,
+        "source_base_sha": source_base_sha,
+        "source_mode": source_mode,
+        "source_sha": source_sha,
+        "source_tree_sha": source_tree_sha,
+    }
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
 def _validate_gb10_env_payload(payload: bytes) -> None:
@@ -3207,6 +3267,7 @@ class HostSystem:
             TMPFILES_PATH: "regular file:root:root:644",
             CONFIG_PATH: "regular file:root:loom-rollout:640",
             INSTALL_RECORD: "regular file:root:root:600",
+            INSTALL_ATTESTATION: "regular file:root:loom-rollout:640",
             TRUST_REVOCATION_LEDGER: "regular file:root:root:600",
             TRUST_TOOL_PATH: "regular file:root:root:755",
             KNOWN_HOSTS_PATH: "regular file:root:root:644",
@@ -3878,6 +3939,15 @@ class HostInstaller:
             (CONFIG_PATH, config, 0o640, "root", SERVICE_GROUP),
         )
         sudoers = self._asset("loom-staging-rollout.sudoers")
+        attestation_assets = {
+            "broker": installed_files[1][1],
+            "client": installed_files[0][1],
+            "config": config,
+            "gb10-known-hosts": installed_files[4][1],
+            "gb10-trust-tool": installed_files[2][1],
+            "shared-work2-mount-unit": installed_files[5][1],
+            "tmpfiles": installed_files[3][1],
+        }
 
         added_operator_memberships = self._record_operator_memberships(previous_record)
         missing_operators = {
@@ -4116,6 +4186,30 @@ class HostInstaller:
         sudoers_ready = sudoers_authority_safe and existing_sudoers == sudoers
         if sudoers_present and not sudoers_authority_safe:
             raise InstallError("existing staging rollout admission authority is unsafe")
+        desired_ready_record = record_value(
+            "ready",
+            admission=True,
+            maintenance=False,
+        )
+        install_attestation_payload = _runner_install_attestation_payload(
+            desired_ready_record,
+            attestation_assets,
+        )
+        install_attestation_ready = bool(
+            self.filesystem.file_matches(
+                INSTALL_ATTESTATION,
+                install_attestation_payload,
+                0o640,
+                expected_nlink=1,
+            )
+            and self.system.file_owner_ready(
+                INSTALL_ATTESTATION,
+                owner="root",
+                group=SERVICE_GROUP,
+                mode=0o640,
+                nlink=1,
+            )
+        )
 
         def restore_admission() -> None:
             if existing_sudoers is None:  # pragma: no cover - caller owns this invariant
@@ -4123,10 +4217,14 @@ class HostInstaller:
             self.filesystem.atomic_write(SUDOERS_PATH, existing_sudoers, 0o440)
             self.system.install_owner(SUDOERS_PATH, "root", 0o440)
 
-        transaction_active = previous_record != record_value(
-            "ready",
-            admission=True,
-            maintenance=False,
+        transaction_active = (
+            previous_record
+            != record_value(
+                "ready",
+                admission=True,
+                maintenance=False,
+            )
+            or not install_attestation_ready
         )
         requires_mutation = bool(
             changes
@@ -4153,7 +4251,9 @@ class HostInstaller:
             or not runtime_ready
             or not kubeconfig_ready
             or not sudoers_ready
+            or not install_attestation_ready
         )
+        transaction_active = transaction_active or requires_mutation
 
         if requires_mutation and (admission_enabled or sudoers_present):
             admission_was_present = self.filesystem.remove(SUDOERS_PATH)
@@ -4344,26 +4444,43 @@ class HostInstaller:
                 admission=False,
                 maintenance=maintenance_enabled,
             )
+        trust_requires_revocation = True
+        ready_record = record_value(
+            "ready",
+            admission=True,
+            maintenance=False,
+        )
+        install_attestation_payload = _runner_install_attestation_payload(
+            ready_record,
+            attestation_assets,
+        )
+        if self.filesystem.atomic_write(
+            INSTALL_ATTESTATION,
+            install_attestation_payload,
+            0o640,
+            expected_nlink=1,
+        ):
+            changes.append("install-attestation")
+        if self.system.install_owner(
+            INSTALL_ATTESTATION,
+            "root",
+            0o640,
+            group=SERVICE_GROUP,
+        ):
+            changes.append("ownership:install-attestation")
+        if persist_record(
+            "ready",
+            admission=True,
+            maintenance=False,
+        ):
+            changes.append("install-record")
         if self.filesystem.atomic_write(SUDOERS_PATH, sudoers, 0o440):
             changes.append(f"file:{SUDOERS_PATH}")
         if self.system.install_owner(SUDOERS_PATH, "root", 0o440):
             changes.append(f"ownership:{SUDOERS_PATH}")
-
-        trust_requires_revocation = True
         if transaction_active:
-            persist_record(
-                "ready",
-                admission=True,
-                maintenance=maintenance_enabled,
-            )
             self.system.end_maintenance()
             maintenance_enabled = False
-        if persist_record(
-            "ready",
-            admission=True,
-            maintenance=maintenance_enabled,
-        ):
-            changes.append("install-record")
         trust_ready = self.system.gb10_trust_ready()
         if trust_ready and changes:
             self.system.run_post_install_dry_run()
@@ -4430,6 +4547,7 @@ class HostInstaller:
             for path, payload, mode in expected
             if not self.filesystem.file_matches(path, payload, mode)
         ]
+        config_payload: bytes | None = None
         if not self.filesystem.exists(CONFIG_PATH):
             failures.append(str(CONFIG_PATH))
         else:
@@ -4437,11 +4555,12 @@ class HostInstaller:
             try:
                 if not isinstance(team_id, str):
                     raise InstallError("install record team ID is invalid")
+                config_payload = self.filesystem.read_bytes(CONFIG_PATH, limit=1 << 20)
                 record_source_sha = record.get("source_sha")
                 record_source_tree_sha = record.get("source_tree_sha")
                 record_source_base_sha = record.get("source_base_sha")
                 self._validate_rendered_config(
-                    self.filesystem.read_bytes(CONFIG_PATH, limit=1 << 20),
+                    config_payload,
                     team_id,
                     source_sha=(
                         record_source_sha
@@ -4462,6 +4581,38 @@ class HostInstaller:
                 )
             except InstallError:
                 failures.append("rendered-config")
+        if config_payload is None:
+            failures.append(str(INSTALL_ATTESTATION))
+        else:
+            attestation_assets = {
+                "broker": self._asset("loom-staging-rollout-broker"),
+                "client": self._asset("loom-staging-rollout"),
+                "config": config_payload,
+                "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
+                "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
+                "shared-work2-mount-unit": self._asset(SHARED_WORK2_MOUNT_UNIT),
+                "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
+            }
+            expected_attestation = _runner_install_attestation_payload(
+                record,
+                attestation_assets,
+            )
+            if not (
+                self.filesystem.file_matches(
+                    INSTALL_ATTESTATION,
+                    expected_attestation,
+                    0o640,
+                    expected_nlink=1,
+                )
+                and self.system.file_owner_ready(
+                    INSTALL_ATTESTATION,
+                    owner="root",
+                    group=SERVICE_GROUP,
+                    mode=0o640,
+                    nlink=1,
+                )
+            ):
+                failures.append(str(INSTALL_ATTESTATION))
         if not self.filesystem.exists(KUBECONFIG_PATH):
             failures.append(str(KUBECONFIG_PATH))
         if not self.filesystem.exists(SERVICE_KEY):
@@ -4672,6 +4823,7 @@ class HostInstaller:
             BROKER_PATH,
             TRUST_TOOL_PATH,
             CONFIG_PATH,
+            INSTALL_ATTESTATION,
             KUBECONFIG_PATH,
             TMPFILES_PATH,
             KNOWN_HOSTS_PATH,

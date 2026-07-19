@@ -290,6 +290,14 @@ loader and host readiness check enforce the same `root:loom-rollout`, `0640`,
 isolated/no-bytecode interpreter boundary, so an operator-controlled working
 directory cannot shadow `loom_cli`.
 
+The private install ledger remains `root:root` `0600`. Root derives a separate
+single-link `root:loom-rollout` `0640` install attestation only after a ready
+transaction. It exposes exact source identity plus hashes of the private record
+and fixed installed assets, never the record contents or secret-bearing
+authority ledgers. The Tier 0 `runner.install` predicate no-follows that
+statement and re-hashes every declared asset before the broker may import
+candidate code or publish a request.
+
 The service account receives traverse-only parent ACLs and leaf-read ACLs only
 for the declared staging token and catalog inputs. Preflight traverses those
 parents with Linux `O_PATH` and `O_NOFOLLOW`, so it neither needs nor receives

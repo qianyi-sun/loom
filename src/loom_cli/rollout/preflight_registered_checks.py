@@ -15,6 +15,10 @@ from loom_cli.rollout.credential_authority import (
     safe_content_fingerprint,
 )
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, probe_gb10_fleet_readonly
+from loom_cli.rollout.install_attestation import (
+    INSTALL_ATTESTATION_PATH,
+    verify_runner_install,
+)
 from loom_cli.rollout.operator.candidate import (
     CandidateBindingError,
     GitRunner,
@@ -137,6 +141,129 @@ def _empty_candidate_probe(candidate: CandidateBinding) -> CheckProbe:
             "approved-base": candidate.approved_base_sha or "none",
             "linear-history-count": 0,
             "identity-digest": "0" * 64,
+        },
+    )
+
+
+def build_runner_install_check(
+    *,
+    config: OperatorConfig,
+    candidate: CandidateBinding,
+    service_uid: int,
+    expected_attestation_digest: str,
+    attestation_path: Path = INSTALL_ATTESTATION_PATH,
+    assets: Mapping[str, tuple[Path, int, bool]] | None = None,
+    expected_root_uid: int = 0,
+) -> RegisteredCheck:
+    """Build the Tier 0 root-issued runner install and live asset invariant."""
+    if len(expected_attestation_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_attestation_digest
+    ):
+        raise ValueError("runner install attestation digest is invalid")
+    expected_base = candidate.approved_base_sha or "none"
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != candidate.resolved_sha
+            or context.bindings["candidate.source-mode"] != candidate.source_mode
+            or context.bindings["candidate.base.sha"] != expected_base
+            or context.bindings["runner.config.sha256"] != config.config_sha256
+            or context.bindings["runner.install.sha256"] != expected_attestation_digest
+            or context.bindings["service.uid"] != service_uid
+        ):
+            return _empty_runner_install_probe(candidate)
+        try:
+            verified = verify_runner_install(
+                service_uid=service_uid,
+                attestation_path=attestation_path,
+                assets=assets,
+                expected_root_uid=expected_root_uid,
+            )
+        except (OSError, ValueError):
+            return _empty_runner_install_probe(candidate)
+        attestation = verified.attestation
+        source_matches = bool(
+            attestation.source_sha == candidate.resolved_sha
+            and attestation.source_mode == candidate.source_mode
+            and attestation.source_base_sha == expected_base
+            and attestation.asset_sha256["config"] == config.config_sha256
+            and attestation.payload_digest == expected_attestation_digest
+        )
+        if candidate.source_mode == "sealed-cumulative":
+            source_matches = source_matches and bool(
+                candidate.resolved_tree is not None
+                and attestation.source_tree_sha == candidate.resolved_tree
+            )
+        else:
+            source_matches = source_matches and attestation.source_tree_sha == "none"
+        failed_assets = {label: "asset-drift" for label in verified.failed_assets}
+        if not source_matches:
+            failed_assets["install-binding"] = "identity-drift"
+        return CheckProbe(
+            passed=verified.ready and source_matches,
+            evidence={
+                "source-sha": attestation.source_sha,
+                "source-tree": attestation.source_tree_sha,
+                "source-base": attestation.source_base_sha,
+                "install-record-digest": attestation.install_record_sha256,
+                "asset-digests": dict(attestation.asset_sha256),
+                "failed-assets": failed_assets,
+                "metadata-fingerprint": verified.metadata_fingerprint,
+                "acl-fingerprint": verified.acl_fingerprint,
+                "attestation-digest": attestation.payload_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="runner.install",
+            failure_code="runner.install.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("candidate.identity",),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "candidate.base.sha",
+                "candidate.sha",
+                "candidate.source-mode",
+                "runner.config.sha256",
+                "runner.install.sha256",
+                "service.uid",
+            ),
+            evidence_schema=(
+                EvidenceField("source-sha", "string"),
+                EvidenceField("source-tree", "string"),
+                EvidenceField("source-base", "string"),
+                EvidenceField("install-record-digest", "sha256"),
+                EvidenceField("asset-digests", "string-map"),
+                EvidenceField("failed-assets", "string-map"),
+                EvidenceField("metadata-fingerprint", "sha256"),
+                EvidenceField("acl-fingerprint", "sha256"),
+                EvidenceField("attestation-digest", "sha256"),
+            ),
+            timeout_seconds=15,
+            freshness_ttl_seconds=300,
+            remediation="reinstall and root-verify the exact runner source, config, and assets",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_runner_install_probe(candidate: CandidateBinding) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "source-sha": candidate.resolved_sha,
+            "source-tree": candidate.resolved_tree or "unavailable",
+            "source-base": candidate.approved_base_sha or "none",
+            "install-record-digest": "0" * 64,
+            "asset-digests": {},
+            "failed-assets": {"install-binding": "unavailable"},
+            "metadata-fingerprint": "0" * 64,
+            "acl-fingerprint": "0" * 64,
+            "attestation-digest": "0" * 64,
         },
     )
 
@@ -547,6 +674,7 @@ __all__ = [
     "build_candidate_identity_check",
     "build_credentials_metadata_check",
     "build_gb10_host_readiness_check",
+    "build_runner_install_check",
     "build_systemd_user_manager_check",
     "build_tools_runtime_check",
     "credential_source_set_digest",

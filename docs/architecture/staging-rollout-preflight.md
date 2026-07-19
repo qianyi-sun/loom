@@ -119,6 +119,17 @@ verifier and emits only the exact Git identities, history count, and evidence
 digest. Later consumers must use the attested tree instead of re-resolving a
 branch or maintaining another identity test.
 
+The root installer retains its full transactional ledger at
+`/etc/loom/staging-rollout.install.json` as `root:root` mode `0600`; the broker
+does not gain access to that ledger. After a ready install, root also publishes
+`staging-rollout.install-attestation.json` as a single-link
+`root:loom-rollout` mode-`0640` statement containing only source identity, the
+full-record digest, and fixed installed-asset digests. `runner.install` reads it
+through the common no-follow authority reader, binds it to the candidate and
+config inputs, then re-reads and hashes every live asset. Missing, stale,
+rewritten, relinked, or metadata-drifted statements and assets fail before
+candidate imports, request publication, or backup.
+
 Runtime readiness is similarly single-source. The fixed executable and Python
 module allowlists live with `probe_runtime_readiness`; the legacy broker adapter
 and the `tools.runtime` DAG check call that same probe. It evaluates every

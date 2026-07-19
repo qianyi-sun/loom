@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import stat
@@ -776,6 +777,29 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     install_record = installer.filesystem.path(host.INSTALL_RECORD)
     assert stat.S_IMODE(install_record.stat().st_mode) == 0o600
     assert (host.INSTALL_RECORD, "root", "root", 0o600) in system.install_owner_calls
+    install_attestation = installer.filesystem.path(host.INSTALL_ATTESTATION)
+    assert stat.S_IMODE(install_attestation.stat().st_mode) == 0o640
+    assert (
+        host.INSTALL_ATTESTATION,
+        "root",
+        host.SERVICE_GROUP,
+        0o640,
+    ) in system.install_owner_calls
+    public_statement = json.loads(install_attestation.read_bytes())
+    assert public_statement["schema_version"] == 1
+    assert public_statement["source_mode"] == "merged-dev"
+    assert public_statement["source_sha"] == "a" * 40
+    assert public_statement["source_tree_sha"] == "none"
+    assert public_statement["source_base_sha"] == "none"
+    assert (
+        public_statement["install_record_sha256"]
+        == hashlib.sha256(install_record.read_bytes()).hexdigest()
+    )
+    assert set(public_statement["asset_sha256"]) == host._INSTALL_ATTESTATION_ASSETS
+    assert all(
+        isinstance(value, str) and len(value) == 64
+        for value in public_statement["asset_sha256"].values()
+    )
     for path in (host.SHARED_WORKER_AUTHORITY_ROOT, host.SHARED_WORKER_REPO_ROOT):
         assert stat.S_IMODE(installer.filesystem.path(path).stat().st_mode) == 0o2750
     assert "trust_legacy_source_sha" not in record
@@ -794,6 +818,113 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_install_publishes_attestation_and_ready_record_before_sudoers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, _system = _installer(tmp_path)
+    writes: list[Path] = []
+    original_atomic_write = host.LocalFilesystem.atomic_write
+
+    def record_write(
+        filesystem: host.LocalFilesystem,
+        absolute: Path,
+        payload: bytes,
+        mode: int,
+        *,
+        expected_nlink: int | None = None,
+    ) -> bool:
+        writes.append(absolute)
+        return original_atomic_write(
+            filesystem,
+            absolute,
+            payload,
+            mode,
+            expected_nlink=expected_nlink,
+        )
+
+    monkeypatch.setattr(host.LocalFilesystem, "atomic_write", record_write)
+
+    installer.install(TEAM_ID)
+
+    assert writes.index(host.INSTALL_ATTESTATION) < max(
+        index for index, path in enumerate(writes) if path == host.INSTALL_RECORD
+    )
+    assert max(index for index, path in enumerate(writes) if path == host.INSTALL_RECORD) < (
+        writes.index(host.SUDOERS_PATH)
+    )
+    assert writes[-1] == host.SUDOERS_PATH
+
+
+def test_install_attestation_publication_failure_keeps_admission_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    original_atomic_write = host.LocalFilesystem.atomic_write
+
+    def fail_attestation(
+        filesystem: host.LocalFilesystem,
+        absolute: Path,
+        payload: bytes,
+        mode: int,
+        *,
+        expected_nlink: int | None = None,
+    ) -> bool:
+        if absolute == host.INSTALL_ATTESTATION:
+            raise host.InstallError("injected install attestation publication failure")
+        return original_atomic_write(
+            filesystem,
+            absolute,
+            payload,
+            mode,
+            expected_nlink=expected_nlink,
+        )
+
+    monkeypatch.setattr(host.LocalFilesystem, "atomic_write", fail_attestation)
+
+    with pytest.raises(host.InstallError, match="attestation publication failure"):
+        installer.install(TEAM_ID)
+
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+    assert record["maintenance_enabled"] is True
+    assert system.maintenance is True
+    assert system.maintenance_begins == 1
+    assert system.maintenance_ends == 0
+    assert not installer.filesystem.exists(host.INSTALL_ATTESTATION)
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+
+
+def test_missing_install_attestation_is_repaired_in_one_controlled_transaction(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    candidate_syncs = system.candidate_syncs
+    installer.filesystem.remove(host.INSTALL_ATTESTATION)
+    system.maintenance_begins = 0
+    system.maintenance_ends = 0
+
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert "install-attestation" in result["changed"]
+    assert installer.filesystem.exists(host.INSTALL_ATTESTATION)
+    assert installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.candidate_syncs == candidate_syncs
+    assert system.maintenance_begins == 1
+    assert system.maintenance_ends == 1
+    assert system.maintenance is False
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "ready"
+    assert record["admission_enabled"] is True
+    assert record["maintenance_enabled"] is False
 
 
 def test_sealed_cumulative_install_records_exact_source_and_checks_candidate(
@@ -819,7 +950,7 @@ def test_sealed_cumulative_install_records_exact_source_and_checks_candidate(
     assert record["source_sha"] == source.commit_sha
     assert record["source_tree_sha"] == source.tree_sha
     assert record["source_base_sha"] == source.base_sha
-    assert 'schema_version = 2' in rendered
+    assert "schema_version = 2" in rendered
     assert 'source_mode = "sealed-cumulative"' in rendered
     assert f'source_commit_sha = "{source.commit_sha}"' in rendered
     assert installer.check() == {"ok": True, "failures": []}
@@ -1763,6 +1894,7 @@ def test_update_failure_stays_fail_closed_with_maintenance_marker(tmp_path: Path
     installer.uninstall(retain_ledger=True)
     assert system.revoked is True
     assert not installer.filesystem.exists(host.INSTALL_RECORD)
+    assert not installer.filesystem.exists(host.INSTALL_ATTESTATION)
 
 
 def test_retry_resyncs_candidate_and_venv_for_non_ready_new_sha_record(
@@ -1879,6 +2011,24 @@ def test_check_rejects_installed_known_hosts_drift(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert str(host.KNOWN_HOSTS_PATH) in result["failures"]
+
+
+def test_check_rejects_root_install_attestation_drift(tmp_path: Path) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    statement = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
+    statement["asset_sha256"]["broker"] = "f" * 64
+    installer.filesystem.atomic_write(
+        host.INSTALL_ATTESTATION,
+        (json.dumps(statement, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        0o640,
+        expected_nlink=1,
+    )
+
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert str(host.INSTALL_ATTESTATION) in result["failures"]
 
 
 def test_failed_validation_never_replaces_installed_authority_files(tmp_path: Path) -> None:
@@ -4516,8 +4666,7 @@ def test_sealed_candidate_fetch_uses_fixed_install_source_upload_pack(
         sha,
     ]
     assert host.SEALED_SOURCE_UPLOAD_PACK == (
-        "/usr/bin/git -c "
-        "safe.directory=/opt/loom-staging-runner/source/.git upload-pack"
+        "/usr/bin/git -c safe.directory=/opt/loom-staging-runner/source/.git upload-pack"
     )
     assert all(
         call[call.index("/bin/sh") : call.index("/usr/bin/git") + 1]
