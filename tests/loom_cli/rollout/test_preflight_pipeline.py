@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -181,6 +182,37 @@ def test_tier_two_assessment_is_rechecked_before_tier_three_attestation(
     assert assessment.through_tier == 2
     assert {item.tier for item in assessment.executions} == {0, 1, 2}
     assert result.passed and result.attestation is not None
+
+
+def test_rehearsal_and_attestation_are_separate_restore_authority_steps(
+    tmp_path: Path,
+) -> None:
+    registry = _registry()
+    store = PreflightAttestationStore(tmp_path / "state")
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=store,
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+    assessment = pipeline.assess(context=context)
+
+    rehearsal = pipeline.rehearse(context=context, assessment=assessment)
+
+    assert rehearsal.passed
+    assert {execution.tier for execution in rehearsal.executions} == {0, 1, 2, 3}
+    assert len(rehearsal.rehearsal_digest) == 64
+    assert not store.root.exists()
+
+    attestation = pipeline.attest(rehearsal=rehearsal, bindings=_bindings())
+
+    assert store.read(attestation.attestation_digest) == attestation
+
+    with pytest.raises(ValueError, match="rehearsal authority"):
+        pipeline.attest(
+            rehearsal=replace(rehearsal, rehearsal_digest="0" * 64),
+            bindings=_bindings(),
+        )
 
 
 def test_tier_two_assessment_rejects_input_drift_before_attestation(tmp_path: Path) -> None:

@@ -179,6 +179,31 @@ class PreflightPipelineResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PreflightRehearsal:
+    """Complete Tier 0-3 evidence awaiting restore lease publication."""
+
+    registry_digest: str
+    coverage_digest: str
+    executions: tuple[CheckExecution, ...]
+    blockers: tuple[PreflightBlocker, ...]
+    rehearsal_digest: str
+
+    @property
+    def passed(self) -> bool:
+        return bool(self.executions) and not self.blockers
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "blockers": [blocker.to_dict() for blocker in self.blockers],
+            "check_count": len(self.executions),
+            "coverage_digest": self.coverage_digest,
+            "passed": self.passed,
+            "registry_digest": self.registry_digest,
+            "rehearsal_digest": self.rehearsal_digest,
+        }
+
+
 class PreflightPipeline:
     """Execute the exact registered DAG and publish a digest-addressed result."""
 
@@ -230,6 +255,38 @@ class PreflightPipeline:
                     reused=True,
                 )
 
+        rehearsal = self.rehearse(context=context, assessment=assessment)
+        if rehearsal.blockers:
+            return PreflightPipelineResult(
+                registry_digest=rehearsal.registry_digest,
+                coverage_digest=rehearsal.coverage_digest,
+                executions=rehearsal.executions,
+                blockers=rehearsal.blockers,
+                attestation=None,
+                reused=False,
+            )
+        if bindings is None:
+            if binding_factory is None:
+                raise ValueError("fresh preflight requires an attestation binding factory")
+            bindings = binding_factory(rehearsal.executions)
+        attestation = self.attest(rehearsal=rehearsal, bindings=bindings)
+        return PreflightPipelineResult(
+            registry_digest=rehearsal.registry_digest,
+            coverage_digest=rehearsal.coverage_digest,
+            executions=rehearsal.executions,
+            blockers=(),
+            attestation=attestation,
+            reused=False,
+        )
+
+    def rehearse(
+        self,
+        *,
+        context: CheckContext,
+        assessment: PreflightAssessment | None = None,
+    ) -> PreflightRehearsal:
+        """Execute Tier 0-3 without claiming a restore-verified lease yet."""
+        now = self._clock()
         executions = self._registry.dag(max_concurrency=self._max_concurrency).run(
             context,
             operation=CheckOperation.PROBE,
@@ -243,35 +300,54 @@ class PreflightPipeline:
             for execution in executions
             if not execution.passed
         )
-        if blockers:
-            return PreflightPipelineResult(
-                registry_digest=self._registry.registry_digest,
-                coverage_digest=self._registry.coverage_digest,
-                executions=executions,
-                blockers=blockers,
-                attestation=None,
-                reused=False,
+        digest = _rehearsal_digest(
+            registry_digest=self._registry.registry_digest,
+            coverage_digest=self._registry.coverage_digest,
+            executions=executions,
+        )
+        return PreflightRehearsal(
+            registry_digest=self._registry.registry_digest,
+            coverage_digest=self._registry.coverage_digest,
+            executions=executions,
+            blockers=blockers,
+            rehearsal_digest=digest,
+        )
+
+    def attest(
+        self,
+        *,
+        rehearsal: PreflightRehearsal,
+        bindings: AttestationBindings,
+    ) -> PreflightAttestation:
+        """Issue only after the caller has published restore-verified lease authority."""
+        expected = dict(self._registry.implementation_digests)
+        executions = {execution.check_id: execution for execution in rehearsal.executions}
+        if (
+            not rehearsal.passed
+            or rehearsal.registry_digest != self._registry.registry_digest
+            or rehearsal.coverage_digest != self._registry.coverage_digest
+            or set(executions) != set(expected)
+            or any(
+                not execution.passed or execution.implementation_digest != expected[check_id]
+                for check_id, execution in executions.items()
             )
-        if bindings is None:
-            if binding_factory is None:
-                raise ValueError("fresh preflight requires an attestation binding factory")
-            bindings = binding_factory(executions)
+            or rehearsal.rehearsal_digest
+            != _rehearsal_digest(
+                registry_digest=rehearsal.registry_digest,
+                coverage_digest=rehearsal.coverage_digest,
+                executions=rehearsal.executions,
+            )
+        ):
+            raise ValueError("preflight rehearsal authority is incomplete or drifted")
         attestation = PreflightAttestation.issue(
             bindings=bindings,
-            executions=executions,
+            executions=rehearsal.executions,
             issued_at=self._clock(),
             registry_digest=self._registry.registry_digest,
             coverage_digest=self._registry.coverage_digest,
         )
         self._store.publish(attestation)
-        return PreflightPipelineResult(
-            registry_digest=self._registry.registry_digest,
-            coverage_digest=self._registry.coverage_digest,
-            executions=executions,
-            blockers=(),
-            attestation=attestation,
-            reused=False,
-        )
+        return attestation
 
     def assess(
         self,
@@ -445,10 +521,29 @@ def _assessment_digest(
     ).hexdigest()
 
 
+def _rehearsal_digest(
+    *,
+    registry_digest: str,
+    coverage_digest: str,
+    executions: Sequence[CheckExecution],
+) -> str:
+    payload = {
+        "coverage_digest": coverage_digest,
+        "executions": [execution.to_dict() for execution in executions],
+        "registry_digest": registry_digest,
+        "schema_version": 1,
+        "through_tier": 3,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 __all__ = [
     "PreflightAssessment",
     "PreflightBlocker",
     "PreflightPipeline",
     "PreflightPipelineResult",
+    "PreflightRehearsal",
     "evidence_by_check",
 ]

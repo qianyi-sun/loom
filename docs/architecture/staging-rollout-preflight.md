@@ -72,6 +72,13 @@ is intentionally issued only after that rehearsal succeeds. Tier 0 may still
 reuse a previously active eligible lease when its complete identity and epoch
 remain unchanged.
 
+The pipeline exposes this ordering directly. `assess` publishes Tier 0-2
+evidence; `rehearse` executes and hashes the complete Tier 0-3 DAG without
+publishing an attestation; and `attest` accepts only that unchanged passing
+rehearsal after the coordinator has published its restore-verified lease. The
+compatibility `authorize` call is only a composition of those operations and
+cannot bypass their validation.
+
 ## Tiers
 
 ### Tier 0: admission, under two minutes
