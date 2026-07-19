@@ -189,7 +189,9 @@ rotates a token whose metadata is otherwise fresh but whose audience cannot be
 accepted by the fixed API server. The PostgreSQL transport uses kubectl's
 explicit loopback `--address=127.0.0.1` option plus a numeric `LOCAL:5432`
 mapping; an address must never be encoded as a third port-mapping field because
-kubectl interprets that field as a named pod port. PostgreSQL
+kubectl interprets that field as a named pod port. Installer SQL uses
+`kubectl exec --stdin` so `psql -f -` receives the fixed transaction; a silent
+EOF success is not convergence evidence. PostgreSQL
 baseline evidence is collected in one `REPEATABLE READ, READ ONLY`
 transaction as `loom_rollout_readonly`; the role is required to be
 non-superuser, `NOINHERIT`, `NOCREATEROLE`, `NOCREATEDB`, `NOREPLICATION` and
