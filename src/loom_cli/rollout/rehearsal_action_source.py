@@ -109,7 +109,10 @@ class RehearsalPlan:
             or not self.db_snapshot_identity.startswith("pgdump-sha256:")
             or not self.schema_revision
             or not image_digests
-            or any(not name or not digest.startswith("sha256:") for name, digest in image_digests.items())
+            or any(
+                not name or not digest.startswith("sha256:")
+                for name, digest in image_digests.items()
+            )
         ):
             raise ValueError("rehearsal plan identity is invalid")
         self.resources.require_isolated()
@@ -145,6 +148,82 @@ class RehearsalPlan:
             "schema_revision": self.schema_revision,
             "schema_version": 1,
         }
+
+    @classmethod
+    def from_record(cls, value: Mapping[str, object]) -> RehearsalPlan:
+        """Parse the one strict plan schema accepted by the installed helper."""
+        expected = {
+            "browser_report_schema_sha256",
+            "candidate_sha",
+            "candidate_tree",
+            "checkpoint_evidence_sha256",
+            "checkpoint_manifest_sha256",
+            "db_snapshot_identity",
+            "image_artifact_sha256",
+            "image_digests",
+            "migration_plan_sha256",
+            "mutation_epoch",
+            "object_inventory_root",
+            "resources",
+            "schema_revision",
+            "schema_version",
+        }
+        resources = value.get("resources")
+        image_digests = value.get("image_digests")
+        mutation_epoch = value.get("mutation_epoch")
+        if (
+            set(value) != expected
+            or type(value.get("schema_version")) is not int
+            or value.get("schema_version") != 1
+            or type(mutation_epoch) is not int
+            or not isinstance(resources, Mapping)
+            or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
+            or not isinstance(image_digests, Mapping)
+            or not image_digests
+            or any(
+                not isinstance(key, str) or not isinstance(item, str)
+                for key, item in image_digests.items()
+            )
+        ):
+            raise ValueError("rehearsal plan schema is invalid")
+        string_fields = (
+            "browser_report_schema_sha256",
+            "candidate_sha",
+            "candidate_tree",
+            "checkpoint_evidence_sha256",
+            "checkpoint_manifest_sha256",
+            "db_snapshot_identity",
+            "image_artifact_sha256",
+            "migration_plan_sha256",
+            "object_inventory_root",
+            "schema_revision",
+        )
+        if any(not isinstance(value.get(field), str) for field in string_fields) or any(
+            not isinstance(resources.get(field), str)
+            for field in ("database", "namespace", "object_prefix", "route", "systemd_unit")
+        ):
+            raise ValueError("rehearsal plan schema is invalid")
+        return cls(
+            candidate_sha=str(value["candidate_sha"]),
+            candidate_tree=str(value["candidate_tree"]),
+            checkpoint_evidence_sha256=str(value["checkpoint_evidence_sha256"]),
+            checkpoint_manifest_sha256=str(value["checkpoint_manifest_sha256"]),
+            mutation_epoch=mutation_epoch,
+            db_snapshot_identity=str(value["db_snapshot_identity"]),
+            object_inventory_root=str(value["object_inventory_root"]),
+            schema_revision=str(value["schema_revision"]),
+            image_digests={str(key): str(item) for key, item in image_digests.items()},
+            image_artifact_sha256=str(value["image_artifact_sha256"]),
+            migration_plan_sha256=str(value["migration_plan_sha256"]),
+            browser_report_schema_sha256=str(value["browser_report_schema_sha256"]),
+            resources=RehearsalResources(
+                database=str(resources["database"]),
+                namespace=str(resources["namespace"]),
+                object_prefix=str(resources["object_prefix"]),
+                route=str(resources["route"]),
+                systemd_unit=str(resources["systemd_unit"]),
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)

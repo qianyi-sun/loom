@@ -78,6 +78,7 @@ MAINTENANCE_MARKER = RUNTIME_ROOT / "maintenance"
 CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
 CLIENT_PATH = Path("/usr/local/bin/loom-staging-rollout")
 BROKER_PATH = Path("/usr/local/libexec/loom-staging-rollout-broker")
+REHEARSAL_PATH = Path("/usr/local/libexec/loom-staging-rollout-rehearsal")
 TRUST_TOOL_PATH = Path("/usr/local/libexec/loom-staging-rollout-gb10-trust")
 SUDOERS_PATH = Path("/etc/sudoers.d/loom-staging-rollout")
 TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
@@ -169,6 +170,7 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "config",
         "gb10-known-hosts",
         "gb10-trust-tool",
+        "rehearsal-helper",
         "shared-work2-mount-unit",
         "tmpfiles",
     }
@@ -1557,6 +1559,7 @@ class HostSystem:
                 for name in (
                     "loom-staging-rollout",
                     "loom-staging-rollout-broker",
+                    "loom-staging-rollout-rehearsal",
                     "loom-staging-rollout.sudoers",
                     SHARED_WORK2_MOUNT_UNIT,
                 )
@@ -1597,6 +1600,7 @@ class HostSystem:
             )
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-broker")])
+            self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-rehearsal")])
             self.runner.run(["visudo", "-cf", str(directory / "loom-staging-rollout.sudoers")])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_repo_helper)])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_work2_helper)])
@@ -3263,6 +3267,7 @@ class HostSystem:
         authority = {
             CLIENT_PATH: "regular file:root:root:755",
             BROKER_PATH: "regular file:root:root:755",
+            REHEARSAL_PATH: "regular file:root:root:755",
             SUDOERS_PATH: "regular file:root:root:440",
             TMPFILES_PATH: "regular file:root:root:644",
             CONFIG_PATH: "regular file:root:loom-rollout:640",
@@ -3909,6 +3914,13 @@ class HostInstaller:
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755, "root", "root"),
             (BROKER_PATH, self._asset("loom-staging-rollout-broker"), 0o755, "root", "root"),
             (
+                REHEARSAL_PATH,
+                self._asset("loom-staging-rollout-rehearsal"),
+                0o755,
+                "root",
+                "root",
+            ),
+            (
                 TRUST_TOOL_PATH,
                 self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
                 0o755,
@@ -3943,10 +3955,11 @@ class HostInstaller:
             "broker": installed_files[1][1],
             "client": installed_files[0][1],
             "config": config,
-            "gb10-known-hosts": installed_files[4][1],
-            "gb10-trust-tool": installed_files[2][1],
-            "shared-work2-mount-unit": installed_files[5][1],
-            "tmpfiles": installed_files[3][1],
+            "gb10-known-hosts": installed_files[5][1],
+            "gb10-trust-tool": installed_files[3][1],
+            "rehearsal-helper": installed_files[2][1],
+            "shared-work2-mount-unit": installed_files[6][1],
+            "tmpfiles": installed_files[4][1],
         }
 
         added_operator_memberships = self._record_operator_memberships(previous_record)
@@ -4524,6 +4537,7 @@ class HostInstaller:
         expected = (
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755),
             (BROKER_PATH, self._asset("loom-staging-rollout-broker"), 0o755),
+            (REHEARSAL_PATH, self._asset("loom-staging-rollout-rehearsal"), 0o755),
             (
                 TRUST_TOOL_PATH,
                 self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
@@ -4590,6 +4604,7 @@ class HostInstaller:
                 "config": config_payload,
                 "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
                 "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
+                "rehearsal-helper": self._asset("loom-staging-rollout-rehearsal"),
                 "shared-work2-mount-unit": self._asset(SHARED_WORK2_MOUNT_UNIT),
                 "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
             }
@@ -4821,6 +4836,7 @@ class HostInstaller:
         removable_files = [
             CLIENT_PATH,
             BROKER_PATH,
+            REHEARSAL_PATH,
             TRUST_TOOL_PATH,
             CONFIG_PATH,
             INSTALL_ATTESTATION,

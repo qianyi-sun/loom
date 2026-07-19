@@ -29,6 +29,11 @@ INSTALL_ASSETS = MappingProxyType(
             0o755,
             False,
         ),
+        "rehearsal-helper": (
+            Path("/usr/local/libexec/loom-staging-rollout-rehearsal"),
+            0o755,
+            False,
+        ),
         "shared-work2-mount-unit": (
             Path("/etc/systemd/system/shared_work2.mount"),
             0o644,
