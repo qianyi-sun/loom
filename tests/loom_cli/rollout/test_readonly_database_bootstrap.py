@@ -61,6 +61,7 @@ def test_role_bootstrap_is_exact_select_only_and_idempotent() -> None:
     assert "NOREPLICATION" in sql
     assert "NOBYPASSRLS" in sql
     assert "default_transaction_read_only = 'on'" in sql
+    assert "REVOKE TEMP ON DATABASE %I FROM PUBLIC" in sql
     assert "REVOKE TEMP ON DATABASE" in sql
     assert "REVOKE CREATE ON SCHEMA public" in sql
     assert "REVOKE ALL PRIVILEGES ON ALL TABLES" in sql

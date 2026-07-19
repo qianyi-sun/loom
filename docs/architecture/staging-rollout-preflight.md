@@ -195,7 +195,12 @@ EOF success is not convergence evidence. PostgreSQL
 baseline evidence is collected in one `REPEATABLE READ, READ ONLY`
 transaction as `loom_rollout_readonly`; the role is required to be
 non-superuser, `NOINHERIT`, `NOCREATEROLE`, `NOCREATEDB`, `NOREPLICATION` and
-`NOBYPASSRLS`. A pre-0066 database has no mutation-epoch table, so the source
+`NOBYPASSRLS`. The bootstrap also revokes the database's default `PUBLIC`
+`TEMP` grant; revoking it only from the named role cannot override an inherited
+`PUBLIC` grant. The staging database inventory permits only its `loom` owner
+and this readonly login, so the owner retains its implicit authority while the
+probe cannot create session-local tables. A pre-0066 database has no
+mutation-epoch table, so the source
 accepts only its exact four-digit Alembic revision and binds the one-time
 bootstrap epoch `0` to that revision. Revision 0066 and later must provide the
 exact staging epoch row; revision 0067 and later must also provide exact

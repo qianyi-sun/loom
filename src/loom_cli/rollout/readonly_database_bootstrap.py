@@ -103,6 +103,7 @@ ALTER ROLE {_ROLE} SET statement_timeout = '15s';
 DO $loom$
 BEGIN
   EXECUTE format('GRANT CONNECT ON DATABASE %I TO {_ROLE}', current_database());
+  EXECUTE format('REVOKE TEMP ON DATABASE %I FROM PUBLIC', current_database());
   EXECUTE format('REVOKE TEMP ON DATABASE %I FROM {_ROLE}', current_database());
 END
 $loom$;
