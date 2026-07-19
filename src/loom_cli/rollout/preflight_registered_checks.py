@@ -12,6 +12,13 @@ from datetime import datetime
 from pathlib import Path
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.rollout.browser_runtime_readiness import (
+    CommandRunner as BrowserCommandRunner,
+)
+from loom_cli.rollout.browser_runtime_readiness import (
+    browser_report_schema_digest,
+    probe_browser_runtime,
+)
 from loom_cli.rollout.credential_authority import (
     read_trusted_file,
     safe_content_fingerprint,
@@ -1732,9 +1739,94 @@ def _empty_manifest_probe() -> CheckProbe:
     )
 
 
+def build_browser_runtime_check(
+    run: BrowserCommandRunner,
+    image_artifact: Callable[[], ImageArtifactSet],
+    *,
+    token_path: Path,
+    service_uid: int,
+    service_gid: int,
+    expected_candidate_sha: str,
+    expected_source_set_digest: str,
+) -> RegisteredCheck:
+    """Build the Tier 1 exact browser image/token/container invariant."""
+    expected_schema_digest = browser_report_schema_digest()
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != expected_candidate_sha
+            or context.bindings["protected-inputs.sha256"] != expected_source_set_digest
+            or context.bindings["browser.report-schema.sha256"] != expected_schema_digest
+        ):
+            return _empty_browser_runtime_probe()
+        try:
+            evidence = probe_browser_runtime(
+                run,
+                image_artifact=image_artifact(),
+                token_path=token_path,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return _empty_browser_runtime_probe()
+        return CheckProbe(
+            passed=evidence.launch_ready,
+            evidence={
+                "image-id": evidence.image_id,
+                "protected-file-metadata-digest": evidence.token_metadata_fingerprint,
+                "protected-file-acl-digest": evidence.token_acl_fingerprint,
+                "report-schema-digest": evidence.report_schema_digest,
+                "launch-ready": evidence.launch_ready,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="browser.runtime",
+            failure_code="browser.runtime.invalid",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("images.contract", "credentials.metadata"),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "browser.report-schema.sha256",
+                "candidate.sha",
+                "protected-inputs.sha256",
+            ),
+            evidence_schema=(
+                EvidenceField("image-id", "string"),
+                EvidenceField("protected-file-metadata-digest", "sha256"),
+                EvidenceField("protected-file-acl-digest", "sha256"),
+                EvidenceField("report-schema-digest", "sha256"),
+                EvidenceField("launch-ready", "boolean"),
+            ),
+            timeout_seconds=60,
+            freshness_ttl_seconds=300,
+            remediation="restore exact browser image, private token authority and launch sandbox",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_browser_runtime_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "image-id": "unavailable",
+            "protected-file-metadata-digest": "0" * 64,
+            "protected-file-acl-digest": "0" * 64,
+            "report-schema-digest": "0" * 64,
+            "launch-ready": False,
+        },
+    )
+
+
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
+    "build_browser_runtime_check",
     "build_candidate_identity_check",
     "build_capacity_high_water_check",
     "build_credentials_metadata_check",

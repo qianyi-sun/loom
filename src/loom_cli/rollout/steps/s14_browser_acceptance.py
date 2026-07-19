@@ -16,14 +16,16 @@ from pathlib import Path
 from typing import cast
 
 from loom_cli.cluster_config import load_cluster_config
+from loom_cli.rollout.browser_runtime_readiness import BROWSER_REPORT_SCHEMA_VERSION
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.image_readiness import BROWSER_IMAGE
 from loom_cli.rollout.steps.base import BaseStep, RunResult
 from loom_cli.rollout.steps.s02_build_images import image_tag
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
-BROWSER_ACCEPTANCE_IMAGE = "loom-staging-admin-browser-smoke"
+BROWSER_ACCEPTANCE_IMAGE = BROWSER_IMAGE
 BROWSER_ACCEPTANCE_USERNAME = "qianyi"
 _OUTPUT_DIRECTORY_NAME = "browser-output"
 _REPORT_NAME = "staging-admin-browser-acceptance.json"
@@ -139,7 +141,7 @@ def _report_is_valid(
     binding = payload.get("rollout_binding")
     cleanup = payload.get("cleanup")
     return bool(
-        payload.get("schema_version") == 3
+        payload.get("schema_version") == BROWSER_REPORT_SCHEMA_VERSION
         and payload.get("status") == "pass"
         and payload.get("failure_code") is None
         and payload.get("request_id") == ctx.request_id

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_digest
 from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
 from loom_cli.rollout.image_readiness import (
@@ -18,6 +19,7 @@ from loom_cli.rollout.image_readiness import (
     BROWSER_ENTRYPOINT,
     BROWSER_IMAGE,
     REVISION_LABEL,
+    ImageDescriptor,
     image_plan_digest,
 )
 from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
@@ -40,6 +42,7 @@ from loom_cli.rollout.preflight_contract import (
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
     build_backup_lease_eligibility_check,
+    build_browser_runtime_check,
     build_candidate_identity_check,
     build_capacity_high_water_check,
     build_credentials_metadata_check,
@@ -1356,3 +1359,61 @@ def test_registered_manifest_checks_render_once_then_server_validate() -> None:
     assert by_id["manifests.server-schema"].evidence["server-valid"] is True
     assert len(render_calls) == 1
     assert server_payloads == [_rendered_image_manifest()]
+
+
+def test_registered_browser_runtime_binds_exact_image_token_and_schema(tmp_path: Path) -> None:
+    token = tmp_path / "admin-token"
+    token.write_text("not-evidence", encoding="utf-8")
+    token.chmod(0o600)
+    browser = ImageDescriptor(
+        image_id="sha256:" + "b" * 64,
+        revision="1" * 40,
+        os="linux",
+        architecture="amd64",
+        entrypoint=BROWSER_ENTRYPOINT,
+    )
+    artifact = SimpleNamespace(descriptors={BROWSER_IMAGE: browser})
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv):
+        calls.append(tuple(argv))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps({"runtime": "ready", "schema_version": 3}, separators=(",", ":")),
+            "",
+        )
+
+    source_digest = "c" * 64
+    check = build_browser_runtime_check(
+        run,
+        lambda: artifact,  # type: ignore[arg-type,return-value]
+        token_path=token,
+        service_uid=os.geteuid(),
+        service_gid=os.getegid(),
+        expected_candidate_sha="1" * 40,
+        expected_source_set_digest=source_digest,
+    )
+    context = CheckContext(
+        {
+            "browser.report-schema.sha256": browser_report_schema_digest(),
+            "candidate.sha": "1" * 40,
+            "protected-inputs.sha256": source_digest,
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("images.contract"),
+            _passing_dependency("credentials.metadata"),
+            check,
+        )
+    )
+
+    result = next(
+        item for item in dag.run(context, through_tier=1) if item.check_id == "browser.runtime"
+    )
+    assert result.passed
+    assert result.evidence["image-id"] == browser.image_id
+    assert result.evidence["report-schema-digest"] == browser_report_schema_digest()
+    assert "--network=none" in calls[0]
