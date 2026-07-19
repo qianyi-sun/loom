@@ -15,7 +15,10 @@ from loom_cli.rollout.image_readiness import DockerRunner as ImageDockerRunner
 from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
 from loom_cli.rollout.manifest_readiness import RenderManifest, ServerDryRun
 from loom_cli.rollout.operator.candidate import GitRunner
-from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
+from loom_cli.rollout.preflight_artifact_store import (
+    LoadedPreflightArtifacts,
+    PreflightArtifactStore,
+)
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_runtime import RehearsalActionFactory, RehearsalIdentityFactory
 from loom_cli.rollout.preflight_runtime_sources import (
@@ -35,7 +38,7 @@ from .model import CandidateBinding
 
 BackupAuthorityFactory = Callable[[int], BackupAdmissionAuthority]
 RehearsalFactory = Callable[
-    [CandidateBinding, int, RuntimePurpose],
+    [CandidateBinding, int, RuntimePurpose, LoadedPreflightArtifacts | None],
     tuple[RehearsalActionFactory, RehearsalIdentityFactory],
 ]
 
@@ -106,9 +109,7 @@ class InstalledDeepPreflightComposition:
                 image_run=self.image_run,
             )
         rehearsal_actions, rehearsal_identity = self.rehearsal_factory(
-            candidate,
-            mutation_epoch,
-            purpose,
+            candidate, mutation_epoch, purpose, loaded
         )
         return PreflightRuntimeSources(
             config=self.config,
