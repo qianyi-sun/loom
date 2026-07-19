@@ -34,6 +34,7 @@ from .candidate import CandidateBindingError, bind_configured_candidate
 from .checkpoint_inventory_provider import KubernetesLifecycleInventoryProvider
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
+from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
 from .lifecycle import LifecycleBusyError, LifecycleCoordinator, LifecycleError
 from .model import (
     CallerIdentity,
@@ -1248,7 +1249,8 @@ def _operator_known_secrets(
 
 def _default_dependencies() -> BrokerDependencies:
     config = OperatorConfig.load(fixed_operator_config_path())
-    service_uid = pwd.getpwnam(config.service_user).pw_uid
+    service_account = pwd.getpwnam(config.service_user)
+    service_uid = service_account.pw_uid
     child_environment = sanitized_child_environment(config, service_uid=service_uid)
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1271,6 +1273,17 @@ def _default_dependencies() -> BrokerDependencies:
         runner=backup_runner,
         environment=child_environment,
     )
+
+    def clock() -> datetime:
+        return datetime.now(UTC)
+
+    deep_preflight = build_installed_deep_preflight_composition(
+        config,
+        service_uid=service_uid,
+        service_gid=service_account.pw_gid,
+        store=store,
+        now=clock,
+    ).authority()
     return BrokerDependencies(
         config=config,
         authenticate=lambda: caller_from_sudo(
@@ -1283,7 +1296,7 @@ def _default_dependencies() -> BrokerDependencies:
         bind_candidate=lambda: bind_configured_candidate(
             config,
             run=run,
-            now=lambda: datetime.now(UTC),
+            now=clock,
         ),
         backup=BackupCreator(
             config,
@@ -1294,7 +1307,7 @@ def _default_dependencies() -> BrokerDependencies:
         store=store,
         lifecycle=lifecycle,
         systemd=systemd,
-        now=lambda: datetime.now(UTC),
+        now=clock,
         new_request_id=lambda: f"req-{uuid4().hex[:16]}",
         new_rollout_id=lambda candidate: new_rollout_id(image_tag=candidate.image_tag),
         stdout=sys.stdout,
@@ -1303,6 +1316,8 @@ def _default_dependencies() -> BrokerDependencies:
             config,
             service_uid=service_uid,
         ),
+        assess_preflight=deep_preflight.assess,
+        read_mutation_epoch=deep_preflight.current_mutation_epoch,
     )
 
 

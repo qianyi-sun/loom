@@ -37,6 +37,7 @@ from .installed_preflight_inputs import InstalledPreflightInputs
 from .model import CandidateBinding
 
 BackupAuthorityFactory = Callable[[int], BackupAdmissionAuthority]
+ManifestFactory = Callable[[CandidateBinding], RenderManifest]
 RehearsalFactory = Callable[
     [CandidateBinding, int, RuntimePurpose, LoadedPreflightArtifacts | None],
     tuple[RehearsalActionFactory, RehearsalIdentityFactory],
@@ -65,7 +66,7 @@ class InstalledDeepPreflightComposition:
     gb10_mount_source: Callable[[], GB10SharedMountReadiness]
     systemd_analyze_run: SystemdAnalyzeRunner
     image_run: ImageDockerRunner
-    render_manifest: RenderManifest
+    render_manifest_factory: ManifestFactory
     server_dry_run: ServerDryRun
     browser_run: BrowserCommandRunner
     baseline_probe_factory: Callable[[int], Mapping[str, ReadonlyProbe]]
@@ -141,7 +142,7 @@ class InstalledDeepPreflightComposition:
             migration_policy_digest=self.inputs.migration_policy_digest,
             systemd_analyze_run=self.systemd_analyze_run,
             image_run=self.image_run,
-            render_manifest=self.render_manifest,
+            render_manifest=self.render_manifest_factory(candidate),
             server_dry_run=self.server_dry_run,
             browser_run=self.browser_run,
             browser_token_path=self.inputs.browser_token_path,

@@ -62,7 +62,7 @@ class InstalledPreflightCommands:
 
     def __post_init__(self) -> None:
         environment = dict(self.child_environment)
-        required = {"HOME", "LANG", "LC_ALL", "PATH", "USER"}
+        required = {"HOME", "LC_ALL", "PATH", "USER"}
         if (
             self.config.environment != "staging"
             or self.config.namespace != "loom-staging"

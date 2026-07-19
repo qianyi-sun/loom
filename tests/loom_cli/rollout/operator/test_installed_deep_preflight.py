@@ -97,7 +97,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         ),
         systemd_analyze_run=command,
         image_run=command,
-        render_manifest=lambda: "",
+        render_manifest_factory=lambda _candidate: lambda: "",
         server_dry_run=lambda _rendered: command(),
         browser_run=command,
         baseline_probe_factory=lambda _epoch: {},
