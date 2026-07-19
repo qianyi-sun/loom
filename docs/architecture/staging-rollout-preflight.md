@@ -129,6 +129,14 @@ complete manifest, component, epoch, snapshot, schema, environment, namespace,
 and inventory identity. The composition root shares one candidate image-build
 session while refreshing baseline and metadata probes between stages.
 
+`CandidatePreflightOrchestrator` is the restart boundary between admission and
+rehearsal. The broker executes Tier 0–2 from a runtime factory before it
+publishes a request. The detached worker later rebuilds that runtime from the
+immutable candidate and mutation epoch, then binds Tier 3 to the published
+checkpoint. Registry and implementation digests must be byte-identical across
+both processes; no in-memory pending plan or cached live probe is rollout
+authority.
+
 Restore evidence is derived from the immutable rehearsal itself, not from an
 operator assertion. Every Tier 3 action must share one isolation ID, candidate,
 and mutation epoch; every action must report no protected mutation; the DB clone
