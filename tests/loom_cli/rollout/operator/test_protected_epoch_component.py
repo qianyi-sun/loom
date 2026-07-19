@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
 
 
 class Runner:
-    def __init__(self, record: dict[str, object]) -> None:
+    def __init__(self, record: dict[str, object] | None) -> None:
         self.record = record
         self.calls: list[tuple[str, ...]] = []
 
@@ -21,18 +22,21 @@ class Runner:
         self.calls.append(tuple(argv))
         assert env == {"KUBECONFIG": "/exact"}
         assert timeout_seconds == 30.0
-        if any("WITH advanced AS" in item for item in argv):
-            variables = {argv[index + 1] for index, value in enumerate(argv) if value == "-v"}
-            assert "request_id=req-alpha" in variables
+        if any("WITH bootstrapped AS" in item for item in argv):
+            raw_variables = {argv[index + 1] for index, value in enumerate(argv) if value == "-v"}
+            variables = {
+                key: value for key, value in (item.split("=", 1) for item in raw_variables)
+            }
+            assert variables["request_id"] == "req-alpha"
             self.record = {
                 "environment": "staging",
                 "namespace": "loom-staging",
-                "epoch": 8,
+                "epoch": int(variables["expected_epoch"]) + 1,
                 "mutation_class": "rollout_apply",
-                "request_id": "req-alpha",
-                "evidence_sha256": _plan(self.tmp_path).plan_digest,
+                "request_id": variables["request_id"],
+                "evidence_sha256": variables["evidence_sha256"],
             }
-        return json.dumps(self.record).encode()
+        return b"" if self.record is None else json.dumps(self.record).encode()
 
     tmp_path: Path
 
@@ -94,3 +98,26 @@ def test_epoch_component_fails_closed_on_concurrent_or_malformed_state(tmp_path:
             runner=malformed,
             environment={"KUBECONFIG": "/exact"},
         ).classify(plan)
+
+
+def test_epoch_component_bootstraps_only_after_legacy_schema_migration(tmp_path: Path) -> None:
+    plan = replace(
+        _plan(tmp_path),
+        schema_revision="0065",
+        migration_target_revision="0067",
+        starting_mutation_epoch=0,
+    )
+    runner = Runner(None)
+    runner.tmp_path = tmp_path
+    authority = KubernetesProtectedEpochComponent(
+        runner=runner,
+        environment={"KUBECONFIG": "/exact"},
+    )
+
+    assert authority.classify(plan).state is ComponentState.READY
+    authority.apply(plan)
+    assert authority.classify(plan).state is ComponentState.EXACT
+
+    nonlegacy = replace(plan, schema_revision="0066")
+    runner.record = None
+    assert authority.classify(nonlegacy).state is ComponentState.DRIFTED

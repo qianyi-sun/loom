@@ -474,6 +474,15 @@ epoch owned by that same request and plan, and `drifted` for every concurrent
 or malformed state. A crash after the transaction is therefore recovered by
 readback, never by a second increment.
 
+The one-time pre-0066 transition is explicit rather than silently pretending
+that a missing epoch row is current authority. Only a plan attesting epoch
+zero, a baseline schema below 0066, and a rehearsed target at or above 0066 may
+bootstrap the staging row. The exact migration component must converge first;
+then one SQL statement inserts the bootstrap row if absent, claims epoch one,
+and appends its event. Missing authority for any already-0066 database is
+drift, and a generic migration never seeds a staging row into another
+environment's database.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:

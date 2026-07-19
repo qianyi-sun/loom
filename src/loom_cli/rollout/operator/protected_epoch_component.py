@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -16,6 +17,7 @@ from .protected_apply_journal import (
 )
 
 _TIMEOUT_SECONDS = 30.0
+_REVISION_RE = re.compile(r"^(?P<number>[0-9]{4})(?:_[a-z0-9_]+)?$")
 _READ_SQL = """
 SELECT jsonb_build_object(
   'environment', environment,
@@ -29,7 +31,14 @@ FROM staging_mutation_epochs
 WHERE environment = 'staging' AND namespace = 'loom-staging';
 """.strip()
 _ADVANCE_SQL = """
-WITH advanced AS (
+WITH bootstrapped AS (
+  INSERT INTO staging_mutation_epochs
+    (environment, namespace, epoch, reason)
+  SELECT 'staging', 'loom-staging', 0, 'bootstrap'
+  WHERE :'allow_bootstrap'::boolean
+  ON CONFLICT (environment) DO NOTHING
+  RETURNING epoch
+), advanced AS (
   UPDATE staging_mutation_epochs
   SET epoch = epoch + 1,
       reason = 'rollout_apply',
@@ -105,6 +114,12 @@ class KubernetesProtectedEpochComponent:
 
     def classify(self, plan: FinalGatePlan) -> ComponentObservation:
         record = self._query((_READ_SQL,))
+        if record is None:
+            return ComponentObservation(
+                state=(ComponentState.READY if _allows_bootstrap(plan) else ComponentState.DRIFTED),
+                evidence_digest=_hash_json({"status": "missing"}),
+                observed_epoch=plan.starting_mutation_epoch,
+            )
         epoch = record["epoch"]
         assert type(epoch) is int
         expected = _expected_identity(plan)
@@ -129,13 +144,15 @@ class KubernetesProtectedEpochComponent:
                 f"evidence_sha256={plan.plan_digest}",
                 "-v",
                 f"expected_epoch={plan.starting_mutation_epoch}",
+                "-v",
+                f"allow_bootstrap={'true' if _allows_bootstrap(plan) else 'false'}",
                 _ADVANCE_SQL,
             )
         )
         if record != _expected_identity(plan):
             raise RuntimeError("protected mutation epoch claim was stale or incomplete")
 
-    def _query(self, arguments: Sequence[str]) -> dict[str, object]:
+    def _query(self, arguments: Sequence[str]) -> dict[str, object] | None:
         sql = arguments[-1]
         variables = tuple(arguments[:-1])
         payload = self.runner.capture_stdout(
@@ -158,7 +175,10 @@ class KubernetesProtectedEpochComponent:
             timeout_seconds=_TIMEOUT_SECONDS,
         )
         try:
-            value = json.loads(payload.decode("utf-8"))
+            decoded = payload.decode("utf-8").strip()
+            if not decoded:
+                return None
+            value = json.loads(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("protected mutation epoch query returned invalid JSON") from exc
         if (
@@ -198,6 +218,18 @@ def _expected_identity(plan: FinalGatePlan) -> dict[str, object]:
         "request_id": plan.request_id,
         "evidence_sha256": plan.plan_digest,
     }
+
+
+def _allows_bootstrap(plan: FinalGatePlan) -> bool:
+    current = _REVISION_RE.fullmatch(plan.schema_revision)
+    target = _REVISION_RE.fullmatch(plan.migration_target_revision)
+    return bool(
+        current is not None
+        and target is not None
+        and int(current.group("number")) < 66
+        and int(target.group("number")) >= 66
+        and plan.starting_mutation_epoch == 0
+    )
 
 
 def _hash_json(value: Mapping[str, object]) -> str:
