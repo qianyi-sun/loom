@@ -51,6 +51,8 @@ def test_namespace_uses_fixed_scoped_apply_and_exact_readback() -> None:
             records[str(record["kind"])] = record
         elif "rolebinding" in argv:
             record = records["RoleBinding"]
+        elif "networkpolicy" in argv:
+            record = records["NetworkPolicy"]
         else:
             record = records["Namespace"]
         return subprocess.CompletedProcess(argv, 0, json.dumps(record), "")
@@ -59,7 +61,7 @@ def test_namespace_uses_fixed_scoped_apply_and_exact_readback() -> None:
     outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.namespace", plan)
 
     assert outcome.passed
-    assert len(calls) == 4
+    assert len(calls) == 6
     assert calls[0][0] == (
         "kubectl",
         "--kubeconfig",
@@ -74,11 +76,20 @@ def test_namespace_uses_fixed_scoped_apply_and_exact_readback() -> None:
         "json",
     )
     assert calls[1][0][3:6] == ("--namespace", plan.resources.namespace, "apply")
-    assert calls[2][0][3:6] == ("get", "namespace", plan.resources.namespace)
-    assert calls[3][0][3:6] == ("--namespace", plan.resources.namespace, "get")
+    assert calls[2][0][3:6] == ("--namespace", plan.resources.namespace, "apply")
+    assert calls[3][0][3:6] == ("get", "namespace", plan.resources.namespace)
+    assert calls[4][0][3:6] == ("--namespace", plan.resources.namespace, "get")
+    assert calls[5][0][3:6] == ("--namespace", plan.resources.namespace, "get")
     namespace = json.loads(calls[0][1] or b"{}")
     assert namespace["metadata"]["annotations"]["loom.openai.dev/plan-sha256"] == plan.plan_digest
     assert namespace["metadata"]["labels"]["loom.openai.dev/authority"] == "staging-preflight"
+    assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
+    assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce-version"] == "latest"
+    network_policy = json.loads(calls[1][1] or b"{}")
+    assert network_policy["spec"] == {
+        "podSelector": {},
+        "policyTypes": ["Ingress", "Egress"],
+    }
 
 
 def test_namespace_returns_normalized_blockers_without_command_output() -> None:
@@ -101,7 +112,7 @@ def test_namespace_returns_normalized_blockers_without_command_output() -> None:
         return subprocess.CompletedProcess(argv, 0, '{"apiVersion":"v1","kind":"Namespace"}', "")
 
     blocked = IsolatedRehearsalExecutor(run=drift).execute("rehearsal.namespace", plan)
-    assert blocked.blockers == {"namespace": "observer-binding-failed"}
+    assert blocked.blockers == {"namespace": "network-policy-failed"}
 
 
 def test_unimplemented_rehearsal_steps_remain_fail_closed() -> None:

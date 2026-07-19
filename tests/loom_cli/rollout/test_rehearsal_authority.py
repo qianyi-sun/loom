@@ -41,6 +41,10 @@ def test_checked_in_rehearsal_authority_is_exact_and_bounded() -> None:
         ('      - "pods"', '      - "nodes"'),
         ("request.userInfo.username ==", "request.userInfo.username !="),
         ("startsWith('loom-rehearsal-')", "startsWith('loom-')"),
+        (
+            "pod-security.kubernetes.io/enforce']\n        == 'restricted'",
+            "pod-security.kubernetes.io/enforce']\n        == 'baseline'",
+        ),
         ("automountServiceAccountToken: false", "automountServiceAccountToken: true"),
     ],
 )

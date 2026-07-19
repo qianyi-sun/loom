@@ -109,6 +109,16 @@ spec:
         (request.operation == 'DELETE' ? oldObject : object).metadata.labels['loom.openai.dev/authority']
         == 'staging-preflight'
       message: rehearsal namespace must carry the exact staging-preflight authority label
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['pod-security.kubernetes.io/enforce']
+        == 'restricted' &&
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['pod-security.kubernetes.io/enforce-version']
+        == 'latest' &&
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['pod-security.kubernetes.io/audit']
+        == 'restricted' &&
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['pod-security.kubernetes.io/warn']
+        == 'restricted'
+      message: rehearsal namespaces must enforce the restricted pod security standard
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

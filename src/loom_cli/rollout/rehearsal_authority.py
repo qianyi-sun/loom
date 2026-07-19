@@ -23,7 +23,7 @@ _EXPECTED_KINDS = (
     "ClusterRoleBinding",
 )
 _MUTATING_VERBS = frozenset({"create", "delete", "patch", "update"})
-_EXPECTED_CANONICAL_SHA256 = "b8a0eccddccafca23f84df322a61f761d46034aa0b385afe5f82444e6d1256bb"
+_EXPECTED_CANONICAL_SHA256 = "7a8a5e78e258e32c515646d1f8abc623d5fcdbb5f6e26f61c5bcebbe45d41a0f"
 _MUTATOR_RULES = [
     {
         "apiGroups": [""],

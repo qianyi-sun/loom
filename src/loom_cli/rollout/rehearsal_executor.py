@@ -103,6 +103,28 @@ class IsolatedRehearsalExecutor:
         )
         if apply is None or not _namespace_matches(apply, plan):
             return _blocked("namespace", "apply-failed")
+        network_policy_manifest = _default_deny_network_policy_manifest(plan)
+        network_policy = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "apply",
+                "--server-side=true",
+                "--field-manager=loom-staging-preflight",
+                "--request-timeout=30s",
+                "-f",
+                "-",
+                "-o",
+                "json",
+            ),
+            _json_bytes(network_policy_manifest),
+            timeout=45,
+        )
+        if network_policy is None or not _default_deny_network_policy_matches(network_policy, plan):
+            return _blocked("namespace", "network-policy-failed")
         binding_manifest = _observer_binding_manifest(plan)
         binding = self._command(
             (
@@ -142,6 +164,27 @@ class IsolatedRehearsalExecutor:
         )
         if observed is None or not _namespace_matches(observed, plan):
             return _blocked("namespace", "readback-drift")
+        observed_network_policy = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "networkpolicy",
+                "loom-rehearsal-default-deny",
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if observed_network_policy is None or not _default_deny_network_policy_matches(
+            observed_network_policy, plan
+        ):
+            return _blocked("namespace", "network-policy-readback-drift")
         observed_binding = self._command(
             (
                 "kubectl",
@@ -208,6 +251,10 @@ def _namespace_manifest(plan: RehearsalPlan) -> dict[str, object]:
                 "loom.openai.dev/isolation": plan.resources.namespace.removeprefix(
                     "loom-rehearsal-"
                 ),
+                "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/enforce": "restricted",
+                "pod-security.kubernetes.io/enforce-version": "latest",
+                "pod-security.kubernetes.io/warn": "restricted",
             },
             "name": plan.resources.namespace,
         },
@@ -259,6 +306,40 @@ def _observer_binding_manifest(plan: RehearsalPlan) -> dict[str, object]:
             }
         ],
     }
+
+
+def _default_deny_network_policy_manifest(plan: RehearsalPlan) -> dict[str, object]:
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+            "name": "loom-rehearsal-default-deny",
+            "namespace": plan.resources.namespace,
+        },
+        "spec": {
+            "podSelector": {},
+            "policyTypes": ["Ingress", "Egress"],
+        },
+    }
+
+
+def _default_deny_network_policy_matches(value: dict[str, object], plan: RehearsalPlan) -> bool:
+    expected = _default_deny_network_policy_manifest(plan)
+    metadata = value.get("metadata")
+    expected_metadata = expected["metadata"]
+    if not isinstance(metadata, dict) or not isinstance(expected_metadata, dict):
+        return False
+    annotations = metadata.get("annotations")
+    return bool(
+        value.get("apiVersion") == expected["apiVersion"]
+        and value.get("kind") == expected["kind"]
+        and metadata.get("name") == expected_metadata["name"]
+        and metadata.get("namespace") == expected_metadata["namespace"]
+        and isinstance(annotations, dict)
+        and annotations.get("loom.openai.dev/plan-sha256") == plan.plan_digest
+        and value.get("spec") == expected["spec"]
+    )
 
 
 def _observer_binding_matches(value: dict[str, object], plan: RehearsalPlan) -> bool:
