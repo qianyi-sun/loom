@@ -25,6 +25,7 @@ from loom_cli.rollout.credential_authority import (
     read_trusted_file,
     safe_content_fingerprint,
 )
+from loom_cli.rollout.runtime_readiness import ModuleImporter, probe_runtime_readiness
 
 from .config import OperatorConfig
 from .policy import sanitized_child_environment
@@ -33,24 +34,6 @@ from .redaction import redact_rollout_text
 _CHECK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 _MAX_REMEDIATION_LENGTH = 240
 _MAX_EVIDENCE_LENGTH = 120
-_REQUIRED_EXECUTABLES = (
-    "git",
-    "docker",
-    "kind",
-    "kubectl",
-    "ssh",
-    "systemd-run",
-    "systemctl",
-    "journalctl",
-)
-_REQUIRED_IMPORTS = (
-    "boto3",
-    "yaml",
-    "loom_benchmark_tool.register_cmd",
-    "loom_benchmarks.registry",
-    "loom_benchmarks.adapters.skilllearnbench",
-    "loom_benchmark_terminal_bench_2.adapter",
-)
 _REQUIRED_ROLLOUT_SUBDIRECTORIES = (
     "rollouts",
     "postgres",
@@ -733,7 +716,7 @@ def collect_preflight(
     service_uid: int | None = None,
     run: CommandRunner | None = None,
     which: Callable[[str], str | None] | None = None,
-    importer: Callable[[str], object] = importlib.import_module,
+    importer: ModuleImporter = importlib.import_module,
 ) -> PreflightReport:
     """Collect every fixed preflight without exposing subprocess diagnostics."""
     if service_uid is None:
@@ -817,16 +800,20 @@ def collect_preflight(
     add("checkout", clean_checkout, "restore the protected clean runner checkout")
 
     executable_lookup = which or (lambda name: shutil.which(name, path=environment["PATH"]))
-    executables_ok = all(executable_lookup(name) is not None for name in _REQUIRED_EXECUTABLES)
-    add("executables", executables_ok, "install the fixed rollout executable set")
-
-    imports_ok = True
-    for module in _REQUIRED_IMPORTS:
-        try:
-            importer(module)
-        except Exception:
-            imports_ok = False
-    add("python-imports", imports_ok, "synchronize the locked rollout Python environment")
+    runtime = probe_runtime_readiness(
+        executable_lookup=executable_lookup,
+        importer=importer,
+    )
+    add(
+        "executables",
+        runtime.executables_ready,
+        "install the fixed rollout executable set",
+    )
+    add(
+        "python-imports",
+        runtime.imports_ready,
+        "synchronize the locked rollout Python environment",
+    )
 
     add(
         "docker",

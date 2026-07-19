@@ -119,6 +119,15 @@ verifier and emits only the exact Git identities, history count, and evidence
 digest. Later consumers must use the attested tree instead of re-resolving a
 branch or maintaining another identity test.
 
+Runtime readiness is similarly single-source. The fixed executable and Python
+module allowlists live with `probe_runtime_readiness`; the legacy broker adapter
+and the `tools.runtime` DAG check call that same probe. It evaluates every
+requirement even after an earlier miss so one Tier 0 report contains the full
+blocker set. Evidence records only `available`/`missing` status, counts, and
+requirement/result digests—never executable paths, import exceptions, or child
+process diagnostics. The DAG check additionally binds the probe to the exact
+runner install hash before it imports candidate code.
+
 Systemd readiness is single-source as well. The broker-facing Tier 0 probe and
 the final GB10 convergence step consume the same user-manager, oneshot service,
 and timer-state classifiers. The read-only probe binds the manager version,

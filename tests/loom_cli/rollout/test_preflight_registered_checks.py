@@ -29,9 +29,11 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_credentials_metadata_check,
     build_gb10_host_readiness_check,
     build_systemd_user_manager_check,
+    build_tools_runtime_check,
     credential_source_set_digest,
     gb10_target_inventory_digest,
 )
+from loom_cli.rollout.runtime_readiness import REQUIRED_EXECUTABLES, REQUIRED_IMPORTS
 
 BOOT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
@@ -203,6 +205,81 @@ def _passing_dependency(check_id: str) -> RegisteredCheck:
             )
         },
     )
+
+
+def test_registered_tools_runtime_reports_every_blocker_without_diagnostics() -> None:
+    executable_calls: list[str] = []
+    import_calls: list[str] = []
+
+    def executable_lookup(name: str) -> str | None:
+        executable_calls.append(name)
+        if name in {"kind", "systemd-run"}:
+            return None
+        return f"/fixed/bin/{name}"
+
+    def importer(name: str) -> object:
+        import_calls.append(name)
+        if name == "loom_benchmark_terminal_bench_2.adapter":
+            raise ModuleNotFoundError("raw diagnostic must not enter evidence")
+        return object()
+
+    install_hash = "9" * 64
+    check = build_tools_runtime_check(
+        runner_install_hash=install_hash,
+        executable_lookup=executable_lookup,
+        importer=importer,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "runner.install.sha256": install_hash,
+        }
+    )
+
+    executions = PreflightDag((_passing_dependency("runner.install"), check)).run(
+        context,
+        through_tier=0,
+    )
+
+    runtime = next(item for item in executions if item.check_id == "tools.runtime")
+    assert not runtime.passed
+    assert executable_calls == list(REQUIRED_EXECUTABLES)
+    assert import_calls == list(REQUIRED_IMPORTS)
+    assert runtime.evidence["executables"] == {
+        name: "missing" if name in {"kind", "systemd-run"} else "available"
+        for name in REQUIRED_EXECUTABLES
+    }
+    assert runtime.evidence["imports"] == {
+        name: ("missing" if name == "loom_benchmark_terminal_bench_2.adapter" else "available")
+        for name in REQUIRED_IMPORTS
+    }
+    assert "diagnostic" not in str(dict(runtime.evidence))
+
+
+def test_registered_tools_runtime_rejects_install_binding_before_probing() -> None:
+    calls: list[str] = []
+    install_hash = "9" * 64
+    check = build_tools_runtime_check(
+        runner_install_hash=install_hash,
+        executable_lookup=lambda name: calls.append(name) or f"/fixed/bin/{name}",
+        importer=lambda name: calls.append(name) or object(),
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "runner.install.sha256": "8" * 64,
+        }
+    )
+
+    executions = PreflightDag((_passing_dependency("runner.install"), check)).run(
+        context,
+        through_tier=0,
+    )
+
+    runtime = next(item for item in executions if item.check_id == "tools.runtime")
+    assert not runtime.passed
+    assert set(runtime.evidence["executables"].values()) == {"missing"}  # type: ignore[union-attr]
+    assert calls == []
 
 
 def test_registered_user_manager_check_runs_through_shared_dag() -> None:

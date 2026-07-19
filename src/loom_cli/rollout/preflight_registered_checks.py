@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import stat
 from collections.abc import Callable, Mapping
@@ -31,6 +32,14 @@ from loom_cli.rollout.preflight_contract import (
     RegisteredCheck,
     SecretRedactionPolicy,
     StageCapability,
+)
+from loom_cli.rollout.runtime_readiness import (
+    REQUIRED_EXECUTABLES,
+    REQUIRED_IMPORTS,
+    RUNTIME_REQUIREMENT_DIGEST,
+    ExecutableLookup,
+    ModuleImporter,
+    probe_runtime_readiness,
 )
 from loom_cli.rollout.systemd_readiness import CommandRunner, probe_user_manager_readonly
 
@@ -278,6 +287,87 @@ def _empty_credentials_probe(
     )
 
 
+def build_tools_runtime_check(
+    *,
+    runner_install_hash: str,
+    executable_lookup: ExecutableLookup,
+    importer: ModuleImporter = importlib.import_module,
+) -> RegisteredCheck:
+    """Build the Tier 0 fixed executable and Python import invariant."""
+    if len(runner_install_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in runner_install_hash
+    ):
+        raise ValueError("runner install hash is invalid")
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if context.bindings["runner.install.sha256"] != runner_install_hash:
+            return _empty_tools_runtime_probe()
+        runtime = probe_runtime_readiness(
+            executable_lookup=executable_lookup,
+            importer=importer,
+        )
+        return CheckProbe(
+            passed=runtime.ready,
+            evidence={
+                "executables": dict(runtime.executables),
+                "imports": dict(runtime.imports),
+                "executable-count": len(runtime.executables),
+                "import-count": len(runtime.imports),
+                "requirement-digest": runtime.requirement_digest,
+                "runtime-digest": runtime.evidence_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="tools.runtime",
+            failure_code="tools.runtime.unavailable",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("runner.install",),
+            mutation_class=MutationClass.NONE,
+            input_keys=("runner.config.sha256", "runner.install.sha256"),
+            evidence_schema=(
+                EvidenceField("executables", "string-map"),
+                EvidenceField("imports", "string-map"),
+                EvidenceField("executable-count", "integer"),
+                EvidenceField("import-count", "integer"),
+                EvidenceField("requirement-digest", "sha256"),
+                EvidenceField("runtime-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=300,
+            remediation="restore the fixed rollout executables and locked Python imports",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_tools_runtime_probe() -> CheckProbe:
+    executables = {name: "missing" for name in REQUIRED_EXECUTABLES}
+    imports = {name: "missing" for name in REQUIRED_IMPORTS}
+    payload = {
+        "executables": executables,
+        "imports": imports,
+        "requirement_digest": RUNTIME_REQUIREMENT_DIGEST,
+    }
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "executables": executables,
+            "imports": imports,
+            "executable-count": len(executables),
+            "import-count": len(imports),
+            "requirement-digest": RUNTIME_REQUIREMENT_DIGEST,
+            "runtime-digest": hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        },
+    )
+
+
 def build_systemd_user_manager_check(
     run: CommandRunner,
     *,
@@ -458,6 +548,7 @@ __all__ = [
     "build_credentials_metadata_check",
     "build_gb10_host_readiness_check",
     "build_systemd_user_manager_check",
+    "build_tools_runtime_check",
     "credential_source_set_digest",
     "gb10_target_inventory_digest",
 ]
