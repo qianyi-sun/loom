@@ -409,6 +409,20 @@ clears its pending active pointer. This fail-closed transition prevents a
 partially migrated installation from rebuilding images, rerendering manifests,
 or rediscovering an early predicate after backup.
 
+Before those actions can run, `FinalGatePlan` joins the driver envelope, the
+digest-addressed attestation, and the build-once preflight artifact publication
+into one strict canonical record. It binds request/attempt, candidate/tree,
+starting epoch, image digests, rendered manifest, migration plan, browser
+schema, restore-verified backup lease and snapshot, environment/route, runner
+source/install/config, secret metadata fingerprints, GB10 probe identities,
+and every attested implementation/evidence digest. The service publishes this
+record once as a mode-`0600`, single-link, no-follow file beneath the existing
+request/attempt directory. A conflicting publisher, changed input, unexpected
+field, content change, path traversal, owner/mode/link drift, or digest mismatch
+fails closed. Installed actions receive only this fixed plan path and digest;
+they do not resolve Git refs, reread ambient configuration, or rediscover
+preflight artifacts.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:
