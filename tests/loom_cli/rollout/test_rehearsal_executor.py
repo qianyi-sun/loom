@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan, RehearsalResources
 from loom_cli.rollout.rehearsal_executor import IsolatedRehearsalExecutor, _default_stream_run
+from loom_cli.rollout.rehearsal_release import RehearsalReleaseArtifact
+from loom_cli.rollout.rehearsal_secret_restore import RehearsalSecretArtifact
 
 
 def _plan() -> RehearsalPlan:
@@ -28,6 +32,7 @@ def _plan() -> RehearsalPlan:
             "loom-control-plane": "sha256:" + "8" * 64,
             "loom-rehearsal-postgres": "sha256:" + "9" * 64,
             "loom-service": "sha256:" + "1" * 64,
+            "loom-web": "sha256:" + "2" * 64,
         },
         image_tag="staging-aaaaaaaa",
         image_artifact_sha256="2" * 64,
@@ -47,6 +52,107 @@ def _plan() -> RehearsalPlan:
             "rehearsal-" + "5" * 24,
             route_origin="https://staging.example.test/dev",
         ),
+    )
+
+
+def _release_artifact(plan: RehearsalPlan) -> RehearsalReleaseArtifact:
+    resources: list[dict[str, object]] = []
+    selectors: dict[str, dict[str, str]] = {}
+    images: dict[str, str] = {}
+    for name in ("loom-control-plane", "loom-service", "loom-web"):
+        selector = {"app": name}
+        selectors[name] = selector
+        images[name] = plan.image_digests[name]
+        resources.append(
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+                    "name": name,
+                    "namespace": plan.resources.namespace,
+                },
+                "spec": {
+                    "replicas": 1,
+                    "selector": {"matchLabels": selector},
+                    "template": {
+                        "metadata": {"labels": selector},
+                        "spec": {
+                            "automountServiceAccountToken": False,
+                            "containers": [
+                                {
+                                    "image": f"{name}:{plan.image_tag}",
+                                    "name": name,
+                                }
+                            ],
+                        },
+                    },
+                },
+            }
+        )
+    for name in ("loom-control-plane", "loom-postgres", "loom-service", "loom-web"):
+        resources.append(
+            {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {
+                    "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+                    "name": name,
+                    "namespace": plan.resources.namespace,
+                },
+                "spec": {
+                    "ports": [{"port": 5432 if name == "loom-postgres" else 80}],
+                    "selector": {"app": name},
+                    "type": "ClusterIP",
+                },
+            }
+        )
+    resources.append(
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+                "name": "loom-rehearsal-release",
+                "namespace": plan.resources.namespace,
+            },
+            "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
+        }
+    )
+    payload = yaml.safe_dump_all(resources, sort_keys=True).encode()
+    return RehearsalReleaseArtifact(
+        payload=payload,
+        artifact_sha256=hashlib.sha256(payload).hexdigest(),
+        deployment_images=images,
+        deployment_selectors=selectors,
+        resource_count=len(resources),
+    )
+
+
+def _secret_artifact(plan: RehearsalPlan) -> RehearsalSecretArtifact:
+    names = ("loom-admin-secret", "loom-secrets", "loom-staging-tls")
+    payload = yaml.safe_dump_all(
+        [
+            {
+                "apiVersion": "v1",
+                "data": {"key": "dmFsdWU="},
+                "kind": "Secret",
+                "metadata": {
+                    "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+                    "name": name,
+                    "namespace": plan.resources.namespace,
+                },
+                "type": "Opaque",
+            }
+            for name in names
+        ],
+        sort_keys=True,
+    ).encode()
+    return RehearsalSecretArtifact(
+        payload=payload,
+        secret_names=names,
+        source_component_sha256="7" * 64,
+        artifact_sha256=hashlib.sha256(payload).hexdigest(),
     )
 
 
@@ -135,6 +241,12 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     def run(argv, payload, timeout):
         nonlocal pod
         calls.append((tuple(argv), payload, timeout))
+        if argv[:3] == ("docker", "image", "inspect"):
+            tag = argv[-1]
+            name = tag.split(":", 1)[0]
+            return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if argv[:3] == ("kind", "load", "docker-image"):
+            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
         if payload is not None:
             pod = json.loads(payload)
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
@@ -189,7 +301,8 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     assert len(streams) == 1
     assert streams[0][1] == plan.checkpoint_manifest_path.parent / "postgres" / "loom.dump"
     assert streams[0][2] == 1800
-    manifest = json.loads(calls[0][1] or b"{}")
+    manifest_call = next(call for call in calls if call[1] is not None)
+    manifest = json.loads(manifest_call[1] or b"{}")
     assert manifest["spec"]["automountServiceAccountToken"] is False
     assert manifest["spec"]["containers"][0]["imagePullPolicy"] == "Never"
     assert manifest["spec"]["containers"][0]["securityContext"] == {
@@ -287,6 +400,121 @@ def test_migration_is_idempotent_and_rejects_unexpected_baseline() -> None:
     record["migration_target_revision"] = "head"
     with pytest.raises(ValueError, match="identity"):
         RehearsalPlan.from_record(record)
+
+
+def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+    secrets = _secret_artifact(plan)
+    resources = {
+        (item["kind"], item["metadata"]["name"]): item
+        for item in yaml.safe_load_all(release.payload)
+    }
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    def run(argv, payload, _timeout):
+        command = tuple(argv)
+        calls.append((command, payload))
+        if command[:3] == ("docker", "image", "inspect"):
+            name = command[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if command[:3] == ("kind", "load", "docker-image"):
+            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+        if "apply" in command:
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        if "secret" in command and "get" in command:
+            name = command[command.index("secret") + 1]
+            return subprocess.CompletedProcess(argv, 0, f"{name}\t{plan.plan_digest}\n", "")
+        if "rollout" in command:
+            return subprocess.CompletedProcess(argv, 0, "ready\n", "")
+        if "deployment" in command and "get" in command:
+            name = command[command.index("deployment") + 1]
+            resource = json.loads(json.dumps(resources[("Deployment", name)]))
+            resource["metadata"]["generation"] = 2
+            resource["status"] = {
+                "availableReplicas": 1,
+                "observedGeneration": 2,
+                "readyReplicas": 1,
+                "replicas": 1,
+                "updatedReplicas": 1,
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(resource), "")
+        if "pods" in command and "get" in command:
+            selector = next(item for item in command if item.startswith("--selector="))
+            name = selector.rsplit("=", 1)[1]
+            pod = {
+                "items": [
+                    {
+                        "metadata": {"labels": {"app": name}},
+                        "status": {
+                            "conditions": [{"status": "True", "type": "Ready"}],
+                            "containerStatuses": [
+                                {
+                                    "imageID": (
+                                        f"docker-pullable://{name}@" + plan.image_digests[name]
+                                    ),
+                                    "name": name,
+                                    "ready": True,
+                                }
+                            ],
+                            "phase": "Running",
+                        },
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        if "service" in command and "get" in command:
+            name = command[command.index("service") + 1]
+            resource = resources[("Service", name)]
+            return subprocess.CompletedProcess(argv, 0, json.dumps(resource), "")
+        if "networkpolicy" in command and "get" in command:
+            resource = resources[("NetworkPolicy", "loom-rehearsal-release")]
+            return subprocess.CompletedProcess(argv, 0, json.dumps(resource), "")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        secret_artifacts=lambda _plan: secrets,
+    ).execute("rehearsal.release", plan)
+
+    assert outcome.passed
+    assert outcome.details == {
+        "manifest-sha256": release.artifact_sha256,
+        "secret-artifact-sha256": secrets.artifact_sha256,
+        "status": "ready",
+    }
+    kind_load = next(command for command, _payload in calls if command[:2] == ("kind", "load"))
+    assert kind_load[-2:] == ("--name", plan.cluster_name)
+    assert set(kind_load[3:-2]) == {
+        "loom-service:" + plan.image_tag,
+        "loom-web:" + plan.image_tag,
+    }
+    secret_apply = next(payload for _command, payload in calls if payload == secrets.payload)
+    assert secret_apply == secrets.payload
+
+
+def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+    secrets = _secret_artifact(plan)
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        calls.append(command)
+        if command[:3] == ("docker", "image", "inspect"):
+            return subprocess.CompletedProcess(argv, 0, "sha256:" + "0" * 64 + "\n", "")
+        raise AssertionError("drifted images must fail before kind or Kubernetes")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        secret_artifacts=lambda _plan: secrets,
+    ).execute("rehearsal.release", plan)
+
+    assert outcome.blockers == {"release": "image-load-failed"}
+    assert all(command[0] == "docker" for command in calls)
 
 
 def test_systemd_launch_uses_exact_isolated_transient_unit_and_budget() -> None:
@@ -537,6 +765,7 @@ def test_stream_runner_rejects_mode_and_read_time_drift(
     assert os.stat(source).st_mode & 0o777 == 0o600
 
 
-def test_unimplemented_rehearsal_steps_remain_fail_closed() -> None:
-    outcome = IsolatedRehearsalExecutor().execute("rehearsal.release", _plan())
+@pytest.mark.parametrize("check_id", ("rehearsal.api-smoke", "rehearsal.browser"))
+def test_unimplemented_rehearsal_steps_remain_fail_closed(check_id: str) -> None:
+    outcome = IsolatedRehearsalExecutor().execute(check_id, _plan())
     assert outcome.blockers == {"executor": "isolated-action-not-implemented"}

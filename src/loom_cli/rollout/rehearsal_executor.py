@@ -17,6 +17,19 @@ from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
+from loom_cli.rollout.rehearsal_release import (
+    RehearsalReleaseArtifact,
+    build_rehearsal_release_artifact,
+    rehearsal_deployment_ready,
+    rehearsal_network_policy_ready,
+    rehearsal_pods_ready,
+    rehearsal_selector_argument,
+    rehearsal_service_ready,
+)
+from loom_cli.rollout.rehearsal_secret_restore import (
+    RehearsalSecretArtifact,
+    build_rehearsal_secret_artifact,
+)
 from loom_cli.rollout.systemd_readiness import (
     RehearsalSystemdActivation,
     parse_systemctl_properties,
@@ -43,6 +56,8 @@ class CommandResult(Protocol):
 
 CommandRunner = Callable[[Sequence[str], bytes | None, int], CommandResult]
 StreamCommandRunner = Callable[[Sequence[str], Path, int], CommandResult]
+ReleaseArtifactBuilder = Callable[[RehearsalPlan], RehearsalReleaseArtifact]
+SecretArtifactBuilder = Callable[[RehearsalPlan], RehearsalSecretArtifact]
 
 
 def _command_environment() -> dict[str, str]:
@@ -121,6 +136,20 @@ def _default_stream_run(
         os.close(fd)
 
 
+def _default_release_artifact(plan: RehearsalPlan) -> RehearsalReleaseArtifact:
+    return build_rehearsal_release_artifact(plan)
+
+
+def _default_secret_artifact(plan: RehearsalPlan) -> RehearsalSecretArtifact:
+    return build_rehearsal_secret_artifact(
+        plan.checkpoint_manifest_path,
+        manifest_sha256=plan.checkpoint_manifest_sha256,
+        namespace=plan.resources.namespace,
+        database=plan.resources.database,
+        plan_digest=plan.plan_digest,
+    )
+
+
 def _open_absolute_regular_no_follow(path: Path) -> int:
     if not path.is_absolute() or ".." in path.parts or path == Path("/"):
         raise OSError("rehearsal stream source path is invalid")
@@ -149,6 +178,8 @@ class IsolatedRehearsalExecutor:
 
     run: CommandRunner = _default_run
     stream_run: StreamCommandRunner = _default_stream_run
+    release_artifacts: ReleaseArtifactBuilder = _default_release_artifact
+    secret_artifacts: SecretArtifactBuilder = _default_secret_artifact
     kubeconfig: Path = REHEARSAL_KUBECONFIG
     monotonic: Callable[[], float] = time.monotonic
 
@@ -168,6 +199,8 @@ class IsolatedRehearsalExecutor:
             return self._systemd_launch(plan)
         if check_id == "rehearsal.migration":
             return self._migration(plan)
+        if check_id == "rehearsal.release":
+            return self._release(plan)
         if check_id == "rehearsal.cleanup":
             return self._cleanup(plan)
         return RehearsalStepOutcome(
@@ -310,6 +343,8 @@ class IsolatedRehearsalExecutor:
             for name in (REHEARSAL_POSTGRES_IMAGE, "loom-control-plane")
         ):
             return _blocked("database", "image-authority-missing")
+        if not self._load_images(plan, (REHEARSAL_POSTGRES_IMAGE, "loom-control-plane")):
+            return _blocked("database", "image-load-failed")
         manifest = _database_pod_manifest(plan)
         applied = self._command(
             (
@@ -469,6 +504,231 @@ class IsolatedRehearsalExecutor:
         ):
             return _blocked("migration", "upgrade-verification-failed")
         return _migration_ready(plan)
+
+    def _release(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+        try:
+            release = self.release_artifacts(plan)
+            secrets = self.secret_artifacts(plan)
+        except (OSError, RuntimeError, ValueError):
+            return _blocked("release", "artifact-validation-failed")
+        image_names = tuple(sorted(release.deployment_images))
+        if not self._local_images_match(plan, image_names) or not self._load_images(
+            plan,
+            ("loom-service", "loom-web"),
+        ):
+            return _blocked("release", "image-load-failed")
+        if not self._status_with_payload(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "apply",
+                "--server-side=true",
+                "--field-manager=loom-staging-preflight",
+                "--request-timeout=30s",
+                "-f",
+                "-",
+            ),
+            secrets.payload,
+            timeout=45,
+        ):
+            return _blocked("release", "secret-apply-failed")
+        for name in secrets.secret_names:
+            if self._secret_plan_digest(plan, name) != plan.plan_digest:
+                return _blocked("release", "secret-readback-drift")
+        if not self._status_with_payload(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "apply",
+                "--server-side=true",
+                "--field-manager=loom-staging-preflight",
+                "--request-timeout=30s",
+                "-f",
+                "-",
+            ),
+            release.payload,
+            timeout=60,
+        ):
+            return _blocked("release", "manifest-apply-failed")
+        for name in sorted(release.deployment_images):
+            if not self._status(
+                (
+                    "kubectl",
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "--namespace",
+                    plan.resources.namespace,
+                    "rollout",
+                    "status",
+                    f"deployment/{name}",
+                    "--timeout=300s",
+                ),
+                timeout=315,
+            ):
+                return _blocked("release", "deployment-not-ready")
+            deployment = self._command(
+                (
+                    "kubectl",
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "--namespace",
+                    plan.resources.namespace,
+                    "get",
+                    "deployment",
+                    name,
+                    "--request-timeout=15s",
+                    "-o",
+                    "json",
+                ),
+                None,
+                timeout=20,
+            )
+            if deployment is None or not rehearsal_deployment_ready(
+                deployment,
+                artifact=release,
+                plan=plan,
+                deployment_name=name,
+            ):
+                return _blocked("release", "deployment-readback-drift")
+            pods = self._command(
+                (
+                    "kubectl",
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "--namespace",
+                    plan.resources.namespace,
+                    "get",
+                    "pods",
+                    "--selector=" + rehearsal_selector_argument(release, name),
+                    "--request-timeout=15s",
+                    "-o",
+                    "json",
+                ),
+                None,
+                timeout=20,
+            )
+            if pods is None or not rehearsal_pods_ready(
+                pods,
+                artifact=release,
+                deployment_name=name,
+            ):
+                return _blocked("release", "pod-image-readback-drift")
+        for name in ("loom-control-plane", "loom-postgres", "loom-service", "loom-web"):
+            service = self._command(
+                (
+                    "kubectl",
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "--namespace",
+                    plan.resources.namespace,
+                    "get",
+                    "service",
+                    name,
+                    "--request-timeout=15s",
+                    "-o",
+                    "json",
+                ),
+                None,
+                timeout=20,
+            )
+            if service is None or not rehearsal_service_ready(
+                service,
+                artifact=release,
+                plan=plan,
+                service_name=name,
+            ):
+                return _blocked("release", "service-readback-drift")
+        policy = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "networkpolicy",
+                "loom-rehearsal-release",
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if policy is None or not rehearsal_network_policy_ready(
+            policy,
+            artifact=release,
+            plan=plan,
+        ):
+            return _blocked("release", "network-policy-readback-drift")
+        return RehearsalStepOutcome(
+            passed=True,
+            details={
+                "manifest-sha256": release.artifact_sha256,
+                "secret-artifact-sha256": secrets.artifact_sha256,
+                "status": "ready",
+            },
+            blockers={},
+        )
+
+    def _load_images(self, plan: RehearsalPlan, names: Sequence[str]) -> bool:
+        tags = tuple(f"{name}:{plan.image_tag}" for name in names)
+        if not tags or not self._local_images_match(plan, names):
+            return False
+        if not self._status(
+            ("kind", "load", "docker-image", *tags, "--name", plan.cluster_name),
+            timeout=900,
+        ):
+            return False
+        return self._local_images_match(plan, names)
+
+    def _local_images_match(self, plan: RehearsalPlan, names: Sequence[str]) -> bool:
+        expected = tuple(plan.image_digests.get(name) for name in names)
+        return bool(
+            names
+            and all(value is not None for value in expected)
+            and tuple(self._local_image_id(f"{name}:{plan.image_tag}") for name in names)
+            == expected
+        )
+
+    def _local_image_id(self, tag: str) -> str | None:
+        value = self._text_command(
+            ("docker", "image", "inspect", "--format={{.Id}}", tag),
+            timeout=30,
+            max_bytes=128,
+        )
+        if value is None:
+            return None
+        image_id = value.strip()
+        return image_id if re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) else None
+
+    def _secret_plan_digest(self, plan: RehearsalPlan, name: str) -> str | None:
+        value = self._text_command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "secret",
+                name,
+                "--request-timeout=15s",
+                "-o=jsonpath={.metadata.name}{'\\t'}{.metadata.annotations.loom\\.openai\\.dev/plan-sha256}{'\\n'}",
+            ),
+            timeout=20,
+            max_bytes=256,
+        )
+        if value is None:
+            return None
+        parts = value.rstrip("\n").split("\t")
+        return parts[1] if parts == [name, plan.plan_digest] else None
 
     def _systemd_launch(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
         contract = RehearsalSystemdActivation(
@@ -705,6 +965,27 @@ class IsolatedRehearsalExecutor:
         except (json.JSONDecodeError, ValueError):
             return None
         return value if isinstance(value, dict) else None
+
+    def _text_command(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: int,
+        max_bytes: int,
+    ) -> str | None:
+        try:
+            result = self.run(argv, None, timeout)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        if (
+            result.returncode != 0
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or len(result.stdout.encode()) > max_bytes
+            or len(result.stderr.encode()) > _MAX_OUTPUT_BYTES
+        ):
+            return None
+        return result.stdout
 
 
 def _namespace_manifest(plan: RehearsalPlan) -> dict[str, object]:

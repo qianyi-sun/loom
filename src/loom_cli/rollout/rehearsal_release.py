@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -15,6 +16,11 @@ from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 
 _MAX_RENDERED_BYTES = 16 * 1024 * 1024
+_LABEL_KEY_RE = re.compile(
+    r"(?:(?:[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?)/)?"
+    r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?\Z"
+)
+_LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?\Z")
 _DEPLOYMENT_IMAGES = {
     "loom-control-plane": "loom-control-plane",
     "loom-service": "loom-service",
@@ -46,6 +52,11 @@ class RehearsalReleaseArtifact:
             or set(images) != set(_DEPLOYMENT_IMAGES)
             or set(selectors) != set(_DEPLOYMENT_IMAGES)
             or any(not selector for selector in selectors.values())
+            or any(
+                _LABEL_KEY_RE.fullmatch(key) is None or _LABEL_VALUE_RE.fullmatch(item) is None
+                for selector in selectors.values()
+                for key, item in selector.items()
+            )
             or self.resource_count != len(_EXPECTED_IDENTITIES) + 1
         ):
             raise ValueError("rehearsal release artifact identity is invalid")
@@ -419,4 +430,198 @@ def _string_map(value: object, *, label: str) -> dict[str, str]:
     return dict(value)
 
 
-__all__ = ["RehearsalReleaseArtifact", "build_rehearsal_release_artifact"]
+def rehearsal_selector_argument(
+    artifact: RehearsalReleaseArtifact,
+    deployment_name: str,
+) -> str:
+    """Return the already-validated exact selector for one release workload."""
+    selector = artifact.deployment_selectors.get(deployment_name)
+    if selector is None:
+        raise ValueError("rehearsal release selector identity is invalid")
+    return ",".join(f"{key}={selector[key]}" for key in sorted(selector))
+
+
+def rehearsal_deployment_ready(
+    observed: Mapping[str, object],
+    *,
+    artifact: RehearsalReleaseArtifact,
+    plan: RehearsalPlan,
+    deployment_name: str,
+) -> bool:
+    expected = _artifact_resource(artifact, kind="Deployment", name=deployment_name)
+    metadata = observed.get("metadata")
+    status = observed.get("status")
+    if not isinstance(metadata, Mapping) or not isinstance(status, Mapping):
+        return False
+    generation = metadata.get("generation")
+    return bool(
+        _contains_expected(observed, expected)
+        and type(generation) is int
+        and generation > 0
+        and status.get("observedGeneration") == generation
+        and status.get("availableReplicas") == 1
+        and status.get("readyReplicas") == 1
+        and status.get("replicas") == 1
+        and status.get("updatedReplicas") == 1
+        and status.get("unavailableReplicas") in (None, 0)
+        and _resource_plan_digest(observed) == plan.plan_digest
+    )
+
+
+def rehearsal_service_ready(
+    observed: Mapping[str, object],
+    *,
+    artifact: RehearsalReleaseArtifact,
+    plan: RehearsalPlan,
+    service_name: str,
+) -> bool:
+    expected = _artifact_resource(artifact, kind="Service", name=service_name)
+    return bool(
+        _contains_expected(observed, expected)
+        and _resource_plan_digest(observed) == plan.plan_digest
+    )
+
+
+def rehearsal_network_policy_ready(
+    observed: Mapping[str, object],
+    *,
+    artifact: RehearsalReleaseArtifact,
+    plan: RehearsalPlan,
+) -> bool:
+    expected = _artifact_resource(
+        artifact,
+        kind="NetworkPolicy",
+        name="loom-rehearsal-release",
+    )
+    return bool(
+        _contains_expected(observed, expected)
+        and _resource_plan_digest(observed) == plan.plan_digest
+    )
+
+
+def rehearsal_pods_ready(
+    observed: Mapping[str, object],
+    *,
+    artifact: RehearsalReleaseArtifact,
+    deployment_name: str,
+) -> bool:
+    expected = _artifact_resource(artifact, kind="Deployment", name=deployment_name)
+    expected_container = _deployment_container(expected)
+    expected_selector = artifact.deployment_selectors.get(deployment_name)
+    items = observed.get("items")
+    if (
+        not isinstance(expected_selector, Mapping)
+        or not isinstance(items, list)
+        or len(items) != 1
+        or not isinstance(items[0], Mapping)
+    ):
+        return False
+    pod = items[0]
+    metadata = pod.get("metadata")
+    status = pod.get("status")
+    if not isinstance(metadata, Mapping) or not isinstance(status, Mapping):
+        return False
+    labels = metadata.get("labels")
+    conditions = status.get("conditions")
+    container_statuses = status.get("containerStatuses")
+    if (
+        not isinstance(labels, Mapping)
+        or any(labels.get(key) != value for key, value in expected_selector.items())
+        or status.get("phase") != "Running"
+        or not isinstance(conditions, list)
+        or not any(
+            isinstance(condition, Mapping)
+            and condition.get("type") == "Ready"
+            and condition.get("status") == "True"
+            for condition in conditions
+        )
+        or not isinstance(container_statuses, list)
+        or len(container_statuses) != 1
+        or not isinstance(container_statuses[0], Mapping)
+    ):
+        return False
+    image_id = container_statuses[0].get("imageID")
+    image_match = (
+        re.search(r"sha256:[0-9a-f]{64}\Z", image_id) if isinstance(image_id, str) else None
+    )
+    image_digest = image_match.group(0) if image_match is not None else None
+    return bool(
+        container_statuses[0].get("name") == expected_container["name"]
+        and container_statuses[0].get("ready") is True
+        and image_digest == artifact.deployment_images[deployment_name]
+    )
+
+
+def _artifact_resource(
+    artifact: RehearsalReleaseArtifact,
+    *,
+    kind: str,
+    name: str,
+) -> Mapping[str, object]:
+    try:
+        resources = list(yaml.safe_load_all(artifact.payload))
+    except yaml.YAMLError as exc:  # guarded by artifact digest, defensive only
+        raise ValueError("rehearsal release artifact is invalid") from exc
+    matches = [
+        resource
+        for resource in resources
+        if isinstance(resource, Mapping)
+        and resource.get("kind") == kind
+        and isinstance(resource.get("metadata"), Mapping)
+        and resource["metadata"].get("name") == name
+    ]
+    if len(matches) != 1:
+        raise ValueError("rehearsal release artifact resource is invalid")
+    return matches[0]
+
+
+def _deployment_container(resource: Mapping[str, object]) -> Mapping[str, object]:
+    spec = resource.get("spec")
+    template = spec.get("template") if isinstance(spec, Mapping) else None
+    pod = template.get("spec") if isinstance(template, Mapping) else None
+    containers = pod.get("containers") if isinstance(pod, Mapping) else None
+    if (
+        not isinstance(containers, list)
+        or len(containers) != 1
+        or not isinstance(containers[0], Mapping)
+    ):
+        raise ValueError("rehearsal release artifact container is invalid")
+    return containers[0]
+
+
+def _resource_plan_digest(resource: Mapping[str, object]) -> str | None:
+    metadata = resource.get("metadata")
+    annotations = metadata.get("annotations") if isinstance(metadata, Mapping) else None
+    value = (
+        annotations.get("loom.openai.dev/plan-sha256") if isinstance(annotations, Mapping) else None
+    )
+    return value if isinstance(value, str) else None
+
+
+def _contains_expected(observed: object, expected: object) -> bool:
+    if isinstance(expected, Mapping):
+        return isinstance(observed, Mapping) and all(
+            key in observed and _contains_expected(observed[key], value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(observed, list)
+            and len(observed) == len(expected)
+            and all(
+                _contains_expected(item, value)
+                for item, value in zip(observed, expected, strict=True)
+            )
+        )
+    return observed == expected
+
+
+__all__ = [
+    "RehearsalReleaseArtifact",
+    "build_rehearsal_release_artifact",
+    "rehearsal_deployment_ready",
+    "rehearsal_network_policy_ready",
+    "rehearsal_pods_ready",
+    "rehearsal_selector_argument",
+    "rehearsal_service_ready",
+]
