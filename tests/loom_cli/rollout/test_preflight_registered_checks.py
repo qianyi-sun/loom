@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ import pytest
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import safe_content_fingerprint
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
+from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
@@ -28,6 +29,7 @@ from loom_cli.rollout.preflight_contract import (
 )
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
+    build_backup_lease_eligibility_check,
     build_candidate_identity_check,
     build_capacity_high_water_check,
     build_credentials_metadata_check,
@@ -734,4 +736,120 @@ def test_registered_gb10_readiness_check_rejects_inventory_drift_without_ssh() -
 
     assert not result.passed
     assert result.evidence["failed-hosts"] == {"trt-gb10-1": "gb10.host-readiness.failed"}
+    assert calls == []
+
+
+def _backup_lease(now: datetime) -> BackupLease:
+    return BackupLease(
+        lease_id="lease-12345678",
+        source_request_id="req-12345678",
+        manifest_sha256="a" * 64,
+        component_sha256={"postgres": "b" * 64, "authority": "c" * 64},
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=7,
+        db_snapshot_identity="lsn:0/16B6C50",
+        schema_revision="0066",
+        object_inventory_root="d" * 64,
+        created_at=now - timedelta(minutes=20),
+        restore_verified_at=now - timedelta(minutes=10),
+        expires_at=now + timedelta(hours=2),
+    )
+
+
+def _backup_lease_context(lease: BackupLease) -> CheckContext:
+    return CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "backup.component-set.sha256": component_set_digest(lease.component_sha256),
+            "backup.lease.sha256": lease.evidence_digest,
+            "backup.manifest.sha256": lease.manifest_sha256,
+            "backup.source-request": lease.source_request_id,
+            "db.snapshot-identity": lease.db_snapshot_identity,
+            "environment": lease.environment,
+            "namespace": lease.namespace,
+            "object.inventory-root": lease.object_inventory_root,
+            "schema.revision": lease.schema_revision,
+            "staging.mutation-epoch": lease.mutation_epoch,
+        }
+    )
+
+
+def _backup_lease_check(lease: BackupLease, now: datetime):
+    return build_backup_lease_eligibility_check(
+        lambda: lease,
+        now=lambda: now,
+        expected_lease_digest=lease.evidence_digest,
+        source_request_id=lease.source_request_id,
+        environment=lease.environment,
+        namespace=lease.namespace,
+        mutation_epoch=lease.mutation_epoch,
+        db_snapshot_identity=lease.db_snapshot_identity,
+        schema_revision=lease.schema_revision,
+        object_inventory_root=lease.object_inventory_root,
+        manifest_sha256=lease.manifest_sha256,
+        component_sha256=lease.component_sha256,
+    )
+
+
+def test_registered_backup_lease_accepts_exact_unchanged_restored_authority() -> None:
+    now = datetime(2026, 7, 19, 18, tzinfo=UTC)
+    lease = _backup_lease(now)
+    check = _backup_lease_check(lease, now)
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("kubernetes.client"),
+            check,
+        )
+    )
+
+    result = next(
+        item
+        for item in dag.run(_backup_lease_context(lease))
+        if item.check_id == check.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["eligible"] is True
+    assert result.evidence["blockers"] == {}
+    assert result.evidence["lease-digest"] == lease.evidence_digest
+
+
+def test_registered_backup_lease_rejects_context_drift_without_reading_lease() -> None:
+    now = datetime(2026, 7, 19, 18, tzinfo=UTC)
+    lease = _backup_lease(now)
+    calls: list[object] = []
+    check = build_backup_lease_eligibility_check(
+        lambda: calls.append(object()) or lease,
+        now=lambda: now,
+        expected_lease_digest=lease.evidence_digest,
+        source_request_id=lease.source_request_id,
+        environment=lease.environment,
+        namespace=lease.namespace,
+        mutation_epoch=lease.mutation_epoch,
+        db_snapshot_identity=lease.db_snapshot_identity,
+        schema_revision=lease.schema_revision,
+        object_inventory_root=lease.object_inventory_root,
+        manifest_sha256=lease.manifest_sha256,
+        component_sha256=lease.component_sha256,
+    )
+    bindings = dict(_backup_lease_context(lease).bindings)
+    bindings["staging.mutation-epoch"] = 8
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("kubernetes.client"),
+            check,
+        )
+    )
+
+    result = next(
+        item for item in dag.run(CheckContext(bindings)) if item.check_id == check.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.evidence["blockers"] == {"input-binding": "blocked"}
     assert calls == []

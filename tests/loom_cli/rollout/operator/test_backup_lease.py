@@ -4,7 +4,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from loom_cli.rollout.operator.backup_lease import BackupLease, evaluate_backup_lease
+from loom_cli.rollout.operator.backup_lease import (
+    BackupLease,
+    component_set_digest,
+    evaluate_backup_lease,
+)
 
 NOW = datetime(2026, 7, 19, 18, tzinfo=UTC)
 
@@ -30,6 +34,7 @@ def _lease() -> BackupLease:
 def _evaluate(lease: BackupLease, **overrides):
     values = {
         "now": NOW,
+        "source_request_id": "req-12345678",
         "environment": "staging",
         "namespace": "loom-staging",
         "mutation_epoch": 7,
@@ -55,6 +60,7 @@ def test_lease_collects_every_provenance_and_freshness_blocker() -> None:
     result = _evaluate(
         _lease(),
         now=NOW + timedelta(hours=3),
+        source_request_id="req-87654321",
         environment="prod",
         namespace="other",
         mutation_epoch=8,
@@ -76,7 +82,17 @@ def test_lease_collects_every_provenance_and_freshness_blocker() -> None:
         "namespace",
         "object-inventory",
         "schema-revision",
+        "source-request",
     )
+
+
+def test_component_set_digest_is_order_independent_and_strict() -> None:
+    assert component_set_digest({"postgres": "a" * 64, "authority": "b" * 64}) == (
+        component_set_digest({"authority": "b" * 64, "postgres": "a" * 64})
+    )
+
+    with pytest.raises(ValueError, match="component hashes"):
+        component_set_digest({"../postgres": "a" * 64})
 
 
 @pytest.mark.parametrize(
@@ -84,7 +100,10 @@ def test_lease_collects_every_provenance_and_freshness_blocker() -> None:
     [
         {"manifest_sha256": "invalid"},
         {"component_sha256": {}},
-        {"environment": "prod"},
+        {"environment": ""},
+        {"lease_id": "invalid"},
+        {"source_request_id": "invalid"},
+        {"namespace": "Invalid"},
         {"mutation_epoch": -1},
         {"restore_verified_at": NOW + timedelta(hours=3)},
     ],
@@ -109,3 +128,19 @@ def test_lease_constructor_rejects_incomplete_or_cross_environment_authority(cha
 
     with pytest.raises(ValueError, match="backup lease"):
         BackupLease(**values)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"source_request_id": "invalid"},
+        {"environment": ""},
+        {"namespace": "Invalid"},
+        {"mutation_epoch": -1},
+        {"manifest_sha256": "invalid"},
+        {"component_sha256": {"../postgres": "b" * 64}},
+    ],
+)
+def test_evaluation_rejects_invalid_expectation_authority(changes) -> None:
+    with pytest.raises(ValueError, match="backup lease"):
+        _evaluate(_lease(), **changes)

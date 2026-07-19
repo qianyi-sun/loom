@@ -8,6 +8,7 @@ import json
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
@@ -24,6 +25,11 @@ from loom_cli.rollout.install_attestation import (
 )
 from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
 from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
+from loom_cli.rollout.operator.backup_lease import (
+    BackupLease,
+    component_set_digest,
+    evaluate_backup_lease,
+)
 from loom_cli.rollout.operator.candidate import (
     CandidateBindingError,
     GitRunner,
@@ -691,6 +697,150 @@ def _empty_capacity_probe(policy_digest: str) -> CheckProbe:
     )
 
 
+def build_backup_lease_eligibility_check(
+    lease_source: Callable[[], BackupLease | None],
+    *,
+    now: Callable[[], datetime],
+    expected_lease_digest: str,
+    source_request_id: str,
+    environment: str,
+    namespace: str,
+    mutation_epoch: int,
+    db_snapshot_identity: str,
+    schema_revision: str,
+    object_inventory_root: str,
+    manifest_sha256: str,
+    component_sha256: Mapping[str, str],
+) -> RegisteredCheck:
+    """Build the Tier 0 exact immutable backup lease reuse invariant."""
+    expected_component_set_digest = component_set_digest(component_sha256)
+    if len(expected_lease_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_lease_digest
+    ):
+        raise ValueError("backup lease digest is invalid")
+
+    expected_bindings = {
+        "backup.component-set.sha256": expected_component_set_digest,
+        "backup.lease.sha256": expected_lease_digest,
+        "backup.manifest.sha256": manifest_sha256,
+        "backup.source-request": source_request_id,
+        "db.snapshot-identity": db_snapshot_identity,
+        "environment": environment,
+        "namespace": namespace,
+        "object.inventory-root": object_inventory_root,
+        "schema.revision": schema_revision,
+        "staging.mutation-epoch": mutation_epoch,
+    }
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if any(context.bindings[key] != value for key, value in expected_bindings.items()):
+            return _empty_backup_lease_probe(
+                source_request_id=source_request_id,
+                manifest_sha256=manifest_sha256,
+                component_digest=expected_component_set_digest,
+                mutation_epoch=mutation_epoch,
+                blockers=("input-binding",),
+            )
+        try:
+            lease = lease_source()
+            if lease is None:
+                raise ValueError("active backup lease is absent")
+            eligibility = evaluate_backup_lease(
+                lease,
+                now=now(),
+                source_request_id=source_request_id,
+                environment=environment,
+                namespace=namespace,
+                mutation_epoch=mutation_epoch,
+                db_snapshot_identity=db_snapshot_identity,
+                schema_revision=schema_revision,
+                object_inventory_root=object_inventory_root,
+                manifest_sha256=manifest_sha256,
+                component_sha256=component_sha256,
+            )
+        except (OSError, ValueError):
+            return _empty_backup_lease_probe(
+                source_request_id=source_request_id,
+                manifest_sha256=manifest_sha256,
+                component_digest=expected_component_set_digest,
+                mutation_epoch=mutation_epoch,
+                blockers=("lease-unavailable",),
+            )
+        blockers = {blocker: "mismatch" for blocker in eligibility.blockers}
+        if eligibility.lease_digest != expected_lease_digest:
+            blockers["lease-digest"] = "mismatch"
+        return CheckProbe(
+            passed=eligibility.eligible and not blockers,
+            evidence={
+                "eligible": eligibility.eligible and not blockers,
+                "blockers": blockers,
+                "lease-digest": eligibility.lease_digest,
+                "source-request": lease.source_request_id,
+                "manifest-digest": lease.manifest_sha256,
+                "component-set-digest": component_set_digest(lease.component_sha256),
+                "mutation-epoch": lease.mutation_epoch,
+                "expires-at": lease.expires_at.isoformat(),
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="backup.lease-eligibility",
+            failure_code="backup.lease.ineligible",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=(
+                "capacity.high-water",
+                "lifecycle.launch-cancel",
+                "kubernetes.client",
+            ),
+            mutation_class=MutationClass.NONE,
+            input_keys=tuple(expected_bindings),
+            evidence_schema=(
+                EvidenceField("eligible", "boolean"),
+                EvidenceField("blockers", "string-map"),
+                EvidenceField("lease-digest", "sha256"),
+                EvidenceField("source-request", "string"),
+                EvidenceField("manifest-digest", "sha256"),
+                EvidenceField("component-set-digest", "sha256"),
+                EvidenceField("mutation-epoch", "integer"),
+                EvidenceField("expires-at", "string"),
+            ),
+            timeout_seconds=15,
+            freshness_ttl_seconds=60,
+            remediation=(
+                "create and restore-verify an exact staging backup lease or prove unchanged epoch provenance"
+            ),
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_backup_lease_probe(
+    *,
+    source_request_id: str,
+    manifest_sha256: str,
+    component_digest: str,
+    mutation_epoch: int,
+    blockers: tuple[str, ...],
+) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "eligible": False,
+            "blockers": {blocker: "blocked" for blocker in blockers},
+            "lease-digest": "0" * 64,
+            "source-request": source_request_id,
+            "manifest-digest": manifest_sha256,
+            "component-set-digest": component_digest,
+            "mutation-epoch": mutation_epoch,
+            "expires-at": "unavailable",
+        },
+    )
+
+
 def build_systemd_user_manager_check(
     run: CommandRunner,
     *,
@@ -867,6 +1017,7 @@ def _empty_gb10_probe(targets: tuple[GB10ProbeTarget, ...]) -> CheckProbe:
 
 __all__ = [
     "CredentialProbeSource",
+    "build_backup_lease_eligibility_check",
     "build_candidate_identity_check",
     "build_capacity_high_water_check",
     "build_credentials_metadata_check",

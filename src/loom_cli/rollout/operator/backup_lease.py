@@ -11,6 +11,36 @@ from datetime import datetime
 from types import MappingProxyType
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_LEASE_ID_RE = re.compile(r"^lease-[a-z0-9][a-z0-9-]{7,63}$")
+_REQUEST_ID_RE = re.compile(r"^req-[a-z0-9][a-z0-9-]{7,63}$")
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def _bounded_identity(value: str, *, limit: int = 160) -> bool:
+    return bool(
+        value
+        and value == value.strip()
+        and len(value) <= limit
+        and not any(ord(character) < 32 for character in value)
+    )
+
+
+def component_set_digest(component_sha256: Mapping[str, str]) -> str:
+    """Bind an allowlisted component map without exposing payload contents."""
+    components = dict(component_sha256)
+    if (
+        not components
+        or len(components) > 32
+        or any(
+            _NAME_RE.fullmatch(name) is None or _SHA256_RE.fullmatch(digest) is None
+            for name, digest in components.items()
+        )
+    ):
+        raise ValueError("backup lease component hashes are invalid")
+    return hashlib.sha256(
+        json.dumps(components, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,22 +61,19 @@ class BackupLease:
 
     def __post_init__(self) -> None:
         if (
-            not self.lease_id
-            or not self.source_request_id
+            _LEASE_ID_RE.fullmatch(self.lease_id) is None
+            or _REQUEST_ID_RE.fullmatch(self.source_request_id) is None
             or self.environment != "staging"
-            or not self.namespace
+            or _NAMESPACE_RE.fullmatch(self.namespace) is None
             or self.mutation_epoch < 0
-            or not self.db_snapshot_identity
-            or not self.schema_revision
+            or not _bounded_identity(self.db_snapshot_identity)
+            or not _bounded_identity(self.schema_revision, limit=64)
             or _SHA256_RE.fullmatch(self.manifest_sha256) is None
             or _SHA256_RE.fullmatch(self.object_inventory_root) is None
         ):
             raise ValueError("backup lease identity is invalid")
         components = dict(self.component_sha256)
-        if not components or any(
-            not name or _SHA256_RE.fullmatch(digest) is None for name, digest in components.items()
-        ):
-            raise ValueError("backup lease component hashes are invalid")
+        component_set_digest(components)
         timestamps = (self.created_at, self.expires_at, self.restore_verified_at)
         if any(value.tzinfo is None or value.utcoffset() is None for value in timestamps):
             raise ValueError("backup lease timestamps must be timezone-aware")
@@ -87,6 +114,7 @@ def evaluate_backup_lease(
     lease: BackupLease,
     *,
     now: datetime,
+    source_request_id: str,
     environment: str,
     namespace: str,
     mutation_epoch: int,
@@ -99,8 +127,21 @@ def evaluate_backup_lease(
     """Collect every provenance/freshness mismatch; absence of proof is ineligible."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("backup lease evaluation time must be timezone-aware")
+    if (
+        _REQUEST_ID_RE.fullmatch(source_request_id) is None
+        or not _bounded_identity(environment, limit=32)
+        or _NAMESPACE_RE.fullmatch(namespace) is None
+        or mutation_epoch < 0
+        or not _bounded_identity(db_snapshot_identity)
+        or not _bounded_identity(schema_revision, limit=64)
+        or _SHA256_RE.fullmatch(object_inventory_root) is None
+        or _SHA256_RE.fullmatch(manifest_sha256) is None
+    ):
+        raise ValueError("backup lease expectation identity is invalid")
+    component_set_digest(component_sha256)
     blockers: list[str] = []
     expectations = (
+        (lease.source_request_id == source_request_id, "source-request"),
         (environment == "staging" and lease.environment == environment, "environment"),
         (lease.namespace == namespace, "namespace"),
         (lease.mutation_epoch == mutation_epoch, "mutation-epoch"),
@@ -123,5 +164,6 @@ def evaluate_backup_lease(
 __all__ = [
     "BackupLease",
     "BackupLeaseEligibility",
+    "component_set_digest",
     "evaluate_backup_lease",
 ]
