@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,10 @@ from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
+from loom_cli.rollout.systemd_readiness import (
+    RehearsalSystemdActivation,
+    parse_systemctl_properties,
+)
 
 REHEARSAL_KUBECONFIG = Path("/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig")
 _MAX_OUTPUT_BYTES = 1024 * 1024
@@ -140,6 +145,7 @@ class IsolatedRehearsalExecutor:
     run: CommandRunner = _default_run
     stream_run: StreamCommandRunner = _default_stream_run
     kubeconfig: Path = REHEARSAL_KUBECONFIG
+    monotonic: Callable[[], float] = time.monotonic
 
     def __post_init__(self) -> None:
         if not self.kubeconfig.is_absolute() or ".." in self.kubeconfig.parts:
@@ -153,6 +159,8 @@ class IsolatedRehearsalExecutor:
             return self._namespace(plan)
         if check_id == "rehearsal.db-clone":
             return self._database(plan)
+        if check_id == "rehearsal.systemd-launch":
+            return self._systemd_launch(plan)
         if check_id == "rehearsal.migration":
             return self._migration(plan)
         return RehearsalStepOutcome(
@@ -454,6 +462,45 @@ class IsolatedRehearsalExecutor:
         ):
             return _blocked("migration", "upgrade-verification-failed")
         return _migration_ready(plan)
+
+    def _systemd_launch(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+        contract = RehearsalSystemdActivation(
+            unit=plan.resources.systemd_unit,
+            plan_digest=plan.plan_digest,
+        )
+        existing = self._systemd_properties(contract)
+        if existing is not None:
+            if contract.ready(existing, latency_ms=0):
+                return _systemd_ready(contract, latency_ms=0)
+            if not contract.absent(existing):
+                return _blocked("systemd", "existing-unit-drift")
+        started_at = self.monotonic()
+        if not self._status(contract.start_argv, timeout=30):
+            return _blocked("systemd", "activation-failed")
+        latency_ms = max(0, round((self.monotonic() - started_at) * 1000))
+        observed = self._systemd_properties(contract)
+        if observed is None or not contract.ready(observed, latency_ms=latency_ms):
+            return _blocked("systemd", "activation-readback-drift")
+        return _systemd_ready(contract, latency_ms=latency_ms)
+
+    def _systemd_properties(
+        self,
+        contract: RehearsalSystemdActivation,
+    ) -> dict[str, str] | None:
+        try:
+            result = self.run(contract.show_argv, None, 15)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        if (
+            result.returncode != 0
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or len(result.stdout.encode()) > _MAX_OUTPUT_BYTES
+            or len(result.stderr.encode()) > _MAX_OUTPUT_BYTES
+        ):
+            return None
+        properties = parse_systemctl_properties(result.stdout)
+        return properties or None
 
     def _psql_json(self, plan: RehearsalPlan, sql: str) -> dict[str, object] | None:
         return self._command(
@@ -830,6 +877,22 @@ def _migration_ready(plan: RehearsalPlan) -> RehearsalStepOutcome:
             "plan-sha256": plan.migration_plan_sha256,
             "schema-revision": plan.migration_target_revision,
             "status": "migrated",
+        },
+        blockers={},
+    )
+
+
+def _systemd_ready(
+    contract: RehearsalSystemdActivation,
+    *,
+    latency_ms: int,
+) -> RehearsalStepOutcome:
+    return RehearsalStepOutcome(
+        passed=True,
+        details={
+            "latency-ms": str(latency_ms),
+            "status": "active",
+            "unit": contract.unit,
         },
         blockers={},
     )

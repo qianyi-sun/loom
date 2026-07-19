@@ -7,6 +7,7 @@ import pytest
 
 from loom_cli.rollout.systemd_readiness import (
     NodeAgentTimerState,
+    RehearsalSystemdActivation,
     UserManagerReadiness,
     classify_node_agent_timer,
     node_agent_service_is_prepared,
@@ -79,6 +80,46 @@ def test_parse_systemctl_properties_ignores_unstructured_lines() -> None:
         "LoadState": "loaded",
         "SubState": "waiting",
     }
+
+
+def test_rehearsal_activation_contract_binds_fixed_sandbox_and_exact_readback() -> None:
+    contract = RehearsalSystemdActivation(
+        unit="loom-preflight-" + "a" * 24 + ".service",
+        plan_digest="b" * 64,
+    )
+
+    assert contract.start_argv[-2:] == ("--", "/usr/bin/true")
+    assert "--property=NoNewPrivileges=yes" in contract.start_argv
+    assert "--property=ProtectSystem=strict" in contract.start_argv
+    assert "--property=IPAddressDeny=any" in contract.start_argv
+    properties = {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "exited",
+        "Type": "oneshot",
+        "Result": "success",
+        "ExecMainStatus": "0",
+        "NeedDaemonReload": "no",
+        "Transient": "yes",
+        "Description": contract.description,
+    }
+    assert contract.ready(properties, latency_ms=4999)
+    assert not contract.ready({**properties, "Description": "other"}, latency_ms=1)
+    assert not contract.ready(properties, latency_ms=5001)
+    assert contract.absent({"LoadState": "not-found"})
+
+
+@pytest.mark.parametrize(
+    ("unit", "digest"),
+    [
+        ("loom-staging-rollout.service", "b" * 64),
+        ("loom-preflight-short.service", "b" * 64),
+        ("loom-preflight-" + "a" * 24 + ".service", "wrong"),
+    ],
+)
+def test_rehearsal_activation_rejects_nonisolated_identity(unit: str, digest: str) -> None:
+    with pytest.raises(ValueError, match="authority"):
+        RehearsalSystemdActivation(unit=unit, plan_digest=digest)
 
 
 def test_user_manager_readonly_probe_binds_version_linger_boot_and_latency() -> None:

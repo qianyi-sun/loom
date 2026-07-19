@@ -288,6 +288,92 @@ def test_migration_is_idempotent_and_rejects_unexpected_baseline() -> None:
         RehearsalPlan.from_record(record)
 
 
+def test_systemd_launch_uses_exact_isolated_transient_unit_and_budget() -> None:
+    plan = _plan()
+    calls: list[tuple[str, ...]] = []
+    active = False
+
+    def run(argv, _payload, _timeout):
+        nonlocal active
+        command = tuple(argv)
+        calls.append(command)
+        if command[0] == "systemd-run":
+            active = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "show"):
+            if not active:
+                return subprocess.CompletedProcess(argv, 4, "", "unit absent")
+            description = f"Loom isolated rehearsal {plan.plan_digest}"
+            output = "\n".join(
+                (
+                    "LoadState=loaded",
+                    "ActiveState=active",
+                    "SubState=exited",
+                    "Type=oneshot",
+                    "Result=success",
+                    "ExecMainStatus=0",
+                    "NeedDaemonReload=no",
+                    "Transient=yes",
+                    f"Description={description}",
+                )
+            )
+            return subprocess.CompletedProcess(argv, 0, output + "\n", "")
+        raise AssertionError(argv)
+
+    clock = iter((10.0, 10.125))
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        monotonic=lambda: next(clock),
+    ).execute("rehearsal.systemd-launch", plan)
+
+    assert outcome.passed
+    assert outcome.details == {
+        "latency-ms": "125",
+        "status": "active",
+        "unit": plan.resources.systemd_unit,
+    }
+    activation = next(call for call in calls if call[0] == "systemd-run")
+    assert f"--unit={plan.resources.systemd_unit}" in activation
+    assert "loom-staging-rollout.service" not in activation
+    assert activation[-2:] == ("--", "/usr/bin/true")
+
+
+def test_systemd_launch_rejects_existing_drift_and_latency_overrun() -> None:
+    plan = _plan()
+
+    def drift(argv, _payload, _timeout):
+        if argv[0] == "systemctl":
+            return subprocess.CompletedProcess(argv, 0, "LoadState=loaded\n", "")
+        raise AssertionError("drifted unit must not be replaced")
+
+    outcome = IsolatedRehearsalExecutor(run=drift).execute("rehearsal.systemd-launch", plan)
+    assert outcome.blockers == {"systemd": "existing-unit-drift"}
+
+    active = False
+
+    def slow(argv, _payload, _timeout):
+        nonlocal active
+        if argv[0] == "systemd-run":
+            active = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if not active:
+            return subprocess.CompletedProcess(argv, 4, "", "")
+        description = f"Loom isolated rehearsal {plan.plan_digest}"
+        output = (
+            "LoadState=loaded\nActiveState=active\nSubState=exited\nType=oneshot\n"
+            "Result=success\nExecMainStatus=0\nNeedDaemonReload=no\nTransient=yes\n"
+            f"Description={description}\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    clock = iter((1.0, 6.001))
+    outcome = IsolatedRehearsalExecutor(
+        run=slow,
+        monotonic=lambda: next(clock),
+    ).execute("rehearsal.systemd-launch", plan)
+    assert outcome.blockers == {"systemd": "activation-readback-drift"}
+
+
 def test_stream_runner_reads_private_file_without_following_parent_symlinks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

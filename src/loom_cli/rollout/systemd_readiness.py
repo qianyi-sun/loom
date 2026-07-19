@@ -22,6 +22,8 @@ _SYSTEMD_VERSION_RE = re.compile(r"[0-9]+(?:[.][0-9]+)*(?:[-+~.A-Za-z0-9]*)?\Z")
 _BOOT_ID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
+_REHEARSAL_UNIT_RE = re.compile(r"loom-preflight-[0-9a-f]{24}[.]service\Z")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 DEFAULT_USER_MANAGER_RPC_BUDGET_MS = 5_000
 
 
@@ -122,6 +124,95 @@ class GB10HostReadiness:
             separators=(",", ":"),
         ).encode()
         return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RehearsalSystemdActivation:
+    """One isolated transient-unit contract shared by plan/apply/verify/cleanup."""
+
+    unit: str
+    plan_digest: str
+    latency_budget_ms: int = DEFAULT_USER_MANAGER_RPC_BUDGET_MS
+
+    def __post_init__(self) -> None:
+        if (
+            _REHEARSAL_UNIT_RE.fullmatch(self.unit) is None
+            or _SHA256_RE.fullmatch(self.plan_digest) is None
+            or not 1 <= self.latency_budget_ms <= 60_000
+        ):
+            raise ValueError("rehearsal systemd activation authority is invalid")
+
+    @property
+    def description(self) -> str:
+        return f"Loom isolated rehearsal {self.plan_digest}"
+
+    @property
+    def start_argv(self) -> tuple[str, ...]:
+        """Return the only transient activation accepted by the rehearsal helper."""
+        return (
+            "systemd-run",
+            "--user",
+            f"--unit={self.unit}",
+            f"--description={self.description}",
+            "--property=Type=oneshot",
+            "--property=RemainAfterExit=yes",
+            "--property=NoNewPrivileges=yes",
+            "--property=PrivateTmp=yes",
+            "--property=ProtectSystem=strict",
+            "--property=ProtectHome=yes",
+            "--property=RestrictAddressFamilies=AF_UNIX",
+            "--property=IPAddressDeny=any",
+            "--",
+            "/usr/bin/true",
+        )
+
+    @property
+    def show_argv(self) -> tuple[str, ...]:
+        properties = (
+            "LoadState",
+            "ActiveState",
+            "SubState",
+            "Type",
+            "Result",
+            "ExecMainStatus",
+            "NeedDaemonReload",
+            "Transient",
+            "Description",
+        )
+        return (
+            "systemctl",
+            "--user",
+            "show",
+            self.unit,
+            *(f"--property={name}" for name in properties),
+        )
+
+    @property
+    def stop_argv(self) -> tuple[str, ...]:
+        return ("systemctl", "--user", "stop", self.unit)
+
+    @property
+    def reset_argv(self) -> tuple[str, ...]:
+        return ("systemctl", "--user", "reset-failed", self.unit)
+
+    def ready(self, properties: dict[str, str], *, latency_ms: int) -> bool:
+        """Verify exact identity, sandbox result, and bounded activation latency."""
+        return 0 <= latency_ms <= self.latency_budget_ms and properties == {
+            "LoadState": "loaded",
+            "ActiveState": "active",
+            "SubState": "exited",
+            "Type": "oneshot",
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "NeedDaemonReload": "no",
+            "Transient": "yes",
+            "Description": self.description,
+        }
+
+    @staticmethod
+    def absent(properties: dict[str, str] | None) -> bool:
+        """Accept only an absent transient unit after cleanup."""
+        return properties is None or properties == {"LoadState": "not-found"}
 
 
 def parse_systemctl_properties(stdout: str) -> dict[str, str]:
@@ -299,6 +390,7 @@ __all__ = [
     "DEFAULT_USER_MANAGER_RPC_BUDGET_MS",
     "GB10HostReadiness",
     "NodeAgentTimerState",
+    "RehearsalSystemdActivation",
     "UserManagerReadiness",
     "classify_node_agent_timer",
     "node_agent_service_is_prepared",
