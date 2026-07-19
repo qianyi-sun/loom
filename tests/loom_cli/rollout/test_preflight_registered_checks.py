@@ -27,6 +27,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
     build_candidate_identity_check,
     build_credentials_metadata_check,
+    build_docker_runtime_check,
     build_gb10_host_readiness_check,
     build_systemd_user_manager_check,
     build_tools_runtime_check,
@@ -280,6 +281,33 @@ def test_registered_tools_runtime_rejects_install_binding_before_probing() -> No
     assert not runtime.passed
     assert set(runtime.evidence["executables"].values()) == {"missing"}  # type: ignore[union-attr]
     assert calls == []
+
+
+def test_registered_docker_runtime_reports_both_blockers_without_diagnostics() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "token=do-not-echo", "private")
+
+    check = build_docker_runtime_check(run)
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "runner.install.sha256": "9" * 64,
+        }
+    )
+
+    executions = PreflightDag((_tools_runtime_check(), check)).run(context, through_tier=0)
+
+    docker = next(item for item in executions if item.check_id == "docker.runtime")
+    assert docker.passed is False
+    assert docker.evidence["daemon-ready"] is False
+    assert docker.evidence["buildx-ready"] is False
+    assert len(str(docker.evidence["runtime-digest"])) == 64
+    assert calls == [("docker", "info"), ("docker", "buildx", "version")]
+    assert "token" not in str(dict(docker.evidence))
+    assert "private" not in str(dict(docker.evidence))
 
 
 def test_registered_user_manager_check_runs_through_shared_dag() -> None:

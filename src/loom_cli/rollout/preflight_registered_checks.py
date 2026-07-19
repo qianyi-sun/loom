@@ -14,6 +14,8 @@ from loom_cli.rollout.credential_authority import (
     read_trusted_file,
     safe_content_fingerprint,
 )
+from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
+from loom_cli.rollout.docker_readiness import probe_docker_runtime
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, probe_gb10_fleet_readonly
 from loom_cli.rollout.install_attestation import (
     INSTALL_ATTESTATION_PATH,
@@ -495,6 +497,44 @@ def _empty_tools_runtime_probe() -> CheckProbe:
     )
 
 
+def build_docker_runtime_check(run: DockerCommandRunner) -> RegisteredCheck:
+    """Build the Tier 0 daemon/buildx invariant from the shared read-only probe."""
+
+    def probe(_context: CheckContext) -> CheckProbe:
+        runtime = probe_docker_runtime(run)
+        return CheckProbe(
+            passed=runtime.ready,
+            evidence={
+                "daemon-ready": runtime.daemon_ready,
+                "buildx-ready": runtime.buildx_ready,
+                "runtime-digest": runtime.evidence_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="docker.runtime",
+            failure_code="docker.runtime.unavailable",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("tools.runtime",),
+            mutation_class=MutationClass.NONE,
+            input_keys=("runner.config.sha256", "runner.install.sha256"),
+            evidence_schema=(
+                EvidenceField("daemon-ready", "boolean"),
+                EvidenceField("buildx-ready", "boolean"),
+                EvidenceField("runtime-digest", "sha256"),
+            ),
+            timeout_seconds=15,
+            freshness_ttl_seconds=120,
+            remediation="restore service Docker daemon access and the fixed buildx plugin",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
 def build_systemd_user_manager_check(
     run: CommandRunner,
     *,
@@ -673,6 +713,7 @@ __all__ = [
     "CredentialProbeSource",
     "build_candidate_identity_check",
     "build_credentials_metadata_check",
+    "build_docker_runtime_check",
     "build_gb10_host_readiness_check",
     "build_runner_install_check",
     "build_systemd_user_manager_check",

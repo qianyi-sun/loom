@@ -1637,6 +1637,12 @@ globally enabled desktop or snap unit failed, even while the D-Bus connection
 and Loom transient-unit boundary are healthy. Loom's own runtime units remain
 subject to the installer check and broker status gates below.
 
+Tier 0 checks Docker with the same two fixed read-only probes used by the
+compatibility preflight: `docker info` and `docker buildx version`. Both probes
+always run so the report exposes daemon and plugin blockers together. Their
+raw output is discarded; restore service-account Docker access or the installed
+buildx plugin rather than retrying a failed rollout request.
+
 The source kubeconfig is the fixed root-only `/root/.kube/config`. The
 installer validates the complete root-owned, non-writable parent chain, opens
 the source once with `O_NOFOLLOW`, and accepts only a root-owned, single-link,

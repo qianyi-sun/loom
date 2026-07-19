@@ -25,6 +25,7 @@ from loom_cli.rollout.credential_authority import (
     read_trusted_file,
     safe_content_fingerprint,
 )
+from loom_cli.rollout.docker_readiness import probe_docker_runtime
 from loom_cli.rollout.runtime_readiness import ModuleImporter, probe_runtime_readiness
 
 from .config import OperatorConfig
@@ -815,14 +816,15 @@ def collect_preflight(
         "synchronize the locked rollout Python environment",
     )
 
+    docker = probe_docker_runtime(child_run) if trusted_checkout else None
     add(
         "docker",
-        trusted_checkout and _command_passes(child_run, ["docker", "info"]),
+        docker is not None and docker.daemon_ready,
         "restore service Docker access",
     )
     add(
         "docker-buildx",
-        trusted_checkout and _command_passes(child_run, ["docker", "buildx", "version"]),
+        docker is not None and docker.buildx_ready,
         "install and verify the Docker buildx plugin",
     )
 

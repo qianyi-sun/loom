@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from loom_cli.rollout.docker_readiness import DockerRuntimeReadiness
 from loom_cli.rollout.operator import preflight as preflight_module
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.policy import sanitized_child_environment
@@ -240,6 +241,36 @@ def test_collect_preflight_accepts_trusted_readable_repo_configs(tmp_path: Path)
     )
 
     assert report.passed, report.to_dict()
+
+
+def test_collect_preflight_uses_shared_docker_runtime_predicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    calls: list[object] = []
+
+    def probe(run):
+        calls.append(run)
+        return DockerRuntimeReadiness(
+            daemon_ready=True,
+            buildx_ready=False,
+        )
+
+    monkeypatch.setattr(preflight_module, "probe_docker_runtime", probe)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=successful_command,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    outcomes = {check.name: check.passed for check in report.checks}
+    assert outcomes["docker"] is True
+    assert outcomes["docker-buildx"] is False
+    assert len(calls) == 1
 
 
 def test_collect_preflight_probes_only_exact_merged_active_gb10_set(tmp_path: Path) -> None:

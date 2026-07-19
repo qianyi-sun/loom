@@ -139,6 +139,12 @@ requirement/result digests—never executable paths, import exceptions, or child
 process diagnostics. The DAG check additionally binds the probe to the exact
 runner install hash before it imports candidate code.
 
+Docker readiness follows the same rule. `probe_docker_runtime` owns the fixed,
+read-only daemon and buildx predicates; both the compatibility preflight report
+and Tier 0 `docker.runtime` consume its complete aggregate. A failing daemon
+probe does not suppress the buildx probe, and neither command's stdout or stderr
+is admitted to evidence.
+
 Systemd readiness is single-source as well. The broker-facing Tier 0 probe and
 the final GB10 convergence step consume the same user-manager, oneshot service,
 and timer-state classifiers. The read-only probe binds the manager version,
