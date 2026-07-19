@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1008,9 +1009,118 @@ def test_registered_backup_lease_accepts_exact_unchanged_restored_authority() ->
     )
 
     assert result.passed
+    assert result.evidence["admission-allowed"] is True
     assert result.evidence["eligible"] is True
+    assert result.evidence["strategy"] == "reuse"
     assert result.evidence["blockers"] == {}
     assert result.evidence["lease-digest"] == lease.evidence_digest
+
+
+def test_registered_backup_lease_selects_fresh_when_active_lease_is_absent() -> None:
+    now = datetime(2026, 7, 19, 18, tzinfo=UTC)
+    expected = _backup_lease(now)
+    check = build_backup_lease_eligibility_check(
+        lambda: None,
+        now=lambda: now,
+        expected_lease_digest=expected.evidence_digest,
+        source_request_id=expected.source_request_id,
+        environment=expected.environment,
+        namespace=expected.namespace,
+        mutation_epoch=expected.mutation_epoch,
+        db_snapshot_identity=expected.db_snapshot_identity,
+        schema_revision=expected.schema_revision,
+        object_inventory_root=expected.object_inventory_root,
+        manifest_sha256=expected.manifest_sha256,
+        component_sha256=expected.component_sha256,
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("kubernetes.client"),
+            check,
+        )
+    )
+
+    result = next(
+        item
+        for item in dag.run(_backup_lease_context(expected))
+        if item.check_id == check.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["admission-allowed"] is True
+    assert result.evidence["eligible"] is False
+    assert result.evidence["strategy"] == "fresh"
+    assert result.evidence["blockers"] == {"lease-absent": "fresh-required"}
+
+
+def test_registered_backup_lease_selects_fresh_when_lease_expired() -> None:
+    now = datetime(2026, 7, 19, 18, tzinfo=UTC)
+    expected = _backup_lease(now)
+    expired = replace(expected, expires_at=now)
+    check = _backup_lease_check(expired, now)
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("kubernetes.client"),
+            check,
+        )
+    )
+
+    result = next(
+        item
+        for item in dag.run(_backup_lease_context(expired))
+        if item.check_id == check.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["eligible"] is False
+    assert result.evidence["strategy"] == "fresh"
+    assert result.evidence["blockers"] == {"freshness": "fresh-required"}
+
+
+def test_registered_backup_lease_rejects_unreadable_authority() -> None:
+    now = datetime(2026, 7, 19, 18, tzinfo=UTC)
+    expected = _backup_lease(now)
+
+    def unreadable() -> BackupLease | None:
+        raise OSError("authority unavailable")
+
+    check = build_backup_lease_eligibility_check(
+        unreadable,
+        now=lambda: now,
+        expected_lease_digest=expected.evidence_digest,
+        source_request_id=expected.source_request_id,
+        environment=expected.environment,
+        namespace=expected.namespace,
+        mutation_epoch=expected.mutation_epoch,
+        db_snapshot_identity=expected.db_snapshot_identity,
+        schema_revision=expected.schema_revision,
+        object_inventory_root=expected.object_inventory_root,
+        manifest_sha256=expected.manifest_sha256,
+        component_sha256=expected.component_sha256,
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("kubernetes.client"),
+            check,
+        )
+    )
+
+    result = next(
+        item
+        for item in dag.run(_backup_lease_context(expected))
+        if item.check_id == check.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.evidence["admission-allowed"] is False
+    assert result.evidence["strategy"] == "blocked"
+    assert result.evidence["blockers"] == {"lease-unavailable": "blocked"}
 
 
 def test_registered_backup_lease_rejects_context_drift_without_reading_lease() -> None:

@@ -767,7 +767,12 @@ def build_backup_lease_eligibility_check(
     manifest_sha256: str,
     component_sha256: Mapping[str, str],
 ) -> RegisteredCheck:
-    """Build the Tier 0 exact immutable backup lease reuse invariant."""
+    """Build the Tier 0 reuse-or-fresh backup admission invariant.
+
+    Absence or expiry of a lease is not itself a rollout blocker: it selects a
+    fresh critical checkpoint after the pre-backup tiers pass.  Unreadable
+    authority, cross-environment state, or input drift still fails closed.
+    """
     expected_component_set_digest = component_set_digest(component_sha256)
     if len(expected_lease_digest) != 64 or any(
         character not in "0123456789abcdef" for character in expected_lease_digest
@@ -799,7 +804,14 @@ def build_backup_lease_eligibility_check(
         try:
             lease = lease_source()
             if lease is None:
-                raise ValueError("active backup lease is absent")
+                return _empty_backup_lease_probe(
+                    source_request_id=source_request_id,
+                    manifest_sha256=manifest_sha256,
+                    component_digest=expected_component_set_digest,
+                    mutation_epoch=mutation_epoch,
+                    blockers=("lease-absent",),
+                    admission_allowed=True,
+                )
             eligibility = evaluate_backup_lease(
                 lease,
                 now=now(),
@@ -824,11 +836,22 @@ def build_backup_lease_eligibility_check(
         blockers = {blocker: "mismatch" for blocker in eligibility.blockers}
         if eligibility.lease_digest != expected_lease_digest:
             blockers["lease-digest"] = "mismatch"
+        fatal = {
+            blocker
+            for blocker in blockers
+            if blocker in {"environment", "namespace", "lease-digest"}
+        }
+        reusable = eligibility.eligible and not blockers
         return CheckProbe(
-            passed=eligibility.eligible and not blockers,
+            passed=not fatal,
             evidence={
-                "eligible": eligibility.eligible and not blockers,
-                "blockers": blockers,
+                "admission-allowed": not fatal,
+                "eligible": reusable,
+                "strategy": "reuse" if reusable else "fresh",
+                "blockers": {
+                    blocker: "blocked" if blocker in fatal else "fresh-required"
+                    for blocker in blockers
+                },
                 "lease-digest": eligibility.lease_digest,
                 "source-request": lease.source_request_id,
                 "manifest-digest": lease.manifest_sha256,
@@ -852,7 +875,9 @@ def build_backup_lease_eligibility_check(
             mutation_class=MutationClass.NONE,
             input_keys=tuple(expected_bindings),
             evidence_schema=(
+                EvidenceField("admission-allowed", "boolean"),
                 EvidenceField("eligible", "boolean"),
+                EvidenceField("strategy", "string"),
                 EvidenceField("blockers", "string-map"),
                 EvidenceField("lease-digest", "sha256"),
                 EvidenceField("source-request", "string"),
@@ -864,11 +889,12 @@ def build_backup_lease_eligibility_check(
             timeout_seconds=15,
             freshness_ttl_seconds=60,
             remediation=(
-                "create and restore-verify an exact staging backup lease or prove unchanged epoch provenance"
+                "repair unreadable or cross-environment lease authority; otherwise create and "
+                "restore-verify the declared fresh staging checkpoint"
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -946,12 +972,18 @@ def _empty_backup_lease_probe(
     component_digest: str,
     mutation_epoch: int,
     blockers: tuple[str, ...],
+    admission_allowed: bool = False,
 ) -> CheckProbe:
     return CheckProbe(
-        passed=False,
+        passed=admission_allowed,
         evidence={
+            "admission-allowed": admission_allowed,
             "eligible": False,
-            "blockers": {blocker: "blocked" for blocker in blockers},
+            "strategy": "fresh" if admission_allowed else "blocked",
+            "blockers": {
+                blocker: "fresh-required" if admission_allowed else "blocked"
+                for blocker in blockers
+            },
             "lease-digest": "0" * 64,
             "source-request": source_request_id,
             "manifest-digest": manifest_sha256,

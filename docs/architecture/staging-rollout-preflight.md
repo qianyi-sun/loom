@@ -119,6 +119,13 @@ high-water limits, lifecycle launch/cancel behavior, and backup lease
 eligibility. Browser token owner/mode/ACL/no-follow/read-stability and the GB10
 timer/transient-unit classifier belong here, not at final acceptance.
 
+Lease eligibility is an admission decision, not a requirement that a reusable
+lease already exist. An exact, fresh, restore-verified active lease selects
+`reuse`; an absent, expired, or epoch-stale lease selects `fresh` after capacity
+admission succeeds. Unreadable lease authority, cross-environment state, or
+input/digest drift remains a blocker. This allows a first rollout to create its
+checkpoint without weakening fail-closed reuse or making Tier 0 circular.
+
 ### Tier 1: candidate-static outputs
 
 Build each image once, bind immutable digests, render all manifests, perform
