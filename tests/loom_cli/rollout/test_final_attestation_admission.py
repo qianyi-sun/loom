@@ -16,6 +16,7 @@ from loom_cli.rollout.preflight_contract import (
     EvidenceField,
     MutationClass,
     PreflightAttestation,
+    PreflightDag,
     RegisteredCheck,
     SecretRedactionPolicy,
     StageCapability,
@@ -70,8 +71,55 @@ def _check(
     )
 
 
-def _checks(*, boot_id: str = "boot-1") -> tuple[RegisteredCheck, ...]:
-    return (
+def _baseline_check(
+    check_id: str,
+    *,
+    dependencies: tuple[str, ...],
+    resource_digest: str,
+) -> RegisteredCheck:
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id=check_id,
+            failure_code=f"{check_id}.failed",
+            tier=2,
+            stage=StageCapability.BASELINE_LIVE_READONLY,
+            dependencies=dependencies,
+            mutation_class=MutationClass.NONE,
+            input_keys=("candidate.sha",),
+            evidence_schema=(
+                EvidenceField("ready", "boolean"),
+                EvidenceField("observed-epoch", "integer"),
+                EvidenceField("readonly-principal", "string"),
+                EvidenceField("resource-digest", "sha256"),
+                EvidenceField("blockers", "string-map"),
+            ),
+            timeout_seconds=5,
+            freshness_ttl_seconds=120,
+            remediation=f"restore {check_id}",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: CheckProbe(
+                passed=True,
+                evidence={
+                    "ready": True,
+                    "observed-epoch": 7,
+                    "readonly-principal": "system:serviceaccount:loom-staging:readonly",
+                    "resource-digest": resource_digest,
+                    "blockers": {},
+                },
+            )
+        },
+    )
+
+
+def _checks(
+    *,
+    boot_id: str = "boot-1",
+    baseline_digest: str = "6" * 64,
+) -> tuple[RegisteredCheck, ...]:
+    tier0 = (
         _check(
             "candidate.identity",
             {"resolved-sha": "a" * 40, "resolved-tree": "b" * 40},
@@ -99,6 +147,43 @@ def _checks(*, boot_id: str = "boot-1") -> tuple[RegisteredCheck, ...]:
             (EvidenceField("inventory-digest", "sha256"), EvidenceField("boot-ids", "string-map")),
         ),
     )
+    tier2 = (
+        _baseline_check(
+            "staging.health",
+            dependencies=(),
+            resource_digest=baseline_digest,
+        ),
+        _baseline_check(
+            "staging.auth",
+            dependencies=("staging.health",),
+            resource_digest="7" * 64,
+        ),
+        _baseline_check(
+            "staging.catalog-task",
+            dependencies=("staging.auth",),
+            resource_digest="8" * 64,
+        ),
+        _baseline_check(
+            "staging.storage-db",
+            dependencies=("staging.health",),
+            resource_digest="9" * 64,
+        ),
+        _baseline_check(
+            "staging.network",
+            dependencies=("staging.health",),
+            resource_digest="a" * 64,
+        ),
+        _baseline_check(
+            "staging.release-baseline",
+            dependencies=(
+                "staging.catalog-task",
+                "staging.storage-db",
+                "staging.network",
+            ),
+            resource_digest="b" * 64,
+        ),
+    )
+    return tier0 + tier2
 
 
 def _bindings() -> AttestationBindings:
@@ -161,13 +246,16 @@ def _plan(checks: tuple[RegisteredCheck, ...]) -> CandidatePreflightPlan:
 
 def _attestation(plan: CandidatePreflightPlan) -> PreflightAttestation:
     implementations = plan.registry.implementation_digests
+    executions = PreflightDag(
+        tuple(check for check in plan.registry.checks if check.spec.tier in {0, 2})
+    ).run(plan.context, through_tier=2, now=lambda: NOW - timedelta(minutes=1))
     return PreflightAttestation(
         schema_version=1,
         bindings=_bindings(),
         registry_digest=plan.registry.registry_digest,
         coverage_digest=plan.registry.coverage_digest,
         check_implementation_digests=implementations,
-        evidence_hashes={check_id: "f" * 64 for check_id in implementations},
+        evidence_hashes={execution.check_id: execution.evidence_hash for execution in executions},
         issued_at=NOW - timedelta(minutes=1),
         expires_at=NOW + timedelta(minutes=30),
         attestation_digest="1" * 64,
@@ -186,6 +274,8 @@ def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
 
     assert len(admission.tier0_executions) == 5
     assert all(execution.passed for execution in admission.tier0_executions)
+    assert len(admission.tier2_executions) == 6
+    assert all(execution.passed for execution in admission.tier2_executions)
 
 
 def test_final_admission_rejects_host_boot_or_epoch_drift() -> None:
@@ -206,5 +296,19 @@ def test_final_admission_rejects_host_boot_or_epoch_drift() -> None:
             candidate=_candidate(),
             plan=plan,
             current_mutation_epoch=8,
+            now=NOW,
+        )
+
+
+def test_final_admission_rejects_tier2_baseline_drift() -> None:
+    attested_plan = _plan(_checks())
+    drifted_plan = _plan(_checks(baseline_digest="c" * 64))
+
+    with pytest.raises(ValueError, match="Tier 2 baseline changed"):
+        validate_final_attestation(
+            attestation=_attestation(attested_plan),
+            candidate=_candidate(),
+            plan=drifted_plan,
+            current_mutation_epoch=7,
             now=NOW,
         )

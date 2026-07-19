@@ -432,6 +432,15 @@ fails closed. Installed actions receive only this fixed plan path and digest;
 they do not resolve Git refs, reread ambient configuration, or rediscover
 preflight artifacts.
 
+Final admission rebuilds the same registered-check implementations and reruns
+only the drift-sensitive Tier 0 checks plus the six Tier 2 readonly staging
+baseline checks. It does not rebuild images or rerender Tier 1 artifacts. Every
+Tier 2 execution must retain the attested mutation epoch, readonly principal,
+empty blocker set, implementation digest, resource evidence, and exact
+evidence hash. A health, auth, catalog/task, storage/database, network, or
+aggregate release-baseline change after rehearsal therefore stops before the
+first protected component rather than being rediscovered after apply.
+
 `FinalGateActionSource` obtains the artifact bundle identity only from the
 immutable passing `artifacts.publish` execution in the request's Tier 0–3
 rehearsal. Its implementation and evidence hashes must match the attestation,

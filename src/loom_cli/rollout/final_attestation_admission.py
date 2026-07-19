@@ -8,7 +8,22 @@ from datetime import datetime
 
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
-from loom_cli.rollout.preflight_contract import CheckExecution, PreflightAttestation
+from loom_cli.rollout.preflight_contract import (
+    CheckExecution,
+    PreflightAttestation,
+    PreflightDag,
+)
+
+_BASELINE_CHECKS = frozenset(
+    {
+        "staging.health",
+        "staging.auth",
+        "staging.catalog-task",
+        "staging.storage-db",
+        "staging.network",
+        "staging.release-baseline",
+    }
+)
 
 _DRIFT_EVIDENCE_CHECKS = frozenset(
     {
@@ -25,10 +40,16 @@ _DRIFT_EVIDENCE_CHECKS = frozenset(
 class FinalAttestationAdmission:
     attestation: PreflightAttestation
     tier0_executions: tuple[CheckExecution, ...]
+    tier2_executions: tuple[CheckExecution, ...]
 
     def __post_init__(self) -> None:
-        if not self.tier0_executions or any(
-            result.tier != 0 or not result.passed for result in self.tier0_executions
+        tier2_by_id = {execution.check_id: execution for execution in self.tier2_executions}
+        if (
+            not self.tier0_executions
+            or any(result.tier != 0 or not result.passed for result in self.tier0_executions)
+            or len(self.tier2_executions) != len(_BASELINE_CHECKS)
+            or set(tier2_by_id) != _BASELINE_CHECKS
+            or any(result.tier != 2 or not result.passed for result in self.tier2_executions)
         ):
             raise ValueError("final attestation admission is incomplete")
 
@@ -69,14 +90,18 @@ def validate_final_attestation(
     if any(plan.context.bindings.get(key) != value for key, value in context_expected.items()):
         raise ValueError("final admission context binding drifted")
 
-    executions = plan.registry.dag(max_concurrency=max_concurrency).run(
+    drift_checks = tuple(check for check in plan.registry.checks if check.spec.tier in {0, 2})
+    executions = PreflightDag(drift_checks, max_concurrency=max_concurrency).run(
         plan.context,
-        through_tier=0,
+        through_tier=2,
         now=lambda: now,
     )
     by_id = {execution.check_id: execution for execution in executions}
+    tier0 = tuple(execution for execution in executions if execution.tier == 0)
+    tier2 = tuple(execution for execution in executions if execution.tier == 2)
     if (
         not _DRIFT_EVIDENCE_CHECKS <= by_id.keys()
+        or set(execution.check_id for execution in tier2) != _BASELINE_CHECKS
         or any(not execution.passed for execution in executions)
         or any(
             execution.implementation_digest
@@ -116,7 +141,18 @@ def validate_final_attestation(
     )
     if not all(exact_evidence):
         raise ValueError("final admission drift-sensitive evidence changed")
-    return FinalAttestationAdmission(attestation, executions)
+    for execution in tier2:
+        current_evidence = execution.evidence
+        if (
+            current_evidence.get("ready") is not True
+            or current_evidence.get("observed-epoch") != current_mutation_epoch
+            or current_evidence.get("readonly-principal") in {None, ""}
+            or current_evidence.get("resource-digest") in {None, ""}
+            or current_evidence.get("blockers") != {}
+            or execution.evidence_hash != attestation.evidence_hashes.get(execution.check_id)
+        ):
+            raise ValueError("final admission Tier 2 baseline changed")
+    return FinalAttestationAdmission(attestation, tier0, tier2)
 
 
 __all__ = ["FinalAttestationAdmission", "validate_final_attestation"]
