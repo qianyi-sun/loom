@@ -235,6 +235,13 @@ manifest/hash/provenance validation and a successful restore verification;
 then every older unreferenced payload is removed while compact evidence is
 retained.
 
+Each complete lease is published once under its evidence digest. The active and
+candidate pointers live in a separate generation-numbered rotation record and
+advance through compare-and-swap publication. A rotation record may reference
+only an already-published byte-equivalent lease. Deletion is always a returned
+post-publication action: a crash can retain an extra old payload for retry, but
+cannot erase the current known-good payload or promote an unverified candidate.
+
 If any proof is unavailable, the operator must fail closed to a fresh verified
 checkpoint. A changed-epoch checkpoint plus restore must complete within 30
 minutes before shared staging rollout may proceed.

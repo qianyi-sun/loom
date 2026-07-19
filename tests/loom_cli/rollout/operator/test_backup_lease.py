@@ -56,6 +56,13 @@ def test_exact_verified_unchanged_epoch_lease_is_eligible() -> None:
     assert result.lease_digest == _lease().evidence_digest
 
 
+def test_lease_round_trips_complete_restore_authority() -> None:
+    lease = _lease()
+
+    assert BackupLease.from_dict(lease.to_dict()) == lease
+    assert len(lease.evidence_digest) == 64
+
+
 def test_lease_collects_every_provenance_and_freshness_blocker() -> None:
     result = _evaluate(
         _lease(),

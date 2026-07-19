@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
@@ -70,6 +71,51 @@ class BackupPayloadRecord:
         elif self.failure_code is not None:
             raise ValueError("non-failed backup payload cannot carry a failure code")
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "created_at": self.created_at.isoformat(),
+            "failure_code": self.failure_code,
+            "lease": self.lease.to_dict() if self.lease is not None else None,
+            "payload_id": self.payload_id,
+            "phase": self.phase.value,
+            "request_id": self.request_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> BackupPayloadRecord:
+        expected = {
+            "created_at",
+            "failure_code",
+            "lease",
+            "payload_id",
+            "phase",
+            "request_id",
+        }
+        if set(data) != expected or not all(
+            isinstance(data[field], str)
+            for field in ("created_at", "payload_id", "phase", "request_id")
+        ):
+            raise ValueError("backup payload record schema is invalid")
+        if data["failure_code"] is not None and not isinstance(data["failure_code"], str):
+            raise ValueError("backup payload record schema is invalid")
+        if data["lease"] is not None and not isinstance(data["lease"], Mapping):
+            raise ValueError("backup payload record schema is invalid")
+        try:
+            created_at = datetime.fromisoformat(data["created_at"])  # type: ignore[arg-type]
+            phase = BackupPayloadPhase(data["phase"])  # type: ignore[arg-type]
+        except ValueError as exc:
+            raise ValueError("backup payload record phase or timestamp is invalid") from exc
+        return cls(
+            payload_id=data["payload_id"],  # type: ignore[arg-type]
+            request_id=data["request_id"],  # type: ignore[arg-type]
+            phase=phase,
+            created_at=created_at,
+            lease=(
+                BackupLease.from_dict(data["lease"]) if isinstance(data["lease"], Mapping) else None
+            ),
+            failure_code=data["failure_code"],
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class BackupRotationState:
@@ -99,26 +145,44 @@ class BackupRotationState:
 
     @property
     def evidence_digest(self) -> str:
-        def record_payload(record: BackupPayloadRecord | None) -> object:
-            if record is None:
-                return None
-            return {
-                "created_at": record.created_at.isoformat(),
-                "failure_code": record.failure_code,
-                "lease_digest": record.lease.evidence_digest if record.lease else None,
-                "payload_id": record.payload_id,
-                "phase": record.phase.value,
-                "request_id": record.request_id,
-            }
-
-        payload = {
-            "active": record_payload(self.active),
-            "candidate": record_payload(self.candidate),
-            "generation": self.generation,
-        }
         return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "active": self.active.to_dict() if self.active is not None else None,
+            "candidate": self.candidate.to_dict() if self.candidate is not None else None,
+            "generation": self.generation,
+            "schema_version": 1,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> BackupRotationState:
+        expected = {"active", "candidate", "generation", "schema_version"}
+        if (
+            set(data) != expected
+            or data["schema_version"] != 1
+            or type(data["generation"]) is not int
+            or any(
+                data[field] is not None and not isinstance(data[field], Mapping)
+                for field in ("active", "candidate")
+            )
+        ):
+            raise ValueError("backup rotation state schema is invalid")
+        return cls(
+            generation=data["generation"],
+            active=(
+                BackupPayloadRecord.from_dict(data["active"])
+                if isinstance(data["active"], Mapping)
+                else None
+            ),
+            candidate=(
+                BackupPayloadRecord.from_dict(data["candidate"])
+                if isinstance(data["candidate"], Mapping)
+                else None
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)

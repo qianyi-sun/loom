@@ -83,7 +83,12 @@ class BackupLease:
 
     @property
     def evidence_digest(self) -> str:
-        payload = {
+        return hashlib.sha256(
+            json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
             "component_sha256": dict(self.component_sha256),
             "created_at": self.created_at.isoformat(),
             "db_snapshot_identity": self.db_snapshot_identity,
@@ -97,10 +102,68 @@ class BackupLease:
             "restore_verified_at": self.restore_verified_at.isoformat(),
             "schema_revision": self.schema_revision,
             "source_request_id": self.source_request_id,
+            "schema_version": 1,
         }
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> BackupLease:
+        expected = {
+            "component_sha256",
+            "created_at",
+            "db_snapshot_identity",
+            "environment",
+            "expires_at",
+            "lease_id",
+            "manifest_sha256",
+            "mutation_epoch",
+            "namespace",
+            "object_inventory_root",
+            "restore_verified_at",
+            "schema_revision",
+            "schema_version",
+            "source_request_id",
+        }
+        components = data.get("component_sha256")
+        if (
+            set(data) != expected
+            or data.get("schema_version") != 1
+            or type(data.get("mutation_epoch")) is not int
+            or not isinstance(components, Mapping)
+            or not all(
+                isinstance(key, str) and isinstance(value, str) for key, value in components.items()
+            )
+        ):
+            raise ValueError("backup lease schema is invalid")
+        string_fields = expected - {
+            "component_sha256",
+            "mutation_epoch",
+            "schema_version",
+        }
+        if not all(isinstance(data[field], str) for field in string_fields):
+            raise ValueError("backup lease schema is invalid")
+        try:
+            created_at = datetime.fromisoformat(data["created_at"])  # type: ignore[arg-type]
+            expires_at = datetime.fromisoformat(data["expires_at"])  # type: ignore[arg-type]
+            restore_verified_at = datetime.fromisoformat(
+                data["restore_verified_at"]  # type: ignore[arg-type]
+            )
+        except ValueError as exc:
+            raise ValueError("backup lease timestamps are invalid") from exc
+        return cls(
+            lease_id=data["lease_id"],  # type: ignore[arg-type]
+            source_request_id=data["source_request_id"],  # type: ignore[arg-type]
+            manifest_sha256=data["manifest_sha256"],  # type: ignore[arg-type]
+            component_sha256=dict(components),
+            environment=data["environment"],  # type: ignore[arg-type]
+            namespace=data["namespace"],  # type: ignore[arg-type]
+            mutation_epoch=data["mutation_epoch"],  # type: ignore[arg-type]
+            db_snapshot_identity=data["db_snapshot_identity"],  # type: ignore[arg-type]
+            schema_revision=data["schema_revision"],  # type: ignore[arg-type]
+            object_inventory_root=data["object_inventory_root"],  # type: ignore[arg-type]
+            created_at=created_at,
+            expires_at=expires_at,
+            restore_verified_at=restore_verified_at,
+        )
 
 
 @dataclass(frozen=True, slots=True)

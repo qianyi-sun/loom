@@ -22,6 +22,8 @@ from .backup_job import (
     PreflightBackupJobEnvelope,
     validate_job_binding,
 )
+from .backup_lease import BackupLease
+from .backup_rotation import BackupRotationState
 from .model import (
     ActivePointer,
     DriverEnvelope,
@@ -300,6 +302,9 @@ class RequestStore:
         self.requests_root = self.root / "requests"
         self.active_path = self.root / "active.json"
         self._active_lock_path = self.root / ".active.lock"
+        self.backup_rotation_path = self.root / "backup-rotation.json"
+        self._backup_rotation_lock_path = self.root / ".backup-rotation.lock"
+        self.backup_leases_root = self.root / "backup-leases"
 
     def _ensure_store(self) -> None:
         if not self.root.exists():
@@ -311,6 +316,97 @@ class RequestStore:
                 raise RequestStoreError("could not create request store root") from exc
         _validate_private_directory(self.root, "request store root")
         _ensure_private_directory(self.requests_root, "requests directory")
+
+    def publish_backup_lease(self, lease: BackupLease) -> Path:
+        """Publish one complete restore-verified lease by its evidence digest."""
+        self._ensure_store()
+        _ensure_private_directory(self.backup_leases_root, "backup leases directory")
+        path = self.backup_leases_root / f"{lease.evidence_digest}.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return _publish_immutable(path, lease.to_dict())
+        except OSError as exc:
+            raise RequestStoreError("could not inspect backup lease") from exc
+        if self.read_backup_lease(lease.evidence_digest) != lease:
+            raise RequestStoreError("backup lease digest collision")
+        return path
+
+    def read_backup_lease(self, digest: str) -> BackupLease:
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise RequestStoreError("backup lease digest is invalid")
+        _validate_private_directory(self.root, "request store root")
+        _validate_private_directory(self.backup_leases_root, "backup leases directory")
+        try:
+            lease = BackupLease.from_dict(
+                _read_json(self.backup_leases_root / f"{digest}.json", "backup lease")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if lease.evidence_digest != digest:
+            raise RequestStoreError("backup lease digest does not match its payload")
+        return lease
+
+    def read_backup_rotation(self) -> BackupRotationState:
+        try:
+            self.root.lstat()
+        except FileNotFoundError:
+            return BackupRotationState()
+        _validate_private_directory(self.root, "request store root")
+        try:
+            payload = _read_json(self.backup_rotation_path, "backup rotation state")
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                return BackupRotationState()
+            raise
+        try:
+            state = BackupRotationState.from_dict(payload)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        for record in (state.active, state.candidate):
+            if record is not None and record.lease is not None:
+                if self.read_backup_lease(record.lease.evidence_digest) != record.lease:
+                    raise RequestStoreError("backup rotation lease authority drifted")
+        return state
+
+    def replace_backup_rotation(
+        self,
+        state: BackupRotationState,
+        *,
+        expected_generation: int,
+    ) -> Path:
+        """CAS-publish rotation before any returned payload deletion is applied."""
+        if expected_generation < 0 or state.generation != expected_generation + 1:
+            raise RequestStoreError("backup rotation generation is not the next value")
+        self._ensure_store()
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self._backup_rotation_lock_path, flags, _PRIVATE_FILE_MODE)
+        except OSError as exc:
+            raise RequestStoreError("could not open backup rotation lock") from exc
+        locked = False
+        try:
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise RequestStoreError("backup rotation lock is unsafe")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            current = self.read_backup_rotation()
+            if current.generation != expected_generation:
+                raise RequestStoreError("backup rotation changed concurrently")
+            for record in (state.active, state.candidate):
+                if record is not None and record.lease is not None:
+                    if self.read_backup_lease(record.lease.evidence_digest) != record.lease:
+                        raise RequestStoreError("backup rotation lease authority is unpublished")
+            return _replace_mutable(self.backup_rotation_path, state.to_dict())
+        except OSError as exc:
+            raise RequestStoreError("backup rotation lock failed") from exc
+        finally:
+            if locked:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     def _request_directory(self, request_id: object) -> Path:
         return self.requests_root / _request_id(request_id)

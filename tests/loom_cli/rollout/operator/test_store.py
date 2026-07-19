@@ -7,7 +7,7 @@ import stat
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,12 @@ from loom_cli.rollout.operator.backup_job import (
     BackupJobState,
     PreflightBackupJobEnvelope,
     transition_backup_job,
+)
+from loom_cli.rollout.operator.backup_lease import BackupLease
+from loom_cli.rollout.operator.backup_rotation import (
+    BackupRotationState,
+    begin_candidate,
+    record_manifest_verified,
 )
 from loom_cli.rollout.operator.config import APPROVED_REMOTE_URL
 from loom_cli.rollout.operator.model import (
@@ -278,6 +284,48 @@ def test_create_request_is_private_and_no_replace(tmp_path: Path) -> None:
     with pytest.raises(RequestStoreError, match="already exists"):
         store.create_request(request)
     assert store.read_request(REQUEST_ID) == request
+
+
+def test_backup_lease_and_rotation_are_digest_bound_and_compare_and_swap(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    lease = BackupLease(
+        lease_id="lease-alpha000",
+        source_request_id="req-alpha0000",
+        manifest_sha256="a" * 64,
+        component_sha256={"postgres": "b" * 64, "authority": "c" * 64},
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=7,
+        db_snapshot_identity="lsn:0/16B6C50",
+        schema_revision="0067",
+        object_inventory_root="d" * 64,
+        created_at=datetime(2026, 7, 19, 20, tzinfo=UTC),
+        restore_verified_at=datetime(2026, 7, 19, 20, 5, tzinfo=UTC),
+        expires_at=datetime(2026, 7, 19, 20, tzinfo=UTC) + timedelta(hours=2),
+    )
+    lease_path = store.publish_backup_lease(lease)
+    state = begin_candidate(
+        BackupRotationState(),
+        payload_id="payload-alpha000",
+        request_id="req-alpha0000",
+        created_at=datetime(2026, 7, 19, 20, tzinfo=UTC),
+    ).state
+    store.replace_backup_rotation(state, expected_generation=0)
+    next_state = record_manifest_verified(
+        state,
+        payload_id="payload-alpha000",
+        lease=lease,
+    ).state
+    store.replace_backup_rotation(next_state, expected_generation=1)
+
+    assert stat.S_IMODE(lease_path.stat().st_mode) == 0o600
+    assert store.publish_backup_lease(lease) == lease_path
+    assert store.read_backup_lease(lease.evidence_digest) == lease
+    assert store.read_backup_rotation() == next_state
+    with pytest.raises(RequestStoreError, match="changed concurrently"):
+        store.replace_backup_rotation(next_state, expected_generation=1)
 
 
 def test_preflight_request_backup_and_promotion_are_separate_immutable_authorities(

@@ -210,3 +210,4 @@ def test_second_candidate_is_rejected_and_state_digest_is_deterministic() -> Non
 
     assert state.evidence_digest == state.evidence_digest
     assert len(state.evidence_digest) == 64
+    assert BackupRotationState.from_dict(state.to_dict()) == state
