@@ -28,12 +28,20 @@ from loom_cli.rollout.lifecycle_protocol import (
     lifecycle_protocol_digest,
     run_lifecycle_self_test,
 )
-from loom_cli.rollout.manifest_readiness import ManifestArtifact, RenderManifest, ServerDryRun
+from loom_cli.rollout.manifest_readiness import (
+    ManifestArtifact,
+    ManifestRenderSession,
+    RenderManifest,
+    ServerDryRun,
+)
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.candidate import GitRunner
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
-from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
+from loom_cli.rollout.preflight_artifact_store import (
+    LoadedPreflightArtifacts,
+    PreflightArtifactStore,
+)
 from loom_cli.rollout.preflight_contract import RegisteredCheck, SafeValue
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
@@ -176,6 +184,7 @@ class PreflightRuntimeSources:
     importer: ModuleImporter = importlib.import_module
     lifecycle_self_test: Callable[[], LifecycleSelfTestEvidence] = run_lifecycle_self_test
     monotonic: Callable[[], float] | None = None
+    loaded_artifacts: LoadedPreflightArtifacts | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -201,8 +210,20 @@ class PreflightRuntimeSources:
             candidate_root=self.candidate_root,
             image_tag=self.candidate.image_tag,
             resolved_sha=self.candidate.resolved_sha,
+            artifact=(None if self.loaded_artifacts is None else self.loaded_artifacts.images),
         )
         manifest_artifacts: dict[str, ManifestArtifact] = {}
+        manifest_session: ManifestRenderSession | None = None
+        if self.loaded_artifacts is not None:
+            manifest_artifacts["exact"] = self.loaded_artifacts.manifests
+            manifest_session = ManifestRenderSession(
+                self.render_manifest,
+                self.server_dry_run,
+                image_tag=self.candidate.image_tag,
+                namespace=self.config.namespace,
+                image_digests=self.loaded_artifacts.images.image_digests,
+                artifact=self.loaded_artifacts.manifests,
+            )
 
         def capture_manifest(artifact: ManifestArtifact) -> None:
             manifest_artifacts["exact"] = artifact
@@ -223,6 +244,7 @@ class PreflightRuntimeSources:
                 image_session=image_session,
                 capture_manifest=capture_manifest,
                 exact_manifest=exact_manifest,
+                manifest_session=manifest_session,
                 mutation_epoch=mutation_epoch,
             )
             tier2 = build_staging_baseline_checks(
@@ -330,6 +352,7 @@ class PreflightRuntimeSources:
         image_session: ImageBuildSession,
         capture_manifest: Callable[[ManifestArtifact], None],
         exact_manifest: Callable[[], ManifestArtifact],
+        manifest_session: ManifestRenderSession | None,
         mutation_epoch: int,
     ) -> tuple[RegisteredCheck, ...]:
         image_checks = build_image_preflight_checks(
@@ -347,6 +370,7 @@ class PreflightRuntimeSources:
             namespace=self.config.namespace,
             expected_candidate_sha=self.candidate.resolved_sha,
             expected_config_digest=self.config.config_sha256,
+            session=manifest_session,
             artifact_sink=capture_manifest,
         )
         return (

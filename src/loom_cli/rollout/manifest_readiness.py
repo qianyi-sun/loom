@@ -67,13 +67,21 @@ class ManifestRenderSession:
         image_tag: str,
         namespace: str,
         image_digests: Mapping[str, str],
+        artifact: ManifestArtifact | None = None,
     ) -> None:
         self._render = render
         self._server_dry_run = server_dry_run
         self._image_tag = image_tag
         self._namespace = namespace
         self._image_digests = dict(image_digests)
-        self._artifact: ManifestArtifact | None = None
+        if artifact is not None and artifact != inspect_rendered_manifests(
+            artifact.rendered_yaml,
+            image_tag=image_tag,
+            namespace=namespace,
+            image_digests=image_digests,
+        ):
+            raise ValueError("seeded manifest artifact identity is invalid")
+        self._artifact: ManifestArtifact | None = artifact
         self._lock = Lock()
 
     def render(self) -> ManifestArtifact:

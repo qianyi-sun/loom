@@ -106,12 +106,21 @@ class ImageBuildSession:
         candidate_root: Path,
         image_tag: str,
         resolved_sha: str,
+        artifact: ImageArtifactSet | None = None,
     ) -> None:
         self._run = run
         self._candidate_root = candidate_root
         self._image_tag = image_tag
         self._resolved_sha = resolved_sha
-        self._artifact: ImageArtifactSet | None = None
+        if artifact is not None and (
+            artifact.plan_digest != image_plan_digest()
+            or any(
+                descriptor.revision != resolved_sha
+                for descriptor in artifact.descriptors.values()
+            )
+        ):
+            raise ValueError("seeded rollout image artifact identity is invalid")
+        self._artifact: ImageArtifactSet | None = artifact
         self._lock = Lock()
 
     def build(self) -> ImageArtifactSet:

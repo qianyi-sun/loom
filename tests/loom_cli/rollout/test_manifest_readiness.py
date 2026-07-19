@@ -130,3 +130,36 @@ def test_manifest_server_validation_fails_closed_without_rerender() -> None:
 
     with pytest.raises(ValueError, match="server-side dry-run"):
         session.server_validate()
+
+
+def test_seeded_manifest_session_never_rerenders_exact_artifact() -> None:
+    artifact = inspect_rendered_manifests(
+        _rendered(),
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+    render_calls: list[object] = []
+    server_inputs: list[str] = []
+
+    def render() -> str:
+        render_calls.append(object())
+        return "must-not-render"
+
+    def server_dry_run(payload: str):
+        server_inputs.append(payload)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    session = ManifestRenderSession(
+        render,
+        server_dry_run,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+        artifact=artifact,
+    )
+
+    assert session.render() is artifact
+    assert session.server_validate() is artifact
+    assert not render_calls
+    assert server_inputs == [_rendered()]

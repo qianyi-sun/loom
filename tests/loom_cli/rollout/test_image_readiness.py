@@ -14,6 +14,7 @@ from loom_cli.rollout.image_readiness import (
     REHEARSAL_POSTGRES_ENTRYPOINT,
     REHEARSAL_POSTGRES_IMAGE,
     REVISION_LABEL,
+    ImageBuildSession,
     build_exact_images,
     verify_image_contract,
 )
@@ -142,3 +143,38 @@ def test_rehearsal_postgres_entrypoint_is_part_of_contract() -> None:
             resolved_sha=revision,
             expected_digests=expected,
         )
+
+
+def test_seeded_image_session_never_rebuilds_exact_artifact(tmp_path: Path) -> None:
+    revision = "a" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, cwd):
+        command = tuple(argv)
+        calls.append(command)
+        assert cwd is None
+        name = command[-1].split(":", 1)[0]
+        return subprocess.CompletedProcess(argv, 0, _inspect_payload(name, revision), "")
+
+    artifact = verify_image_contract(
+        run,
+        image_tag="staging-aaaaaaaa",
+        resolved_sha=revision,
+        expected_digests={
+            name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+            for name, _path in ALL_BUILD_IMAGES
+        },
+    )
+    calls.clear()
+    session = ImageBuildSession(
+        run,
+        candidate_root=tmp_path,
+        image_tag="staging-aaaaaaaa",
+        resolved_sha=revision,
+        artifact=artifact,
+    )
+
+    assert session.build() is artifact
+    assert session.verify() == artifact
+    assert calls
+    assert all(command[:3] == ("docker", "image", "inspect") for command in calls)
