@@ -1647,7 +1647,15 @@ using mode alone as the permission proof.
 Protected-input parents intentionally grant only traverse (`--x`) permission;
 the leaf grants read (`r--`). Linux preflight opens those parent descriptors
 with `O_PATH|O_DIRECTORY|O_NOFOLLOW`, preserving no-listing access while still
-rejecting symlinked path components. The data contract includes
+rejecting symlinked path components. The Tier 0 `credentials.metadata` gate and
+the final browser/operator consumers use this same reader implementation. It
+reads the POSIX ACL from the already-open descriptor before and after the
+bounded file read, rejects undeclared named users/groups and write/execute
+grants outside the owner, verifies that only the rollout service obtains the
+declared read grant, and fails if inode metadata or the ACL changes during the
+read. Preflight evidence contains only owner/group/mode plus metadata, ACL, and
+bounded content fingerprints; paths and credential values are never emitted.
+The data contract includes
 the declared rollout, Postgres, MinIO, backup, and pre-existing
 `environment-state` subdirectories. Each receives access/default `rwx`; the
 staging root remains read/traverse-only. This explicit environment-state grant

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import struct
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,8 @@ def test_private_authority_returns_stable_metadata_fingerprint(tmp_path: Path) -
     assert first.payload == b"credential\n"
     assert first.metadata_fingerprint == second.metadata_fingerprint
     assert len(first.metadata_fingerprint) == 64
+    assert first.acl_fingerprint == second.acl_fingerprint
+    assert len(first.acl_fingerprint) == 64
 
 
 @pytest.mark.parametrize("mode", [0o641, 0o660, 0o740, 0o4640])
@@ -68,3 +71,50 @@ def test_private_authority_requires_nonempty_when_requested(tmp_path: Path) -> N
             private=True,
             require_nonempty=True,
         )
+
+
+def _acl_payload(*entries: tuple[int, int, int]) -> bytes:
+    return struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, identifier)
+        for tag, permissions, identifier in entries
+    )
+
+
+def test_private_authority_rejects_undeclared_named_acl_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "admin-token"
+    _private(path)
+    undefined = 0xFFFFFFFF
+    payload = _acl_payload(
+        (0x01, 0x6, undefined),
+        (0x02, 0x4, os.getuid()),
+        (0x02, 0x4, os.getuid() + 1),
+        (0x04, 0x0, undefined),
+        (0x10, 0x4, undefined),
+        (0x20, 0x0, undefined),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.credential_authority._get_acl_xattr",
+        lambda _fd, _name: payload,
+    )
+
+    with pytest.raises(ValueError, match="undeclared reader"):
+        read_trusted_file(path, service_uid=os.getuid(), private=True)
+
+
+def test_private_authority_rejects_acl_drift_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "admin-token"
+    _private(path)
+    payloads = iter((b"", b"changed"))
+    monkeypatch.setattr(
+        "loom_cli.rollout.credential_authority._get_acl_xattr",
+        lambda _fd, _name: next(payloads),
+    )
+
+    with pytest.raises(ValueError, match="changed while it was read"):
+        read_trusted_file(path, service_uid=os.getuid(), private=True)

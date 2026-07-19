@@ -5,6 +5,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from loom_cli.rollout.credential_authority import safe_content_fingerprint
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -19,8 +20,11 @@ from loom_cli.rollout.preflight_contract import (
     StageCapability,
 )
 from loom_cli.rollout.preflight_registered_checks import (
+    CredentialProbeSource,
+    build_credentials_metadata_check,
     build_gb10_host_readiness_check,
     build_systemd_user_manager_check,
+    credential_source_set_digest,
     gb10_target_inventory_digest,
 )
 
@@ -127,6 +131,145 @@ def test_registered_user_manager_check_fails_closed_without_raw_output() -> None
     assert not manager.passed
     assert "token" not in str(dict(manager.evidence))
     assert "secret" not in str(dict(manager.evidence))
+
+
+def _credential_sources(tmp_path: Path) -> tuple[CredentialProbeSource, ...]:
+    payloads = {
+        "admin": b"admin-private-value\n",
+        "worker": b"worker-private-value\n",
+        "service": b"service-private-value\n",
+        "catalog": b"CATALOG_PASSWORD=private-value\n",
+    }
+    sources: list[CredentialProbeSource] = []
+    for label, payload in payloads.items():
+        path = tmp_path / label
+        path.write_bytes(payload)
+        path.chmod(0o600)
+        sources.append(
+            CredentialProbeSource(
+                label=label,
+                path=path,
+                expected_content_fingerprint=(
+                    safe_content_fingerprint(payload) if label == "admin" else None
+                ),
+            )
+        )
+    return tuple(sources)
+
+
+def _credential_context(sources: tuple[CredentialProbeSource, ...]) -> CheckContext:
+    return CheckContext(
+        {
+            "protected-inputs.sha256": credential_source_set_digest(sources),
+            "runner.config.sha256": "a" * 64,
+            "secret-fingerprints": {
+                source.label: source.expected_content_fingerprint
+                for source in sources
+                if source.expected_content_fingerprint is not None
+            },
+            "service.uid": __import__("os").getuid(),
+        }
+    )
+
+
+def test_registered_credentials_check_attests_metadata_without_secret_values(
+    tmp_path: Path,
+) -> None:
+    sources = _credential_sources(tmp_path)
+    check = build_credentials_metadata_check(
+        sources=sources,
+        service_uid=__import__("os").getuid(),
+    )
+    dag = PreflightDag((_passing_dependency("runner.install"), check))
+
+    result = next(
+        item
+        for item in dag.run(_credential_context(sources))
+        if item.check_id == check.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["failed-sources"] == {}
+    assert set(result.evidence["metadata-fingerprints"]) == {
+        "admin",
+        "worker",
+        "service",
+        "catalog",
+    }
+    rendered = json.dumps(dict(result.evidence), sort_keys=True)
+    assert "private-value" not in rendered
+    assert "CATALOG_PASSWORD" not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_registered_credentials_check_reports_all_unsafe_sources(
+    tmp_path: Path,
+) -> None:
+    original = _credential_sources(tmp_path)
+    sources = tuple(
+        CredentialProbeSource(
+            label=source.label,
+            path=source.path,
+            expected_content_fingerprint=(
+                "sha256:000000000000 len=1" if source.label == "admin" else None
+            ),
+        )
+        for source in original
+    )
+    (tmp_path / "worker").chmod(0o660)
+    check = build_credentials_metadata_check(
+        sources=sources,
+        service_uid=__import__("os").getuid(),
+    )
+    dag = PreflightDag((_passing_dependency("runner.install"), check))
+
+    result = next(
+        item
+        for item in dag.run(_credential_context(sources))
+        if item.check_id == check.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.evidence["failed-sources"] == {
+        "admin": "content-fingerprint-mismatch",
+        "worker": "authority-or-stability-failed",
+    }
+    assert set(result.evidence["metadata-fingerprints"]) == {"service", "catalog"}
+
+
+def test_registered_credentials_check_rejects_source_binding_drift_before_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sources = _credential_sources(tmp_path)
+    calls: list[Path] = []
+
+    def unexpected_read(path: Path, **_kwargs):
+        calls.append(path)
+        raise AssertionError("credential files must not be read after binding drift")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.preflight_registered_checks.read_trusted_file",
+        unexpected_read,
+    )
+    check = build_credentials_metadata_check(
+        sources=sources,
+        service_uid=__import__("os").getuid(),
+    )
+    context = _credential_context(sources)
+    drifted = CheckContext({**dict(context.bindings), "protected-inputs.sha256": "b" * 64})
+    dag = PreflightDag((_passing_dependency("runner.install"), check))
+
+    result = next(item for item in dag.run(drifted) if item.check_id == check.spec.check_id)
+
+    assert not result.passed
+    assert set(result.evidence["failed-sources"]) == {
+        "admin",
+        "worker",
+        "service",
+        "catalog",
+    }
+    assert calls == []
 
 
 def test_registered_gb10_readiness_check_returns_bound_fleet_evidence() -> None:

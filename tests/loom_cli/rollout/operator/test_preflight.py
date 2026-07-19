@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -904,16 +905,36 @@ def test_qianyi_owner_allowance_is_explicit_not_applied_to_git_config(
     protected = tmp_path / "protected"
     protected.write_text("value", encoding="utf-8")
     protected.chmod(0o640)
+    service_uid = os.geteuid() + 1
     monkeypatch.setattr(
         preflight_module.pwd,
         "getpwnam",
         lambda username: type("Entry", (), {"pw_uid": os.geteuid()})(),
     )
+    monkeypatch.setattr(
+        "loom_cli.rollout.credential_authority.pwd.getpwuid",
+        lambda _uid: type("Entry", (), {"pw_gid": protected.stat().st_gid})(),
+    )
+    undefined = 0xFFFFFFFF
+    acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, identifier)
+        for tag, permissions, identifier in (
+            (0x01, 0x6, undefined),
+            (0x02, 0x4, service_uid),
+            (0x04, 0x0, undefined),
+            (0x10, 0x4, undefined),
+            (0x20, 0x0, undefined),
+        )
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.credential_authority._get_acl_xattr",
+        lambda _fd, _name: acl,
+    )
 
     assert (
         preflight_module._trusted_file_bytes(  # type: ignore[attr-defined]
             protected,
-            service_uid=os.geteuid() + 1,
+            service_uid=service_uid,
             private=True,
             allow_qianyi_owner=True,
         )
@@ -922,7 +943,7 @@ def test_qianyi_owner_allowance_is_explicit_not_applied_to_git_config(
     assert (
         preflight_module._trusted_file_bytes(  # type: ignore[attr-defined]
             protected,
-            service_uid=os.geteuid() + 1,
+            service_uid=service_uid,
             private=False,
             allow_qianyi_owner=False,
         )

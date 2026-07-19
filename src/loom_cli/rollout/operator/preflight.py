@@ -21,7 +21,10 @@ from typing import Protocol
 
 from dotenv import dotenv_values
 
-from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.credential_authority import (
+    read_trusted_file,
+    safe_content_fingerprint,
+)
 
 from .config import OperatorConfig
 from .policy import sanitized_child_environment
@@ -228,7 +231,7 @@ class PreflightReport:
 
 def safe_fingerprint(payload: bytes) -> str:
     """Render the only credential detail permitted in preflight output."""
-    return f"sha256:{hashlib.sha256(payload).hexdigest()[:12]} len={len(payload)}"
+    return safe_content_fingerprint(payload)
 
 
 def _default_run(

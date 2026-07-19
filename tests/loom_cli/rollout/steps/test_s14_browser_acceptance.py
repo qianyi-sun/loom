@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pwd
+import struct
 from dataclasses import replace
 from pathlib import Path
 
@@ -125,6 +126,26 @@ def test_browser_acceptance_accepts_qianyi_owned_0640_acl_token(
         pwd,
         "getpwnam",
         lambda _name: type("User", (), {"pw_uid": token.stat().st_uid})(),
+    )
+    monkeypatch.setattr(
+        pwd,
+        "getpwuid",
+        lambda _uid: type("User", (), {"pw_gid": token.stat().st_gid})(),
+    )
+    undefined = 0xFFFFFFFF
+    acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, identifier)
+        for tag, permissions, identifier in (
+            (0x01, 0x6, undefined),
+            (0x02, 0x4, service_uid),
+            (0x04, 0x0, undefined),
+            (0x10, 0x4, undefined),
+            (0x20, 0x0, undefined),
+        )
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.credential_authority._get_acl_xattr",
+        lambda _fd, _name: acl,
     )
 
     metadata = _validate_admin_token_file(token)
