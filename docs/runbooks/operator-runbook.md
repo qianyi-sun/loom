@@ -1709,6 +1709,27 @@ Create the fixed invocation checkout as root with a deterministic umask. On a
 later update, require a clean checkout, fetch `dev`, and detach at the fetched
 remote head. Do not force over local drift:
 
+Before `install`, provision the dedicated database-backed application probe at
+the fixed root-only path
+`/etc/loom/staging-rollout-readonly-probe-token`. The corresponding database
+row must be the deployment-managed `readonly_probe` principal for the exact
+smoke team, with only `read:own`, no creating user, and no admin/submit scope.
+The file must be root:root `0600`, single-link, and non-empty. This is a
+bootstrap authority, not an operator token: never reuse the admin, service,
+worker, browser, or smoke credential and never pass the value through argv,
+environment variables, install records, or rollout evidence.
+
+During installation, the exact candidate applies the checked-in readonly and
+rehearsal RBAC/admission manifests with the root kubeconfig, then obtains
+six-hour TokenRequest credentials for the exact service accounts. It publishes
+minified service-owned `0600` kubeconfigs under
+`/var/lib/loom-staging-rollout/credentials`; inherited root client keys are
+discarded. `check` fails once either token has less than two hours remaining,
+so repeated `install` is the supported refresh path before admission. The
+credential check reports only authority metadata and expiry; the deep-preflight
+attestation retains only metadata fingerprints and evidence hashes, never a
+token value.
+
 ```bash
 INSTALLER_CHECKOUT=/root/loom-staging-installer
 sudo /bin/sh -c 'umask 077; exec /usr/bin/git "$@"' loom-staging-git \

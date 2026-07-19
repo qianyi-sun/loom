@@ -10,6 +10,7 @@ import yaml
 from loom_cli.rollout.preflight_kubeconfig_authority import (
     render_token_request_kubeconfig,
     validate_token_request,
+    validate_token_request_kubeconfig,
 )
 
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
@@ -115,6 +116,39 @@ def test_rejects_cross_service_account_token_and_non_minified_source() -> None:
         render_token_request_kubeconfig(
             yaml.safe_dump(source).encode(),
             _token(),
+            namespace="loom-staging",
+            service_account="loom-rollout-readonly",
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda body: body["users"][0]["user"].update({"client-key-data": "root-key"}),
+        lambda body: body["clusters"][0]["cluster"].update(
+            {"insecure-skip-tls-verify": True}
+        ),
+        lambda body: body["contexts"][0]["context"].update(
+            {"namespace": "loom-staging" + "-other"}
+        ),
+        lambda body: body.update({"extension": "unexpected"}),
+    ],
+)
+def test_installed_validator_rejects_inherited_or_extended_authority(mutate) -> None:
+    rendered = render_token_request_kubeconfig(
+        _source(),
+        _token(),
+        namespace="loom-staging",
+        service_account="loom-rollout-readonly",
+        now=NOW,
+    )
+    body = yaml.safe_load(rendered.payload)
+    mutate(body)
+
+    with pytest.raises(ValueError, match=r"authority|invalid"):
+        validate_token_request_kubeconfig(
+            yaml.safe_dump(body).encode(),
             namespace="loom-staging",
             service_account="loom-rollout-readonly",
             now=NOW,

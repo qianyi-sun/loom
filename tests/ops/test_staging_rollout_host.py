@@ -64,6 +64,7 @@ class FakeSystem:
         self.install_owner_calls: list[tuple[Path, str, str, int]] = []
         self.shared_worker_identity_ready = True
         self.shared_work2_mounted = False
+        self.preflight_credentials = False
 
     def validate_prerequisites(self) -> None:
         self.validated += 1
@@ -364,6 +365,20 @@ class FakeSystem:
 
     def package_runtime_ready(self) -> bool:
         return self.package_ready
+
+    def preflight_credentials_ready(self) -> bool:
+        return self.preflight_credentials
+
+    def ensure_preflight_credentials(self) -> bool:
+        changed = not self.preflight_credentials
+        self.preflight_credentials = True
+        for path in (
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-kubeconfig",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-probe-token",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "rehearsal-kubeconfig",
+        ):
+            self.filesystem.atomic_write(path, b"credential-fixture\n", 0o600)
+        return changed
 
     def ensure_service_key(self) -> bool:
         if self.service_key_present():
@@ -744,6 +759,16 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert stat.S_IMODE(known_hosts.stat().st_mode) == 0o644
     assert set(system.operator_members) == set(host.OPERATORS)
     assert system.docker is True
+    assert system.preflight_credentials is True
+    assert "preflight-credentials" in first["changed"]
+    assert all(
+        stat.S_IMODE(installer.filesystem.path(path).stat().st_mode) == 0o600
+        for path in (
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-kubeconfig",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-probe-token",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "rehearsal-kubeconfig",
+        )
+    )
     environment_state = Path("/data/loom-staging/environment-state")
     assert Path(f"{environment_state}#False") in system.data_acls
     assert Path(f"{environment_state}#True") in system.data_acls

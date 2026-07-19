@@ -190,6 +190,89 @@ def render_token_request_kubeconfig(
     return RenderedKubeconfig(payload=rendered, evidence=evidence)
 
 
+def validate_token_request_kubeconfig(
+    payload: bytes,
+    *,
+    namespace: str,
+    service_account: str,
+    now: datetime,
+    minimum_remaining_seconds: int = _MIN_REMAINING_SECONDS,
+) -> TokenRequestEvidence:
+    """Revalidate the exact minimal installed kubeconfig without inherited auth."""
+    if not payload or len(payload) > _MAX_KUBECONFIG_BYTES:
+        raise ValueError("installed preflight kubeconfig is unavailable")
+    try:
+        document = yaml.safe_load(payload)
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ValueError("installed preflight kubeconfig is invalid") from exc
+    expected_identity = f"{namespace}-{service_account}"
+    if (
+        not isinstance(document, dict)
+        or set(document)
+        != {
+            "apiVersion",
+            "clusters",
+            "contexts",
+            "current-context",
+            "kind",
+            "preferences",
+            "users",
+        }
+        or document.get("apiVersion") != "v1"
+        or document.get("kind") != "Config"
+        or document.get("preferences") != {}
+        or document.get("current-context") != expected_identity
+    ):
+        raise ValueError("installed preflight kubeconfig is invalid")
+    cluster = _single_named_entry(document.get("clusters"), "cluster")
+    context = _single_named_entry(document.get("contexts"), "context")
+    user = _single_named_entry(document.get("users"), "user")
+    cluster_body = cluster["cluster"]
+    context_body = context["context"]
+    user_body = user["user"]
+    if (
+        not isinstance(cluster_body, dict)
+        or set(cluster_body) not in (
+            {"certificate-authority-data", "server"},
+            {"certificate-authority-data", "server", "tls-server-name"},
+        )
+        or not isinstance(context_body, dict)
+        or context_body
+        != {
+            "cluster": cluster["name"],
+            "namespace": namespace,
+            "user": expected_identity,
+        }
+        or user.get("name") != expected_identity
+        or not isinstance(user_body, dict)
+        or set(user_body) != {"token"}
+    ):
+        raise ValueError("installed preflight kubeconfig authority is invalid")
+    server = cluster_body.get("server")
+    certificate = cluster_body.get("certificate-authority-data")
+    token = user_body.get("token")
+    if (
+        not isinstance(server, str)
+        or not server.startswith("https://")
+        or not isinstance(certificate, str)
+        or not isinstance(token, str)
+    ):
+        raise ValueError("installed preflight kubeconfig authority is invalid")
+    try:
+        decoded_certificate = base64.b64decode(certificate, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("installed preflight kubeconfig CA authority is invalid") from exc
+    if not decoded_certificate.startswith(b"-----BEGIN CERTIFICATE-----"):
+        raise ValueError("installed preflight kubeconfig CA authority is invalid")
+    return validate_token_request(
+        token,
+        namespace=namespace,
+        service_account=service_account,
+        now=now,
+        minimum_remaining_seconds=minimum_remaining_seconds,
+    )
+
+
 def _valid_name(value: str) -> bool:
     return bool(value and _DNS_LABEL_RE.fullmatch(value))
 
@@ -224,4 +307,5 @@ __all__ = [
     "TokenRequestEvidence",
     "render_token_request_kubeconfig",
     "validate_token_request",
+    "validate_token_request_kubeconfig",
 ]

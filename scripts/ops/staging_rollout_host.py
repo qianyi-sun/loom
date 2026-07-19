@@ -83,6 +83,8 @@ TRUST_TOOL_PATH = Path("/usr/local/libexec/loom-staging-rollout-gb10-trust")
 SUDOERS_PATH = Path("/etc/sudoers.d/loom-staging-rollout")
 TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
 KUBECONFIG_PATH = STATE_ROOT / "kubeconfig"
+PREFLIGHT_CREDENTIAL_ROOT = STATE_ROOT / "credentials"
+REHEARSAL_STATE_ROOT = STATE_ROOT / "rehearsals"
 ROOT_KUBECONFIG = Path("/root/.kube/config")
 ROOT_KUBECONFIG_SNAPSHOT_PARENT = Path("/root")
 SERVICE_KEY = STATE_ROOT / "gb10-deploy-ed25519"
@@ -171,6 +173,8 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "gb10-known-hosts",
         "gb10-trust-tool",
         "rehearsal-helper",
+        "rehearsal-authority",
+        "readonly-authority",
         "shared-work2-mount-unit",
         "tmpfiles",
     }
@@ -847,7 +851,7 @@ class LocalFilesystem:
         return True
 
     def remove_tree(self, absolute: Path) -> bool:
-        if absolute not in {GENERATED_ROOT, RUNTIME_ROOT}:
+        if absolute not in {GENERATED_ROOT, PREFLIGHT_CREDENTIAL_ROOT, RUNTIME_ROOT}:
             raise InstallError("refusing recursive removal outside service-generated state")
         path = self.path(absolute)
         if not path.exists():
@@ -3023,6 +3027,58 @@ class HostSystem:
             raise InstallError("loom-staging kubeconfig export is empty")
         return result.stdout.encode("utf-8")
 
+    def preflight_credentials_ready(self) -> bool:
+        """Probe the exact installed credential authority without exposing tokens."""
+        if not (VENV / "bin/python").is_file():
+            return False
+        result = self._probe(
+            [
+                str(VENV / "bin/python"),
+                "-m",
+                "loom_cli.rollout.operator.preflight_credential_installer",
+                "check",
+            ]
+        )
+        if result.returncode != 0 or result.stderr.strip():
+            return False
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(payload, dict) and payload.get("ok") is True
+
+    def ensure_preflight_credentials(self) -> bool:
+        """Apply fixed RBAC and publish fresh bounded TokenRequest kubeconfigs."""
+        before = self.preflight_credentials_ready()
+        result = self.runner.run(
+            [
+                str(VENV / "bin/python"),
+                "-m",
+                "loom_cli.rollout.operator.preflight_credential_installer",
+                "install",
+            ],
+            env={
+                "HOME": "/root",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": _ROOT_PATH,
+                "USER": "root",
+                "LOGNAME": "root",
+            },
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise InstallError("preflight credential install result is invalid") from exc
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise InstallError("preflight credential install failed safely")
+        changed = payload.get("changed")
+        if not isinstance(changed, list) or any(not isinstance(path, str) for path in changed):
+            raise InstallError("preflight credential install ledger is invalid")
+        if not self.preflight_credentials_ready():
+            raise InstallError("preflight credential authority did not converge")
+        return not before or bool(changed)
+
     def ensure_linger(self) -> bool:
         if self.linger_enabled():
             return False
@@ -3957,6 +4013,12 @@ class HostInstaller:
             "config": config,
             "gb10-known-hosts": installed_files[5][1],
             "gb10-trust-tool": installed_files[3][1],
+            "readonly-authority": self._source_file(
+                "deploy/k8s/staging-rollout-readonly.yaml"
+            ),
+            "rehearsal-authority": self._source_file(
+                "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
+            ),
             "rehearsal-helper": installed_files[2][1],
             "shared-work2-mount-unit": installed_files[6][1],
             "tmpfiles": installed_files[4][1],
@@ -4137,6 +4199,8 @@ class HostInstaller:
             for directory, mode in (
                 (STATE_ROOT, 0o700),
                 (GENERATED_ROOT, 0o700),
+                (PREFLIGHT_CREDENTIAL_ROOT, 0o700),
+                (REHEARSAL_STATE_ROOT, 0o700),
                 (CANDIDATE_REPO, 0o700),
             )
         )
@@ -4157,6 +4221,9 @@ class HostInstaller:
         venv_ready = not venv_lock_requires_hardening and self.system.venv_ready()
         package_runtime_ready = (
             not service_user_missing and venv_ready and self.system.package_runtime_ready()
+        )
+        preflight_credentials_ready = (
+            package_runtime_ready and self.system.preflight_credentials_ready()
         )
         installed_files_ready = all(
             self.filesystem.file_matches(
@@ -4259,6 +4326,7 @@ class HostInstaller:
             or venv_lock_requires_hardening
             or not venv_ready
             or not package_runtime_ready
+            or not preflight_credentials_ready
             or not broker_runtime_ready
             or not installed_files_ready
             or not runtime_ready
@@ -4331,6 +4399,8 @@ class HostInstaller:
         for directory, mode in (
             (STATE_ROOT, 0o700),
             (GENERATED_ROOT, 0o700),
+            (PREFLIGHT_CREDENTIAL_ROOT, 0o700),
+            (REHEARSAL_STATE_ROOT, 0o700),
             (CANDIDATE_REPO, 0o700),
         ):
             if self.system.ensure_owned_directory(directory, owner=SERVICE_USER, mode=mode):
@@ -4386,6 +4456,8 @@ class HostInstaller:
         ):
             self.system.sync_venv(self.source_root)
             changes.append("venv")
+        if self.system.ensure_preflight_credentials():
+            changes.append("preflight-credentials")
         if self.system.ensure_service_key():
             created_service_key = True
             changes.append("service-key")
@@ -4604,6 +4676,12 @@ class HostInstaller:
                 "config": config_payload,
                 "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
                 "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
+                "readonly-authority": self._source_file(
+                    "deploy/k8s/staging-rollout-readonly.yaml"
+                ),
+                "rehearsal-authority": self._source_file(
+                    "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
+                ),
                 "rehearsal-helper": self._asset("loom-staging-rollout-rehearsal"),
                 "shared-work2-mount-unit": self._asset(SHARED_WORK2_MOUNT_UNIT),
                 "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
@@ -4630,6 +4708,8 @@ class HostInstaller:
                 failures.append(str(INSTALL_ATTESTATION))
         if not self.filesystem.exists(KUBECONFIG_PATH):
             failures.append(str(KUBECONFIG_PATH))
+        if not self.system.preflight_credentials_ready():
+            failures.append("preflight-credentials")
         if not self.filesystem.exists(SERVICE_KEY):
             failures.append(str(SERVICE_KEY))
         generated_env_templates = self.filesystem.generated_gb10_env_templates()
@@ -4854,6 +4934,8 @@ class HostInstaller:
             self.system.reload_systemd()
         if self.filesystem.remove_tree(GENERATED_ROOT):
             removed.append(str(GENERATED_ROOT))
+        if self.filesystem.remove_tree(PREFLIGHT_CREDENTIAL_ROOT):
+            removed.append(str(PREFLIGHT_CREDENTIAL_ROOT))
         if self.filesystem.remove_tree(RUNTIME_ROOT):
             removed.append(str(RUNTIME_ROOT))
         if trust_ledger_migrated and not trust_ledger_removed:

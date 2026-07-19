@@ -1,0 +1,449 @@
+"""Root-only convergence for installed least-privilege preflight credentials."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, fields
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Protocol
+
+import yaml  # type: ignore[import-untyped]
+
+from loom_cli.rollout.preflight_credential_paths import (
+    PREFLIGHT_CREDENTIAL_ROOT,
+    READONLY_KUBECONFIG_PATH,
+    READONLY_TOKEN_PATH,
+    REHEARSAL_KUBECONFIG_PATH,
+)
+from loom_cli.rollout.preflight_kubeconfig_authority import (
+    render_token_request_kubeconfig,
+    validate_token_request_kubeconfig,
+)
+
+_ROOT_KUBECONFIG = Path("/root/.kube/config")
+_RUNNER_REPO = Path("/opt/loom-staging-runner/source")
+_READONLY_MANIFEST = _RUNNER_REPO / "deploy/k8s/staging-rollout-readonly.yaml"
+_REHEARSAL_MANIFEST = _RUNNER_REPO / "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
+_APPLICATION_TOKEN_SOURCE = Path("/etc/loom/staging-rollout-readonly-probe-token")
+_SERVICE_USER = "loom-rollout"
+_TOKEN_DURATION = "6h"
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{32,1024}$")
+_CHILD_ENVIRONMENT = {
+    "HOME": "/root",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "USER": "root",
+}
+
+
+class CredentialInstallError(RuntimeError):
+    """Fail-closed preflight credential convergence error."""
+
+
+class CommandResult(Protocol):
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+Run = Callable[..., CommandResult]
+Now = Callable[[], datetime]
+
+
+def _run(
+    argv: Sequence[str],
+    *,
+    input: str | None,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(argv),
+        env=_CHILD_ENVIRONMENT,
+        input=input,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=timeout,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialPaths:
+    root_kubeconfig: Path = _ROOT_KUBECONFIG
+    readonly_manifest: Path = _READONLY_MANIFEST
+    rehearsal_manifest: Path = _REHEARSAL_MANIFEST
+    application_token_source: Path = _APPLICATION_TOKEN_SOURCE
+    credential_root: Path = PREFLIGHT_CREDENTIAL_ROOT
+    readonly_kubeconfig: Path = READONLY_KUBECONFIG_PATH
+    readonly_token: Path = READONLY_TOKEN_PATH
+    rehearsal_kubeconfig: Path = REHEARSAL_KUBECONFIG_PATH
+
+
+@dataclass(slots=True)
+class PreflightCredentialInstaller:
+    """Converge two bounded SA kubeconfigs and one fixed readonly API token."""
+
+    paths: CredentialPaths = CredentialPaths()
+    run: Run = _run
+    now: Now = lambda: datetime.now(UTC)
+    euid: int = -1
+    service_uid: int = -1
+    service_gid: int = -1
+    root_uid: int = 0
+    root_gid: int = 0
+
+    def __post_init__(self) -> None:
+        if self.euid == -1:
+            self.euid = os.geteuid()
+        if self.service_uid == -1 or self.service_gid == -1:
+            try:
+                identity = pwd.getpwnam(_SERVICE_USER)
+            except KeyError as exc:
+                raise CredentialInstallError("rollout service identity is unavailable") from exc
+            self.service_uid = identity.pw_uid
+            self.service_gid = identity.pw_gid
+        if (
+            self.service_uid < 1
+            or self.service_gid < 1
+            or self.root_uid < 0
+            or self.root_gid < 0
+        ):
+            raise CredentialInstallError("rollout service identity is unsafe")
+        for field in fields(self.paths):
+            path = getattr(self.paths, field.name)
+            if not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts:
+                raise CredentialInstallError("preflight credential path authority is invalid")
+
+    def install(self) -> dict[str, object]:
+        if self.euid != 0:
+            raise CredentialInstallError("preflight credential install requires root")
+        source_kubeconfig = self._minified_source_kubeconfig()
+        for manifest in (self.paths.readonly_manifest, self.paths.rehearsal_manifest):
+            self._apply_authority(manifest)
+        application_token = self._read_private(
+            self.paths.application_token_source,
+            expected_uid=self.root_uid,
+            expected_gid=self.root_gid,
+        ).strip()
+        try:
+            rendered_token = application_token.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise CredentialInstallError("readonly application token is not ASCII") from exc
+        if _TOKEN_RE.fullmatch(rendered_token) is None:
+            raise CredentialInstallError("readonly application token payload is invalid")
+        existing = self.check()
+        installed_application_token: bytes | None = None
+        if existing["ok"]:
+            installed_application_token = self._read_private(
+                self.paths.readonly_token,
+                expected_uid=self.service_uid,
+                expected_gid=self.service_gid,
+            ).strip()
+        if existing["ok"] and installed_application_token == application_token:
+            return {"ok": True, "changed": [], "authority": existing["authority"]}
+        readonly = self._request_kubeconfig(
+            source_kubeconfig,
+            namespace="loom-staging",
+            service_account="loom-rollout-readonly",
+        )
+        rehearsal = self._request_kubeconfig(
+            source_kubeconfig,
+            namespace="loom-rollout-system",
+            service_account="loom-rollout-rehearsal",
+        )
+        self._ensure_private_directory(self.paths.credential_root)
+        changed = {
+            str(self.paths.readonly_kubeconfig): self._atomic_write(
+                self.paths.readonly_kubeconfig,
+                readonly,
+            ),
+            str(self.paths.readonly_token): self._atomic_write(
+                self.paths.readonly_token,
+                application_token.rstrip() + b"\n",
+            ),
+            str(self.paths.rehearsal_kubeconfig): self._atomic_write(
+                self.paths.rehearsal_kubeconfig,
+                rehearsal,
+            ),
+        }
+        result = self.check()
+        if not result["ok"]:
+            raise CredentialInstallError("installed preflight credentials did not verify")
+        return {
+            "ok": True,
+            "changed": sorted(path for path, value in changed.items() if value),
+            "authority": result["authority"],
+        }
+
+    def check(self) -> dict[str, object]:
+        now = self.now()
+        failures: list[str] = []
+        authority: dict[str, object] = {}
+        for label, path, namespace, account in (
+            (
+                "readonly",
+                self.paths.readonly_kubeconfig,
+                "loom-staging",
+                "loom-rollout-readonly",
+            ),
+            (
+                "rehearsal",
+                self.paths.rehearsal_kubeconfig,
+                "loom-rollout-system",
+                "loom-rollout-rehearsal",
+            ),
+        ):
+            try:
+                payload = self._read_private(
+                    path,
+                    expected_uid=self.service_uid,
+                    expected_gid=self.service_gid,
+                )
+                evidence = validate_token_request_kubeconfig(
+                    payload,
+                    namespace=namespace,
+                    service_account=account,
+                    now=now,
+                )
+                authority[label] = {
+                    "audiences": list(evidence.audiences),
+                    "expires_at": evidence.expires_at,
+                    "metadata_digest": evidence.metadata_digest,
+                    "subject": evidence.subject,
+                }
+            except (CredentialInstallError, ValueError, yaml.YAMLError):
+                failures.append(label)
+        try:
+            application_payload = self._read_private(
+                self.paths.readonly_token,
+                expected_uid=self.service_uid,
+                expected_gid=self.service_gid,
+            ).strip()
+            if _TOKEN_RE.fullmatch(application_payload.decode("ascii")) is None:
+                raise ValueError
+        except (CredentialInstallError, UnicodeDecodeError, ValueError):
+            failures.append("readonly-application")
+        return {"ok": not failures, "failures": sorted(failures), "authority": authority}
+
+    def _minified_source_kubeconfig(self) -> bytes:
+        self._read_private(
+            self.paths.root_kubeconfig,
+            expected_uid=self.root_uid,
+            expected_gid=self.root_gid,
+        )
+        result = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.paths.root_kubeconfig),
+                "config",
+                "view",
+                "--raw",
+                "--minify",
+                "--context",
+                "loom-staging",
+            ),
+            timeout=30,
+        )
+        return result.stdout.encode()
+
+    def _apply_authority(self, path: Path) -> None:
+        payload = self._read_public_root(path).decode("utf-8")
+        self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.paths.root_kubeconfig),
+                "apply",
+                "--server-side",
+                "--field-manager=loom-staging-rollout-installer",
+                "--force-conflicts=false",
+                "--validate=strict",
+                "--request-timeout=30s",
+                "-f",
+                "-",
+            ),
+            input=payload,
+            timeout=60,
+        )
+
+    def _request_kubeconfig(
+        self,
+        source_kubeconfig: bytes,
+        *,
+        namespace: str,
+        service_account: str,
+    ) -> bytes:
+        result = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.paths.root_kubeconfig),
+                "--namespace",
+                namespace,
+                "create",
+                "token",
+                service_account,
+                f"--duration={_TOKEN_DURATION}",
+                "--audience=https://kubernetes.default.svc",
+            ),
+            timeout=30,
+        )
+        token = result.stdout.strip()
+        return render_token_request_kubeconfig(
+            source_kubeconfig,
+            token,
+            namespace=namespace,
+            service_account=service_account,
+            now=self.now(),
+        ).payload
+
+    def _command(
+        self,
+        argv: Sequence[str],
+        *,
+        input: str | None = None,
+        timeout: int,
+    ) -> CommandResult:
+        result = self.run(argv, input=input, timeout=timeout)
+        if result.returncode != 0 or result.stderr.strip():
+            raise CredentialInstallError("preflight credential command failed")
+        if not result.stdout.strip() and " apply " not in f" {' '.join(argv)} ":
+            raise CredentialInstallError("preflight credential command returned no output")
+        return result
+
+    def _ensure_private_directory(self, path: Path) -> None:
+        try:
+            if path.exists() or path.is_symlink():
+                metadata = os.lstat(path)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or metadata.st_uid != self.service_uid
+                    or metadata.st_gid != self.service_gid
+                    or stat.S_IMODE(metadata.st_mode) != 0o700
+                ):
+                    raise CredentialInstallError("preflight credential directory is unsafe")
+                return
+            path.mkdir(mode=0o700)
+            os.chown(path, self.service_uid, self.service_gid)
+            os.chmod(path, 0o700)
+        except OSError as exc:
+            raise CredentialInstallError("preflight credential directory is unavailable") from exc
+
+    def _atomic_write(self, path: Path, payload: bytes) -> bool:
+        if not payload or len(payload) > 1 << 20 or path.parent != self.paths.credential_root:
+            raise CredentialInstallError("preflight credential payload is invalid")
+        previous: bytes | None = None
+        if path.exists() and not path.is_symlink():
+            previous = self._read_private(
+                path,
+                expected_uid=self.service_uid,
+                expected_gid=self.service_gid,
+            )
+        if previous == payload:
+            return False
+        temporary: Path | None = None
+        try:
+            descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+            temporary = Path(raw)
+            os.fchmod(descriptor, 0o600)
+            os.fchown(descriptor, self.service_uid, self.service_gid)
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            temporary = None
+            parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        except OSError as exc:
+            raise CredentialInstallError("preflight credential publication failed") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+        return True
+
+    @staticmethod
+    def _read_private(path: Path, *, expected_uid: int, expected_gid: int) -> bytes:
+        try:
+            metadata = os.lstat(path)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != expected_uid
+                or metadata.st_gid != expected_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
+                or metadata.st_size <= 0
+                or metadata.st_size > 1 << 20
+            ):
+                raise CredentialInstallError("private credential authority is unsafe")
+            return path.read_bytes()
+        except OSError as exc:
+            raise CredentialInstallError("private credential authority is unavailable") from exc
+
+    def _read_public_root(self, path: Path) -> bytes:
+        try:
+            metadata = os.lstat(path)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != self.root_uid
+                or metadata.st_gid != self.root_gid
+                or stat.S_IMODE(metadata.st_mode) not in {0o444, 0o644}
+                or metadata.st_nlink != 1
+                or metadata.st_size <= 0
+                or metadata.st_size > 4 << 20
+            ):
+                raise CredentialInstallError("preflight authority manifest is unsafe")
+            return path.read_bytes()
+        except OSError as exc:
+            raise CredentialInstallError("preflight authority manifest is unavailable") from exc
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser.add_argument("command", choices=("install", "check"))
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        command = _parser().parse_args(list(argv) if argv is not None else None).command
+        installer = PreflightCredentialInstaller()
+        result = installer.install() if command == "install" else installer.check()
+        sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+        return 0 if result["ok"] else 1
+    except CredentialInstallError as exc:
+        sys.stderr.write(json.dumps({"error": str(exc)}, sort_keys=True) + "\n")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = [
+    "CredentialInstallError",
+    "CredentialPaths",
+    "PreflightCredentialInstaller",
+    "main",
+]
