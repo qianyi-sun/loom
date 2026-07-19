@@ -13,6 +13,10 @@ _READONLY_HTTP_METHODS = frozenset({"GET", "HEAD"})
 _FORBIDDEN_RESOURCES = frozenset({"secrets", "serviceaccounts/token"})
 
 
+def _forbidden_resource(resource: str) -> bool:
+    return resource in _FORBIDDEN_RESOURCES or resource.startswith("secrets/")
+
+
 def readonly_authority_policy_digest() -> str:
     payload = {
         "environment": "staging",
@@ -66,7 +70,7 @@ class ReadonlyAuthorityEvidence:
         return bool(
             set(self.kubernetes_verbs) <= _READONLY_KUBERNETES_VERBS
             and set(self.http_methods) <= _READONLY_HTTP_METHODS
-            and not (set(self.kubernetes_resources) & _FORBIDDEN_RESOURCES)
+            and not any(_forbidden_resource(item) for item in self.kubernetes_resources)
             and "*" not in self.kubernetes_verbs
             and "*" not in self.kubernetes_resources
         )

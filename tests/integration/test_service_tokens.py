@@ -309,6 +309,8 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
     assert whoami.status_code == 200, whoami.text
     assert whoami.json()["credential_type"] == "staging_readonly_probe"
     assert whoami.json()["scopes"] == ["read:own"]
+    assert whoami.json()["allowed_http_methods"] == ["GET", "HEAD"]
+    assert whoami.json()["readonly_authority_version"] == "v1"
     assert rejected.status_code == 401
     async with app.state.session_factory() as session:
         usage = (await session.execute(
