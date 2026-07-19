@@ -109,6 +109,13 @@ and timer-state classifiers. The read-only probe binds the manager version,
 where a request-specific unit and cleanup journal prove launch/cancel latency
 without mutating protected staging.
 
+The GB10 Tier 0 host check runs one fixed read-only probe per declared host
+with bounded concurrency. It validates the manager version, linger, boot ID,
+completed oneshot result, enabled timer, and only the documented
+`active/running` to `active/waiting` transient transition. All hosts are
+reported in one result; the attestation retains per-host boot IDs and evidence
+digests, while raw SSH output and service diagnostics are never published.
+
 The initial contract and coverage manifest are additive foundations. Existing
 broker predicates remain mapped while adapters are converted to the shared
 implementations. The coverage test prevents an unmapped legacy predicate or

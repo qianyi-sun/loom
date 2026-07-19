@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -9,6 +10,7 @@ from loom_cli.rollout.systemd_readiness import (
     UserManagerReadiness,
     classify_node_agent_timer,
     node_agent_service_is_prepared,
+    parse_gb10_host_readiness,
     parse_systemctl_properties,
     probe_user_manager_readonly,
 )
@@ -145,3 +147,69 @@ def test_user_manager_readonly_probe_enforces_latency_budget() -> None:
         )
         is None
     )
+
+
+def _gb10_payload(*, timer_substate: str = "waiting") -> str:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "boot_id": BOOT_ID,
+            "manager_version": "255.4-1ubuntu8.14",
+            "linger_enabled": True,
+            "timer_enabled": True,
+            "service": {
+                "LoadState": "loaded",
+                "Type": "oneshot",
+                "Result": "success",
+                "ExecMainStatus": "0",
+                "ActiveState": "inactive",
+                "SubState": "dead",
+                "NeedDaemonReload": "no",
+            },
+            "timer": {
+                "LoadState": "loaded",
+                "ActiveState": "active",
+                "SubState": timer_substate,
+                "Unit": "loom-gb10-node-agent.service",
+                "NeedDaemonReload": "no",
+            },
+        }
+    )
+
+
+def test_parse_gb10_host_readiness_accepts_prepared_and_classifies_transient() -> None:
+    prepared = parse_gb10_host_readiness(_gb10_payload(), service="loom-gb10-node-agent.service")
+    transient = parse_gb10_host_readiness(
+        _gb10_payload(timer_substate="running"),
+        service="loom-gb10-node-agent.service",
+    )
+
+    assert prepared is not None and prepared.ready
+    assert len(prepared.evidence_digest) == 64
+    assert transient is not None and not transient.ready and transient.transient_timer
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"boot_id": "wrong"},
+        {"manager_version": "degraded"},
+        {"linger_enabled": False},
+        {"timer_enabled": False},
+        {"extra": "unknown"},
+    ],
+)
+def test_parse_gb10_host_readiness_fails_closed_on_authority_drift(
+    mutation: dict[str, object],
+) -> None:
+    payload = json.loads(_gb10_payload())
+    payload.update(mutation)
+
+    evidence = parse_gb10_host_readiness(
+        json.dumps(payload), service="loom-gb10-node-agent.service"
+    )
+
+    if set(mutation) <= {"linger_enabled", "timer_enabled"}:
+        assert evidence is not None and not evidence.ready
+    else:
+        assert evidence is None

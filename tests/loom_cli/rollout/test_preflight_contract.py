@@ -160,6 +160,84 @@ def test_input_fingerprint_rejects_raw_secret_fields() -> None:
         check.input_fingerprint(CheckContext(bindings={"admin.token": "raw-secret"}))
 
 
+def test_check_contract_accepts_bounded_string_map_evidence() -> None:
+    spec = CheckSpec(
+        check_id="gb10.host-readiness",
+        failure_code="gb10.host-readiness.failed",
+        tier=0,
+        stage=StageCapability.STATIC,
+        dependencies=(),
+        mutation_class=MutationClass.NONE,
+        input_keys=("inventory.digest",),
+        evidence_schema=(EvidenceField("boot-ids", "string-map"),),
+        timeout_seconds=10,
+        freshness_ttl_seconds=120,
+        remediation="restore the exact GB10 host readiness contract",
+        secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+    )
+    check = RegisteredCheck(
+        spec=spec,
+        implementation_version="v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: CheckProbe(
+                passed=True,
+                evidence={"boot-ids": {"trt-gb10-1": "boot-a"}},
+            )
+        },
+    )
+
+    execution = PreflightDag((check,)).run(
+        CheckContext({"inventory.digest": "a" * 64}),
+        through_tier=0,
+    )[0]
+
+    assert execution.passed
+    assert execution.evidence["boot-ids"] == {"trt-gb10-1": "boot-a"}
+
+
+@pytest.mark.parametrize(
+    "bad_map",
+    [
+        {"host": "token=raw-secret"},
+        {"": "boot"},
+        {"host": "line\nbreak"},
+    ],
+)
+def test_check_contract_rejects_unsafe_string_map_evidence(
+    bad_map: dict[str, str],
+) -> None:
+    spec = CheckSpec(
+        check_id="gb10.host-readiness",
+        failure_code="gb10.host-readiness.failed",
+        tier=0,
+        stage=StageCapability.STATIC,
+        dependencies=(),
+        mutation_class=MutationClass.NONE,
+        input_keys=("inventory.digest",),
+        evidence_schema=(EvidenceField("boot-ids", "string-map"),),
+        timeout_seconds=10,
+        freshness_ttl_seconds=120,
+        remediation="restore the exact GB10 host readiness contract",
+        secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+    )
+    check = RegisteredCheck(
+        spec=spec,
+        implementation_version="v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: CheckProbe(
+                passed=True,
+                evidence={"boot-ids": bad_map},
+            )
+        },
+    )
+
+    with pytest.raises(ValueError):
+        PreflightDag((check,)).run(
+            CheckContext({"inventory.digest": "a" * 64}),
+            through_tier=0,
+        )
+
+
 def _bindings(**overrides: object) -> AttestationBindings:
     values: dict[str, object] = {
         "candidate_sha": "a" * 40,

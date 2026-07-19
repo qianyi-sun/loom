@@ -81,6 +81,49 @@ class UserManagerReadiness:
         return hashlib.sha256(payload).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class GB10HostReadiness:
+    """Validated readonly systemd evidence for one GB10 host."""
+
+    boot_id: str
+    manager_version: str
+    linger_enabled: bool
+    service_ready: bool
+    timer_state: NodeAgentTimerState
+    timer_enabled: bool
+
+    @property
+    def ready(self) -> bool:
+        return (
+            _BOOT_ID_RE.fullmatch(self.boot_id) is not None
+            and _SYSTEMD_VERSION_RE.fullmatch(self.manager_version) is not None
+            and self.linger_enabled
+            and self.service_ready
+            and self.timer_state is NodeAgentTimerState.PREPARED
+            and self.timer_enabled
+        )
+
+    @property
+    def transient_timer(self) -> bool:
+        return self.timer_state is NodeAgentTimerState.TRANSIENT_RUNNING
+
+    @property
+    def evidence_digest(self) -> str:
+        payload = json.dumps(
+            {
+                "boot_id": self.boot_id,
+                "linger_enabled": self.linger_enabled,
+                "manager_version": self.manager_version,
+                "service_ready": self.service_ready,
+                "timer_enabled": self.timer_enabled,
+                "timer_state": self.timer_state.value,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+
 def parse_systemctl_properties(stdout: str) -> dict[str, str]:
     """Parse the fixed ``systemctl show`` key/value output."""
     properties: dict[str, str] = {}
@@ -188,14 +231,80 @@ def probe_user_manager_readonly(
     return evidence if evidence.ready else None
 
 
+def parse_gb10_host_readiness(
+    payload: str,
+    *,
+    service: str,
+) -> GB10HostReadiness | None:
+    """Validate one fixed remote JSON payload without exposing raw output."""
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, dict) or set(decoded) != {
+        "schema_version",
+        "boot_id",
+        "manager_version",
+        "linger_enabled",
+        "service",
+        "timer",
+        "timer_enabled",
+    }:
+        return None
+    if decoded["schema_version"] != 1:
+        return None
+    service_keys = {
+        "LoadState",
+        "Type",
+        "Result",
+        "ExecMainStatus",
+        "ActiveState",
+        "SubState",
+        "NeedDaemonReload",
+    }
+    timer_keys = {"LoadState", "ActiveState", "SubState", "Unit", "NeedDaemonReload"}
+    if (
+        not isinstance(decoded["boot_id"], str)
+        or not isinstance(decoded["manager_version"], str)
+        or type(decoded["linger_enabled"]) is not bool
+        or type(decoded["timer_enabled"]) is not bool
+        or not isinstance(decoded["service"], dict)
+        or not isinstance(decoded["timer"], dict)
+        or set(decoded["service"]) != service_keys
+        or set(decoded["timer"]) != timer_keys
+        or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for properties in (decoded["service"], decoded["timer"])
+            for key, value in properties.items()
+        )
+    ):
+        return None
+    evidence = GB10HostReadiness(
+        boot_id=decoded["boot_id"],
+        manager_version=decoded["manager_version"],
+        linger_enabled=decoded["linger_enabled"],
+        service_ready=node_agent_service_is_prepared(decoded["service"]),
+        timer_state=classify_node_agent_timer(decoded["timer"], service=service),
+        timer_enabled=decoded["timer_enabled"],
+    )
+    if (
+        _BOOT_ID_RE.fullmatch(evidence.boot_id) is None
+        or _SYSTEMD_VERSION_RE.fullmatch(evidence.manager_version) is None
+    ):
+        return None
+    return evidence
+
+
 __all__ = [
     "DEFAULT_USER_MANAGER_RPC_BUDGET_MS",
+    "GB10HostReadiness",
     "NodeAgentTimerState",
     "UserManagerReadiness",
     "classify_node_agent_timer",
     "node_agent_service_is_prepared",
     "node_agent_service_status_summary",
     "node_agent_timer_status_summary",
+    "parse_gb10_host_readiness",
     "parse_systemctl_properties",
     "probe_user_manager_readonly",
 ]

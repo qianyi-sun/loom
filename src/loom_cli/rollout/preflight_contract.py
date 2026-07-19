@@ -18,12 +18,13 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 from loom_cli.rollout.operator.redaction import redact_rollout_mapping, redact_rollout_text
 
 SafeScalar: TypeAlias = str | int | float | bool | None
 SafeValue: TypeAlias = SafeScalar | list["SafeValue"] | dict[str, "SafeValue"]
+EvidenceValue: TypeAlias = SafeScalar | dict[str, str]
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9.-]{2,95}$")
 _VERSION_RE = re.compile(r"^[a-z][a-z0-9.-]{0,31}$")
@@ -74,7 +75,14 @@ class EvidenceField:
     def __post_init__(self) -> None:
         if _ID_RE.fullmatch(self.name) is None:
             raise ValueError("evidence field name is invalid")
-        if self.value_type not in {"string", "integer", "number", "boolean", "sha256"}:
+        if self.value_type not in {
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "sha256",
+            "string-map",
+        }:
             raise ValueError("evidence field type is invalid")
 
 
@@ -165,7 +173,7 @@ class CheckContext:
 @dataclass(frozen=True, slots=True)
 class CheckProbe:
     passed: bool
-    evidence: Mapping[str, SafeScalar]
+    evidence: Mapping[str, EvidenceValue]
 
 
 CheckImplementation = Callable[[CheckContext], CheckProbe]
@@ -233,7 +241,7 @@ class CheckExecution:
     outcome: CheckOutcome
     input_fingerprint: str
     implementation_digest: str
-    evidence: Mapping[str, SafeScalar]
+    evidence: Mapping[str, EvidenceValue]
     evidence_hash: str
     started_at: datetime
     finished_at: datetime
@@ -288,20 +296,17 @@ def _assert_secret_safe_mapping(
 
 
 def _validate_evidence(
-    spec: CheckSpec, evidence: Mapping[str, SafeScalar]
-) -> dict[str, SafeScalar]:
+    spec: CheckSpec, evidence: Mapping[str, EvidenceValue]
+) -> dict[str, EvidenceValue]:
     schema = {field.name: field.value_type for field in spec.evidence_schema}
     if set(evidence) != set(schema):
         raise ValueError("check evidence does not match its declared schema")
-    source: Mapping[str, SafeScalar]
+    source: Mapping[str, EvidenceValue]
     if spec.secret_redaction_policy is SecretRedactionPolicy.REDACT_ALL:
         redacted = redact_rollout_mapping(dict(evidence))
-        if not all(
-            isinstance(value, (str, int, float, bool)) or value is None
-            for value in redacted.values()
-        ):
+        if not all(_is_evidence_value(value) for value in redacted.values()):
             raise ValueError("redacted evidence is not scalar")
-        source = redacted
+        source = cast(Mapping[str, EvidenceValue], redacted)
     else:
         source = evidence
     _assert_secret_safe_mapping(
@@ -309,7 +314,7 @@ def _validate_evidence(
         policy=spec.secret_redaction_policy,
         allow_redaction=True,
     )
-    normalized: dict[str, SafeScalar] = {}
+    normalized: dict[str, EvidenceValue] = {}
     for name, expected in schema.items():
         value = source[name]
         valid = {
@@ -318,11 +323,33 @@ def _validate_evidence(
             "number": type(value) in {int, float},
             "boolean": type(value) is bool,
             "sha256": isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None,
+            "string-map": _is_bounded_string_map(value),
         }[expected]
         if not valid:
             raise ValueError(f"evidence field {name} has the wrong type")
         normalized[name] = value
     return normalized
+
+
+def _is_bounded_string_map(value: object) -> bool:
+    if not isinstance(value, Mapping) or len(value) > 64:
+        return False
+    return all(
+        isinstance(key, str)
+        and isinstance(item, str)
+        and 1 <= len(key) <= 96
+        and len(item) <= 256
+        and not any(ord(char) < 32 for char in key + item)
+        and redact_rollout_text(key) == key
+        and redact_rollout_text(item) == item
+        for key, item in value.items()
+    )
+
+
+def _is_evidence_value(value: object) -> bool:
+    return (
+        isinstance(value, (str, int, float, bool)) or value is None or _is_bounded_string_map(value)
+    )
 
 
 class PreflightDag:
@@ -479,7 +506,7 @@ class PreflightDag:
         context: CheckContext,
         operation: CheckOperation,
         outcome: CheckOutcome,
-        evidence: Mapping[str, SafeScalar],
+        evidence: Mapping[str, EvidenceValue],
         started_at: datetime,
         finished_at: datetime,
     ) -> CheckExecution:
@@ -522,13 +549,15 @@ class PreflightDag:
         return replace(result, blocked_by=blocked_by)
 
 
-def _empty_value(field: EvidenceField) -> SafeScalar:
+def _empty_value(field: EvidenceField) -> EvidenceValue:
     if field.value_type == "string":
         return "unavailable"
     if field.value_type == "boolean":
         return False
     if field.value_type == "sha256":
         return "0" * 64
+    if field.value_type == "string-map":
+        return {}
     return 0
 
 
