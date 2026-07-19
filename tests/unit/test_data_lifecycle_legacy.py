@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -16,6 +17,7 @@ from loom.data_lifecycle_legacy import (
     classification_plan_document,
 )
 from loom.data_lifecycle_legacy_s3 import S3LegacyObjectInspector
+from loom.data_lifecycle_legacy_sql import _artifact_object
 
 NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
 SCOPE = GcScope(environment="staging", namespace="loom-staging")
@@ -190,3 +192,49 @@ def test_s3_inspector_hashes_one_get_response_without_head_race() -> None:
     assert digest == hashlib.sha256(b"legacy body").hexdigest()
     assert size == 11
     assert body.closed
+
+
+def test_legacy_migration_sentinels_bind_exact_observed_object() -> None:
+    class Inspector:
+        def inspect(self, **_kwargs: object) -> tuple[None, str, int]:
+            return None, "f" * 64, 8192
+
+    source = SimpleNamespace(
+        storage={"bucket": "artifacts", "key": "run/output.json", "size_bytes": 0},
+        content_hash="pending:legacy-unhashed",
+    )
+
+    observed = _artifact_object(_artifact(), source, Inspector())
+
+    assert observed.content_sha256 == "f" * 64
+    assert observed.size_bytes == 8192
+
+
+@pytest.mark.parametrize(
+    ("content_hash", "size_bytes", "message"),
+    [
+        ("pending:other", 0, "content hash is unclassified"),
+        ("sha256:" + "f" * 64, 0, "object size drifted"),
+        ("sha256:" + "e" * 64, 8192, "object digest drifted"),
+    ],
+)
+def test_legacy_object_placeholder_exceptions_remain_fail_closed(
+    content_hash: str,
+    size_bytes: int,
+    message: str,
+) -> None:
+    class Inspector:
+        def inspect(self, **_kwargs: object) -> tuple[None, str, int]:
+            return None, "f" * 64, 8192
+
+    source = SimpleNamespace(
+        storage={
+            "bucket": "artifacts",
+            "key": "run/output.json",
+            "size_bytes": size_bytes,
+        },
+        content_hash=content_hash,
+    )
+
+    with pytest.raises(LegacyClassificationError, match=message):
+        _artifact_object(_artifact(), source, Inspector())

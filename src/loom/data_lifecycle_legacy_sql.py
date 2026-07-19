@@ -163,10 +163,25 @@ def _load_rows(
         )
     for item in connection.execute(
         text(
-            "SELECT id, team_id, created_at, content_hash, storage FROM artifacts "
-            "WHERE lifecycle_authority_id IS NULL ORDER BY id"
+            "SELECT a.id, a.team_id, a.batch_id, a.trial_id, a.created_at, "
+            "a.content_hash, a.storage, a.retention, a.artifact_type, "
+            "b.team_id AS batch_team_id, t.team_id AS trial_team_id "
+            "FROM artifacts a LEFT JOIN batches b ON b.id=a.batch_id "
+            "LEFT JOIN trials t ON t.id=a.trial_id "
+            "WHERE a.lifecycle_authority_id IS NULL ORDER BY a.id"
         )
     ):
+        retention_class = (
+            item.retention.get("class") if isinstance(item.retention, dict) else None
+        )
+        if item.artifact_type in {"benchmark", "catalog", "bootstrap", "system"} or (
+            retention_class == "shared_reusable"
+        ):
+            blockers.append(f"legacy artifact {item.id} requires pinned classification")
+        if item.batch_id is not None and item.batch_team_id != item.team_id:
+            blockers.append(f"legacy artifact {item.id} has missing or cross-team batch owner")
+        if item.trial_id is not None and item.trial_team_id != item.team_id:
+            blockers.append(f"legacy artifact {item.id} has missing or cross-team trial owner")
         row = _row(
             table="artifacts",
             row_id=item.id,
@@ -213,11 +228,21 @@ def _artifact_object(
         expected_sha = content_hash.removeprefix("sha256:")
         if expected_sha != observed_sha:
             raise LegacyClassificationError(f"legacy artifact {row.row_id} object digest drifted")
+    elif content_hash != "pending:legacy-unhashed":
+        raise LegacyClassificationError(
+            f"legacy artifact {row.row_id} content hash is unclassified"
+        )
     expected_size = storage.get("size_bytes")
-    if expected_size is not None and (
-        type(expected_size) is not int or expected_size != observed_size
-    ):
-        raise LegacyClassificationError(f"legacy artifact {row.row_id} object size drifted")
+    if expected_size is not None:
+        if type(expected_size) is not int or expected_size < 0:
+            raise LegacyClassificationError(f"legacy artifact {row.row_id} object size is invalid")
+        # Migration 0047 deliberately used zero as the sentinel for a
+        # legacy object whose exact size had never been recorded.  Only the
+        # paired pending-hash sentinel may authorize replacing that unknown
+        # value with the exact, single-GET observed identity.
+        size_unknown = expected_size == 0 and content_hash == "pending:legacy-unhashed"
+        if not size_unknown and expected_size != observed_size:
+            raise LegacyClassificationError(f"legacy artifact {row.row_id} object size drifted")
     return LegacyObject(
         row_table="artifacts",
         row_id=row.row_id,
