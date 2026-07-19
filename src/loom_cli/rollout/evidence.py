@@ -311,6 +311,7 @@ class EvidenceDirectory:
 
     STATE_JSON = "state.json"
     INPUTS_JSON = "inputs.json"
+    FAILURE_JSON = "failure.json"
 
     def __init__(self, root: Path, rollout_id: str) -> None:
         _validate_component(rollout_id)
@@ -354,6 +355,9 @@ class EvidenceDirectory:
     def driver_log_path(self) -> Path:
         return self.path / "logs" / "driver.log"
 
+    def failure_path(self) -> Path:
+        return self.path / self.FAILURE_JSON
+
     def write_inputs(self, inputs: dict[str, Any]) -> None:
         """Persist the resolved CLI args + config shas for --resume audit."""
         directory_fd = _open_rollout_directory(self.root, self.rollout_id)
@@ -378,6 +382,32 @@ class EvidenceDirectory:
                 self.STATE_JSON,
                 json.dumps(redacted, indent=2, sort_keys=True) + "\n",
             )
+        finally:
+            os.close(directory_fd)
+
+    def write_failure(self, document: dict[str, Any]) -> None:
+        """Atomically persist one normalized, redacted terminal failure."""
+        redacted = redact_rollout_mapping(document)
+        if not isinstance(redacted, dict):  # pragma: no cover - mapping contract
+            raise TypeError("redacted rollout failure must remain a mapping")
+        directory_fd = _open_rollout_directory(self.root, self.rollout_id)
+        try:
+            _atomic_private_write_text_at(
+                directory_fd,
+                self.FAILURE_JSON,
+                json.dumps(redacted, indent=2, sort_keys=True) + "\n",
+            )
+        finally:
+            os.close(directory_fd)
+
+    def read_failure(self) -> dict[str, Any] | None:
+        """Read normalized terminal failure evidence without following links."""
+        directory_fd = _open_rollout_directory(self.root, self.rollout_id)
+        try:
+            try:
+                return _read_json_object_at(directory_fd, self.FAILURE_JSON)
+            except FileNotFoundError:
+                return None
         finally:
             os.close(directory_fd)
 

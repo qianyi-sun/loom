@@ -352,6 +352,22 @@ class TestRunRollout:
 
 
 class TestFailure:
+    def test_production_step_failure_writes_normalized_stage_evidence(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ctx = make_ctx(tmp_path)
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+
+        assert run_rollout(ctx, [_AlwaysFailStep(15, "smoke")], ev, io.StringIO()) == 7
+        failure = ev.read_failure()
+        assert failure is not None
+        assert failure["check_id"] == "final.smoke"
+        assert failure["failure_code"] == "final.smoke.failed"
+        assert failure["declared_stage"] == "final-only"
+        assert failure["discovered_stage"] == "final-only"
+        assert failure["coverage_defect"] is False
+
     def test_step_failure_marks_state_failed_and_returns_nonzero(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)
         ev = EvidenceDirectory(tmp_path, "test-rid")
