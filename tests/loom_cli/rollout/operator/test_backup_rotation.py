@@ -9,6 +9,7 @@ from loom_cli.rollout.operator.backup_rotation import (
     BackupPayloadPhase,
     BackupRotationError,
     BackupRotationState,
+    acknowledge_retirement,
     begin_candidate,
     collect_failed_candidate,
     fail_candidate,
@@ -86,6 +87,7 @@ def test_candidate_failure_before_manifest_preserves_active_until_compacted() ->
 
     assert result.state.active == active_state.active
     assert result.state.candidate is None
+    assert tuple(record.payload_id for record in result.state.retirements) == ("payload-failed00",)
     assert result.delete_payload_ids == ("payload-failed00",)
 
 
@@ -150,6 +152,9 @@ def test_active_request_reference_defers_payload_deletion_until_retry() -> None:
     assert deferred.state == state
     assert deferred.delete_payload_ids == ()
     assert collected.state.candidate is None
+    assert tuple(record.payload_id for record in collected.state.retirements) == (
+        "payload-failed00",
+    )
     assert collected.delete_payload_ids == ("payload-failed00",)
 
 
@@ -176,7 +181,25 @@ def test_promotion_state_is_crash_safe_before_old_payload_deletion() -> None:
     assert promoted.delete_payload_ids == ("payload-old00000",)
     # A crash after atomic state publication but before deletion leaves the new
     # verified lease active and the old payload safe for idempotent GC retry.
-    assert promoted.state.payload_count == 1
+    assert promoted.state.payload_count == 2
+    assert tuple(record.payload_id for record in promoted.state.retirements) == (
+        "payload-old00000",
+    )
+
+    with pytest.raises(BackupRotationError, match="retirement"):
+        begin_candidate(
+            promoted.state,
+            payload_id="payload-third000",
+            request_id="req-third0000",
+            created_at=NOW,
+        )
+
+    acknowledged = acknowledge_retirement(
+        promoted.state,
+        payload_id="payload-old00000",
+    ).state
+    assert acknowledged.payload_count == 1
+    assert acknowledged.retirements == ()
 
 
 def test_three_replacements_stay_at_one_steady_and_two_transient_payloads() -> None:
@@ -195,6 +218,12 @@ def test_three_replacements_stay_at_one_steady_and_two_transient_payloads() -> N
         result = promote_candidate(state, payload_id=payload_id)
         state = result.state
         deleted.extend(result.delete_payload_ids)
+        if result.delete_payload_ids:
+            assert state.payload_count == 2
+            state = acknowledge_retirement(
+                state,
+                payload_id=result.delete_payload_ids[0],
+            ).state
         assert state.payload_count == 1
 
     assert deleted == ["payload-rotate00", "payload-rotate01", "payload-rotate02"]
@@ -221,3 +250,18 @@ def test_second_candidate_is_rejected_and_state_digest_is_deterministic() -> Non
     assert state.evidence_digest == state.evidence_digest
     assert len(state.evidence_digest) == 64
     assert BackupRotationState.from_dict(state.to_dict()) == state
+
+
+def test_schema_one_rotation_state_upgrades_without_retirements() -> None:
+    legacy = {
+        "active": None,
+        "candidate": None,
+        "generation": 3,
+        "schema_version": 1,
+    }
+
+    state = BackupRotationState.from_dict(legacy)
+
+    assert state.generation == 3
+    assert state.retirements == ()
+    assert state.to_dict()["schema_version"] == 2

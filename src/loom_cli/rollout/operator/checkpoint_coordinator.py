@@ -13,6 +13,7 @@ from .backup_lease import BackupLease
 from .backup_rotation import (
     BackupRotationResult,
     BackupRotationState,
+    acknowledge_retirement,
     begin_candidate,
     fail_candidate,
     promote_candidate,
@@ -106,9 +107,32 @@ class DetachedCheckpointCoordinator:
             referenced_payload_ids=self.referenced_payload_ids(),
         )
         self._publish_rotation(current, result)
-        if self.retire_payload is not None:
-            for retired in result.delete_payload_ids:
-                self.retire_payload(retired)
+        self._drain_retirements(strict=False)
+
+    def _drain_retirements(self, *, strict: bool) -> None:
+        """Idempotently delete and acknowledge exact persisted retirements."""
+        state = self.store.read_backup_rotation()
+        referenced = self.referenced_payload_ids()
+        for retirement in state.retirements:
+            if retirement.payload_id in referenced or self.retire_payload is None:
+                continue
+            try:
+                self.retire_payload(retirement.payload_id)
+                current = self.store.read_backup_rotation()
+                acknowledged = acknowledge_retirement(
+                    current,
+                    payload_id=retirement.payload_id,
+                )
+                self._publish_rotation(current, acknowledged)
+            except Exception as exc:
+                if strict:
+                    raise CheckpointCoordinatorError(
+                        "backup payload retirement did not complete"
+                    ) from exc
+                return
+        remaining = self.store.read_backup_rotation().retirements
+        if strict and remaining:
+            raise CheckpointCoordinatorError("backup payload retirement is still referenced")
 
     @staticmethod
     def _validate_binding(
@@ -138,6 +162,7 @@ class DetachedCheckpointCoordinator:
         self._validate_binding(request, envelope)
         if cancelled():
             raise CheckpointCoordinatorError("backup cancelled before reservation")
+        self._drain_retirements(strict=True)
         state = self.store.read_backup_rotation()
         reservation = begin_candidate(
             state,
@@ -197,9 +222,7 @@ class DetachedCheckpointCoordinator:
                 referenced_payload_ids=self.referenced_payload_ids(),
             )
             self._publish_rotation(current, promoted)
-            if self.retire_payload is not None:
-                for retired in promoted.delete_payload_ids:
-                    self.retire_payload(retired)
+            self._drain_retirements(strict=False)
             return VerifiedBackupJob(
                 manifest_path=checkpoint.manifest_path,
                 manifest_sha256=checkpoint.manifest_sha256,

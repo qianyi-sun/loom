@@ -216,6 +216,52 @@ def test_restore_failure_preserves_old_active_and_never_publishes_new_lease(
     assert retired == [second_job.payload_id]
 
 
+def test_successful_replacement_acknowledges_persisted_old_payload_retirement(
+    tmp_path: Path,
+) -> None:
+    retired: list[str] = []
+    coordinator, _creator, store, job = _coordinator(tmp_path, retired=retired)
+    coordinator(_request(), job, lambda: False)
+
+    second_path = tmp_path / "20260719T220000Z-req-checkpoint2" / "backup-manifest.json"
+    second_request = replace(_request(), request_id="req-checkpoint2")
+    second_job = replace(
+        job,
+        job_id="job-checkpoint02",
+        request_id="req-checkpoint2",
+        payload_id="payload-checkpoint2",
+        bundle_name=second_path.parent.name,
+        created_at=NOW + timedelta(hours=1),
+    )
+    second_checkpoint = replace(
+        _checkpoint(second_path),
+        request_id="req-checkpoint2",
+        created_at=NOW + timedelta(hours=1),
+    )
+    replacement = DetachedCheckpointCoordinator(
+        creator=FakeCreator(second_path),
+        store=store,
+        inspect_checkpoint=lambda _backup, _request: second_checkpoint,
+        verify_restore=lambda found, _request, _cancelled: replace(
+            _restore(found),
+            verified_at=NOW + timedelta(hours=1, minutes=3),
+        ),
+        publish_attestation=lambda _checkpoint, _lease, _request: "a" * 64,
+        now=lambda: NOW + timedelta(hours=1, minutes=4),
+        lease_ttl=timedelta(hours=4),
+        retire_payload=retired.append,
+    )
+
+    replacement(second_request, second_job, lambda: False)
+
+    state = store.read_backup_rotation()
+    assert state.active is not None
+    assert state.active.payload_id == second_job.payload_id
+    assert state.retirements == ()
+    assert state.payload_count == 1
+    assert retired == [job.payload_id]
+
+
 def test_binding_drift_and_early_cancel_do_not_reserve_payload(tmp_path: Path) -> None:
     coordinator, creator, store, job = _coordinator(tmp_path)
 

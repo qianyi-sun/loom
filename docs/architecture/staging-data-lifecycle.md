@@ -241,6 +241,13 @@ advance through compare-and-swap publication. A rotation record may reference
 only an already-published byte-equivalent lease. Deletion is always a returned
 post-publication action: a crash can retain an extra old payload for retry, but
 cannot erase the current known-good payload or promote an unverified candidate.
+Every post-publication deletion is also retained in that rotation record as an
+exact retirement entry until the idempotent payload remover succeeds and a
+second compare-and-swap acknowledges it. A pending or referenced retirement
+blocks admission of another candidate, so repeated process crashes cannot lose
+the payload identity or accumulate more generations. Immediately after a
+promotion the physical bound is transiently two payloads; after retirement
+acknowledgement it is one.
 The persisted state distinguishes manifest verification from restore
 verification: the former carries only the exact manifest digest, while the
 latter is the first phase allowed to carry a complete lease.

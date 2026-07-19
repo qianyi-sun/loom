@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
+from typing import cast
 
 from .backup_lease import BackupLease
 
@@ -32,6 +33,42 @@ class BackupPayloadPhase(StrEnum):
     RESTORE_VERIFIED = "restore_verified"
     ACTIVE = "active"
     FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class BackupRetirementRecord:
+    """Durable authority to delete one exact unreferenced large payload."""
+
+    payload_id: str
+    request_id: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if (
+            _PAYLOAD_ID_RE.fullmatch(self.payload_id) is None
+            or _REQUEST_ID_RE.fullmatch(self.request_id) is None
+            or self.reason not in {"failed", "superseded"}
+        ):
+            raise ValueError("backup retirement identity is invalid")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "payload_id": self.payload_id,
+            "reason": self.reason,
+            "request_id": self.request_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> BackupRetirementRecord:
+        if set(data) != {"payload_id", "reason", "request_id"} or not all(
+            isinstance(data[field], str) for field in data
+        ):
+            raise ValueError("backup retirement record schema is invalid")
+        return cls(
+            payload_id=data["payload_id"],  # type: ignore[arg-type]
+            request_id=data["request_id"],  # type: ignore[arg-type]
+            reason=data["reason"],  # type: ignore[arg-type]
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +176,7 @@ class BackupRotationState:
     generation: int = 0
     active: BackupPayloadRecord | None = None
     candidate: BackupPayloadRecord | None = None
+    retirements: tuple[BackupRetirementRecord, ...] = ()
 
     def __post_init__(self) -> None:
         if self.generation < 0:
@@ -153,10 +191,22 @@ class BackupRotationState:
             and self.active.payload_id == self.candidate.payload_id
         ):
             raise ValueError("active and candidate payloads must be distinct")
+        payload_ids = [record.payload_id for record in self.retirements]
+        if len(set(payload_ids)) != len(payload_ids) or any(
+            payload_id
+            in {
+                None if self.active is None else self.active.payload_id,
+                None if self.candidate is None else self.candidate.payload_id,
+            }
+            for payload_id in payload_ids
+        ):
+            raise ValueError("backup retirement queue identity is invalid")
 
     @property
     def payload_count(self) -> int:
-        return int(self.active is not None) + int(self.candidate is not None)
+        return (
+            int(self.active is not None) + int(self.candidate is not None) + len(self.retirements)
+        )
 
     @property
     def evidence_digest(self) -> str:
@@ -169,19 +219,32 @@ class BackupRotationState:
             "active": self.active.to_dict() if self.active is not None else None,
             "candidate": self.candidate.to_dict() if self.candidate is not None else None,
             "generation": self.generation,
-            "schema_version": 1,
+            "retirements": [record.to_dict() for record in self.retirements],
+            "schema_version": 2,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> BackupRotationState:
-        expected = {"active", "candidate", "generation", "schema_version"}
+        schema_version = data.get("schema_version")
+        expected = (
+            {"active", "candidate", "generation", "schema_version"}
+            if schema_version == 1
+            else {"active", "candidate", "generation", "retirements", "schema_version"}
+        )
         if (
             set(data) != expected
-            or data["schema_version"] != 1
+            or schema_version not in {1, 2}
             or type(data["generation"]) is not int
             or any(
                 data[field] is not None and not isinstance(data[field], Mapping)
                 for field in ("active", "candidate")
+            )
+            or (
+                schema_version == 2
+                and (
+                    not isinstance(data["retirements"], list)
+                    or not all(isinstance(item, Mapping) for item in data["retirements"])
+                )
             )
         ):
             raise ValueError("backup rotation state schema is invalid")
@@ -196,6 +259,14 @@ class BackupRotationState:
                 BackupPayloadRecord.from_dict(data["candidate"])
                 if isinstance(data["candidate"], Mapping)
                 else None
+            ),
+            retirements=(
+                tuple(
+                    BackupRetirementRecord.from_dict(item)
+                    for item in cast(list[Mapping[str, object]], data["retirements"])
+                )
+                if schema_version == 2
+                else ()
             ),
         )
 
@@ -218,6 +289,8 @@ def begin_candidate(
     """Reserve the sole transient candidate without replacing the active lease."""
     if state.candidate is not None:
         raise BackupRotationError("a backup payload candidate is already reserved")
+    if state.retirements:
+        raise BackupRotationError("backup payload retirement must complete before admission")
     candidate = BackupPayloadRecord(
         payload_id=payload_id,
         request_id=request_id,
@@ -229,6 +302,7 @@ def begin_candidate(
             generation=state.generation + 1,
             active=state.active,
             candidate=candidate,
+            retirements=state.retirements,
         )
     )
 
@@ -295,11 +369,17 @@ def fail_candidate(
     )
     if payload_id in referenced_payload_ids:
         return _replace_candidate(state, failed)
+    retirement = BackupRetirementRecord(
+        payload_id=failed.payload_id,
+        request_id=failed.request_id,
+        reason="failed",
+    )
     return BackupRotationResult(
         BackupRotationState(
             generation=state.generation + 1,
             active=state.active,
             candidate=None,
+            retirements=(*state.retirements, retirement),
         ),
         (payload_id,),
     )
@@ -315,11 +395,17 @@ def collect_failed_candidate(
         return BackupRotationResult(state)
     if candidate.payload_id in referenced_payload_ids:
         return BackupRotationResult(state)
+    retirement = BackupRetirementRecord(
+        payload_id=candidate.payload_id,
+        request_id=candidate.request_id,
+        reason="failed",
+    )
     return BackupRotationResult(
         BackupRotationState(
             generation=state.generation + 1,
             active=state.active,
             candidate=None,
+            retirements=(*state.retirements, retirement),
         ),
         (candidate.payload_id,),
     )
@@ -340,6 +426,16 @@ def promote_candidate(
     promoted = replace(candidate, phase=BackupPayloadPhase.ACTIVE)
     previous = state.active
     delete_ids: tuple[str, ...] = ()
+    retirements = state.retirements
+    if previous is not None:
+        retirements = (
+            *retirements,
+            BackupRetirementRecord(
+                payload_id=previous.payload_id,
+                request_id=previous.request_id,
+                reason="superseded",
+            ),
+        )
     if previous is not None and previous.payload_id not in referenced_payload_ids:
         delete_ids = (previous.payload_id,)
     return BackupRotationResult(
@@ -347,8 +443,30 @@ def promote_candidate(
             generation=state.generation + 1,
             active=promoted,
             candidate=None,
+            retirements=retirements,
         ),
         delete_ids,
+    )
+
+
+def acknowledge_retirement(
+    state: BackupRotationState,
+    *,
+    payload_id: str,
+) -> BackupRotationResult:
+    """Remove one retirement record only after idempotent payload deletion."""
+    matches = tuple(record for record in state.retirements if record.payload_id == payload_id)
+    if len(matches) != 1:
+        raise BackupRotationError("backup payload retirement identity does not match")
+    return BackupRotationResult(
+        BackupRotationState(
+            generation=state.generation + 1,
+            active=state.active,
+            candidate=state.candidate,
+            retirements=tuple(
+                record for record in state.retirements if record.payload_id != payload_id
+            ),
+        )
     )
 
 
@@ -374,6 +492,7 @@ def _replace_candidate(
             generation=state.generation + 1,
             active=state.active,
             candidate=candidate,
+            retirements=state.retirements,
         )
     )
 
@@ -381,9 +500,11 @@ def _replace_candidate(
 __all__ = [
     "BackupPayloadPhase",
     "BackupPayloadRecord",
+    "BackupRetirementRecord",
     "BackupRotationError",
     "BackupRotationResult",
     "BackupRotationState",
+    "acknowledge_retirement",
     "begin_candidate",
     "collect_failed_candidate",
     "fail_candidate",
