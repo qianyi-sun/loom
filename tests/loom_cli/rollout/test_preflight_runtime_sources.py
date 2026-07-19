@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
+from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
 from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
@@ -109,6 +110,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
         systemd_analyze_run=command,
         image_run=command,
         render_manifest=lambda: "",
+        manifest_image_names=frozenset(name for name, _path in ROLLOUT_IMAGES),
         server_dry_run=lambda _rendered: _result(),
         browser_run=command,
         browser_token_path=token,

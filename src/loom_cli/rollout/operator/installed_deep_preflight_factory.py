@@ -12,6 +12,7 @@ from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
+from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
 from loom_cli.rollout.manifest_readiness import RenderManifest
 from loom_cli.rollout.preflight_artifact_store import (
     LoadedPreflightArtifacts,
@@ -86,9 +87,15 @@ def build_installed_deep_preflight_composition(
             now=now(),
         )
 
+    cluster = load_cluster_config(config.cluster_config_path)
+    manifest_image_names = frozenset(
+        name
+        for name, _path in ROLLOUT_IMAGES
+        if name != "loom-worker" or cluster.k8s_worker.enabled
+    )
+
     def manifest_factory(candidate: CandidateBinding) -> RenderManifest:
         def render() -> str:
-            cluster = load_cluster_config(config.cluster_config_path)
             return render_manifests(replace(cluster, image_tag=candidate.image_tag))
 
         return render
@@ -189,6 +196,7 @@ def build_installed_deep_preflight_composition(
         systemd_analyze_run=commands.simple,
         image_run=commands.image,
         render_manifest_factory=manifest_factory,
+        manifest_image_names=manifest_image_names,
         server_dry_run=commands.manifest_server_dry_run,
         browser_run=commands.simple,
         baseline_probe_factory=readonly.baseline_probes,

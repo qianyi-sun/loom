@@ -12,6 +12,7 @@ from loom_cli.rollout.browser_runtime_readiness import CommandRunner as BrowserC
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.final_gate_command_runner import CommandRunner as FinalGateCommandRunner
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
+from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
 from loom_cli.rollout.image_readiness import DockerRunner as ImageDockerRunner
 from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
 from loom_cli.rollout.manifest_readiness import RenderManifest, ServerDryRun
@@ -68,6 +69,7 @@ class InstalledDeepPreflightComposition:
     systemd_analyze_run: SystemdAnalyzeRunner
     image_run: ImageDockerRunner
     render_manifest_factory: ManifestFactory
+    manifest_image_names: frozenset[str]
     server_dry_run: ServerDryRun
     browser_run: BrowserCommandRunner
     baseline_probe_factory: Callable[[int], Mapping[str, ReadonlyProbe]]
@@ -86,6 +88,8 @@ class InstalledDeepPreflightComposition:
             or self.service_uid < 0
             or self.service_gid < 0
             or not self.route.startswith("https://")
+            or not self.manifest_image_names
+            or not self.manifest_image_names <= {name for name, _path in ROLLOUT_IMAGES}
             or not 1 <= self.max_concurrency <= 32
         ):
             raise ValueError("installed deep preflight composition is invalid")
@@ -146,6 +150,7 @@ class InstalledDeepPreflightComposition:
             systemd_analyze_run=self.systemd_analyze_run,
             image_run=self.image_run,
             render_manifest=self.render_manifest_factory(candidate),
+            manifest_image_names=self.manifest_image_names,
             server_dry_run=self.server_dry_run,
             browser_run=self.browser_run,
             browser_token_path=self.inputs.browser_token_path,

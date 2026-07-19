@@ -130,6 +130,16 @@ baseline from hiding mutation-epoch or infrastructure drift. Build-once image
 artifacts remain owned by their exact candidate session and are re-inspected,
 not rebuilt, when the refreshed checks consume them.
 
+Rendered-manifest image authority is profile-aware and explicit. The installed
+composition derives the required Kubernetes image set from the exact cluster
+profile; for example, the GB10 staging profile intentionally excludes
+`loom-worker` while `k8s_worker.enabled=false`. The rendered artifact must
+contain every enabled rollout image, must contain no disabled rollout image,
+and binds each observed image to the corresponding build-once image ID. The
+enabled image-name set is stored in the private artifact descriptor and is
+revalidated when the detached worker reloads it, so an intentionally disabled
+workload cannot be confused with an accidentally missing manifest.
+
 Tier 1 also normalizes the environment profile's rate-card sync and hosted
 provider pricing defaults into one canonical, secret-free
 `ProductionDefaultsArtifact`. Provider ordering, optional sync inputs,

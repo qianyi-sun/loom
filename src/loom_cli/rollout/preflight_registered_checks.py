@@ -1969,6 +1969,7 @@ def build_manifest_preflight_checks(
     namespace: str,
     expected_candidate_sha: str,
     expected_config_digest: str,
+    expected_image_names: frozenset[str] | None = None,
     session: ManifestRenderSession | None = None,
     artifact_sink: Callable[[ManifestArtifact], None] | None = None,
 ) -> tuple[RegisteredCheck, RegisteredCheck]:
@@ -1984,6 +1985,7 @@ def build_manifest_preflight_checks(
                 image_tag=image_tag,
                 namespace=namespace,
                 image_digests=image_artifact().image_digests,
+                expected_image_names=expected_image_names,
             )
         return manifest_session
 

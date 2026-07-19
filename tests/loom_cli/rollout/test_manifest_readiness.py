@@ -89,6 +89,37 @@ def test_manifest_render_rejects_missing_or_stale_local_image() -> None:
         )
 
 
+def test_manifest_render_binds_profile_enabled_image_subset() -> None:
+    expected = frozenset(name for name, _path in ROLLOUT_IMAGES if name != "loom-worker")
+    rendered = _rendered().replace(
+        "        - name: loom-worker\n          image: loom-worker:staging-1111111\n",
+        "",
+    )
+
+    artifact = inspect_rendered_manifests(
+        rendered,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+        expected_image_names=expected,
+    )
+
+    assert set(artifact.image_identities) == expected
+
+
+def test_manifest_render_rejects_unexpected_profile_image() -> None:
+    expected = frozenset(name for name, _path in ROLLOUT_IMAGES if name != "loom-worker")
+
+    with pytest.raises(ValueError, match="disabled rollout image"):
+        inspect_rendered_manifests(
+            _rendered(),
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+            expected_image_names=expected,
+        )
+
+
 def test_manifest_session_renders_once_and_server_validates_same_bytes() -> None:
     render_calls: list[object] = []
     server_inputs: list[str] = []

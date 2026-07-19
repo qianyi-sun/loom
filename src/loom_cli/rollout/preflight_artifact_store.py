@@ -51,6 +51,7 @@ class _ParsedDescriptor(TypedDict):
     image_artifact_sha256: str
     image_digests: dict[str, str]
     manifest_artifact_sha256: str
+    manifest_image_names: tuple[str, ...]
     migration_image_id: str
     migration_job_name: str
     migration_manifest_artifact_sha256: str
@@ -421,6 +422,7 @@ class PreflightArtifactStore:
                 image_tag=image_tag,
                 namespace=namespace,
                 image_digests=images.image_digests,
+                expected_image_names=descriptor["manifest_image_names"],
             )
             migration = inspect_migration_manifest_artifact(
                 migration_read.payload.decode("utf-8"),
@@ -507,6 +509,7 @@ def _descriptor(
         "image_artifact_sha256": images.artifact_digest,
         "image_digests": dict(images.image_digests),
         "manifest_artifact_sha256": manifests.artifact_digest,
+        "manifest_image_names": sorted(manifests.image_identities),
         "migration_image_id": migration.image_id,
         "migration_job_name": migration.job_name,
         "migration_manifest_artifact_sha256": migration.artifact_digest,
@@ -517,7 +520,7 @@ def _descriptor(
         "production_defaults_sha256": production_defaults.artifact_digest,
         "rendered_manifest_sha256": manifests.rendered_sha256,
         "resource_set_digest": manifests.resource_set_digest,
-        "schema_version": 3,
+        "schema_version": 4,
     }
 
 
@@ -530,6 +533,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "image_artifact_sha256",
         "image_digests",
         "manifest_artifact_sha256",
+        "manifest_image_names",
         "migration_image_id",
         "migration_job_name",
         "migration_manifest_artifact_sha256",
@@ -543,15 +547,23 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "schema_version",
     }
     image_digests = value.get("image_digests")
+    manifest_image_names = value.get("manifest_image_names")
     mutation_epoch = value.get("mutation_epoch")
     if (
         set(value) != expected
         or value.get("bundle_digest") != bundle_digest
-        or value.get("schema_version") != 3
+        or value.get("schema_version") != 4
         or type(value.get("schema_version")) is not int
         or type(mutation_epoch) is not int
         or not isinstance(image_digests, Mapping)
         or not image_digests
+        or not isinstance(manifest_image_names, list)
+        or not manifest_image_names
+        or manifest_image_names != sorted(set(manifest_image_names))
+        or any(
+            not isinstance(name, str) or name not in image_digests
+            for name in manifest_image_names
+        )
         or any(
             not isinstance(key, str) or not isinstance(item, str) or not item.startswith("sha256:")
             for key, item in image_digests.items()
@@ -583,6 +595,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         image_artifact_sha256=str(value["image_artifact_sha256"]),
         image_digests={str(key): str(item) for key, item in image_digests.items()},
         manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
+        manifest_image_names=tuple(str(name) for name in manifest_image_names),
         migration_image_id=str(value["migration_image_id"]),
         migration_job_name=str(value["migration_job_name"]),
         migration_manifest_artifact_sha256=str(value["migration_manifest_artifact_sha256"]),

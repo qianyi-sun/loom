@@ -180,6 +180,7 @@ class PreflightRuntimeSources:
     systemd_analyze_run: SystemdAnalyzeRunner
     image_run: ImageDockerRunner
     render_manifest: RenderManifest
+    manifest_image_names: frozenset[str]
     server_dry_run: ServerDryRun
     browser_run: BrowserCommandRunner
     browser_token_path: Path
@@ -202,6 +203,7 @@ class PreflightRuntimeSources:
             or not self.candidate_root.is_absolute()
             or not self.migration_policy_path.is_absolute()
             or not self.route.startswith("https://")
+            or not self.manifest_image_names
         ):
             raise ValueError("preflight runtime sources are outside staging authority")
 
@@ -235,6 +237,7 @@ class PreflightRuntimeSources:
                 image_tag=self.candidate.image_tag,
                 namespace=self.config.namespace,
                 image_digests=self.loaded_artifacts.images.image_digests,
+                expected_image_names=self.manifest_image_names,
                 artifact=self.loaded_artifacts.manifests,
             )
 
@@ -439,6 +442,7 @@ class PreflightRuntimeSources:
             namespace=self.config.namespace,
             expected_candidate_sha=self.candidate.resolved_sha,
             expected_config_digest=self.config.config_sha256,
+            expected_image_names=self.manifest_image_names,
             session=manifest_session,
             artifact_sink=capture_manifest,
         )

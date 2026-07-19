@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from threading import Lock
 from types import MappingProxyType
@@ -49,7 +49,8 @@ class ManifestArtifact:
             or _SHA256_RE.fullmatch(self.resource_set_digest) is None
             or _SHA256_RE.fullmatch(self.artifact_digest) is None
             or not 1 <= self.resource_count <= _MAX_RESOURCES
-            or set(identities) != {name for name, _path in ROLLOUT_IMAGES}
+            or not identities
+            or not set(identities) <= {name for name, _path in ROLLOUT_IMAGES}
             or any(_IMAGE_ID_RE.fullmatch(value) is None for value in identities.values())
         ):
             raise ValueError("rendered manifest artifact identity is invalid")
@@ -67,6 +68,7 @@ class ManifestRenderSession:
         image_tag: str,
         namespace: str,
         image_digests: Mapping[str, str],
+        expected_image_names: Collection[str] | None = None,
         artifact: ManifestArtifact | None = None,
     ) -> None:
         self._render = render
@@ -74,11 +76,17 @@ class ManifestRenderSession:
         self._image_tag = image_tag
         self._namespace = namespace
         self._image_digests = dict(image_digests)
+        self._expected_image_names = frozenset(
+            {name for name, _path in ROLLOUT_IMAGES}
+            if expected_image_names is None
+            else expected_image_names
+        )
         if artifact is not None and artifact != inspect_rendered_manifests(
             artifact.rendered_yaml,
             image_tag=image_tag,
             namespace=namespace,
             image_digests=image_digests,
+            expected_image_names=self._expected_image_names,
         ):
             raise ValueError("seeded manifest artifact identity is invalid")
         self._artifact: ManifestArtifact | None = artifact
@@ -92,6 +100,7 @@ class ManifestRenderSession:
                     image_tag=self._image_tag,
                     namespace=self._namespace,
                     image_digests=self._image_digests,
+                    expected_image_names=self._expected_image_names,
                 )
             return self._artifact
 
@@ -112,16 +121,22 @@ def inspect_rendered_manifests(
     image_tag: str,
     namespace: str,
     image_digests: Mapping[str, str],
+    expected_image_names: Collection[str] | None = None,
 ) -> ManifestArtifact:
     """Validate one bounded render and bind local image refs to exact IDs."""
     encoded = rendered_yaml.encode("utf-8")
-    expected_images = {name for name, _path in ROLLOUT_IMAGES}
+    all_rollout_images = {name for name, _path in ROLLOUT_IMAGES}
+    expected_images = set(
+        all_rollout_images if expected_image_names is None else expected_image_names
+    )
     if (
         not rendered_yaml.strip()
         or len(encoded) > _MAX_RENDERED_BYTES
         or _IMAGE_TAG_RE.fullmatch(image_tag) is None
         or _DNS_RE.fullmatch(namespace) is None
         or set(image_digests) != {name for name, _path in ALL_BUILD_IMAGES}
+        or not expected_images
+        or not expected_images <= all_rollout_images
         or any(_IMAGE_ID_RE.fullmatch(value) is None for value in image_digests.values())
     ):
         raise ValueError("rendered manifest binding is invalid")
@@ -160,6 +175,8 @@ def inspect_rendered_manifests(
         identities.append(identity)
         for image in _container_images(resource):
             name = image.rsplit("/", 1)[-1].split(":", 1)[0]
+            if name in all_rollout_images and name not in expected_images:
+                raise ValueError(f"rendered manifest contains disabled rollout image {name}")
             if name not in expected_images:
                 continue
             if image.rsplit(":", 1)[-1] != image_tag:
