@@ -79,6 +79,7 @@ CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
 CLIENT_PATH = Path("/usr/local/bin/loom-staging-rollout")
 BROKER_PATH = Path("/usr/local/libexec/loom-staging-rollout-broker")
 REHEARSAL_PATH = Path("/usr/local/libexec/loom-staging-rollout-rehearsal")
+FINAL_GATE_PATH = Path("/usr/local/libexec/loom-staging-rollout-final-gate")
 TRUST_TOOL_PATH = Path("/usr/local/libexec/loom-staging-rollout-gb10-trust")
 SUDOERS_PATH = Path("/etc/sudoers.d/loom-staging-rollout")
 TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
@@ -99,9 +100,7 @@ SYSTEM_PYTHON = Path("/usr/bin/python3")
 UV_BINARY = Path("/usr/local/bin/uv")
 SYSTEM_SHELL = Path("/bin/sh")
 SYSTEM_GIT = Path("/usr/bin/git")
-SEALED_SOURCE_UPLOAD_PACK = (
-    f"{SYSTEM_GIT} -c safe.directory={INSTALL_SOURCE / '.git'} upload-pack"
-)
+SEALED_SOURCE_UPLOAD_PACK = f"{SYSTEM_GIT} -c safe.directory={INSTALL_SOURCE / '.git'} upload-pack"
 
 PROTECTED_INPUTS = (
     Path("/shared_work/qianyi/loom-worker-capacity/staging-admin-token"),
@@ -172,6 +171,7 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "config",
         "gb10-known-hosts",
         "gb10-trust-tool",
+        "final-gate-helper",
         "rehearsal-helper",
         "rehearsal-authority",
         "readonly-authority",
@@ -1564,6 +1564,7 @@ class HostSystem:
                     "loom-staging-rollout",
                     "loom-staging-rollout-broker",
                     "loom-staging-rollout-rehearsal",
+                    "loom-staging-rollout-final-gate",
                     "loom-staging-rollout.sudoers",
                     SHARED_WORK2_MOUNT_UNIT,
                 )
@@ -1605,12 +1606,11 @@ class HostSystem:
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-broker")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-rehearsal")])
+            self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-final-gate")])
             self.runner.run(["visudo", "-cf", str(directory / "loom-staging-rollout.sudoers")])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_repo_helper)])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_work2_helper)])
-            self.runner.run(
-                [str(SYSTEM_PYTHON), "-m", "py_compile", str(sealed_source_helper)]
-            )
+            self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(sealed_source_helper)])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(export_helper)])
 
     def source_file(self, source_root: Path, source_sha: str, relative_path: str) -> bytes:
@@ -1645,7 +1645,10 @@ class HostSystem:
         if (source_tree_sha is None) != (source_base_sha is None):
             raise InstallError("install record sealed source binding is incomplete")
         if source_tree_sha is not None and source_base_sha is not None:
-            if _SHA_RE.fullmatch(source_tree_sha) is None or _SHA_RE.fullmatch(source_base_sha) is None:
+            if (
+                _SHA_RE.fullmatch(source_tree_sha) is None
+                or _SHA_RE.fullmatch(source_base_sha) is None
+            ):
                 raise InstallError("install record sealed source binding is invalid")
             observed_tree = self.runner.run(
                 ["git", "-C", str(INSTALL_SOURCE), "rev-parse", f"{source_sha}^{{tree}}"]
@@ -2058,10 +2061,7 @@ class HostSystem:
         source_tree_sha: str,
         source_base_sha: str,
     ) -> None:
-        if (
-            _SHA_RE.fullmatch(source_tree_sha) is None
-            or _SHA_RE.fullmatch(source_base_sha) is None
-        ):
+        if _SHA_RE.fullmatch(source_tree_sha) is None or _SHA_RE.fullmatch(source_base_sha) is None:
             raise InstallError("candidate sealed source binding is invalid")
         observed_tree = self._service_git(
             "-C",
@@ -2125,9 +2125,7 @@ class HostSystem:
                     REMOTE_URL,
                 )
             else:
-                self._service_git(
-                    "clone", "--origin", "origin", REMOTE_URL, str(CANDIDATE_REPO)
-                )
+                self._service_git("clone", "--origin", "origin", REMOTE_URL, str(CANDIDATE_REPO))
             refresh = True
             changed = True
         _validate_git_checkout_tree(
@@ -2171,9 +2169,7 @@ class HostSystem:
         ).stdout
         if dirty:
             raise InstallError("candidate checkout is dirty")
-        head_result = self._service_git(
-            "-C", str(CANDIDATE_REPO), "rev-parse", "HEAD", check=False
-        )
+        head_result = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD", check=False)
         head = head_result.stdout.strip() if head_result.returncode == 0 else ""
         if refresh or head != expected_sha:
             if sealed:
@@ -3324,6 +3320,7 @@ class HostSystem:
             CLIENT_PATH: "regular file:root:root:755",
             BROKER_PATH: "regular file:root:root:755",
             REHEARSAL_PATH: "regular file:root:root:755",
+            FINAL_GATE_PATH: "regular file:root:root:755",
             SUDOERS_PATH: "regular file:root:root:440",
             TMPFILES_PATH: "regular file:root:root:644",
             CONFIG_PATH: "regular file:root:loom-rollout:640",
@@ -3586,7 +3583,11 @@ class HostInstaller:
         rendered = template.replace(_FINGERPRINT_TOKEN, _token_fingerprint(admin_token))
         rendered = rendered.replace(_TEAM_TOKEN, _validate_team_id(team_id))
         if self.source_mode == "sealed-cumulative":
-            if self.source_sha is None or self.source_tree_sha is None or self.source_base_sha is None:
+            if (
+                self.source_sha is None
+                or self.source_tree_sha is None
+                or self.source_base_sha is None
+            ):
                 raise InstallError("sealed source binding is unavailable for config rendering")
             rendered = rendered.replace("schema_version = 1", "schema_version = 2", 1)
             rendered += (
@@ -4005,6 +4006,13 @@ class HostInstaller:
                 "root",
             ),
             (CONFIG_PATH, config, 0o640, "root", SERVICE_GROUP),
+            (
+                FINAL_GATE_PATH,
+                self._asset("loom-staging-rollout-final-gate"),
+                0o755,
+                "root",
+                "root",
+            ),
         )
         sudoers = self._asset("loom-staging-rollout.sudoers")
         attestation_assets = {
@@ -4013,13 +4021,12 @@ class HostInstaller:
             "config": config,
             "gb10-known-hosts": installed_files[5][1],
             "gb10-trust-tool": installed_files[3][1],
-            "readonly-authority": self._source_file(
-                "deploy/k8s/staging-rollout-readonly.yaml"
-            ),
+            "readonly-authority": self._source_file("deploy/k8s/staging-rollout-readonly.yaml"),
             "rehearsal-authority": self._source_file(
                 "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
             ),
             "rehearsal-helper": installed_files[2][1],
+            "final-gate-helper": installed_files[8][1],
             "shared-work2-mount-unit": installed_files[6][1],
             "tmpfiles": installed_files[4][1],
         }
@@ -4610,6 +4617,7 @@ class HostInstaller:
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755),
             (BROKER_PATH, self._asset("loom-staging-rollout-broker"), 0o755),
             (REHEARSAL_PATH, self._asset("loom-staging-rollout-rehearsal"), 0o755),
+            (FINAL_GATE_PATH, self._asset("loom-staging-rollout-final-gate"), 0o755),
             (
                 TRUST_TOOL_PATH,
                 self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
@@ -4655,14 +4663,10 @@ class HostInstaller:
                         else None
                     ),
                     source_tree_sha=(
-                        record_source_tree_sha
-                        if isinstance(record_source_tree_sha, str)
-                        else None
+                        record_source_tree_sha if isinstance(record_source_tree_sha, str) else None
                     ),
                     source_base_sha=(
-                        record_source_base_sha
-                        if isinstance(record_source_base_sha, str)
-                        else None
+                        record_source_base_sha if isinstance(record_source_base_sha, str) else None
                     ),
                 )
             except InstallError:
@@ -4676,13 +4680,12 @@ class HostInstaller:
                 "config": config_payload,
                 "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
                 "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
-                "readonly-authority": self._source_file(
-                    "deploy/k8s/staging-rollout-readonly.yaml"
-                ),
+                "readonly-authority": self._source_file("deploy/k8s/staging-rollout-readonly.yaml"),
                 "rehearsal-authority": self._source_file(
                     "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
                 ),
                 "rehearsal-helper": self._asset("loom-staging-rollout-rehearsal"),
+                "final-gate-helper": self._asset("loom-staging-rollout-final-gate"),
                 "shared-work2-mount-unit": self._asset(SHARED_WORK2_MOUNT_UNIT),
                 "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
             }
@@ -4917,6 +4920,7 @@ class HostInstaller:
             CLIENT_PATH,
             BROKER_PATH,
             REHEARSAL_PATH,
+            FINAL_GATE_PATH,
             TRUST_TOOL_PATH,
             CONFIG_PATH,
             INSTALL_ATTESTATION,

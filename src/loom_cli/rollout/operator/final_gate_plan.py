@@ -16,6 +16,7 @@ from uuid import uuid4
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import PreflightAttestation
 
+from .backup_lease import BackupLease, component_set_digest
 from .model import DriverEnvelope, validate_safe_identifier
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -57,6 +58,7 @@ class FinalGatePlan:
     backup_manifest_path: str
     backup_manifest_sha256: str
     backup_lease_id: str
+    backup_source_request_id: str
     backup_lease_digest: str
     backup_component_set_digest: str
     db_snapshot_identity: str
@@ -135,6 +137,7 @@ class FinalGatePlan:
             raise ValueError("final gate migration or snapshot identity is missing")
         if not self.backup_lease_id or not self.schema_revision:
             raise ValueError("final gate checkpoint identity is missing")
+        validate_safe_identifier(self.backup_source_request_id, "backup_source_request_id")
         if (
             _SHA_RE.fullmatch(self.runner_source_sha) is None
             or _SHA_RE.fullmatch(self.runner_source_tree) is None
@@ -207,6 +210,7 @@ class FinalGatePlan:
         envelope: DriverEnvelope,
         attestation: PreflightAttestation,
         artifacts: PreflightArtifactPublication,
+        lease: BackupLease,
     ) -> FinalGatePlan:
         bindings = attestation.bindings
         if (
@@ -227,6 +231,16 @@ class FinalGatePlan:
             or artifacts.mutation_epoch != bindings.staging_mutation_epoch
             or artifacts.migration_plan_sha256 != bindings.migration_plan_digest
             or artifacts.browser_report_schema_sha256 != bindings.browser_report_schema
+            or lease.lease_id != bindings.backup_lease_id
+            or lease.evidence_digest != bindings.backup_lease_digest
+            or lease.manifest_sha256 != bindings.backup_manifest_sha256
+            or component_set_digest(lease.component_sha256) != bindings.backup_component_set_digest
+            or lease.environment != bindings.environment
+            or lease.namespace != bindings.namespace
+            or lease.mutation_epoch != bindings.staging_mutation_epoch
+            or lease.db_snapshot_identity != bindings.db_snapshot_identity
+            or lease.schema_revision != bindings.schema_revision
+            or lease.object_inventory_root != bindings.object_inventory_root
         ):
             raise ValueError("final gate plan inputs drifted")
         payload = {
@@ -254,6 +268,7 @@ class FinalGatePlan:
             "backup_manifest_path": envelope.backup_manifest_path,
             "backup_manifest_sha256": bindings.backup_manifest_sha256,
             "backup_lease_id": bindings.backup_lease_id,
+            "backup_source_request_id": lease.source_request_id,
             "backup_lease_digest": bindings.backup_lease_digest,
             "backup_component_set_digest": bindings.backup_component_set_digest,
             "db_snapshot_identity": bindings.db_snapshot_identity,
@@ -309,6 +324,7 @@ class FinalGatePlan:
             backup_manifest_path=_string(value, "backup_manifest_path"),
             backup_manifest_sha256=_string(value, "backup_manifest_sha256"),
             backup_lease_id=_string(value, "backup_lease_id"),
+            backup_source_request_id=_string(value, "backup_source_request_id"),
             backup_lease_digest=_string(value, "backup_lease_digest"),
             backup_component_set_digest=_string(value, "backup_component_set_digest"),
             db_snapshot_identity=_string(value, "db_snapshot_identity"),

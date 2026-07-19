@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import stat
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.final_gate_plan import (
     FinalGatePlan,
     FinalGatePlanError,
@@ -31,6 +32,24 @@ from loom_cli.rollout.preflight_contract import (
 )
 
 NOW = datetime(2026, 7, 19, 21, tzinfo=UTC)
+
+
+def _lease() -> BackupLease:
+    return BackupLease(
+        lease_id="lease-1234567890abcdef",
+        source_request_id="req-source01",
+        manifest_sha256="a" * 64,
+        component_sha256={"postgres": "d" * 64},
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=7,
+        db_snapshot_identity="snapshot-1",
+        schema_revision="0066",
+        object_inventory_root="c" * 64,
+        created_at=NOW - timedelta(minutes=10),
+        expires_at=NOW + timedelta(hours=1),
+        restore_verified_at=NOW - timedelta(minutes=5),
+    )
 
 
 def _attestation() -> PreflightAttestation:
@@ -61,6 +80,7 @@ def _attestation() -> PreflightAttestation:
         CheckContext({"candidate.sha": "a" * 40}),
         now=lambda: NOW,
     )
+    lease = _lease()
     bindings = AttestationBindings(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
@@ -73,10 +93,10 @@ def _attestation() -> PreflightAttestation:
         runner_install_hash="2" * 64,
         runner_config_hash="3" * 64,
         staging_mutation_epoch=7,
-        backup_lease_id="lease-1",
-        backup_lease_digest="9" * 64,
+        backup_lease_id=lease.lease_id,
+        backup_lease_digest=lease.evidence_digest,
         backup_manifest_sha256="a" * 64,
-        backup_component_set_digest="b" * 64,
+        backup_component_set_digest=component_set_digest(lease.component_sha256),
         db_snapshot_identity="snapshot-1",
         schema_revision="0066",
         object_inventory_root="c" * 64,
@@ -160,7 +180,7 @@ def _artifacts(tmp_path: Path) -> PreflightArtifactPublication:
 
 def _plan(tmp_path: Path) -> FinalGatePlan:
     attestation = _attestation()
-    return FinalGatePlan.build(_envelope(attestation), attestation, _artifacts(tmp_path))
+    return FinalGatePlan.build(_envelope(attestation), attestation, _artifacts(tmp_path), _lease())
 
 
 def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Path) -> None:
@@ -169,7 +189,8 @@ def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Pa
     assert FinalGatePlan.from_dict(plan.to_dict()) == plan
     assert plan.candidate_tree == "b" * 40
     assert plan.artifact_bundle_digest == "e" * 64
-    assert plan.backup_lease_id == "lease-1"
+    assert plan.backup_lease_id == _lease().lease_id
+    assert plan.backup_source_request_id == "req-source01"
     assert plan.image_digests["api"] == "sha256:" + "1" * 64
     assert plan.secret_metadata_fingerprints == {"admin": "sha256:abc len=32"}
 
@@ -183,6 +204,7 @@ def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None
             replace(envelope, backup_manifest_sha256="f" * 64),
             attestation,
             _artifacts(tmp_path),
+            _lease(),
         )
 
     payload = _plan(tmp_path).to_dict()

@@ -24,12 +24,15 @@ from loom_cli.rollout.preflight_artifact_store import (
 from loom_cli.rollout.preflight_contract import CheckOperation, PreflightAttestation
 from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
 
+from .backup_lease import BackupLease
 from .final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from .model import DriverEnvelope
 
 
 class FinalGateRehearsalStore(Protocol):
     def read_preflight_rehearsal(self, request_id: str) -> PreflightRehearsal: ...
+
+    def read_backup_lease(self, digest: str) -> BackupLease: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +65,8 @@ class FinalGateActionSource:
         if mutation_epoch != attestation.bindings.staging_mutation_epoch:
             raise ValueError("final gate action source mutation epoch drifted")
         publication = self._publication(envelope, attestation)
-        plan = FinalGatePlan.build(envelope, attestation, publication)
+        lease = self.request_store.read_backup_lease(attestation.bindings.backup_lease_digest)
+        plan = FinalGatePlan.build(envelope, attestation, publication, lease)
         plan_path = FinalGatePlanStore(
             self.state_root,
             request_id=envelope.request_id,

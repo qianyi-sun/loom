@@ -838,6 +838,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert set(system.source_reads) >= {
         "deploy/staging-rollout/loom-staging-rollout",
         "deploy/staging-rollout/loom-staging-rollout-broker",
+        "deploy/staging-rollout/loom-staging-rollout-final-gate",
         "deploy/staging-rollout/loom-staging-rollout-rehearsal",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
         "deploy/staging-rollout/loom-staging-rollout.tmpfiles",

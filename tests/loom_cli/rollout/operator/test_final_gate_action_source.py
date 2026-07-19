@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
+from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.final_gate_action_source import FinalGateActionSource
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
@@ -30,7 +31,7 @@ from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
 from tests.loom_cli.rollout.operator.test_final_gate_plan import (
     _attestation as binding_attestation,
 )
-from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope
+from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope, _lease
 from tests.loom_cli.rollout.test_preflight_artifact_store import _images, _manifests
 
 NOW = datetime(2026, 7, 19, 21, tzinfo=UTC)
@@ -42,6 +43,9 @@ class _Store:
 
     def read_preflight_rehearsal(self, _request_id: str) -> PreflightRehearsal:
         return self.rehearsal
+
+    def read_backup_lease(self, _digest: str) -> BackupLease:
+        return _lease()
 
 
 def _execution(publication, *, image_digest: str | None = None):

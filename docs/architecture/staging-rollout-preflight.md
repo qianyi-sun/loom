@@ -433,6 +433,16 @@ Only then does it publish the plan and construct the complete six-action map
 around the fixed installed helper. Directory scanning, newest-artifact
 selection, ambient argv and partial action maps are not accepted.
 
+The installed final helper runs with the protected staging kubeconfig, not the
+rehearsal credential. Before dispatching any action it reloads the strict plan,
+the exact digest-addressed artifact publication, and the restore-verified
+checkpoint named by the backup lease's source request. Candidate, manifest,
+snapshot, epoch, schema, object-inventory or path drift fails before the
+executor is entered. A successful protected apply must report exactly one
+mutation-epoch advance and protected-mutation evidence; every later action is
+read-only. Until a concrete protected executor is installed, the helper is
+intentionally unavailable and exits without mutation.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:
