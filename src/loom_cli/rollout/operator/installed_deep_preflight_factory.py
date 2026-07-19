@@ -13,7 +13,6 @@ from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
 from loom_cli.rollout.manifest_readiness import RenderManifest
-from loom_cli.rollout.operator.backup import SubprocessBackupCommandRunner
 from loom_cli.rollout.preflight_artifact_store import (
     LoadedPreflightArtifacts,
     PreflightArtifactStore,
@@ -27,7 +26,7 @@ from loom_cli.rollout.rehearsal_command_runner import InstalledRehearsalStepRunn
 from loom_cli.rollout.rehearsal_journal_backend import JournaledRehearsalBackend
 from loom_cli.rollout.rehearsal_readiness import RehearsalAction
 
-from .checkpoint_inventory_provider import KubernetesLifecycleInventoryProvider
+from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .checkpoint_lease import CriticalCheckpointEvidence
 from .config import OperatorConfig
 from .deep_preflight_authority import RuntimePurpose
@@ -58,14 +57,12 @@ def build_installed_deep_preflight_composition(
     child_environment = sanitized_child_environment(config, service_uid=service_uid)
     commands = InstalledPreflightCommands(config, child_environment)
     inputs = InstalledPreflightInputs.load(config, service_uid=service_uid)
-    command_runner = SubprocessBackupCommandRunner()
-    inventory_source = KubernetesLifecycleInventoryProvider(
-        config,
-        runner=command_runner,
-        environment=child_environment,
-    )
     database_evidence = InstalledReadonlyDatabaseEvidenceSource(
         service_uid=service_uid,
+    )
+    inventory_source = ReadonlyLifecycleInventoryProvider(
+        config,
+        evidence_source=database_evidence,
     )
     readonly = ReadonlyPreflightAuthority(
         config,

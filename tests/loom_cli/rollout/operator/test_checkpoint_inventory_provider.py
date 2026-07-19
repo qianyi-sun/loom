@@ -1,27 +1,16 @@
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
-
 from loom_cli.rollout.operator.checkpoint_inventory_provider import (
-    KubernetesLifecycleInventoryProvider,
+    ReadonlyLifecycleInventoryProvider,
 )
 from loom_cli.rollout.operator.config import OperatorConfig
+from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReference
+from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
 
 NOW = datetime(2026, 7, 19, 23, tzinfo=UTC)
-
-
-class Runner:
-    def __init__(self, document: object) -> None:
-        self.document = document
-        self.calls: list[tuple[list[str], dict[str, str], float | None]] = []
-
-    def capture_stdout(self, argv, *, env, timeout_seconds=None):
-        self.calls.append((list(argv), dict(env), timeout_seconds))
-        return json.dumps(self.document).encode()
 
 
 def _config(tmp_path: Path) -> OperatorConfig:
@@ -61,27 +50,28 @@ def _config(tmp_path: Path) -> OperatorConfig:
 def test_provider_builds_sorted_exact_inventory_without_object_payloads(
     tmp_path: Path,
 ) -> None:
-    runner = Runner(
-        {
-            "mutation_epoch": 11,
-            "schema_revision": "0066",
-            "objects": [
-                {
-                    "authoritative_source": "catalog:sha256:" + "d" * 64,
-                    "bucket": "loom-staging-artifacts",
-                    "content_sha256": "a" * 64,
-                    "data_class": "benchmark",
-                    "object_key": "benchmarks/b",
-                    "size_bytes": 5,
-                    "version_id": "v1",
-                }
-            ],
-        }
+    evidence = ReadonlyDatabaseEvidence(
+        schema_revision="0066",
+        mutation_epoch=11,
+        epoch_authority="staging-mutation-epoch-v1",
+        baseline_counts={"agents": 1, "provider_models": 1, "tasks": 1, "teams": 1, "users": 1},
+        capacity=None,
+        evidence_sha256="e" * 64,
+        immutable_objects=(
+            ImmutableObjectReference(
+                authoritative_source="catalog:sha256:" + "d" * 64,
+                bucket="loom-staging-artifacts",
+                content_sha256="a" * 64,
+                data_class="benchmark",
+                object_key="benchmarks/b",
+                size_bytes=5,
+                version_id="v1",
+            ),
+        ),
     )
-    provider = KubernetesLifecycleInventoryProvider(
+    provider = ReadonlyLifecycleInventoryProvider(
         _config(tmp_path),
-        runner=runner,
-        environment={"PATH": "/usr/bin"},
+        evidence_source=lambda: evidence,
     )
 
     inventory = provider(NOW)
@@ -89,45 +79,25 @@ def test_provider_builds_sorted_exact_inventory_without_object_payloads(
     assert inventory.mutation_epoch == 11
     assert inventory.schema_revision == "0066"
     assert inventory.objects[0].object_key == "benchmarks/b"
-    argv, env, timeout = runner.calls[0]
-    assert argv[:5] == ["kubectl", "-n", "loom-staging", "exec", "statefulset/loom-postgres"]
-    assert "data_lifecycle_objects" in argv[-1]
-    assert env == {"PATH": "/usr/bin"}
-    assert timeout == 60.0
+    assert inventory.objects == evidence.immutable_objects
 
 
-@pytest.mark.parametrize(
-    "document",
-    [
-        {},
-        {"mutation_epoch": None, "schema_revision": "0066", "objects": []},
-        {"mutation_epoch": 1, "schema_revision": "0066", "objects": "all"},
-        {
-            "mutation_epoch": 1,
-            "schema_revision": "0066",
-            "objects": [
-                {
-                    "authoritative_source": "",
-                    "bucket": "bucket",
-                    "content_sha256": "a" * 64,
-                    "data_class": "artifact",
-                    "object_key": "run/output",
-                    "size_bytes": 1,
-                    "version_id": "v1",
-                }
-            ],
-        },
-    ],
-)
-def test_provider_fails_closed_on_missing_epoch_or_unclassified_objects(
-    tmp_path: Path,
-    document: object,
-) -> None:
-    provider = KubernetesLifecycleInventoryProvider(
+def test_provider_binds_legacy_empty_inventory_to_shared_snapshot(tmp_path: Path) -> None:
+    evidence = ReadonlyDatabaseEvidence(
+        schema_revision="0065",
+        mutation_epoch=0,
+        epoch_authority="legacy-pre-0066",
+        baseline_counts={"agents": 1, "provider_models": 1, "tasks": 1, "teams": 1, "users": 1},
+        capacity=None,
+        evidence_sha256="e" * 64,
+    )
+    provider = ReadonlyLifecycleInventoryProvider(
         _config(tmp_path),
-        runner=Runner(document),
-        environment={},
+        evidence_source=lambda: evidence,
     )
 
-    with pytest.raises(ValueError):
-        provider(NOW)
+    inventory = provider(NOW)
+
+    assert inventory.mutation_epoch == 0
+    assert inventory.schema_revision == "0065"
+    assert inventory.objects == ()

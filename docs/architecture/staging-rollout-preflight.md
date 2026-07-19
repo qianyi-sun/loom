@@ -213,7 +213,12 @@ authority before granting SELECT back to the fixed allowlist, so privilege
 drift cannot silently accumulate.
 The concurrent DAG shares one process-local, single-flight database snapshot;
 Tier 0 capacity, Tier 2 baseline, capability evidence, and mutation-epoch
-binding cannot race through separate transactions. The exact tunnel and DB
+binding cannot race through separate transactions. The critical checkpoint's
+pinned benchmark/catalog/system inventory is derived from that same snapshot,
+never from a privileged `kubectl exec`. A pre-0066 snapshot binds an explicitly
+empty legacy inventory because typed object authority does not exist yet;
+revision 0066 and later must return a sorted, unique, fully classified inventory
+from the lifecycle tables. The exact tunnel and DB
 session are always rolled back and closed after evidence collection.
 Installed preflight treats the readonly application token, readonly kubeconfig,
 rehearsal kubeconfig, and server-dry-run kubeconfig as distinct private

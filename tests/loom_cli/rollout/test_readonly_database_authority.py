@@ -5,12 +5,19 @@ from collections.abc import Mapping
 import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReference
 from loom_cli.rollout.readonly_database_authority import probe_readonly_database
 
 
 class Query:
-    def __init__(self, *, revision: str = "0065") -> None:
+    def __init__(
+        self,
+        *,
+        revision: str = "0065",
+        inventory: tuple[Mapping[str, object], ...] = (),
+    ) -> None:
         self.revision = revision
+        self.inventory = inventory
         self.calls: list[str] = []
 
     def __call__(self, sql: str) -> tuple[Mapping[str, object], ...]:
@@ -40,6 +47,8 @@ class Query:
             return ({"teams": 2, "users": 3, "agents": 4, "tasks": 5, "provider_models": 6},)
         if "staging_mutation_epochs" in sql:
             return ({"environment": "staging", "namespace": "loom-staging", "epoch": 9},)
+        if "FROM data_lifecycle_objects" in sql:
+            return self.inventory
         if "staging_lifecycle_capacity" in sql:
             capacity = StagingCapacity(10, 20, 80, 90)
             return (
@@ -83,6 +92,44 @@ def test_current_database_requires_exact_epoch_and_capacity() -> None:
     assert evidence.capacity is not None
     assert evidence.capacity["bytes_used"] == 20
     assert len(evidence.evidence_sha256) == 64
+
+
+def test_current_database_binds_sorted_immutable_inventory_in_same_snapshot() -> None:
+    row = {
+        "authoritative_source": "catalog:sha256:" + "f" * 64,
+        "bucket": "loom-staging-artifacts",
+        "content_sha256": "a" * 64,
+        "data_class": "catalog",
+        "object_key": "catalog/exact.json",
+        "size_bytes": 42,
+        "version_id": "v1",
+    }
+    query = Query(revision="0066", inventory=(row,))
+
+    evidence = probe_readonly_database(query)
+
+    assert evidence.immutable_objects == (ImmutableObjectReference.from_dict(row),)
+    assert any("FROM data_lifecycle_objects" in sql for sql in query.calls)
+
+
+def test_current_database_rejects_unclassified_immutable_inventory() -> None:
+    query = Query(
+        revision="0066",
+        inventory=(
+            {
+                "authoritative_source": "",
+                "bucket": "loom-staging-artifacts",
+                "content_sha256": "a" * 64,
+                "data_class": "artifact",
+                "object_key": "runs/unclassified",
+                "size_bytes": 42,
+                "version_id": "v1",
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="immutable inventory is invalid"):
+        probe_readonly_database(query)
 
 
 @pytest.mark.parametrize(

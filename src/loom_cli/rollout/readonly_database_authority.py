@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReference
 
 _REVISION_RE = re.compile(r"^[0-9]{4}$")
 _ROLE = "loom_rollout_readonly"
@@ -67,6 +68,23 @@ FROM staging_lifecycle_capacity
 WHERE environment = 'staging' AND namespace = 'loom-staging'
 """.strip()
 
+_INVENTORY_SQL = """
+SELECT obj.bucket, obj.object_key, obj.version_id, obj.content_sha256,
+       obj.size_bytes, auth.data_class,
+       auth.metadata ->> 'authoritative_source' AS authoritative_source
+FROM data_lifecycle_objects AS obj
+JOIN data_lifecycle_authorities AS auth ON auth.id = obj.authority_id
+WHERE obj.environment = 'staging'
+  AND obj.namespace = 'loom-staging'
+  AND obj.state = 'active'
+  AND auth.environment = obj.environment
+  AND auth.namespace = obj.namespace
+  AND auth.state = 'active'
+  AND auth.pinned
+  AND auth.data_class IN ('benchmark', 'catalog', 'system')
+ORDER BY obj.bucket, obj.object_key, obj.version_id
+""".strip()
+
 DatabaseQuery = Callable[[str], tuple[Mapping[str, object], ...]]
 
 
@@ -80,10 +98,12 @@ class ReadonlyDatabaseEvidence:
     baseline_counts: Mapping[str, int]
     capacity: Mapping[str, object] | None
     evidence_sha256: str
+    immutable_objects: tuple[ImmutableObjectReference, ...] = ()
 
     def __post_init__(self) -> None:
         counts = dict(self.baseline_counts)
         capacity = None if self.capacity is None else dict(self.capacity)
+        identities = [item.identity for item in self.immutable_objects]
         if (
             _REVISION_RE.fullmatch(self.schema_revision) is None
             or self.mutation_epoch < 0
@@ -91,11 +111,15 @@ class ReadonlyDatabaseEvidence:
             or set(counts) != {"agents", "provider_models", "tasks", "teams", "users"}
             or any(type(value) is not int or value < 0 for value in counts.values())
             or len(self.evidence_sha256) != 64
+            or identities != sorted(identities)
+            or len(identities) != len(set(identities))
         ):
             raise ValueError("readonly database evidence is invalid")
         if int(self.schema_revision) < _EPOCH_FIRST_REVISION:
             if self.mutation_epoch != 0 or self.epoch_authority != "legacy-pre-0066":
                 raise ValueError("legacy database epoch authority is invalid")
+            if self.immutable_objects:
+                raise ValueError("legacy database immutable object authority is invalid")
         elif self.epoch_authority != "staging-mutation-epoch-v1":
             raise ValueError("database epoch authority is invalid")
         if (int(self.schema_revision) >= _CAPACITY_FIRST_REVISION) != (capacity is not None):
@@ -269,11 +293,27 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
         ):
             raise ValueError("readonly database capacity evidence is invalid")
 
+    immutable_objects: tuple[ImmutableObjectReference, ...] = ()
+    if revision_number >= _EPOCH_FIRST_REVISION:
+        inventory_rows = query(_INVENTORY_SQL)
+        if len(inventory_rows) > 1024:
+            raise ValueError("readonly database immutable inventory is too large")
+        try:
+            immutable_objects = tuple(
+                ImmutableObjectReference.from_dict(dict(row)) for row in inventory_rows
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("readonly database immutable inventory is invalid") from exc
+        identities = [item.identity for item in immutable_objects]
+        if identities != sorted(identities) or len(identities) != len(set(identities)):
+            raise ValueError("readonly database immutable inventory is invalid")
+
     canonical = {
         "authority": expected_authority,
         "baseline_counts": counts,
         "capacity": capacity,
         "epoch_authority": epoch_authority,
+        "immutable_objects": [item.to_dict() for item in immutable_objects],
         "mutation_epoch": epoch,
         "schema_revision": revision,
         "version": "v1",
@@ -288,6 +328,7 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
         baseline_counts=counts,
         capacity=capacity,
         evidence_sha256=evidence_sha256,
+        immutable_objects=immutable_objects,
     )
 
 

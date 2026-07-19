@@ -8,14 +8,14 @@ from datetime import datetime, timedelta
 from loom_cli.cluster_backup_guard import DEFAULT_BACKUP_MAX_AGE_HOURS
 
 from .backup import BackupCreator, SubprocessBackupCommandRunner, VerifiedBackup
-from .checkpoint_inventory_provider import KubernetesLifecycleInventoryProvider
+from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .checkpoint_lease import CriticalCheckpointEvidence, inspect_critical_checkpoint
 from .config import OperatorConfig
 from .deep_preflight_authority import DeepPreflightAuthority
 from .detached_preflight_runner import DetachedPreflightBackupRunner
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
 from .model import PreflightRequest
-from .policy import sanitized_child_environment
+from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
 from .store import RequestStore
 
 # Preserve the existing two-hour launch margin and another two-hour hard
@@ -35,12 +35,11 @@ def build_installed_detached_preflight_runner(
     """Build the exact Tier 3 worker callback; no legacy backup-only fallback."""
     if service_uid < 0 or service_gid < 0:
         raise ValueError("detached preflight service identity is invalid")
-    child_environment = sanitized_child_environment(config, service_uid=service_uid)
     command_runner = SubprocessBackupCommandRunner()
-    inventory_source = KubernetesLifecycleInventoryProvider(
+    database_evidence = InstalledReadonlyDatabaseEvidenceSource(service_uid=service_uid)
+    inventory_source = ReadonlyLifecycleInventoryProvider(
         config,
-        runner=command_runner,
-        environment=child_environment,
+        evidence_source=database_evidence,
     )
     creator = BackupCreator(
         config,

@@ -31,7 +31,7 @@ from .backup import (
 from .backup_job import PreflightBackupJobEnvelope, transition_backup_job
 from .backup_rotation import begin_candidate, fail_candidate
 from .candidate import CandidateBindingError, bind_configured_candidate
-from .checkpoint_inventory_provider import KubernetesLifecycleInventoryProvider
+from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
@@ -49,6 +49,7 @@ from .model import (
 )
 from .policy import PolicyError, caller_from_sudo, sanitized_child_environment
 from .preflight import PreflightReport, catalog_secret_values, collect_preflight
+from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
 from .redaction import known_secrets_from_sources, redact_rollout_text
 from .store import RequestStore, RequestStoreError
 from .systemd import (
@@ -1268,10 +1269,9 @@ def _default_dependencies() -> BrokerDependencies:
     )
     lifecycle = LifecycleCoordinator(config, store=store, systemd=systemd)
     backup_runner = SubprocessBackupCommandRunner()
-    inventory_provider = KubernetesLifecycleInventoryProvider(
+    inventory_provider = ReadonlyLifecycleInventoryProvider(
         config,
-        runner=backup_runner,
-        environment=child_environment,
+        evidence_source=InstalledReadonlyDatabaseEvidenceSource(service_uid=service_uid),
     )
 
     def clock() -> datetime:
