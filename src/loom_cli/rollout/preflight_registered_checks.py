@@ -84,6 +84,11 @@ from loom_cli.rollout.preflight_contract import (
     SecretRedactionPolicy,
     StageCapability,
 )
+from loom_cli.rollout.rehearsal_readiness import (
+    IsolatedRehearsalSession,
+    RehearsalAction,
+    RehearsalResult,
+)
 from loom_cli.rollout.runtime_readiness import (
     REQUIRED_EXECUTABLES,
     REQUIRED_IMPORTS,
@@ -1982,6 +1987,135 @@ def _empty_baseline_probe() -> CheckProbe:
     )
 
 
+def build_rehearsal_checks(
+    actions: Mapping[str, RehearsalAction],
+    *,
+    isolation_id: str,
+    candidate_sha: str,
+    mutation_epoch: int,
+    backup_lease_digest: str,
+    rehearsal_plan_digest: str,
+) -> tuple[RegisteredCheck, ...]:
+    """Build all Tier 3 exact isolated rehearsal actions."""
+    session = IsolatedRehearsalSession(
+        actions,
+        isolation_id=isolation_id,
+        candidate_sha=candidate_sha,
+        mutation_epoch=mutation_epoch,
+    )
+    bindings = {
+        "backup.lease.sha256": backup_lease_digest,
+        "candidate.sha": candidate_sha,
+        "rehearsal.plan.sha256": rehearsal_plan_digest,
+        "staging.mutation-epoch": mutation_epoch,
+    }
+    dependencies = {
+        "rehearsal.namespace": ("manifests.server-schema", "staging.release-baseline"),
+        "rehearsal.db-clone": ("rehearsal.namespace", "backup.lease-eligibility"),
+        "rehearsal.systemd-launch": (
+            "rehearsal.namespace",
+            "systemd.user-manager",
+            "systemd.render",
+        ),
+        "rehearsal.migration": ("rehearsal.db-clone", "migration.plan"),
+        "rehearsal.release": ("rehearsal.migration", "images.contract"),
+        "rehearsal.api-smoke": ("rehearsal.release",),
+        "rehearsal.browser": ("rehearsal.api-smoke", "browser.runtime"),
+        "rehearsal.cleanup": ("rehearsal.browser", "rehearsal.systemd-launch"),
+    }
+    failure_codes = {check_id: check_id + ".failed" for check_id in dependencies}
+    common_inputs = tuple(sorted(bindings))
+
+    def bindings_match(context: CheckContext) -> bool:
+        return all(context.bindings[key] == value for key, value in bindings.items())
+
+    checks: list[RegisteredCheck] = []
+    for check_id, required in dependencies.items():
+
+        def probe(context: CheckContext, *, check_id: str = check_id) -> CheckProbe:
+            if not bindings_match(context):
+                return _empty_rehearsal_probe()
+            try:
+                result = session.execute(check_id)
+            except (OSError, RuntimeError, ValueError):
+                return _empty_rehearsal_probe()
+            return _rehearsal_probe(result)
+
+        checks.append(
+            RegisteredCheck(
+                spec=CheckSpec(
+                    check_id=check_id,
+                    failure_code=failure_codes[check_id],
+                    tier=3,
+                    stage=StageCapability.ISOLATED_REHEARSAL,
+                    dependencies=required,
+                    mutation_class=MutationClass.ISOLATED,
+                    input_keys=common_inputs,
+                    evidence_schema=_rehearsal_evidence_schema(),
+                    timeout_seconds=3600,
+                    freshness_ttl_seconds=3600,
+                    remediation=f"restore and clean the exact isolated {check_id} action",
+                    secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                ),
+                implementation_version="v1",
+                operations={
+                    CheckOperation.PROBE: probe,
+                    CheckOperation.APPLY: probe,
+                    CheckOperation.VERIFY: probe,
+                },
+            )
+        )
+    return tuple(checks)
+
+
+def _rehearsal_evidence_schema() -> tuple[EvidenceField, ...]:
+    return (
+        EvidenceField("ready", "boolean"),
+        EvidenceField("isolation-id", "string"),
+        EvidenceField("candidate-sha", "string"),
+        EvidenceField("observed-epoch", "integer"),
+        EvidenceField("evidence-digest", "sha256"),
+        EvidenceField("journal-digest", "sha256"),
+        EvidenceField("protected-mutation", "boolean"),
+        EvidenceField("cleanup-verified", "boolean"),
+        EvidenceField("blockers", "string-map"),
+    )
+
+
+def _rehearsal_probe(result: RehearsalResult) -> CheckProbe:
+    return CheckProbe(
+        passed=result.ready,
+        evidence={
+            "ready": result.ready,
+            "isolation-id": result.isolation_id,
+            "candidate-sha": result.candidate_sha,
+            "observed-epoch": result.mutation_epoch,
+            "evidence-digest": result.evidence_digest,
+            "journal-digest": result.journal_digest,
+            "protected-mutation": result.protected_mutation,
+            "cleanup-verified": result.cleanup_verified,
+            "blockers": dict(result.blockers),
+        },
+    )
+
+
+def _empty_rehearsal_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "ready": False,
+            "isolation-id": "unavailable",
+            "candidate-sha": "unavailable",
+            "observed-epoch": 0,
+            "evidence-digest": "0" * 64,
+            "journal-digest": "0" * 64,
+            "protected-mutation": False,
+            "cleanup-verified": False,
+            "blockers": {"binding": "rehearsal-unavailable"},
+        },
+    )
+
+
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
@@ -1998,6 +2132,7 @@ __all__ = [
     "build_lifecycle_launch_cancel_check",
     "build_manifest_preflight_checks",
     "build_migration_plan_check",
+    "build_rehearsal_checks",
     "build_runner_install_check",
     "build_staging_baseline_checks",
     "build_systemd_render_check",

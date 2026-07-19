@@ -55,6 +55,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_lifecycle_launch_cancel_check,
     build_manifest_preflight_checks,
     build_migration_plan_check,
+    build_rehearsal_checks,
     build_staging_baseline_checks,
     build_systemd_render_check,
     build_systemd_user_manager_check,
@@ -63,6 +64,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     gb10_mount_binding_digest,
     gb10_target_inventory_digest,
 )
+from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS, RehearsalResult
 from loom_cli.rollout.runtime_readiness import REQUIRED_EXECUTABLES, REQUIRED_IMPORTS
 from loom_cli.rollout.staging_baseline_readiness import BaselineProbeResult
 
@@ -1476,3 +1478,59 @@ def test_registered_staging_baseline_runs_independent_readonly_blockers() -> Non
     assert by_id["staging.network"].evidence["blockers"] == {"dns": "canonical-route-unresolved"}
     assert by_id["staging.storage-db"].passed
     assert by_id["staging.release-baseline"].blocked_by == ("staging.network",)
+
+
+def test_registered_rehearsal_runs_exact_isolated_journaled_actions() -> None:
+    calls: list[str] = []
+
+    def result(check_id: str) -> RehearsalResult:
+        calls.append(check_id)
+        return RehearsalResult(
+            check_id=check_id,
+            isolation_id="rehearsal-abc123",
+            candidate_sha="1" * 40,
+            mutation_epoch=8,
+            evidence_digest=hashlib.sha256(check_id.encode()).hexdigest(),
+            journal_digest=hashlib.sha256((check_id + "-journal").encode()).hexdigest(),
+            protected_mutation=False,
+            cleanup_verified=check_id == "rehearsal.cleanup",
+            blockers={},
+        )
+
+    checks = build_rehearsal_checks(
+        {check_id: lambda check_id=check_id: result(check_id) for check_id in REHEARSAL_CHECK_IDS},
+        isolation_id="rehearsal-abc123",
+        candidate_sha="1" * 40,
+        mutation_epoch=8,
+        backup_lease_digest="b" * 64,
+        rehearsal_plan_digest="c" * 64,
+    )
+    dependencies = sorted(
+        {
+            dependency
+            for check in checks
+            for dependency in check.spec.dependencies
+            if not dependency.startswith("rehearsal.")
+        }
+    )
+    context = CheckContext(
+        {
+            "backup.lease.sha256": "b" * 64,
+            "candidate.sha": "1" * 40,
+            "rehearsal.plan.sha256": "c" * 64,
+            "staging.mutation-epoch": 8,
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+    dag = PreflightDag((*(_passing_dependency(item) for item in dependencies), *checks))
+
+    executions = dag.run(context, through_tier=3)
+    by_id = {execution.check_id: execution for execution in executions}
+    assert set(calls) == set(REHEARSAL_CHECK_IDS)
+    assert all(by_id[check_id].passed for check_id in REHEARSAL_CHECK_IDS)
+    assert by_id["rehearsal.cleanup"].evidence["cleanup-verified"] is True
+    assert by_id["rehearsal.cleanup"].evidence["protected-mutation"] is False
+    assert all(
+        {CheckOperation.PROBE, CheckOperation.APPLY, CheckOperation.VERIFY} <= set(check.operations)
+        for check in checks
+    )
