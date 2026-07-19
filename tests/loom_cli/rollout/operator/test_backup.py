@@ -36,6 +36,7 @@ from loom_cli.rollout.operator.model import (
     CandidateBinding,
     RolloutRequest,
 )
+from loom_cli.rollout.operator.rollout_checkpoint import build_immutable_inventory
 
 FIXED_NOW = datetime(2026, 7, 13, 20, 0, tzinfo=UTC)
 POSTGRES_BYTES = b"pg\x00dump\xffbytes"
@@ -327,6 +328,48 @@ def test_binary_dump_and_exact_secret_allowlist_never_expose_credentials(tmp_pat
     for value in (MINIO_ACCESS_KEY, MINIO_SECRET_KEY):
         assert value not in rendered_boundary
     assert runner.timeouts == [600.0, 30.0, 30.0, 30.0, 30.0]
+
+
+def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    runner = RecordingRunner()
+
+    def inventory(created_at: datetime):
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-staging",
+            mutation_epoch=6,
+            schema_revision="0066",
+            created_at=created_at,
+            objects=[],
+        )
+
+    backup = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=FailingMinioMirror(),
+        now=lambda: FIXED_NOW,
+        object_inventory_provider=inventory,
+    ).create(make_request())
+
+    manifest = json.loads(backup.manifest_path.read_text(encoding="utf-8"))
+    bundle = backup.manifest_path.parent
+    assert manifest["schema_version"] == 2
+    assert set(manifest["components"]) == {
+        "postgres",
+        "object_inventory",
+        "k8s_secrets",
+    }
+    assert not (bundle / "minio").exists()
+    inventory_document = json.loads((bundle / "object-inventory.json").read_text(encoding="utf-8"))
+    assert inventory_document["mutation_epoch"] == 6
+    assert len(inventory_document["inventory_root"]) == 64
+    assert all("port-forward" not in argv for argv in runner.argvs)
+    assert not any(argv[-2:] == ["-o", "json"] for argv in runner.argvs)
+    assert runner.timeouts == [600.0, 30.0, 30.0, 30.0]
 
 
 def test_oversized_postgres_dump_stops_before_crossing_component_cap(

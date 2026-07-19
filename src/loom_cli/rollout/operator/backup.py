@@ -49,6 +49,7 @@ from .config import (
     OperatorConfig,
 )
 from .model import APPROVED_BACKUP_EVENT_REASONS, RolloutRequest
+from .rollout_checkpoint import ImmutableObjectInventory
 
 logger = logging.getLogger(__name__)
 
@@ -2098,6 +2099,7 @@ class BackupCreator:
         inode_reserve: int = _MINIO_INODE_RESERVE,
         capacity_provider: CapacityProvider = _capacity_snapshot,
         traversal_limits: BackupTraversalLimits | None = None,
+        object_inventory_provider: Callable[[datetime], ImmutableObjectInventory] | None = None,
     ) -> None:
         self.config = config
         if service_uid is None:
@@ -2140,6 +2142,7 @@ class BackupCreator:
             config,
             max_total_bytes=max_total_bytes,
         )
+        self._object_inventory_provider = object_inventory_provider
 
     def _bundle_root(self, request: RolloutRequest, created_at: datetime) -> Path:
         return (
@@ -2341,16 +2344,23 @@ class BackupCreator:
         minio_path: Path,
         secrets_path: Path,
         resources: _BackupResourceBudget,
+        object_inventory_path: Path | None = None,
     ) -> None:
+        components = {
+            "postgres": postgres_path,
+            "k8s_secrets": secrets_path,
+        }
+        if object_inventory_path is None:
+            components["minio"] = minio_path
+            schema_version = 1
+        else:
+            components["object_inventory"] = object_inventory_path
+            schema_version = 2
         write_backup_manifest(
             environment=self.config.environment,
             namespace=self.config.namespace,
             output_path=manifest_path,
-            components={
-                "postgres": postgres_path,
-                "minio": minio_path,
-                "k8s_secrets": secrets_path,
-            },
+            components=components,
             now=created_at,
             limits=self._traversal_limits,
             write_output=lambda path, payload: _write_private_bytes(
@@ -2359,6 +2369,7 @@ class BackupCreator:
                 resources=resources,
                 component="manifest",
             ),
+            schema_version=schema_version,
         )
         _fsync_private_file(manifest_path)
         _fsync_directory(manifest_path.parent)
@@ -2624,25 +2635,68 @@ class BackupCreator:
         postgres_dir = bundle_root / "postgres"
         minio_dir = bundle_root / "minio"
         secrets_dir = bundle_root / "secrets"
-        for directory in (postgres_dir, minio_dir, secrets_dir):
+        component_directories = [postgres_dir, secrets_dir]
+        if self._object_inventory_provider is None:
+            component_directories.append(minio_dir)
+        for directory in component_directories:
             _stage(
                 "backup_root_create_failed",
                 partial(_private_directory, directory, resources=resources),
             )
 
-        buckets = _stage("minio_bucket_config_invalid", self._load_buckets)
-        transport_failed = False
-        try:
-            local_port, stop_port_forward = self._start_minio_transport()
-        except Exception:
-            transport_failed = True
-        if transport_failed:
-            raise BackupError(
-                "minio_transport_failed",
-                public_reason="backup_transport_failed",
-            )
-        operation_failure: BaseException | None = None
-        try:
+        object_inventory_path: Path | None = None
+        if self._object_inventory_provider is None:
+            buckets = _stage("minio_bucket_config_invalid", self._load_buckets)
+            transport_failed = False
+            try:
+                local_port, stop_port_forward = self._start_minio_transport()
+            except Exception:
+                transport_failed = True
+            if transport_failed:
+                raise BackupError(
+                    "minio_transport_failed",
+                    public_reason="backup_transport_failed",
+                )
+            operation_failure: BaseException | None = None
+            try:
+                _stage(
+                    "postgres_dump_failed",
+                    lambda: self._dump_postgres(
+                        postgres_dir / "loom.dump",
+                        resources=resources,
+                    ),
+                )
+                access_key, secret_key = _stage(
+                    "minio_credentials_failed",
+                    self._read_minio_credentials,
+                )
+                _stage(
+                    "minio_snapshot_failed",
+                    lambda: self._mirror_minio(
+                        minio_dir,
+                        local_port=local_port,
+                        stop_port_forward=stop_port_forward,
+                        buckets=buckets,
+                        access_key=access_key,
+                        secret_key=secret_key,
+                        resources=resources,
+                    ),
+                )
+            except BaseException as exc:
+                operation_failure = exc
+            cleanup_failed = False
+            try:
+                stop_port_forward()
+            except BaseException:
+                cleanup_failed = True
+            if cleanup_failed:
+                raise BackupError(
+                    "minio_transport_cleanup_failed",
+                    public_reason="backup_transport_failed",
+                )
+            if operation_failure is not None:
+                raise operation_failure
+        else:
             _stage(
                 "postgres_dump_failed",
                 lambda: self._dump_postgres(
@@ -2650,36 +2704,40 @@ class BackupCreator:
                     resources=resources,
                 ),
             )
-            access_key, secret_key = _stage(
-                "minio_credentials_failed",
-                self._read_minio_credentials,
+            inventory_provider = self._object_inventory_provider
+            if inventory_provider is None:
+                raise BackupError("object_inventory_provider_unavailable")
+            inventory = _stage(
+                "object_inventory_failed",
+                lambda: inventory_provider(created_at),
             )
+            if (
+                inventory.environment != self.config.environment
+                or inventory.namespace != self.config.namespace
+                or inventory.created_at != created_at
+            ):
+                raise BackupError("object_inventory_binding_failed")
+            object_inventory_path = bundle_root / "object-inventory.json"
+            payload = (
+                json.dumps(
+                    {
+                        **inventory.to_dict(),
+                        "inventory_root": inventory.inventory_root,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
             _stage(
-                "minio_snapshot_failed",
-                lambda: self._mirror_minio(
-                    minio_dir,
-                    local_port=local_port,
-                    stop_port_forward=stop_port_forward,
-                    buckets=buckets,
-                    access_key=access_key,
-                    secret_key=secret_key,
+                "object_inventory_write_failed",
+                lambda: _write_private_bytes(
+                    object_inventory_path,
+                    payload,
                     resources=resources,
+                    component="object_inventory",
                 ),
             )
-        except BaseException as exc:
-            operation_failure = exc
-        cleanup_failed = False
-        try:
-            stop_port_forward()
-        except BaseException:
-            cleanup_failed = True
-        if cleanup_failed:
-            raise BackupError(
-                "minio_transport_cleanup_failed",
-                public_reason="backup_transport_failed",
-            )
-        if operation_failure is not None:
-            raise operation_failure
         for secret_name in _RESTORE_SECRET_NAMES:
             _stage(
                 "secret_export_failed",
@@ -2703,6 +2761,7 @@ class BackupCreator:
                     minio_path=minio_dir,
                     secrets_path=secrets_dir,
                     resources=resources,
+                    object_inventory_path=object_inventory_path,
                 ),
             )
             validation_time = _stage(
