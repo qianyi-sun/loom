@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from loom_cli.rollout.rehearsal_action_source import RehearsalPlan, RehearsalResources
+from loom_cli.rollout.rehearsal_action_source import (
+    RehearsalPlan,
+    RehearsalResources,
+    RehearsalSmokeAuthority,
+)
 from loom_cli.rollout.rehearsal_executor import IsolatedRehearsalExecutor, _default_stream_run
 from loom_cli.rollout.rehearsal_release import RehearsalReleaseArtifact
 from loom_cli.rollout.rehearsal_secret_restore import RehearsalSecretArtifact
@@ -56,6 +60,14 @@ def _plan() -> RehearsalPlan:
         resources=RehearsalResources.derive(
             "rehearsal-" + "5" * 24,
             route_origin="https://staging.example.test/dev",
+        ),
+        smoke_authority=RehearsalSmokeAuthority(
+            represented_username="devansh",
+            team_id="11111111-1111-4111-8111-111111111111",
+            admin_actor="loom-staging-rollout",
+            task_id="loom-smoke/gb10-oracle-hello-world",
+            required_worker_pool="gb10-arm64",
+            agent="oracle",
         ),
     )
 

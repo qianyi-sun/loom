@@ -10,7 +10,11 @@ import yaml  # type: ignore[import-untyped]
 
 from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
-from loom_cli.rollout.rehearsal_action_source import RehearsalPlan, RehearsalResources
+from loom_cli.rollout.rehearsal_action_source import (
+    RehearsalPlan,
+    RehearsalResources,
+    RehearsalSmokeAuthority,
+)
 from loom_cli.rollout.rehearsal_release import build_rehearsal_release_artifact
 
 
@@ -117,6 +121,14 @@ def _plan(tmp_path: Path) -> RehearsalPlan:
         resources=RehearsalResources.derive(
             "rehearsal-" + "5" * 24,
             route_origin="https://yylx.world/dev",
+        ),
+        smoke_authority=RehearsalSmokeAuthority(
+            represented_username="devansh",
+            team_id="11111111-1111-4111-8111-111111111111",
+            admin_actor="loom-staging-rollout",
+            task_id="loom-smoke/gb10-oracle-hello-world",
+            required_worker_pool="gb10-arm64",
+            agent="oracle",
         ),
     )
 

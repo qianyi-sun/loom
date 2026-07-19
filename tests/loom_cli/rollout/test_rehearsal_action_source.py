@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from loom_cli.rollout.rehearsal_action_source import (
     RehearsalObservation,
     RehearsalPlan,
     RehearsalResources,
+    RehearsalSmokeAuthority,
 )
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
 
@@ -119,7 +121,19 @@ def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
         browser_report_schema_sha256="c" * 64,
         cluster_name="loom-staging",
         route_origin="https://staging.example.test/dev",
+        smoke_authority=_smoke_authority(),
         backend=backend,
+    )
+
+
+def _smoke_authority() -> RehearsalSmokeAuthority:
+    return RehearsalSmokeAuthority(
+        represented_username="devansh",
+        team_id="11111111-1111-4111-8111-111111111111",
+        admin_actor="loom-staging-rollout",
+        task_id="loom-smoke/gb10-oracle-hello-world",
+        required_worker_pool="gb10-arm64",
+        agent="oracle",
     )
 
 
@@ -166,12 +180,65 @@ def test_isolation_identity_changes_with_browser_contract(tmp_path: Path) -> Non
         browser_report_schema_sha256="d" * 64,
         cluster_name="loom-staging",
         route_origin="https://staging.example.test/dev",
+        smoke_authority=_smoke_authority(),
         backend=Backend(),
     )
 
     assert original.identity(_candidate(), _checkpoint(tmp_path)) != changed.identity(
         _candidate(), _checkpoint(tmp_path)
     )
+
+
+def test_isolation_identity_changes_with_smoke_authority(tmp_path: Path) -> None:
+    original = _source(Backend(), tmp_path)
+    changed = RehearsalActionSource(
+        image_artifacts=_artifacts,
+        manifest_artifacts=_manifests,
+        artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
+        migration_plan_sha256="b" * 64,
+        migration_target_revision="0067",
+        browser_report_schema_sha256="c" * 64,
+        cluster_name="loom-staging",
+        route_origin="https://staging.example.test/dev",
+        smoke_authority=replace(_smoke_authority(), agent="codex"),
+        backend=Backend(),
+    )
+
+    assert original.identity(_candidate(), _checkpoint(tmp_path)) != changed.identity(
+        _candidate(), _checkpoint(tmp_path)
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("team_id", "11111111-1111-1111-8111-111111111111"),
+        ("team_id", "11111111-1111-4111-1111-111111111111"),
+        ("task_id", "../loom-smoke/gb10-oracle-hello-world"),
+        ("task_id", "loom-smoke//gb10-oracle-hello-world"),
+        ("admin_actor", "rollout actor"),
+    ],
+)
+def test_smoke_authority_rejects_unsafe_identity(field: str, value: str) -> None:
+    with pytest.raises(ValueError, match=r"smoke (team identity|authority) is invalid"):
+        replace(_smoke_authority(), **{field: value})
+
+
+def test_plan_schema_round_trips_smoke_authority(tmp_path: Path) -> None:
+    backend = Backend()
+    source = _source(backend, tmp_path)
+    candidate = _candidate()
+    checkpoint = _checkpoint(tmp_path)
+    isolation_id, _digest = source.identity(candidate, checkpoint)
+    source.actions(candidate, checkpoint, isolation_id)["rehearsal.namespace"]()
+    plan = backend.calls[-1][1]
+
+    record = plan.to_record()
+    assert RehearsalPlan.from_record(record) == plan
+
+    record["schema_version"] = 1
+    with pytest.raises(ValueError, match="plan schema is invalid"):
+        RehearsalPlan.from_record(record)
 
 
 @pytest.mark.parametrize(

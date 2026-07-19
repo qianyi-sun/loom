@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from loom_cli.rollout.rehearsal_action_source import RehearsalPlan, RehearsalResources
+from loom_cli.rollout.rehearsal_action_source import (
+    RehearsalPlan,
+    RehearsalResources,
+    RehearsalSmokeAuthority,
+)
 from loom_cli.rollout.rehearsal_journal_backend import (
     JournaledRehearsalBackend,
     RehearsalStepOutcome,
@@ -53,6 +57,14 @@ def _plan(*, candidate_sha: str = "a" * 40) -> RehearsalPlan:
         resources=RehearsalResources.derive(
             "rehearsal-" + "5" * 24,
             route_origin="https://staging.example.test/dev",
+        ),
+        smoke_authority=RehearsalSmokeAuthority(
+            represented_username="devansh",
+            team_id="11111111-1111-4111-8111-111111111111",
+            admin_actor="loom-staging-rollout",
+            task_id="loom-smoke/gb10-oracle-hello-world",
+            required_worker_pool="gb10-arm64",
+            agent="oracle",
         ),
     )
 

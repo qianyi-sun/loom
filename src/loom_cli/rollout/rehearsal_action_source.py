@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,8 @@ _ROUTE_RE = re.compile(r"^https://[a-z0-9.-]+/[a-z0-9/-]+$")
 _IMAGE_TAG_RE = re.compile(r"^staging-[a-z0-9][a-z0-9-]{5,63}$")
 _CLUSTER_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _REVISION_RE = re.compile(r"^[0-9]{4}(?:_[a-z0-9_]+)?$")
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +79,60 @@ class RehearsalResources:
 
 
 @dataclass(frozen=True, slots=True)
+class RehearsalSmokeAuthority:
+    """Non-secret represented-user smoke inputs bound into the isolation ID."""
+
+    represented_username: str
+    team_id: str
+    admin_actor: str
+    task_id: str
+    required_worker_pool: str
+    agent: str
+
+    def __post_init__(self) -> None:
+        try:
+            parsed_team = uuid.UUID(self.team_id)
+        except ValueError as exc:
+            raise ValueError("rehearsal smoke team identity is invalid") from exc
+        if (
+            parsed_team.version != 4
+            or str(parsed_team) != self.team_id
+            or _SAFE_NAME_RE.fullmatch(self.represented_username) is None
+            or _SAFE_NAME_RE.fullmatch(self.admin_actor) is None
+            or _TASK_ID_RE.fullmatch(self.task_id) is None
+            or _SAFE_NAME_RE.fullmatch(self.required_worker_pool) is None
+            or _SAFE_NAME_RE.fullmatch(self.agent) is None
+        ):
+            raise ValueError("rehearsal smoke authority is invalid")
+
+    def to_record(self) -> dict[str, str]:
+        return {
+            "admin_actor": self.admin_actor,
+            "agent": self.agent,
+            "represented_username": self.represented_username,
+            "required_worker_pool": self.required_worker_pool,
+            "task_id": self.task_id,
+            "team_id": self.team_id,
+        }
+
+    @classmethod
+    def from_record(cls, value: Mapping[str, object]) -> RehearsalSmokeAuthority:
+        expected = {
+            "admin_actor",
+            "agent",
+            "represented_username",
+            "required_worker_pool",
+            "task_id",
+            "team_id",
+        }
+        if set(value) != expected or any(
+            not isinstance(value.get(field), str) for field in expected
+        ):
+            raise ValueError("rehearsal smoke authority schema is invalid")
+        return cls(**{field: str(value[field]) for field in expected})
+
+
+@dataclass(frozen=True, slots=True)
 class RehearsalPlan:
     """Immutable exact-candidate plan shared by identity and action factories."""
 
@@ -102,6 +159,7 @@ class RehearsalPlan:
     migration_target_revision: str
     browser_report_schema_sha256: str
     resources: RehearsalResources
+    smoke_authority: RehearsalSmokeAuthority
 
     def __post_init__(self) -> None:
         image_digests = dict(self.image_digests)
@@ -192,7 +250,8 @@ class RehearsalPlan:
             "rendered_manifest_path": str(self.rendered_manifest_path),
             "rendered_manifest_sha256": self.rendered_manifest_sha256,
             "schema_revision": self.schema_revision,
-            "schema_version": 1,
+            "schema_version": 2,
+            "smoke_authority": self.smoke_authority.to_record(),
         }
 
     @classmethod
@@ -223,18 +282,21 @@ class RehearsalPlan:
             "rendered_manifest_sha256",
             "schema_revision",
             "schema_version",
+            "smoke_authority",
         }
         resources = value.get("resources")
+        smoke_authority = value.get("smoke_authority")
         image_digests = value.get("image_digests")
         mutation_epoch = value.get("mutation_epoch")
         if (
             set(value) != expected
             or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 1
+            or value.get("schema_version") != 2
             or type(mutation_epoch) is not int
             or not isinstance(resources, Mapping)
             or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
             or not isinstance(image_digests, Mapping)
+            or not isinstance(smoke_authority, Mapping)
             or not image_digests
             or any(
                 not isinstance(key, str) or not isinstance(item, str)
@@ -299,6 +361,7 @@ class RehearsalPlan:
                 route=str(resources["route"]),
                 systemd_unit=str(resources["systemd_unit"]),
             ),
+            smoke_authority=RehearsalSmokeAuthority.from_record(smoke_authority),
         )
 
 
@@ -330,6 +393,7 @@ class RehearsalActionSource:
     browser_report_schema_sha256: str
     cluster_name: str
     route_origin: str
+    smoke_authority: RehearsalSmokeAuthority
     backend: RehearsalBackend
 
     def __post_init__(self) -> None:
@@ -450,6 +514,7 @@ class RehearsalActionSource:
             migration_target_revision=self.migration_target_revision,
             browser_report_schema_sha256=self.browser_report_schema_sha256,
             resources=resources,
+            smoke_authority=self.smoke_authority,
         )
 
     def _isolation_id(
@@ -473,7 +538,8 @@ class RehearsalActionSource:
             "migration_plan_sha256": self.migration_plan_sha256,
             "migration_target_revision": self.migration_target_revision,
             "route_origin": self.route_origin,
-            "schema_version": 1,
+            "smoke_authority": self.smoke_authority.to_record(),
+            "schema_version": 2,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -487,4 +553,5 @@ __all__ = [
     "RehearsalObservation",
     "RehearsalPlan",
     "RehearsalResources",
+    "RehearsalSmokeAuthority",
 ]

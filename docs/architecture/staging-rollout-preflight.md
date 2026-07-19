@@ -258,7 +258,10 @@ forbidden.
 `RehearsalActionSource` is the sole plan and resource-name authority for these
 actions. Its identity factory and action factory consume the same checkpoint,
 candidate tree, image artifact set, migration plan, browser report schema and
-route origin. Namespace, database, object-prefix, route and transient-unit
+route origin. The represented username, team UUID, admin audit actor, smoke
+task, required worker pool and agent are strict non-secret authority fields in
+that same plan; changing any of them changes the isolation identity before the
+helper can run. Namespace, database, object-prefix, route and transient-unit
 names are derived from that immutable plan and must retain their dedicated
 `rehearsal` prefixes; a backend cannot substitute `loom-staging` or another
 protected resource name. A change to any bound input changes both the plan
