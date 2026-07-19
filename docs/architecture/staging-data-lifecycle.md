@@ -27,7 +27,10 @@ admission decision together. A missing inventory or policy-digest drift denies
 admission before request publication or backup.
 
 The object registry stores exact bucket, key, optional version, digest, and
-size. A generic prefix is never sufficient deletion authority.
+size. A generic prefix is never sufficient deletion authority. Read-only
+inventory uses one repeatable-read database snapshot and reports the count of
+unclassified rows in every execution-history table; any nonzero count is bound
+into the plan digest and blocks apply.
 
 ## Mutation epoch
 
@@ -61,6 +64,9 @@ when its exact SHA-256 is registered; a versioned object is addressed by its
 exact version. Object deletion, absence verification, business-metadata
 removal, and the epoch increment are distinct journaled transitions. A dry run
 records its inventory digest but cannot call the object-store deleter.
+The S3/MinIO adapter checks exact size and version before delete, and streams an
+unversioned object to verify its registered SHA-256. Drift is detected before
+the delete call; absence verification uses the same exact version identity.
 After a failed apply, resume reconstructs the canonical epoch-bound plan from
 the journal, verifies one exact deletion token across every item, and claims
 the failed run with a compare-and-swap transition before doing more work. It

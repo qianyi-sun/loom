@@ -385,6 +385,7 @@ def build_gc_plan(
     now: datetime,
     authorities: Iterable[AuthorityInventory],
     objects: Iterable[RegisteredObject],
+    additional_blockers: Iterable[str] = (),
 ) -> GcPlan:
     """Build an exact, deterministic plan; ambiguity becomes a blocker."""
     if mutation_epoch < 0:
@@ -392,7 +393,7 @@ def build_gc_plan(
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
 
-    blockers: list[str] = []
+    blockers = [value for value in additional_blockers if value]
     eligible: dict[UUID, AuthorityInventory] = {}
     seen_authority_ids: set[UUID] = set()
     for authority in authorities:

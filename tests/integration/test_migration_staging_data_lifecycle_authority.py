@@ -24,6 +24,7 @@ from loom.data_lifecycle_gc import (
     resume_gc,
 )
 from loom.data_lifecycle_gc_sql import SqlAlchemyGcJournal
+from loom.data_lifecycle_inventory_sql import SqlAlchemyLifecycleInventory
 from loom.staging_mutation_epoch import (
     MutationEpochAdvance,
     ProtectedMutationClass,
@@ -322,6 +323,37 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
         assert authority_count == 0
     finally:
         engine.dispose()
+
+
+def test_sql_inventory_is_read_only_and_binds_unclassified_counts(
+    postgres_url_at_0065: str,
+) -> None:
+    engine = create_engine(postgres_url_at_0065)
+    scope = GcScope(environment="staging", namespace="loom-staging")
+    try:
+        with engine.connect() as connection:
+            gc_runs_before = connection.execute(
+                text("SELECT count(*) FROM data_lifecycle_gc_runs")
+            ).scalar_one()
+        snapshot = SqlAlchemyLifecycleInventory(engine).load(scope=scope)
+        plan = snapshot.build_plan(now=datetime(2026, 7, 20, 2, tzinfo=UTC))
+        with engine.connect() as connection:
+            gc_runs_after = connection.execute(
+                text("SELECT count(*) FROM data_lifecycle_gc_runs")
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert snapshot.scope == scope
+    assert dict(snapshot.unclassified_rows) == {
+        "artifacts": 0,
+        "batches": 0,
+        "llm_calls": 0,
+        "trial_events": 0,
+        "trials": 0,
+    }
+    assert plan.mutation_epoch == snapshot.mutation_epoch
+    assert gc_runs_after == gc_runs_before
 
 
 def test_downgrade_refuses_to_discard_lifecycle_data(postgres_url_at_0065: str) -> None:

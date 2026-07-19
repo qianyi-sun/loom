@@ -151,6 +151,30 @@ def test_versioned_object_does_not_require_content_hash() -> None:
     assert plan.objects == (item,)
 
 
+def test_external_inventory_blockers_are_bound_into_plan_digest() -> None:
+    authority = _authority()
+    plan = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=0,
+        now=NOW,
+        authorities=[authority],
+        objects=[_object(authority.id)],
+        additional_blockers=["trials contains 2 unclassified execution rows"],
+    )
+
+    with pytest.raises(LifecycleGcPlanError, match="unclassified execution rows"):
+        plan.require_applicable()
+    without_blocker = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=0,
+        now=NOW,
+        authorities=[authority],
+        objects=[_object(authority.id, id=plan.objects[0].id)],
+    )
+    assert serialize_gc_plan(plan)["inventory_digest"] == plan.inventory_digest
+    assert plan.inventory_digest != without_blocker.inventory_digest
+
+
 def test_reconciliation_reports_both_orphan_directions() -> None:
     authority = _authority()
     registered = _object(authority.id)
