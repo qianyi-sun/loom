@@ -20,6 +20,7 @@ from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunn
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
 from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
+    GB10SharedMountReadiness,
     probe_gb10_fleet_readonly,
     probe_gb10_ssh_topology,
 )
@@ -1106,6 +1107,111 @@ def build_gb10_ssh_topology_check(
     )
 
 
+def gb10_mount_binding_digest(binding: Mapping[str, int]) -> str:
+    required = {
+        "service_uid",
+        "service_primary_gid",
+        "consumer_uid",
+        "consumer_primary_gid",
+        "shared_gid",
+        "parent_device",
+        "parent_inode",
+        "authority_device",
+        "authority_inode",
+        "repository_device",
+        "repository_inode",
+    }
+    values = dict(binding)
+    if set(values) != required or any(
+        type(value) is not int or value < 0 for value in values.values()
+    ):
+        raise ValueError("GB10 mount binding is invalid")
+    return hashlib.sha256(
+        json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def build_gb10_shared_mount_check(
+    mount_source: Callable[[], GB10SharedMountReadiness],
+    *,
+    targets: tuple[GB10ProbeTarget, ...],
+    expected_binding_digest: str,
+) -> RegisteredCheck:
+    """Build the Tier 0 exact shared mount and immutable checkout-root invariant."""
+    expected_inventory_digest = gb10_target_inventory_digest(targets)
+    if len(expected_binding_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_binding_digest
+    ):
+        raise ValueError("GB10 mount binding digest is invalid")
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["gb10.inventory-digest"] != expected_inventory_digest
+            or context.bindings["gb10.mount-binding.sha256"] != expected_binding_digest
+        ):
+            return _empty_gb10_mount_probe(targets, expected_binding_digest)
+        try:
+            evidence = mount_source()
+        except Exception:
+            return _empty_gb10_mount_probe(targets, expected_binding_digest)
+        return CheckProbe(
+            passed=evidence.ready
+            and set(evidence.host_digests) == {target.ssh_target for target in targets},
+            evidence={
+                "host-digests": dict(evidence.host_digests),
+                "failed-hosts": {host: "mount-drift" for host in evidence.failed_hosts},
+                "host-count": len(targets),
+                "binding-digest": expected_binding_digest,
+                "mount-digest": evidence.evidence_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="gb10.shared-mount",
+            failure_code="gb10.shared-mount.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("gb10.ssh-topology",),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "gb10.inventory-digest",
+                "gb10.mount-binding.sha256",
+                "runner.config.sha256",
+            ),
+            evidence_schema=(
+                EvidenceField("host-digests", "string-map"),
+                EvidenceField("failed-hosts", "string-map"),
+                EvidenceField("host-count", "integer"),
+                EvidenceField("binding-digest", "sha256"),
+                EvidenceField("mount-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=120,
+            remediation="restore the canonical shared mount, UID/GID authority, and immutable checkout root",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_gb10_mount_probe(
+    targets: tuple[GB10ProbeTarget, ...],
+    binding_digest: str,
+) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "host-digests": {},
+            "failed-hosts": {target.ssh_target: "mount-drift" for target in targets},
+            "host-count": len(targets),
+            "binding-digest": binding_digest,
+            "mount-digest": "0" * 64,
+        },
+    )
+
+
 def _empty_gb10_ssh_probe(
     targets: tuple[GB10ProbeTarget, ...],
     ssh_config_digest: str,
@@ -1224,6 +1330,7 @@ __all__ = [
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
     "build_gb10_host_readiness_check",
+    "build_gb10_shared_mount_check",
     "build_gb10_ssh_topology_check",
     "build_kubernetes_client_check",
     "build_lifecycle_launch_cancel_check",
@@ -1231,5 +1338,6 @@ __all__ = [
     "build_systemd_user_manager_check",
     "build_tools_runtime_check",
     "credential_source_set_digest",
+    "gb10_mount_binding_digest",
     "gb10_target_inventory_digest",
 ]

@@ -110,6 +110,38 @@ class GB10SshTopology:
         ).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class GB10SharedMountReadiness:
+    host_digests: Mapping[str, str]
+    failed_hosts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        digests = dict(self.host_digests)
+        hosts = (*digests, *self.failed_hosts)
+        if (
+            not hosts
+            or len(set(hosts)) != len(hosts)
+            or any(_HOST_RE.fullmatch(host) is None for host in hosts)
+            or any(re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in digests.values())
+        ):
+            raise ValueError("GB10 shared mount evidence is inconsistent")
+        object.__setattr__(self, "host_digests", MappingProxyType(digests))
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.host_digests) and not self.failed_hosts
+
+    @property
+    def evidence_digest(self) -> str:
+        payload = {
+            "failed": self.failed_hosts,
+            "hosts": dict(self.host_digests),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
 def _remote_probe_source(service: str) -> str:
     """Return a fixed Python probe that emits only an allowlisted JSON object."""
     if _SERVICE_RE.fullmatch(service) is None:
@@ -370,6 +402,7 @@ __all__ = [
     "DEFAULT_SETTLE_INTERVAL_SECONDS",
     "GB10FleetReadiness",
     "GB10ProbeTarget",
+    "GB10SharedMountReadiness",
     "GB10SshTopology",
     "probe_gb10_fleet_readonly",
     "probe_gb10_ssh_topology",

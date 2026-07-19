@@ -15,6 +15,7 @@ import stat
 import subprocess
 import tomllib
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -26,6 +27,7 @@ from loom_cli.rollout.credential_authority import (
     safe_content_fingerprint,
 )
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
+from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
 from loom_cli.rollout.runtime_readiness import ModuleImporter, probe_runtime_readiness
 
@@ -588,19 +590,74 @@ def _shared_repository_binding(
     }
 
 
-def _gb10_shared_repository_probe(
+def _validate_gb10_shared_mount_output(
+    output: str,
+    *,
+    host: str,
+    binding: dict[str, int],
+) -> str | None:
+    fields = output.strip().split(";")
+    if len(fields) != 21 or any(not field for field in fields):
+        return None
+    try:
+        remote_uid = int(fields[0])
+        remote_groups = {int(value) for value in fields[1].split(",")}
+        values: list[int] = []
+        for offset in range(2, 17, 5):
+            values.extend(
+                (
+                    int(fields[offset]),
+                    int(fields[offset + 1]),
+                    int(fields[offset + 2], 8),
+                    int(fields[offset + 3]),
+                    int(fields[offset + 4]),
+                )
+            )
+        mount_type = fields[17]
+        mount_source = fields[18]
+        mount_device = (int(fields[19]), int(fields[20]))
+        parent = values[0:5]
+        authority = values[5:10]
+        repository = values[10:15]
+        repository_device = (os.major(repository[3]), os.minor(repository[3]))
+    except (OverflowError, ValueError):
+        return None
+    if (
+        remote_uid != binding["consumer_uid"]
+        or binding["shared_gid"] not in remote_groups
+        or parent[:3] != [binding["consumer_uid"], binding["shared_gid"], int("2775", 8)]
+        or authority[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
+        or repository[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
+        or any(value <= 0 for value in (*parent[3:], *authority[3:], *repository[3:]))
+        or mount_device != repository_device
+        or (
+            host == "trt-gb10-2"
+            and (mount_type != "ext4" or mount_source == _SHARED_REPOSITORY_SOURCE)
+        )
+        or (
+            host != "trt-gb10-2"
+            and (mount_type != "nfs4" or mount_source != _SHARED_REPOSITORY_SOURCE)
+        )
+    ):
+        return None
+    return hashlib.sha256(output.strip().encode("ascii")).hexdigest()
+
+
+def probe_gb10_shared_mount_readonly(
     run: CommandRunner,
     *,
     ssh_config: Path,
     identity: Path,
     hosts: tuple[str, ...],
     binding: dict[str, int],
-) -> str | None:
-    if hosts != ACTIVE_GB10_HOSTS:
-        return None
-    evidence = hashlib.sha256()
+    max_concurrency: int = 8,
+) -> GB10SharedMountReadiness:
+    """Collect exact mount, directory, UID/GID, and checkout-root evidence."""
+    if hosts != ACTIVE_GB10_HOSTS or not 1 <= max_concurrency <= 16:
+        raise ValueError("GB10 shared mount inventory is invalid")
     remote_command = f"python3 -c {shlex.quote(_REMOTE_SHARED_REPOSITORY_PROBE)}"
-    for host in hosts:
+
+    def probe(host: str) -> str | None:
         output = _command_stdout(
             run,
             [
@@ -627,63 +684,53 @@ def _gb10_shared_repository_probe(
                 remote_command,
             ],
         )
-        if output is None:
-            return None
-        fields = output.strip().split(";")
-        if len(fields) != 21 or any(not field for field in fields):
-            return None
-        try:
-            remote_uid = int(fields[0])
-            remote_groups = {int(value) for value in fields[1].split(",")}
-            values: list[int] = []
-            for offset in range(2, 17, 5):
-                values.extend(
-                    (
-                        int(fields[offset]),
-                        int(fields[offset + 1]),
-                        int(fields[offset + 2], 8),
-                        int(fields[offset + 3]),
-                        int(fields[offset + 4]),
-                    )
-                )
-            mount_type = fields[17]
-            mount_source = fields[18]
-            mount_device = (int(fields[19]), int(fields[20]))
-        except ValueError:
-            return None
-        parent = values[0:5]
-        authority = values[5:10]
-        repository = values[10:15]
-        try:
-            repository_device = (
-                os.major(repository[3]),
-                os.minor(repository[3]),
-            )
-        except OverflowError:
-            return None
-        if (
-            remote_uid != binding["consumer_uid"]
-            or binding["shared_gid"] not in remote_groups
-            or parent[:3] != [binding["consumer_uid"], binding["shared_gid"], int("2775", 8)]
-            or authority[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
-            or repository[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
-            or any(value <= 0 for value in (*parent[3:], *authority[3:], *repository[3:]))
-            or mount_device != repository_device
-            or (
-                host == "trt-gb10-2"
-                and (mount_type != "ext4" or mount_source == _SHARED_REPOSITORY_SOURCE)
-            )
-            or (
-                host != "trt-gb10-2"
-                and (mount_type != "nfs4" or mount_source != _SHARED_REPOSITORY_SOURCE)
-            )
-        ):
-            return None
-        evidence.update(host.encode("ascii"))
-        evidence.update(b"\0")
-        evidence.update(output.strip().encode("ascii"))
-        evidence.update(b"\0")
-    return f"sha256:{evidence.hexdigest()[:12]} hosts={len(hosts)}"
+        return (
+            None
+            if output is None
+            else _validate_gb10_shared_mount_output(output, host=host, binding=binding)
+        )
+
+    outcomes: dict[str, str | None] = {}
+    with ThreadPoolExecutor(
+        max_workers=min(max_concurrency, len(hosts)),
+        thread_name_prefix="loom-gb10-shared-mount",
+    ) as executor:
+        futures = {executor.submit(probe, host): host for host in hosts}
+        for future in as_completed(futures):
+            host = futures[future]
+            try:
+                outcomes[host] = future.result()
+            except Exception:
+                outcomes[host] = None
+    return GB10SharedMountReadiness(
+        host_digests={host: digest for host, digest in outcomes.items() if digest is not None},
+        failed_hosts=tuple(sorted(host for host, digest in outcomes.items() if digest is None)),
+    )
+
+
+def _gb10_shared_repository_probe(
+    run: CommandRunner,
+    *,
+    ssh_config: Path,
+    identity: Path,
+    hosts: tuple[str, ...],
+    binding: dict[str, int],
+) -> str | None:
+    try:
+        evidence = probe_gb10_shared_mount_readonly(
+            run,
+            ssh_config=ssh_config,
+            identity=identity,
+            hosts=hosts,
+            binding=binding,
+        )
+    except ValueError:
+        return None
+    return (
+        f"sha256:{evidence.evidence_digest[:12]} hosts={len(evidence.host_digests)}"
+        if evidence.ready
+        else None
+    )
 
 
 def catalog_secret_values(
@@ -1013,5 +1060,6 @@ __all__ = [
     "PreflightReport",
     "catalog_secret_values",
     "collect_preflight",
+    "probe_gb10_shared_mount_readonly",
     "safe_fingerprint",
 ]

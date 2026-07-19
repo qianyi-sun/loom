@@ -11,7 +11,7 @@ import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
-from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
+from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
 from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
@@ -37,12 +37,14 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_credentials_metadata_check,
     build_docker_runtime_check,
     build_gb10_host_readiness_check,
+    build_gb10_shared_mount_check,
     build_gb10_ssh_topology_check,
     build_kubernetes_client_check,
     build_lifecycle_launch_cancel_check,
     build_systemd_user_manager_check,
     build_tools_runtime_check,
     credential_source_set_digest,
+    gb10_mount_binding_digest,
     gb10_target_inventory_digest,
 )
 from loom_cli.rollout.runtime_readiness import REQUIRED_EXECUTABLES, REQUIRED_IMPORTS
@@ -838,6 +840,77 @@ def test_registered_gb10_ssh_topology_rejects_binding_drift_without_ssh(
 
     assert not result.passed
     assert result.evidence["failed-hosts"] == {"trt-gb10-1": "unreachable"}
+    assert calls == []
+
+
+def test_registered_gb10_shared_mount_reports_all_drifted_hosts() -> None:
+    targets = (
+        GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service"),
+        GB10ProbeTarget("trt-gb10-2", "loom-gb10-node-agent.service"),
+    )
+    binding = {
+        "service_uid": 1001,
+        "service_primary_gid": 1001,
+        "consumer_uid": 2005,
+        "consumer_primary_gid": 2005,
+        "shared_gid": 2007,
+        "parent_device": 67,
+        "parent_inode": 101,
+        "authority_device": 67,
+        "authority_inode": 102,
+        "repository_device": 67,
+        "repository_inode": 103,
+    }
+    binding_digest = gb10_mount_binding_digest(binding)
+    check = build_gb10_shared_mount_check(
+        lambda: GB10SharedMountReadiness(
+            host_digests={"trt-gb10-1": "a" * 64},
+            failed_hosts=("trt-gb10-2",),
+        ),
+        targets=targets,
+        expected_binding_digest=binding_digest,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "gb10.inventory-digest": gb10_target_inventory_digest(targets),
+            "gb10.mount-binding.sha256": binding_digest,
+        }
+    )
+    dag = PreflightDag((_passing_dependency("gb10.ssh-topology"), check))
+
+    result = next(item for item in dag.run(context) if item.check_id == check.spec.check_id)
+
+    assert not result.passed
+    assert result.evidence["host-digests"] == {"trt-gb10-1": "a" * 64}
+    assert result.evidence["failed-hosts"] == {"trt-gb10-2": "mount-drift"}
+    assert result.evidence["binding-digest"] == binding_digest
+
+
+def test_registered_gb10_shared_mount_rejects_binding_drift_without_probe() -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    calls: list[object] = []
+    check = build_gb10_shared_mount_check(
+        lambda: (
+            calls.append(object())  # type: ignore[arg-type,return-value]
+            or GB10SharedMountReadiness(host_digests={"trt-gb10-1": "a" * 64}, failed_hosts=())
+        ),
+        targets=(target,),
+        expected_binding_digest="b" * 64,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "gb10.inventory-digest": gb10_target_inventory_digest((target,)),
+            "gb10.mount-binding.sha256": "c" * 64,
+        }
+    )
+    dag = PreflightDag((_passing_dependency("gb10.ssh-topology"), check))
+
+    result = next(item for item in dag.run(context) if item.check_id == check.spec.check_id)
+
+    assert not result.passed
+    assert result.evidence["failed-hosts"] == {"trt-gb10-1": "mount-drift"}
     assert calls == []
 
 
