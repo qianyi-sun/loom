@@ -21,6 +21,8 @@ from loom_cli.rollout.install_attestation import (
     INSTALL_ATTESTATION_PATH,
     verify_runner_install,
 )
+from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
+from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
 from loom_cli.rollout.operator.candidate import (
     CandidateBindingError,
     GitRunner,
@@ -535,6 +537,87 @@ def build_docker_runtime_check(run: DockerCommandRunner) -> RegisteredCheck:
     )
 
 
+def build_kubernetes_client_check(
+    run: KubernetesCommandRunner,
+    *,
+    config: OperatorConfig,
+    expected_kubeconfig_metadata_digest: str,
+) -> RegisteredCheck:
+    """Build the Tier 0 exact context/namespace client invariant."""
+    if len(expected_kubeconfig_metadata_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_kubeconfig_metadata_digest
+    ):
+        raise ValueError("kubeconfig metadata digest is invalid")
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["runner.config.sha256"] != config.config_sha256
+            or context.bindings["kubeconfig.metadata.sha256"] != expected_kubeconfig_metadata_digest
+        ):
+            return _empty_kubernetes_probe(config.namespace)
+        readiness = probe_kubernetes_client(
+            run,
+            kubeconfig=config.kubeconfig_path,
+            cluster_name=config.cluster_name,
+            namespace=config.namespace,
+        )
+        return CheckProbe(
+            passed=readiness.ready,
+            evidence={
+                "current-context": readiness.current_context,
+                "namespace": readiness.namespace,
+                "context-ready": readiness.context_ready,
+                "namespace-ready": readiness.namespace_ready,
+                "client-digest": readiness.evidence_digest,
+                "kubeconfig-metadata-digest": expected_kubeconfig_metadata_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="kubernetes.client",
+            failure_code="kubernetes.client.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("tools.runtime",),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "kubeconfig.metadata.sha256",
+                "runner.config.sha256",
+                "runner.install.sha256",
+            ),
+            evidence_schema=(
+                EvidenceField("current-context", "string"),
+                EvidenceField("namespace", "string"),
+                EvidenceField("context-ready", "boolean"),
+                EvidenceField("namespace-ready", "boolean"),
+                EvidenceField("client-digest", "sha256"),
+                EvidenceField("kubeconfig-metadata-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=120,
+            remediation="restore the exact kubeconfig, staging context, and namespace access",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_kubernetes_probe(namespace: str) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "current-context": "unavailable",
+            "namespace": namespace,
+            "context-ready": False,
+            "namespace-ready": False,
+            "client-digest": "0" * 64,
+            "kubeconfig-metadata-digest": "0" * 64,
+        },
+    )
+
+
 def build_systemd_user_manager_check(
     run: CommandRunner,
     *,
@@ -715,6 +798,7 @@ __all__ = [
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
     "build_gb10_host_readiness_check",
+    "build_kubernetes_client_check",
     "build_runner_install_check",
     "build_systemd_user_manager_check",
     "build_tools_runtime_check",

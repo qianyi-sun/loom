@@ -1643,6 +1643,12 @@ always run so the report exposes daemon and plugin blockers together. Their
 raw output is discarded; restore service-account Docker access or the installed
 buildx plugin rather than retrying a failed rollout request.
 
+The fixed Kubernetes client probe reads the current context and gets only the
+target namespace using the explicit installed kubeconfig. It does not apply or
+patch resources. Tier 0 binds the result to the kubeconfig metadata digest and
+reports context and namespace failures together; replace the exact installed
+kubeconfig rather than editing context state in place.
+
 The source kubeconfig is the fixed root-only `/root/.kube/config`. The
 installer validates the complete root-owned, non-writable parent chain, opens
 the source once with `O_NOFOLLOW`, and accepts only a root-owned, single-link,

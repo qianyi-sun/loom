@@ -29,6 +29,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_credentials_metadata_check,
     build_docker_runtime_check,
     build_gb10_host_readiness_check,
+    build_kubernetes_client_check,
     build_systemd_user_manager_check,
     build_tools_runtime_check,
     credential_source_set_digest,
@@ -308,6 +309,65 @@ def test_registered_docker_runtime_reports_both_blockers_without_diagnostics() -
     assert calls == [("docker", "info"), ("docker", "buildx", "version")]
     assert "token" not in str(dict(docker.evidence))
     assert "private" not in str(dict(docker.evidence))
+
+
+def test_registered_kubernetes_client_binds_kubeconfig_and_safe_evidence(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        stdout = "kind-loom-staging\n" if "current-context" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    metadata_digest = "7" * 64
+    check = build_kubernetes_client_check(
+        run,
+        config=_candidate_config(tmp_path),
+        expected_kubeconfig_metadata_digest=metadata_digest,
+    )
+    context = CheckContext(
+        {
+            "kubeconfig.metadata.sha256": metadata_digest,
+            "runner.config.sha256": "a" * 64,
+            "runner.install.sha256": "9" * 64,
+        }
+    )
+
+    executions = PreflightDag((_tools_runtime_check(), check)).run(context, through_tier=0)
+
+    kubernetes = next(item for item in executions if item.check_id == "kubernetes.client")
+    assert kubernetes.passed
+    assert kubernetes.evidence["current-context"] == "kind-loom-staging"
+    assert kubernetes.evidence["namespace"] == "loom-staging"
+    assert kubernetes.evidence["kubeconfig-metadata-digest"] == metadata_digest
+    assert len(calls) == 2
+
+
+def test_registered_kubernetes_client_rejects_metadata_drift_before_commands(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    check = build_kubernetes_client_check(
+        lambda argv: calls.append(tuple(argv)) or subprocess.CompletedProcess(argv, 0, "", ""),
+        config=_candidate_config(tmp_path),
+        expected_kubeconfig_metadata_digest="7" * 64,
+    )
+    context = CheckContext(
+        {
+            "kubeconfig.metadata.sha256": "8" * 64,
+            "runner.config.sha256": "a" * 64,
+            "runner.install.sha256": "9" * 64,
+        }
+    )
+
+    executions = PreflightDag((_tools_runtime_check(), check)).run(context, through_tier=0)
+
+    kubernetes = next(item for item in executions if item.check_id == "kubernetes.client")
+    assert kubernetes.passed is False
+    assert kubernetes.evidence["client-digest"] == "0" * 64
+    assert calls == []
 
 
 def test_registered_user_manager_check_runs_through_shared_dag() -> None:

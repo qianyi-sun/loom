@@ -26,6 +26,7 @@ from loom_cli.rollout.credential_authority import (
     safe_content_fingerprint,
 )
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
+from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
 from loom_cli.rollout.runtime_readiness import ModuleImporter, probe_runtime_readiness
 
 from .config import OperatorConfig
@@ -828,38 +829,24 @@ def collect_preflight(
         "install and verify the Docker buildx plugin",
     )
 
-    current_context = None
-    if trusted_checkout:
-        current_context = _command_stdout(
+    kubernetes = (
+        probe_kubernetes_client(
             child_run,
-            [
-                "kubectl",
-                "--kubeconfig",
-                str(config.kubeconfig_path),
-                "config",
-                "current-context",
-            ],
+            kubeconfig=config.kubeconfig_path,
+            cluster_name=config.cluster_name,
+            namespace=config.namespace,
         )
-    kube_context_ok = current_context is not None and current_context.strip() in {
-        config.cluster_name,
-        f"kind-{config.cluster_name}",
-    }
-    add("kube-context", kube_context_ok, "restore the fixed staging kube context")
-    namespace_ok = trusted_checkout and _command_passes(
-        child_run,
-        [
-            "kubectl",
-            "--kubeconfig",
-            str(config.kubeconfig_path),
-            "get",
-            "namespace",
-            config.namespace,
-            "--request-timeout=10s",
-        ],
+        if trusted_checkout
+        else None
+    )
+    add(
+        "kube-context",
+        kubernetes is not None and kubernetes.context_ready,
+        "restore the fixed staging kube context",
     )
     add(
         "kube-namespace",
-        trusted_checkout and namespace_ok,
+        kubernetes is not None and kubernetes.namespace_ready,
         "restore access to the staging namespace",
     )
 

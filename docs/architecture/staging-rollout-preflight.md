@@ -145,6 +145,12 @@ and Tier 0 `docker.runtime` consume its complete aggregate. A failing daemon
 probe does not suppress the buildx probe, and neither command's stdout or stderr
 is admitted to evidence.
 
+`probe_kubernetes_client` likewise owns the fixed kubeconfig, current-context,
+and target-namespace predicate. It always probes both context and namespace,
+emits only the allowlisted context/namespace plus booleans and a digest, and is
+bound by the DAG to the kubeconfig metadata digest. The compatibility report
+uses this implementation instead of maintaining a second context policy.
+
 Systemd readiness is single-source as well. The broker-facing Tier 0 probe and
 the final GB10 convergence step consume the same user-manager, oneshot service,
 and timer-state classifiers. The read-only probe binds the manager version,

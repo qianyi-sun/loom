@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.docker_readiness import DockerRuntimeReadiness
+from loom_cli.rollout.kubernetes_readiness import KubernetesClientReadiness
 from loom_cli.rollout.operator import preflight as preflight_module
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.policy import sanitized_child_environment
@@ -270,6 +271,38 @@ def test_collect_preflight_uses_shared_docker_runtime_predicate(
     outcomes = {check.name: check.passed for check in report.checks}
     assert outcomes["docker"] is True
     assert outcomes["docker-buildx"] is False
+    assert len(calls) == 1
+
+
+def test_collect_preflight_uses_shared_kubernetes_client_predicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    calls: list[object] = []
+
+    def probe(run, **_kwargs):
+        calls.append(run)
+        return KubernetesClientReadiness(
+            current_context="kind-loom-staging",
+            namespace="loom-staging",
+            context_ready=False,
+            namespace_ready=True,
+        )
+
+    monkeypatch.setattr(preflight_module, "probe_kubernetes_client", probe)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=successful_command,
+        which=lambda name: f"/usr/bin/{name}",
+        importer=lambda name: object(),
+    )
+
+    outcomes = {check.name: check.passed for check in report.checks}
+    assert outcomes["kube-context"] is False
+    assert outcomes["kube-namespace"] is True
     assert len(calls) == 1
 
 
