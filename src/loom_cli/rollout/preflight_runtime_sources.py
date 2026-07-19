@@ -165,7 +165,7 @@ class PreflightRuntimeSources:
     server_dry_run: ServerDryRun
     browser_run: BrowserCommandRunner
     browser_token_path: Path
-    baseline_probes: Mapping[str, ReadonlyProbe]
+    baseline_probe_factory: Callable[[int], Mapping[str, ReadonlyProbe]]
     route: str
     rehearsal_actions: RehearsalActionFactory
     rehearsal_identity: RehearsalIdentityFactory
@@ -208,7 +208,7 @@ class PreflightRuntimeSources:
             tier0 = self._tier0(mutation_epoch=mutation_epoch)
             tier1 = self._tier1(image_session=image_session)
             tier2 = build_staging_baseline_checks(
-                self.baseline_probes,
+                self.baseline_probe_factory(mutation_epoch),
                 environment=self.config.environment,
                 namespace=self.config.namespace,
                 route=self.route,

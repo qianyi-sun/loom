@@ -109,7 +109,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
         server_dry_run=lambda _rendered: _result(),
         browser_run=command,
         browser_token_path=token,
-        baseline_probes={
+        baseline_probe_factory=lambda _epoch: {
             check_id: (lambda: None)  # type: ignore[dict-item,return-value]
             for check_id in (
                 "staging.health",
