@@ -203,6 +203,63 @@ class PreflightRehearsal:
             "rehearsal_digest": self.rehearsal_digest,
         }
 
+    def require_integrity(self) -> None:
+        try:
+            executions_round_trip = all(
+                CheckExecution.from_dict(execution.to_dict()) == execution
+                for execution in self.executions
+            )
+        except ValueError as exc:
+            raise ValueError("preflight rehearsal authority is incomplete or drifted") from exc
+        if (
+            not self.executions
+            or any(
+                len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
+                for value in (
+                    self.registry_digest,
+                    self.coverage_digest,
+                    self.rehearsal_digest,
+                )
+            )
+            or len({execution.check_id for execution in self.executions}) != len(self.executions)
+            or not executions_round_trip
+            or self.rehearsal_digest
+            != _rehearsal_digest(
+                registry_digest=self.registry_digest,
+                coverage_digest=self.coverage_digest,
+                executions=self.executions,
+            )
+        ):
+            raise ValueError("preflight rehearsal authority is incomplete or drifted")
+
+    @classmethod
+    def from_executions(
+        cls,
+        *,
+        registry_digest: str,
+        coverage_digest: str,
+        executions: Sequence[CheckExecution],
+    ) -> PreflightRehearsal:
+        stable = tuple(executions)
+        blockers = tuple(
+            PreflightBlocker.from_execution(execution)
+            for execution in stable
+            if not execution.passed
+        )
+        rehearsal = cls(
+            registry_digest=registry_digest,
+            coverage_digest=coverage_digest,
+            executions=stable,
+            blockers=blockers,
+            rehearsal_digest=_rehearsal_digest(
+                registry_digest=registry_digest,
+                coverage_digest=coverage_digest,
+                executions=stable,
+            ),
+        )
+        rehearsal.require_integrity()
+        return rehearsal
+
 
 class PreflightPipeline:
     """Execute the exact registered DAG and publish a digest-addressed result."""
@@ -295,22 +352,10 @@ class PreflightPipeline:
         )
         if assessment is not None:
             self._require_matching_assessment(assessment, executions=executions, now=now)
-        blockers = tuple(
-            PreflightBlocker.from_execution(execution)
-            for execution in executions
-            if not execution.passed
-        )
-        digest = _rehearsal_digest(
+        return PreflightRehearsal.from_executions(
             registry_digest=self._registry.registry_digest,
             coverage_digest=self._registry.coverage_digest,
             executions=executions,
-        )
-        return PreflightRehearsal(
-            registry_digest=self._registry.registry_digest,
-            coverage_digest=self._registry.coverage_digest,
-            executions=executions,
-            blockers=blockers,
-            rehearsal_digest=digest,
         )
 
     def attest(
@@ -320,6 +365,7 @@ class PreflightPipeline:
         bindings: AttestationBindings,
     ) -> PreflightAttestation:
         """Issue only after the caller has published restore-verified lease authority."""
+        rehearsal.require_integrity()
         expected = dict(self._registry.implementation_digests)
         executions = {execution.check_id: execution for execution in rehearsal.executions}
         if (
@@ -330,12 +376,6 @@ class PreflightPipeline:
             or any(
                 not execution.passed or execution.implementation_digest != expected[check_id]
                 for check_id, execution in executions.items()
-            )
-            or rehearsal.rehearsal_digest
-            != _rehearsal_digest(
-                registry_digest=rehearsal.registry_digest,
-                coverage_digest=rehearsal.coverage_digest,
-                executions=rehearsal.executions,
             )
         ):
             raise ValueError("preflight rehearsal authority is incomplete or drifted")

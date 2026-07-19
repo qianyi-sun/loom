@@ -79,6 +79,13 @@ rehearsal after the coordinator has published its restore-verified lease. The
 compatibility `authorize` call is only a composition of those operations and
 cannot bypass their validation.
 
+Restore evidence is derived from the immutable rehearsal itself, not from an
+operator assertion. Every Tier 3 action must share one isolation ID, candidate,
+and mutation epoch; every action must report no protected mutation; the DB clone
+must pass; and the terminal cleanup must be verified. The report digest binds
+all Tier 3 implementation, input, evidence, and journal digests together with
+the critical-checkpoint evidence digest.
+
 ## Tiers
 
 ### Tier 0: admission, under two minutes
