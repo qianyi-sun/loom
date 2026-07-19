@@ -465,6 +465,15 @@ plan. Component classifiers use these exact resource digests as their
 pre-apply authority instead of treating any arbitrary live difference as safe
 to overwrite.
 
+For a database that already has lifecycle authority, the first protected
+component is a single PostgreSQL compare-and-swap epoch claim. Its fixed query
+updates the staging/`loom-staging` row and appends the matching epoch event in
+one statement, bound to the request ID and final-plan digest. Classification
+returns `ready` only at the attested starting epoch, `exact` only for the next
+epoch owned by that same request and plan, and `drifted` for every concurrent
+or malformed state. A crash after the transaction is therefore recovered by
+readback, never by a second increment.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:
