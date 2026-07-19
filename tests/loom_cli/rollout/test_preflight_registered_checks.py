@@ -11,6 +11,7 @@ import pytest
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import safe_content_fingerprint
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
+from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -36,6 +37,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_docker_runtime_check,
     build_gb10_host_readiness_check,
     build_kubernetes_client_check,
+    build_lifecycle_launch_cancel_check,
     build_systemd_user_manager_check,
     build_tools_runtime_check,
     credential_source_set_digest,
@@ -852,4 +854,42 @@ def test_registered_backup_lease_rejects_context_drift_without_reading_lease() -
 
     assert not result.passed
     assert result.evidence["blockers"] == {"input-binding": "blocked"}
+    assert calls == []
+
+
+def test_registered_lifecycle_check_runs_shared_protocol_self_test() -> None:
+    check = build_lifecycle_launch_cancel_check()
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "lifecycle.protocol.sha256": lifecycle_protocol_digest(),
+        }
+    )
+    dag = PreflightDag((_passing_dependency("systemd.user-manager"), check))
+
+    result = next(item for item in dag.run(context) if item.check_id == check.spec.check_id)
+
+    assert result.passed
+    assert result.evidence["ready"] is True
+    assert result.evidence["scenario-count"] == 4
+    assert result.evidence["rejection-count"] == 6
+
+
+def test_registered_lifecycle_check_rejects_protocol_binding_drift() -> None:
+    calls: list[object] = []
+    check = build_lifecycle_launch_cancel_check(
+        lambda: calls.append(object())  # type: ignore[arg-type,return-value]
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "lifecycle.protocol.sha256": "f" * 64,
+        }
+    )
+    dag = PreflightDag((_passing_dependency("systemd.user-manager"), check))
+
+    result = next(item for item in dag.run(context) if item.check_id == check.spec.check_id)
+
+    assert not result.passed
+    assert result.evidence["scenario-count"] == 0
     assert calls == []

@@ -160,6 +160,15 @@ and timer-state classifiers. The read-only probe binds the manager version,
 where a request-specific unit and cleanup journal prove launch/cancel latency
 without mutating protected staging.
 
+Backup and launch admission use the shared `lifecycle_protocol` transition
+table rather than step-local status strings. A request may publish launch only
+after backup verification; pending/running backup may instead enter the
+cancel-requested path and must seal as failed before any new admission. Tier 0
+`lifecycle.launch-cancel` exercises success, pre-start cancellation,
+in-flight cancellation, backup failure, and forbidden early-launch sequences
+against that same implementation. The probe is static; it does not create a
+request, unit, backup, or protected-staging mutation.
+
 The GB10 Tier 0 host check runs one fixed read-only probe per declared host
 with bounded concurrency. It validates the manager version, linger, boot ID,
 completed oneshot result, enabled timer, and only the documented

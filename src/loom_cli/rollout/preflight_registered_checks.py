@@ -25,6 +25,11 @@ from loom_cli.rollout.install_attestation import (
 )
 from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
 from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
+from loom_cli.rollout.lifecycle_protocol import (
+    LifecycleSelfTestEvidence,
+    lifecycle_protocol_digest,
+    run_lifecycle_self_test,
+)
 from loom_cli.rollout.operator.backup_lease import (
     BackupLease,
     component_set_digest,
@@ -818,6 +823,72 @@ def build_backup_lease_eligibility_check(
     )
 
 
+def build_lifecycle_launch_cancel_check(
+    self_test: Callable[[], LifecycleSelfTestEvidence] = run_lifecycle_self_test,
+) -> RegisteredCheck:
+    """Build the Tier 0 isolated test of the broker's shared lifecycle protocol."""
+    expected_protocol_digest = lifecycle_protocol_digest()
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if context.bindings["lifecycle.protocol.sha256"] != expected_protocol_digest:
+            return _empty_lifecycle_probe(expected_protocol_digest)
+        try:
+            evidence = self_test()
+        except Exception:
+            return _empty_lifecycle_probe(expected_protocol_digest)
+        return CheckProbe(
+            passed=evidence.ready and evidence.protocol_digest == expected_protocol_digest,
+            evidence={
+                "ready": evidence.ready,
+                "scenario-count": evidence.scenario_count,
+                "transition-count": evidence.transition_count,
+                "rejection-count": evidence.rejection_count,
+                "protocol-digest": evidence.protocol_digest,
+                "self-test-digest": evidence.evidence_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="lifecycle.launch-cancel",
+            failure_code="lifecycle.launch-cancel.failed",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("systemd.user-manager",),
+            mutation_class=MutationClass.NONE,
+            input_keys=("lifecycle.protocol.sha256", "runner.config.sha256"),
+            evidence_schema=(
+                EvidenceField("ready", "boolean"),
+                EvidenceField("scenario-count", "integer"),
+                EvidenceField("transition-count", "integer"),
+                EvidenceField("rejection-count", "integer"),
+                EvidenceField("protocol-digest", "sha256"),
+                EvidenceField("self-test-digest", "sha256"),
+            ),
+            timeout_seconds=5,
+            freshness_ttl_seconds=300,
+            remediation="restore the reviewed short-lock backup and launch transition protocol",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_lifecycle_probe(protocol_digest: str) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "ready": False,
+            "scenario-count": 0,
+            "transition-count": 0,
+            "rejection-count": 0,
+            "protocol-digest": protocol_digest,
+            "self-test-digest": "0" * 64,
+        },
+    )
+
+
 def _empty_backup_lease_probe(
     *,
     source_request_id: str,
@@ -1024,6 +1095,7 @@ __all__ = [
     "build_docker_runtime_check",
     "build_gb10_host_readiness_check",
     "build_kubernetes_client_check",
+    "build_lifecycle_launch_cancel_check",
     "build_runner_install_check",
     "build_systemd_user_manager_check",
     "build_tools_runtime_check",
