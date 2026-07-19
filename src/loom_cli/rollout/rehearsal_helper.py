@@ -17,6 +17,7 @@ from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.checkpoint_lease import inspect_critical_checkpoint
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
+from loom_cli.rollout.rehearsal_executor import IsolatedRehearsalExecutor
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
 
@@ -132,15 +133,7 @@ def _record(
 
 
 def _execute(check_id: str, plan: RehearsalPlan) -> RehearsalStepOutcome:
-    del plan
-    # Concrete operations are admitted one by one behind this fixed boundary.
-    # Until an operation exists, return a normalized blocker rather than ever
-    # treating an empty or partial rehearsal as evidence.
-    return RehearsalStepOutcome(
-        passed=False,
-        details={"status": "blocked"},
-        blockers={"executor": "isolated-action-not-implemented"},
-    )
+    return IsolatedRehearsalExecutor().execute(check_id, plan)
 
 
 def _parser() -> argparse.ArgumentParser:

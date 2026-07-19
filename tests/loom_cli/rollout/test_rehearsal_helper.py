@@ -93,7 +93,7 @@ def test_helper_loads_exact_plan_and_returns_normalized_blocker(
         == 1
     )
     record = json.loads(capsys.readouterr().out)
-    assert record["blockers"] == {"executor": "isolated-action-not-implemented"}
+    assert record["blockers"] == {"namespace": "apply-failed"}
     assert record["plan_digest"] == plan.plan_digest
     assert record["passed"] is False
 
