@@ -5,16 +5,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from threading import Lock
 
+from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import CandidateBinding
+from loom_cli.rollout.operator.rehearsal_attestor import (
+    RehearsalLeaseAttestor,
+    RehearsalStore,
+)
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
-from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
 from loom_cli.rollout.preflight_contract import AttestationBindings, CheckContext
 from loom_cli.rollout.preflight_pipeline import (
     PreflightAssessment,
     PreflightPipeline,
-    PreflightPipelineResult,
 )
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
@@ -51,58 +53,65 @@ class CandidatePreflightPlan:
 
 
 PreflightPlanner = Callable[[CandidateBinding], CandidatePreflightPlan]
+CheckpointPreflightPlanner = Callable[
+    [CandidateBinding, CriticalCheckpointEvidence],
+    CandidatePreflightPlan,
+]
 
 
 class CandidatePreflightAuthorizer:
-    """Create an attestation before the broker may create a rollout request."""
+    """Split pre-backup assessment from checkpoint-bound rehearsal authority."""
 
     def __init__(
         self,
         *,
         planner: PreflightPlanner,
+        checkpoint_planner: CheckpointPreflightPlanner,
         store: PreflightAttestationStore,
         now: Callable[[], datetime],
         max_concurrency: int = 8,
     ) -> None:
         self._planner = planner
+        self._checkpoint_planner = checkpoint_planner
         self._store = store
         self._now = now
         self._max_concurrency = max_concurrency
-        self._pending: tuple[CandidatePreflightPlan, PreflightAssessment] | None = None
-        self._lock = Lock()
 
     def assess(self, candidate: CandidateBinding) -> PreflightAssessment:
-        """Run and retain the exact pre-backup plan for one candidate."""
+        """Run the exact Tier 0-2 plan without retaining process-local state."""
         plan = self._planner(candidate)
         if plan.candidate != candidate:
             raise ValueError("preflight planner changed the immutable candidate")
         pipeline = self._pipeline(plan)
-        assessment = pipeline.assess(context=plan.context)
-        with self._lock:
-            if self._pending is not None:
-                raise ValueError("another pre-backup assessment is already pending")
-            self._pending = (plan, assessment)
-        return assessment
+        return pipeline.assess(context=plan.context)
 
-    def __call__(self, candidate: CandidateBinding) -> PreflightPipelineResult:
-        with self._lock:
-            pending = self._pending
-            self._pending = None
-        if pending is None:
-            raise ValueError("pre-backup assessment is unavailable")
-        plan, assessment = pending
+    def build_rehearsal_attestor(
+        self,
+        *,
+        candidate: CandidateBinding,
+        checkpoint: CriticalCheckpointEvidence,
+        assessment: PreflightAssessment,
+        rehearsal_store: RehearsalStore,
+    ) -> RehearsalLeaseAttestor:
+        """Rebuild the exact plan after checkpoint publication, without pending RAM."""
+        if not assessment.passed:
+            raise ValueError("checkpoint rehearsal requires a passing assessment")
+        plan = self._checkpoint_planner(candidate, checkpoint)
         if plan.candidate != candidate:
-            raise ValueError("pre-backup assessment candidate drifted")
-        pipeline = self._pipeline(plan)
-        return pipeline.authorize(
+            raise ValueError("checkpoint planner changed the immutable candidate")
+        if (
+            plan.registry.registry_digest != assessment.registry_digest
+            or plan.registry.coverage_digest != assessment.coverage_digest
+            or plan.context.bindings.get("checkpoint.evidence.sha256") != checkpoint.evidence_digest
+            or plan.context.bindings.get("staging.mutation-epoch") != checkpoint.mutation_epoch
+        ):
+            raise ValueError("checkpoint plan drifts from pre-backup authority")
+        return RehearsalLeaseAttestor(
+            pipeline=self._pipeline(plan),
             context=plan.context,
-            bindings=plan.current_bindings,
-            binding_factory=lambda executions: derive_attestation_bindings(
-                plan.context,
-                executions,
-            ),
-            reusable_attestation_digest=plan.reusable_attestation_digest,
             assessment=assessment,
+            store=rehearsal_store,
+            now=self._now,
         )
 
     def _pipeline(self, plan: CandidatePreflightPlan) -> PreflightPipeline:
@@ -117,5 +126,6 @@ class CandidatePreflightAuthorizer:
 __all__ = [
     "CandidatePreflightAuthorizer",
     "CandidatePreflightPlan",
+    "CheckpointPreflightPlanner",
     "PreflightPlanner",
 ]

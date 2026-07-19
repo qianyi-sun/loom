@@ -79,6 +79,14 @@ rehearsal after the coordinator has published its restore-verified lease. The
 compatibility `authorize` call is only a composition of those operations and
 cannot bypass their validation.
 
+`CandidatePreflightAuthorizer` retains no process-local pending plan. Its
+pre-backup planner produces only the assessment; after checkpoint publication,
+the detached worker invokes a checkpoint-bound planner, requires the same
+registry and coverage digests, and binds the exact checkpoint evidence and
+mutation epoch before constructing `RehearsalLeaseAttestor`. Repeated
+assessments are independent, while restart continuation comes only from the
+immutable request-store assessment rather than RAM.
+
 Restore evidence is derived from the immutable rehearsal itself, not from an
 operator assertion. Every Tier 3 action must share one isolation ID, candidate,
 and mutation epoch; every action must report no protected mutation; the DB clone
