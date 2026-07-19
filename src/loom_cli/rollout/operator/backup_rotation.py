@@ -42,6 +42,7 @@ class BackupPayloadRecord:
     request_id: str
     phase: BackupPayloadPhase
     created_at: datetime
+    manifest_sha256: str | None = None
     lease: BackupLease | None = None
     failure_code: str | None = None
 
@@ -55,18 +56,27 @@ class BackupPayloadRecord:
             raise ValueError("backup payload identity is invalid")
         if self.lease is not None and self.lease.source_request_id != self.request_id:
             raise ValueError("backup payload lease belongs to another request")
-        if (
-            self.phase
-            in {
-                BackupPayloadPhase.MANIFEST_VERIFIED,
-                BackupPayloadPhase.RESTORE_VERIFIED,
-                BackupPayloadPhase.ACTIVE,
-            }
-            and self.lease is None
+        manifest_verified = self.phase in {
+            BackupPayloadPhase.MANIFEST_VERIFIED,
+            BackupPayloadPhase.RESTORE_VERIFIED,
+            BackupPayloadPhase.ACTIVE,
+        }
+        restore_verified = self.phase in {
+            BackupPayloadPhase.RESTORE_VERIFIED,
+            BackupPayloadPhase.ACTIVE,
+        }
+        if manifest_verified != (
+            isinstance(self.manifest_sha256, str)
+            and len(self.manifest_sha256) == 64
+            and all(character in "0123456789abcdef" for character in self.manifest_sha256)
         ):
-            raise ValueError("verified backup payload requires an exact lease")
+            raise ValueError("manifest-verified payload requires an exact manifest digest")
+        if restore_verified != (self.lease is not None):
+            raise ValueError("restore-verified backup payload requires an exact lease")
+        if self.lease is not None and self.lease.manifest_sha256 != self.manifest_sha256:
+            raise ValueError("backup payload manifest and lease digests differ")
         if self.phase is BackupPayloadPhase.FAILED:
-            if not self.failure_code or self.lease is not None:
+            if not self.failure_code or self.lease is not None or self.manifest_sha256 is not None:
                 raise ValueError("failed backup payload requires compact failure evidence only")
         elif self.failure_code is not None:
             raise ValueError("non-failed backup payload cannot carry a failure code")
@@ -76,6 +86,7 @@ class BackupPayloadRecord:
             "created_at": self.created_at.isoformat(),
             "failure_code": self.failure_code,
             "lease": self.lease.to_dict() if self.lease is not None else None,
+            "manifest_sha256": self.manifest_sha256,
             "payload_id": self.payload_id,
             "phase": self.phase.value,
             "request_id": self.request_id,
@@ -87,6 +98,7 @@ class BackupPayloadRecord:
             "created_at",
             "failure_code",
             "lease",
+            "manifest_sha256",
             "payload_id",
             "phase",
             "request_id",
@@ -97,6 +109,8 @@ class BackupPayloadRecord:
         ):
             raise ValueError("backup payload record schema is invalid")
         if data["failure_code"] is not None and not isinstance(data["failure_code"], str):
+            raise ValueError("backup payload record schema is invalid")
+        if data["manifest_sha256"] is not None and not isinstance(data["manifest_sha256"], str):
             raise ValueError("backup payload record schema is invalid")
         if data["lease"] is not None and not isinstance(data["lease"], Mapping):
             raise ValueError("backup payload record schema is invalid")
@@ -113,6 +127,7 @@ class BackupPayloadRecord:
             lease=(
                 BackupLease.from_dict(data["lease"]) if isinstance(data["lease"], Mapping) else None
             ),
+            manifest_sha256=data["manifest_sha256"],
             failure_code=data["failure_code"],
         )
 
@@ -222,14 +237,20 @@ def record_manifest_verified(
     state: BackupRotationState,
     *,
     payload_id: str,
-    lease: BackupLease,
+    manifest_sha256: str,
 ) -> BackupRotationResult:
     candidate = _require_candidate(state, payload_id, BackupPayloadPhase.CREATING)
-    if lease.source_request_id != candidate.request_id:
-        raise BackupRotationError("candidate manifest belongs to another request")
+    if len(manifest_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in manifest_sha256
+    ):
+        raise ValueError("candidate manifest digest is invalid")
     return _replace_candidate(
         state,
-        replace(candidate, phase=BackupPayloadPhase.MANIFEST_VERIFIED, lease=lease),
+        replace(
+            candidate,
+            phase=BackupPayloadPhase.MANIFEST_VERIFIED,
+            manifest_sha256=manifest_sha256,
+        ),
     )
 
 
@@ -237,15 +258,20 @@ def record_restore_verified(
     state: BackupRotationState,
     *,
     payload_id: str,
+    lease: BackupLease,
 ) -> BackupRotationResult:
     candidate = _require_candidate(
         state,
         payload_id,
         BackupPayloadPhase.MANIFEST_VERIFIED,
     )
+    if lease.source_request_id != candidate.request_id:
+        raise BackupRotationError("candidate restore belongs to another request")
+    if lease.manifest_sha256 != candidate.manifest_sha256:
+        raise BackupRotationError("candidate restore manifest digest does not match")
     return _replace_candidate(
         state,
-        replace(candidate, phase=BackupPayloadPhase.RESTORE_VERIFIED),
+        replace(candidate, phase=BackupPayloadPhase.RESTORE_VERIFIED, lease=lease),
     )
 
 

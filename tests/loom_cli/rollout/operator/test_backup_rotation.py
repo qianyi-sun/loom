@@ -54,9 +54,13 @@ def _verified_candidate(
     state = record_manifest_verified(
         state,
         payload_id=payload_id,
+        manifest_sha256=suffix * 64,
+    ).state
+    return record_restore_verified(
+        state,
+        payload_id=payload_id,
         lease=_lease(request_id, suffix=suffix),
     ).state
-    return record_restore_verified(state, payload_id=payload_id).state
 
 
 def test_candidate_failure_before_manifest_preserves_active_until_compacted() -> None:
@@ -92,11 +96,11 @@ def test_validation_and_restore_failure_never_promote_candidate() -> None:
         request_id="req-candidate0",
         created_at=NOW,
     ).state
-    with pytest.raises(BackupRotationError, match="another request"):
+    with pytest.raises(ValueError, match="digest"):
         record_manifest_verified(
             state,
             payload_id="payload-candidate0",
-            lease=_lease("req-other0000", suffix="a"),
+            manifest_sha256="invalid",
         )
     with pytest.raises(BackupRotationError, match="wrong phase"):
         promote_candidate(state, payload_id="payload-candidate0")
@@ -104,8 +108,14 @@ def test_validation_and_restore_failure_never_promote_candidate() -> None:
     state = record_manifest_verified(
         state,
         payload_id="payload-candidate0",
-        lease=_lease("req-candidate0", suffix="a"),
+        manifest_sha256="a" * 64,
     ).state
+    with pytest.raises(BackupRotationError, match="another request"):
+        record_restore_verified(
+            state,
+            payload_id="payload-candidate0",
+            lease=_lease("req-other0000", suffix="a"),
+        )
     failed = fail_candidate(
         state,
         payload_id="payload-candidate0",

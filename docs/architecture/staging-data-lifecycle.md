@@ -241,6 +241,9 @@ advance through compare-and-swap publication. A rotation record may reference
 only an already-published byte-equivalent lease. Deletion is always a returned
 post-publication action: a crash can retain an extra old payload for retry, but
 cannot erase the current known-good payload or promote an unverified candidate.
+The persisted state distinguishes manifest verification from restore
+verification: the former carries only the exact manifest digest, while the
+latter is the first phase allowed to carry a complete lease.
 
 The lease constructor accepts only a strictly revalidated schema-v2 checkpoint.
 It binds the exact manifest and component hashes, identifies the PostgreSQL

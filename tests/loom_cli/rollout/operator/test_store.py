@@ -26,6 +26,7 @@ from loom_cli.rollout.operator.backup_rotation import (
     BackupRotationState,
     begin_candidate,
     record_manifest_verified,
+    record_restore_verified,
 )
 from loom_cli.rollout.operator.config import APPROVED_REMOTE_URL
 from loom_cli.rollout.operator.model import (
@@ -316,16 +317,22 @@ def test_backup_lease_and_rotation_are_digest_bound_and_compare_and_swap(
     next_state = record_manifest_verified(
         state,
         payload_id="payload-alpha000",
-        lease=lease,
+        manifest_sha256=lease.manifest_sha256,
     ).state
     store.replace_backup_rotation(next_state, expected_generation=1)
+    restored_state = record_restore_verified(
+        next_state,
+        payload_id="payload-alpha000",
+        lease=lease,
+    ).state
+    store.replace_backup_rotation(restored_state, expected_generation=2)
 
     assert stat.S_IMODE(lease_path.stat().st_mode) == 0o600
     assert store.publish_backup_lease(lease) == lease_path
     assert store.read_backup_lease(lease.evidence_digest) == lease
-    assert store.read_backup_rotation() == next_state
+    assert store.read_backup_rotation() == restored_state
     with pytest.raises(RequestStoreError, match="changed concurrently"):
-        store.replace_backup_rotation(next_state, expected_generation=1)
+        store.replace_backup_rotation(restored_state, expected_generation=2)
 
 
 def test_preflight_request_backup_and_promotion_are_separate_immutable_authorities(
