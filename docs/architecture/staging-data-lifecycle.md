@@ -199,6 +199,16 @@ python scripts/ops/staging_data_lifecycle_gc.py inventory \
   --bucket artifacts
 ```
 
+The fixed `loom-staging-data-lifecycle.timer` runs every five minutes. Its
+oneshot first publishes capacity from the same exact bucket inventory, then
+uses the `auto` action: no eligible owners is a journal-free no-op; any
+classification/reconciliation blocker makes the unit fail and alert; otherwise
+the ordinary epoch-bound two-phase executor performs the deletion. The service
+uses the `loom-rollout` identity, a read-only `/data` view, no shell or sudo,
+and the standard secret-bearing environment file. Automatic policy authority
+does not weaken the manual digest-approved `apply` or exact failed-run `resume`
+paths.
+
 ## Rollout checkpoint versus disaster recovery
 
 The synchronous rollout checkpoint contains only state the rollout can mutate

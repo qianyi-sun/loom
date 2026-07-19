@@ -200,6 +200,47 @@ def test_apply_requires_approved_live_inventory_digest() -> None:
     assert journal.events == []
 
 
+def test_auto_applies_exact_eligible_plan_without_manual_digest() -> None:
+    snapshot = _snapshot()
+    journal = _Journal(snapshot)
+    deleter = _Deleter()
+
+    document = run_lifecycle_operator(
+        request=_request(OperatorAction.AUTO, request_id="req-gcauto0000"),
+        scope=SCOPE,
+        inventory=_Inventory(snapshot),
+        journal=journal,
+        object_deleter=deleter,
+    )
+
+    assert document["no_op"] is False
+    assert document["execution"]["mutation_epoch_after"] == 5  # type: ignore[index]
+    assert journal.events == ["begin", "deleted", "verified", "metadata", "complete"]
+
+
+def test_auto_is_noop_when_nothing_is_eligible() -> None:
+    snapshot = LifecycleInventorySnapshot(
+        scope=SCOPE,
+        mutation_epoch=4,
+        authorities=(),
+        objects=(),
+        unclassified_rows=(),
+    )
+    journal = _Journal(snapshot)
+
+    document = run_lifecycle_operator(
+        request=_request(OperatorAction.AUTO, request_id="req-gcauto0001"),
+        scope=SCOPE,
+        inventory=_Inventory(snapshot),
+        journal=journal,
+        object_deleter=_Deleter(),
+    )
+
+    assert document["no_op"] is True
+    assert document["execution"] is None
+    assert journal.events == []
+
+
 def test_resume_skips_live_replanning_and_uses_exact_run() -> None:
     snapshot = _snapshot()
     inventory = _Inventory(snapshot)

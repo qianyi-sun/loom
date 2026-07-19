@@ -1,0 +1,21 @@
+[Unit]
+Description=Loom staging bounded data lifecycle maintenance
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/loom/staging-data-lifecycle.env
+
+[Service]
+Type=oneshot
+User=loom-rollout
+Group=loom-rollout
+WorkingDirectory=/opt/loom-staging-runner/repo
+EnvironmentFile=/etc/loom/staging-data-lifecycle.env
+Environment=PATH=/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/data
+ExecStart=/opt/loom-staging-runner/venv/bin/python -I -B scripts/ops/staging_data_lifecycle_maintenance.py --namespace loom-staging --bucket trajectories --bucket artifacts --filesystem-path /data
+TimeoutStartSec=1800

@@ -26,6 +26,7 @@ class OperatorAction(StrEnum):
     DRY_RUN = "dry-run"
     APPLY = "apply"
     RESUME = "resume"
+    AUTO = "auto"
 
 
 class LifecycleInventoryLoader(Protocol):
@@ -52,6 +53,11 @@ class LifecycleOperatorRequest:
         elif self.action == OperatorAction.RESUME:
             if self.resume_run_id is None or self.request_id is None:
                 raise ValueError("resume requires run id and request id")
+        elif self.action == OperatorAction.AUTO:
+            if self.request_id is None:
+                raise ValueError("auto requires request id")
+            if self.approved_inventory_digest is not None or self.resume_run_id is not None:
+                raise ValueError("auto does not accept manual approval or resume authority")
         elif any(
             value is not None
             for value in (
@@ -134,6 +140,32 @@ def run_lifecycle_operator(
     document = _plan_document(snapshot=snapshot, plan=plan)
     if request.action == OperatorAction.INVENTORY:
         return {**document, "action": request.action}
+    if request.action == OperatorAction.AUTO:
+        if plan.blockers:
+            plan.require_applicable()
+        if not plan.authority_ids:
+            return {
+                **document,
+                "action": request.action,
+                "execution": None,
+                "no_op": True,
+            }
+        assert request.request_id is not None
+        result = execute_gc(
+            plan=plan,
+            requested_by=request.requested_by,
+            journal=journal,
+            object_deleter=object_deleter,
+            dry_run=False,
+            request_id=request.request_id,
+            completed_at=request.now,
+        )
+        return {
+            **document,
+            "action": request.action,
+            "execution": _execution_document(result),
+            "no_op": False,
+        }
     if request.action == OperatorAction.APPLY:
         if request.approved_inventory_digest != plan.inventory_digest:
             raise LifecycleGcPlanError("approved inventory digest does not match live plan")
