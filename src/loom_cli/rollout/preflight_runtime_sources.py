@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -51,6 +50,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_lifecycle_launch_cancel_check,
     build_manifest_preflight_checks,
     build_migration_plan_check,
+    build_readonly_authority_check,
     build_runner_install_check,
     build_staging_baseline_checks,
     build_systemd_render_check,
@@ -63,6 +63,10 @@ from loom_cli.rollout.preflight_runtime import (
     CandidatePreflightRuntime,
     RehearsalActionFactory,
     RehearsalIdentityFactory,
+)
+from loom_cli.rollout.readonly_authority import (
+    ReadonlyAuthorityEvidence,
+    readonly_authority_policy_digest,
 )
 from loom_cli.rollout.runtime_readiness import ExecutableLookup, ModuleImporter
 from loom_cli.rollout.staging_baseline_readiness import ReadonlyProbe
@@ -141,6 +145,7 @@ class PreflightRuntimeSources:
     docker_runtime_run: DockerCommandRunner
     kubernetes_run: KubernetesCommandRunner
     kubeconfig_metadata_digest: str
+    readonly_authority_source: Callable[[], ReadonlyAuthorityEvidence]
     capacity_source: Callable[[], StagingCapacity]
     backup_authority: BackupAdmissionAuthority
     systemd_run: SystemdCommandRunner
@@ -261,6 +266,7 @@ class PreflightRuntimeSources:
                 config=self.config,
                 expected_kubeconfig_metadata_digest=self.kubeconfig_metadata_digest,
             ),
+            build_readonly_authority_check(self.readonly_authority_source),
             build_capacity_high_water_check(self.capacity_source),
             build_lifecycle_launch_cancel_check(self.lifecycle_self_test),
             systemd_check,
@@ -366,7 +372,7 @@ class PreflightRuntimeSources:
             "namespace": self.config.namespace,
             "object.inventory-root": authority.object_inventory_root,
             "protected-inputs.sha256": credential_source_set_digest(self.credential_sources),
-            "readonly.principal.sha256": hashlib.sha256(b"loom-rollout-readonly").hexdigest(),
+            "readonly.principal.sha256": readonly_authority_policy_digest(),
             "route": self.route,
             "runner.config.sha256": self.config.config_sha256,
             "runner.install.sha256": self.runner_install_digest,

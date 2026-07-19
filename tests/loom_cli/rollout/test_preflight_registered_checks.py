@@ -58,6 +58,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_lifecycle_launch_cancel_check,
     build_manifest_preflight_checks,
     build_migration_plan_check,
+    build_readonly_authority_check,
     build_rehearsal_checks,
     build_staging_baseline_checks,
     build_systemd_render_check,
@@ -66,6 +67,10 @@ from loom_cli.rollout.preflight_registered_checks import (
     credential_source_set_digest,
     gb10_mount_binding_digest,
     gb10_target_inventory_digest,
+)
+from loom_cli.rollout.readonly_authority import (
+    ReadonlyAuthorityEvidence,
+    readonly_authority_policy_digest,
 )
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS, RehearsalResult
 from loom_cli.rollout.runtime_readiness import REQUIRED_EXECUTABLES, REQUIRED_IMPORTS
@@ -402,6 +407,35 @@ def test_registered_kubernetes_client_rejects_metadata_drift_before_commands(
     assert kubernetes.passed is False
     assert kubernetes.evidence["client-digest"] == "0" * 64
     assert calls == []
+
+
+def test_registered_readonly_authority_rejects_mutation_capability() -> None:
+    check = build_readonly_authority_check(
+        lambda: ReadonlyAuthorityEvidence(
+            principal="loom-rollout-readonly",
+            environment="staging",
+            namespace="loom-staging",
+            kubernetes_verbs=("get", "create"),
+            kubernetes_resources=("pods",),
+            http_methods=("GET",),
+            capability_source_digest="f" * 64,
+        )
+    )
+    context = CheckContext(
+        {
+            "readonly.principal.sha256": readonly_authority_policy_digest(),
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+
+    executions = PreflightDag((_passing_dependency("runner.install"), check)).run(
+        context,
+        through_tier=0,
+    )
+
+    result = next(item for item in executions if item.check_id == "readonly.authority")
+    assert not result.passed
+    assert result.evidence["mutation-denied"] is False
 
 
 def test_registered_capacity_high_water_reports_all_bound_metrics() -> None:
@@ -1569,7 +1603,7 @@ def test_registered_staging_baseline_runs_independent_readonly_blockers() -> Non
         {
             "environment": "staging",
             "namespace": "loom-staging",
-            "readonly.principal.sha256": hashlib.sha256(b"loom-rollout-readonly").hexdigest(),
+            "readonly.principal.sha256": readonly_authority_policy_digest(),
             "route": "https://yylx.world/dev",
             "staging.mutation-epoch": 8,
             "runner.config.sha256": "a" * 64,
@@ -1578,6 +1612,7 @@ def test_registered_staging_baseline_runs_independent_readonly_blockers() -> Non
     dag = PreflightDag(
         (
             _passing_dependency("kubernetes.client"),
+            _passing_dependency("readonly.authority"),
             _passing_dependency("credentials.metadata"),
             *checks,
         )

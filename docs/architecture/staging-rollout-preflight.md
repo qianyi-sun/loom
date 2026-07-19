@@ -129,6 +129,12 @@ complete manifest, component, epoch, snapshot, schema, environment, namespace,
 and inventory identity. The composition root shares one candidate image-build
 session while refreshing baseline and metadata probes between stages.
 
+Tier 2 is additionally gated by `readonly.authority`. Its evidence comes from
+the server-observed capability set for the dedicated
+`loom-rollout-readonly` principal, not from the fact that a probe happened to
+use GET. Any Kubernetes write verb, wildcard authority, secret/token read, or
+HTTP mutation method blocks admission before a baseline probe can run.
+
 `CandidatePreflightOrchestrator` is the restart boundary between admission and
 rehearsal. The broker executes Tier 0–2 from a runtime factory before it
 publishes a request. The detached worker later rebuilds that runtime from the

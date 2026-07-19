@@ -12,6 +12,7 @@ from loom_cli.rollout.preflight_runtime_sources import (
     BackupAdmissionAuthority,
     PreflightRuntimeSources,
 )
+from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
 
@@ -72,6 +73,15 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
         docker_runtime_run=command,
         kubernetes_run=command,
         kubeconfig_metadata_digest="2" * 64,
+        readonly_authority_source=lambda: ReadonlyAuthorityEvidence(
+            principal="loom-rollout-readonly",
+            environment="staging",
+            namespace="loom-staging",
+            kubernetes_verbs=("get", "list", "watch"),
+            kubernetes_resources=("deployments", "pods", "services"),
+            http_methods=("GET", "HEAD"),
+            capability_source_digest="8" * 64,
+        ),
         capacity_source=lambda: None,  # type: ignore[arg-type,return-value]
         backup_authority=BackupAdmissionAuthority.fresh(
             schema_revision="0066",
@@ -130,6 +140,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
     )
     assert {check.spec.check_id for check in plan.registry.checks} >= {
         "candidate.identity",
+        "readonly.authority",
         "backup.lease-eligibility",
         "images.build",
         "staging.release-baseline",

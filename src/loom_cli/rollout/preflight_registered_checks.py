@@ -89,6 +89,10 @@ from loom_cli.rollout.preflight_contract import (
     SecretRedactionPolicy,
     StageCapability,
 )
+from loom_cli.rollout.readonly_authority import (
+    ReadonlyAuthorityEvidence,
+    readonly_authority_policy_digest,
+)
 from loom_cli.rollout.rehearsal_readiness import (
     IsolatedRehearsalSession,
     RehearsalAction,
@@ -663,6 +667,74 @@ def build_kubernetes_client_check(
         ),
         implementation_version="v1",
         operations={CheckOperation.PROBE: probe},
+    )
+
+
+def build_readonly_authority_check(
+    source: Callable[[], ReadonlyAuthorityEvidence],
+) -> RegisteredCheck:
+    """Prove the Tier 2 principal cannot mutate staging or read secrets."""
+    policy_digest = readonly_authority_policy_digest()
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if context.bindings["readonly.principal.sha256"] != policy_digest:
+            return _empty_readonly_authority_probe(policy_digest)
+        try:
+            evidence = source()
+        except Exception:
+            return _empty_readonly_authority_probe(policy_digest)
+        return CheckProbe(
+            passed=evidence.ready,
+            evidence={
+                "principal": evidence.principal,
+                "mutation-denied": evidence.ready,
+                "protected-read-denied": not bool(
+                    set(evidence.kubernetes_resources) & {"secrets", "serviceaccounts/token"}
+                ),
+                "policy-digest": policy_digest,
+                "authority-digest": evidence.evidence_digest,
+                "capability-source-digest": evidence.capability_source_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="readonly.authority",
+            failure_code="readonly.authority.unsafe",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("runner.install",),
+            mutation_class=MutationClass.NONE,
+            input_keys=("readonly.principal.sha256", "runner.config.sha256"),
+            evidence_schema=(
+                EvidenceField("principal", "string"),
+                EvidenceField("mutation-denied", "boolean"),
+                EvidenceField("protected-read-denied", "boolean"),
+                EvidenceField("policy-digest", "sha256"),
+                EvidenceField("authority-digest", "sha256"),
+                EvidenceField("capability-source-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=60,
+            remediation="restore the dedicated read-only principal and remove every write or secret-read grant",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_readonly_authority_probe(policy_digest: str) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "principal": "loom-rollout-readonly",
+            "mutation-denied": False,
+            "protected-read-denied": False,
+            "policy-digest": policy_digest,
+            "authority-digest": "0" * 64,
+            "capability-source-digest": "0" * 64,
+        },
     )
 
 
@@ -1886,7 +1958,7 @@ def build_staging_baseline_checks(
         expected_route=route,
         expected_mutation_epoch=mutation_epoch,
     )
-    principal_digest = hashlib.sha256(b"loom-rollout-readonly").hexdigest()
+    principal_digest = readonly_authority_policy_digest()
     bindings = {
         "environment": environment,
         "namespace": namespace,
@@ -1899,7 +1971,7 @@ def build_staging_baseline_checks(
         return all(context.bindings[key] == value for key, value in bindings.items())
 
     dependencies = {
-        "staging.health": ("kubernetes.client",),
+        "staging.health": ("kubernetes.client", "readonly.authority"),
         "staging.auth": ("staging.health", "credentials.metadata"),
         "staging.catalog-task": ("staging.auth",),
         "staging.storage-db": ("staging.health",),
