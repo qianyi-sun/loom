@@ -21,6 +21,8 @@ from typing import Protocol
 
 from dotenv import dotenv_values
 
+from loom_cli.rollout.credential_authority import read_trusted_file
+
 from .config import OperatorConfig
 from .policy import sanitized_child_environment
 from .redaction import redact_rollout_text
@@ -269,62 +271,15 @@ def _trusted_file_bytes(
     private: bool,
     allow_qianyi_owner: bool = False,
 ) -> bytes | None:
-    normalized = Path(os.path.normpath(path))
-    if not normalized.is_absolute():
-        return None
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    # Linux O_PATH preserves the installer contract of traverse-only parent
-    # ACLs; O_RDONLY would also require directory listing permission.
-    directory_flags = (
-        getattr(os, "O_PATH", os.O_RDONLY)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    directory_fd: int | None = None
     try:
-        directory_fd = os.open("/", directory_flags)
-        for component in normalized.parts[1:-1]:
-            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
-        fd = os.open(normalized.name, flags, dir_fd=directory_fd)
-    except OSError:
-        if directory_fd is not None:
-            os.close(directory_fd)
+        return read_trusted_file(
+            path,
+            service_uid=service_uid,
+            private=private,
+            allow_qianyi_owner=allow_qianyi_owner,
+        ).payload
+    except ValueError:
         return None
-    os.close(directory_fd)
-    try:
-        metadata = os.fstat(fd)
-        allowed_owners = {0, service_uid}
-        if allow_qianyi_owner:
-            try:
-                allowed_owners.add(pwd.getpwnam("qianyi").pw_uid)
-            except (KeyError, OSError):
-                pass
-        unsafe_mode = 0o137 if private else 0o022
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid not in allowed_owners
-            or stat.S_IMODE(metadata.st_mode) & unsafe_mode
-            or metadata.st_nlink != 1
-            or metadata.st_size > 1024 * 1024
-        ):
-            return None
-        payload = os.read(fd, metadata.st_size + 1)
-        if len(payload) != metadata.st_size:
-            return None
-        after = os.fstat(fd)
-        if (metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_size) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_mtime_ns,
-            after.st_size,
-        ):
-            return None
-        return payload
-    finally:
-        os.close(fd)
 
 
 def _private_file_bytes(

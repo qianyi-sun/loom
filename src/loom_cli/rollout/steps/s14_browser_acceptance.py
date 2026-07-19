@@ -11,13 +11,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import pwd
 import stat
 from pathlib import Path
 from typing import cast
 
 from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.context import RolloutContext
+from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult
 from loom_cli.rollout.steps.s02_build_images import image_tag
@@ -107,72 +107,24 @@ def _validate_admin_token_file(path: Path) -> os.stat_result:
     authority outside the owner before the path is bind-mounted read-only.
     """
 
-    normalized = Path(os.path.normpath(path))
-    if not normalized.is_absolute() or ".." in path.parts:
-        raise ValueError("browser acceptance admin token path is unsafe")
-    directory_flags = (
-        getattr(os, "O_PATH", os.O_RDONLY)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    directory_fd: int | None = None
     try:
-        directory_fd = os.open("/", directory_flags)
-        for component in normalized.parts[1:-1]:
-            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
-        fd = os.open(normalized.name, file_flags, dir_fd=directory_fd)
-    except OSError as exc:
-        if directory_fd is not None:
-            os.close(directory_fd)
-        raise ValueError("browser acceptance admin token path is unsafe") from exc
-    os.close(directory_fd)
-    try:
-        before = os.fstat(fd)
-        allowed_owners = {0, os.geteuid()}
-        try:
-            allowed_owners.add(pwd.getpwnam(BROWSER_ACCEPTANCE_USERNAME).pw_uid)
-        except (KeyError, OSError):
-            pass
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_uid not in allowed_owners
-            or stat.S_IMODE(before.st_mode) & 0o7137
-            or before.st_nlink != 1
-            or before.st_size < 1
-            or before.st_size > _MAX_ADMIN_TOKEN_BYTES
-        ):
-            raise ValueError("browser acceptance admin token metadata is unsafe")
-        payload = os.read(fd, before.st_size + 1)
-        after = os.fstat(fd)
-        if len(payload) != before.st_size or (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_uid,
-            before.st_gid,
-            before.st_nlink,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_uid,
-            after.st_gid,
-            after.st_nlink,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        ):
-            raise ValueError("browser acceptance admin token changed while it was read")
-        return before
-    finally:
-        os.close(fd)
+        return read_trusted_file(
+            path,
+            service_uid=os.geteuid(),
+            private=True,
+            allow_qianyi_owner=True,
+            max_bytes=_MAX_ADMIN_TOKEN_BYTES,
+            require_nonempty=True,
+        ).metadata
+    except ValueError as exc:
+        detail = str(exc)
+        if "traversal" in detail or "path or authority" in detail:
+            message = "browser acceptance admin token path is unsafe"
+        elif "changed while" in detail:
+            message = "browser acceptance admin token changed while it was read"
+        else:
+            message = "browser acceptance admin token metadata is unsafe"
+        raise ValueError(message) from exc
 
 
 def _report_is_valid(
