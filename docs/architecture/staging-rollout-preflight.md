@@ -330,6 +330,16 @@ reopens that sibling envelope with the private-file authority reader and
 revalidates request, attempt, candidate, config and attestation identities
 before a live browser session may cite the digest.
 
+The installed `FinalBrowserExecutor` consumes that same report predicate and
+the exact final-plan browser image digest. It reopens the admin token through
+the no-follow credential authority, checks both attested metadata and the
+root-configured redacted content fingerprint, and writes only into the private
+request-attempt evidence directory. A complete existing report is reusable;
+an existing partial or drifted report is terminal evidence and forbids another
+browser session instead of silently repeating a protected mutation. This
+executor remains unwired until the complete protected component chain is
+represented by the installed final helper.
+
 The Tier 3 API probe runs from the exact `loom-service` image with a fixed
 module invocation. It reads a dedicated root-owned mode-`0440` regular-file
 projection of the cloned admin secret with `O_NOFOLLOW`, stable metadata and a
