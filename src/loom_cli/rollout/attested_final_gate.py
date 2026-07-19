@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -97,7 +97,13 @@ class AttestedFinalGateAuthority:
             }
         )
 
-    def execute(self, *, now: datetime) -> AttestedFinalGateReport:
+    def execute(
+        self,
+        *,
+        now: datetime,
+        prior_executions: Mapping[str, CheckExecution] | None = None,
+        on_execution: Callable[[CheckExecution], None] | None = None,
+    ) -> AttestedFinalGateReport:
         """Apply once, then verify every non-mutating protected invariant."""
         if now.tzinfo is None or now.utcoffset() is None or now >= self._attestation.expires_at:
             raise ValueError("final gate attestation expired before execution")
@@ -114,6 +120,8 @@ class AttestedFinalGateAuthority:
             operation=operations,
             through_tier=4,
             now=lambda: now,
+            prior_executions=prior_executions,
+            on_execution=on_execution,
         )
         return AttestedFinalGateReport(
             attestation_digest=self._attestation.attestation_digest,
