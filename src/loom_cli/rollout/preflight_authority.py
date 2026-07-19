@@ -5,12 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from threading import Lock
 
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
 from loom_cli.rollout.preflight_contract import AttestationBindings, CheckContext
-from loom_cli.rollout.preflight_pipeline import PreflightPipeline, PreflightPipelineResult
+from loom_cli.rollout.preflight_pipeline import (
+    PreflightAssessment,
+    PreflightPipeline,
+    PreflightPipelineResult,
+)
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
 
@@ -63,17 +68,32 @@ class CandidatePreflightAuthorizer:
         self._store = store
         self._now = now
         self._max_concurrency = max_concurrency
+        self._pending: tuple[CandidatePreflightPlan, PreflightAssessment] | None = None
+        self._lock = Lock()
 
-    def __call__(self, candidate: CandidateBinding) -> PreflightPipelineResult:
+    def assess(self, candidate: CandidateBinding) -> PreflightAssessment:
+        """Run and retain the exact pre-backup plan for one candidate."""
         plan = self._planner(candidate)
         if plan.candidate != candidate:
             raise ValueError("preflight planner changed the immutable candidate")
-        pipeline = PreflightPipeline(
-            registry=plan.registry,
-            store=self._store,
-            max_concurrency=self._max_concurrency,
-            now=self._now,
-        )
+        pipeline = self._pipeline(plan)
+        assessment = pipeline.assess(context=plan.context)
+        with self._lock:
+            if self._pending is not None:
+                raise ValueError("another pre-backup assessment is already pending")
+            self._pending = (plan, assessment)
+        return assessment
+
+    def __call__(self, candidate: CandidateBinding) -> PreflightPipelineResult:
+        with self._lock:
+            pending = self._pending
+            self._pending = None
+        if pending is None:
+            raise ValueError("pre-backup assessment is unavailable")
+        plan, assessment = pending
+        if plan.candidate != candidate:
+            raise ValueError("pre-backup assessment candidate drifted")
+        pipeline = self._pipeline(plan)
         return pipeline.authorize(
             context=plan.context,
             bindings=plan.current_bindings,
@@ -82,6 +102,15 @@ class CandidatePreflightAuthorizer:
                 executions,
             ),
             reusable_attestation_digest=plan.reusable_attestation_digest,
+            assessment=assessment,
+        )
+
+    def _pipeline(self, plan: CandidatePreflightPlan) -> PreflightPipeline:
+        return PreflightPipeline(
+            registry=plan.registry,
+            store=self._store,
+            max_concurrency=self._max_concurrency,
+            now=self._now,
         )
 
 

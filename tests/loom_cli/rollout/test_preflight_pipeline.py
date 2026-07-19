@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
@@ -128,10 +130,12 @@ def test_pipeline_publishes_and_reuses_exact_attestation(tmp_path: Path) -> None
         binding_factory=lambda _executions: _bindings(),
     )
     assert first.passed and first.attestation is not None and not first.reused
+    assessment = pipeline.assess(context=_context(registry))
     second = pipeline.authorize(
         context=_context(registry),
         bindings=_bindings(),
         reusable_attestation_digest=first.attestation.attestation_digest,
+        assessment=assessment,
     )
     assert second.passed and second.reused
     assert second.executions == ()
@@ -153,3 +157,47 @@ def test_pipeline_invalidates_epoch_drift_and_reruns(tmp_path: Path) -> None:
     )
     assert drifted.passed and not drifted.reused
     assert drifted.executions
+
+
+def test_tier_two_assessment_is_rechecked_before_tier_three_attestation(
+    tmp_path: Path,
+) -> None:
+    registry = _registry()
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+
+    assessment = pipeline.assess(context=context)
+    result = pipeline.authorize(
+        context=context,
+        bindings=_bindings(),
+        assessment=assessment,
+    )
+
+    assert assessment.passed
+    assert assessment.through_tier == 2
+    assert {item.tier for item in assessment.executions} == {0, 1, 2}
+    assert result.passed and result.attestation is not None
+
+
+def test_tier_two_assessment_rejects_input_drift_before_attestation(tmp_path: Path) -> None:
+    registry = _registry()
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+    assessment = pipeline.assess(context=context)
+    drifted = dict(context.bindings)
+    drifted[registry.checks[0].spec.input_keys[0]] = "drifted"
+
+    with pytest.raises(ValueError, match="assessment evidence drifted"):
+        pipeline.authorize(
+            context=CheckContext(drifted),
+            bindings=_bindings(),
+            assessment=assessment,
+        )

@@ -37,6 +37,17 @@ contains all independent blockers. Every result records the implementation
 digest, input fingerprint, evidence hash, discovered stage, start/finish time,
 and expiry.
 
+Execution has an explicit pre-backup boundary. Tiers 0–2 first produce one
+digest-addressed `PreflightAssessment`; no rollout request or backup job may be
+published if it contains a blocker. The same in-memory check sessions are then
+retained while a request-specific checkpoint is created and restore-verified.
+Tier 3 reruns the earlier probes as drift checks, reuses the immutable image,
+manifest, and baseline artifacts instead of rebuilding them, and refuses to
+attest if any input fingerprint, implementation digest, evidence hash, or TTL
+differs from the assessment. This removes the previous circular dependency in
+which clone rehearsal needed a verified lease while the broker demanded the
+rehearsal attestation before it could create that lease.
+
 ## Tiers
 
 ### Tier 0: admission, under two minutes
@@ -78,6 +89,11 @@ run environment-state, release, API, admin-on-behalf, smoke, and authenticated
 browser acceptance. Cleanup is journaled and verified. Rehearsal credentials
 cannot mutate protected staging, and live MinIO filesystem snapshots remain
 forbidden.
+
+Tier 3 is therefore the first stage after the request-specific backup worker
+has published a restore-verified lease. The pre-backup assessment alone is
+never launch authority; only the complete Tier 0–3 attestation can be promoted
+into the immutable rollout request and driver envelope.
 
 ### Tier 4: justified final-only checks
 
