@@ -34,6 +34,7 @@ from loom_cli.rollout.manifest_readiness import (
     RenderManifest,
     ServerDryRun,
 )
+from loom_cli.rollout.migration_readiness import MigrationPlanEvidence
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.candidate import GitRunner
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -213,6 +214,7 @@ class PreflightRuntimeSources:
             artifact=(None if self.loaded_artifacts is None else self.loaded_artifacts.images),
         )
         manifest_artifacts: dict[str, ManifestArtifact] = {}
+        migration_artifacts: dict[str, MigrationPlanEvidence] = {}
         manifest_session: ManifestRenderSession | None = None
         if self.loaded_artifacts is not None:
             manifest_artifacts["exact"] = self.loaded_artifacts.manifests
@@ -234,6 +236,22 @@ class PreflightRuntimeSources:
             except KeyError as exc:
                 raise ValueError("preflight manifest artifact was not produced") from exc
 
+        def capture_migration(artifact: MigrationPlanEvidence) -> None:
+            migration_artifacts["exact"] = artifact
+
+        def exact_migration() -> tuple[str, str]:
+            try:
+                artifact = migration_artifacts["exact"]
+            except KeyError:
+                if self.loaded_artifacts is None:
+                    raise ValueError("preflight migration artifact was not produced") from None
+                publication = self.loaded_artifacts.publication
+                return (
+                    publication.migration_plan_sha256,
+                    publication.migration_target_revision,
+                )
+            return artifact.plan_digest, artifact.head
+
         def groups() -> tuple[
             tuple[RegisteredCheck, ...],
             tuple[RegisteredCheck, ...],
@@ -245,6 +263,8 @@ class PreflightRuntimeSources:
                 capture_manifest=capture_manifest,
                 exact_manifest=exact_manifest,
                 manifest_session=manifest_session,
+                capture_migration=capture_migration,
+                exact_migration=exact_migration,
                 mutation_epoch=mutation_epoch,
             )
             tier2 = build_staging_baseline_checks(
@@ -353,6 +373,8 @@ class PreflightRuntimeSources:
         capture_manifest: Callable[[ManifestArtifact], None],
         exact_manifest: Callable[[], ManifestArtifact],
         manifest_session: ManifestRenderSession | None,
+        capture_migration: Callable[[MigrationPlanEvidence], None],
+        exact_migration: Callable[[], tuple[str, str]],
         mutation_epoch: int,
     ) -> tuple[RegisteredCheck, ...]:
         image_checks = build_image_preflight_checks(
@@ -378,6 +400,7 @@ class PreflightRuntimeSources:
                 alembic_ini=self.alembic_ini,
                 expected_candidate_sha=self.candidate.resolved_sha,
                 expected_policy_digest=self.migration_policy_digest,
+                artifact_sink=capture_migration,
             ),
             build_systemd_render_check(
                 self.systemd_analyze_run,
@@ -402,8 +425,8 @@ class PreflightRuntimeSources:
                 candidate_sha=self.candidate.resolved_sha,
                 candidate_tree=self.candidate.resolved_tree or "",
                 mutation_epoch=mutation_epoch,
-                migration_plan_sha256=self.migration_policy_digest,
-                migration_target_revision="0066",
+                migration_artifact=exact_migration,
+                expected_migration_policy_sha256=self.migration_policy_digest,
                 browser_report_schema_sha256=browser_report_schema_digest(),
             ),
         )

@@ -64,6 +64,7 @@ from loom_cli.rollout.manifest_readiness import (
 )
 from loom_cli.rollout.migration_readiness import (
     DEFAULT_MIGRATION_POLICY,
+    MigrationPlanEvidence,
     inspect_migration_plan,
 )
 from loom_cli.rollout.operator.backup_lease import (
@@ -1478,6 +1479,7 @@ def build_migration_plan_check(
     expected_candidate_sha: str,
     expected_policy_digest: str,
     policy_path: Path = DEFAULT_MIGRATION_POLICY,
+    artifact_sink: Callable[[MigrationPlanEvidence], None] | None = None,
 ) -> RegisteredCheck:
     """Build the Tier 1 exact static migration graph and policy invariant."""
     for value in (expected_candidate_sha, expected_policy_digest):
@@ -1496,6 +1498,8 @@ def build_migration_plan_check(
             plan = inspect_migration_plan(alembic_ini, policy_path=policy_path)
         except ValueError:
             return _empty_migration_plan_probe(expected_policy_digest)
+        if artifact_sink is not None:
+            artifact_sink(plan)
         return CheckProbe(
             passed=plan.policy_digest == expected_policy_digest,
             evidence={
@@ -1845,8 +1849,8 @@ def build_preflight_artifact_publication_check(
     candidate_sha: str,
     candidate_tree: str,
     mutation_epoch: int,
-    migration_plan_sha256: str,
-    migration_target_revision: str,
+    migration_artifact: Callable[[], tuple[str, str]],
+    expected_migration_policy_sha256: str,
     browser_report_schema_sha256: str,
 ) -> RegisteredCheck:
     """Publish the exact Tier 1 outputs consumed by the detached worker."""
@@ -1856,12 +1860,12 @@ def build_preflight_artifact_publication_check(
             context.bindings["candidate.sha"] != candidate_sha
             or context.bindings["candidate.tree"] != candidate_tree
             or context.bindings["staging.mutation-epoch"] != mutation_epoch
-            or context.bindings["migration.policy.sha256"] != migration_plan_sha256
-            or context.bindings["browser.report-schema.sha256"]
-            != browser_report_schema_sha256
+            or context.bindings["migration.policy.sha256"] != expected_migration_policy_sha256
+            or context.bindings["browser.report-schema.sha256"] != browser_report_schema_sha256
         ):
             return _empty_artifact_publication_probe()
         try:
+            migration_plan_sha256, migration_target_revision = migration_artifact()
             publication = store.publish(
                 candidate_sha=candidate_sha,
                 candidate_tree=candidate_tree,

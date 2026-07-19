@@ -283,8 +283,8 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
         candidate_sha="a" * 40,
         candidate_tree="f" * 40,
         mutation_epoch=8,
-        migration_plan_sha256="1" * 64,
-        migration_target_revision="0066",
+        migration_artifact=lambda: ("1" * 64, "0066"),
+        expected_migration_policy_sha256="9" * 64,
         browser_report_schema_sha256="2" * 64,
     )
     context = CheckContext(
@@ -292,7 +292,7 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
             "browser.report-schema.sha256": "2" * 64,
             "candidate.sha": "a" * 40,
             "candidate.tree": "f" * 40,
-            "migration.policy.sha256": "1" * 64,
+            "migration.policy.sha256": "9" * 64,
             "staging.mutation-epoch": 8,
         }
     )
@@ -316,3 +316,5 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
         image_run=_docker,
     )
     assert outcome.evidence["bundle-digest"] == loaded.publication.bundle_digest
+    assert loaded.publication.migration_plan_sha256 == "1" * 64
+    assert loaded.publication.migration_target_revision == "0066"
