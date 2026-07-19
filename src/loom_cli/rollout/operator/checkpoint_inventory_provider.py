@@ -59,7 +59,7 @@ class InventoryCommandRunner(Protocol):
         argv: Sequence[str],
         *,
         env: Mapping[str, str],
-        timeout_seconds: float | None = None,
+        timeout_seconds: float,
     ) -> bytes: ...
 
 

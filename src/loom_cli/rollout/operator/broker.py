@@ -23,10 +23,12 @@ from loom_cli.rollout.preflight_pipeline import PreflightPipelineResult
 from .backup import (
     BackupCreator,
     BackupError,
+    SubprocessBackupCommandRunner,
     VerifiedBackup,
     normalize_backup_public_reason,
 )
 from .candidate import CandidateBindingError, bind_configured_candidate
+from .checkpoint_inventory_provider import KubernetesLifecycleInventoryProvider
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
 from .lifecycle import LifecycleBusyError, LifecycleCoordinator, LifecycleError
@@ -1029,6 +1031,12 @@ def _default_dependencies() -> BrokerDependencies:
         stream=stream,
     )
     lifecycle = LifecycleCoordinator(config, store=store, systemd=systemd)
+    backup_runner = SubprocessBackupCommandRunner()
+    inventory_provider = KubernetesLifecycleInventoryProvider(
+        config,
+        runner=backup_runner,
+        environment=child_environment,
+    )
     return BrokerDependencies(
         config=config,
         authenticate=lambda: caller_from_sudo(
@@ -1043,7 +1051,12 @@ def _default_dependencies() -> BrokerDependencies:
             run=run,
             now=lambda: datetime.now(UTC),
         ),
-        backup=BackupCreator(config, service_uid=service_uid),
+        backup=BackupCreator(
+            config,
+            service_uid=service_uid,
+            runner=backup_runner,
+            object_inventory_provider=inventory_provider,
+        ),
         store=store,
         lifecycle=lifecycle,
         systemd=systemd,
