@@ -75,6 +75,18 @@ verified rather than deleted again and already removed metadata is not replayed.
 An active, dry-run, completed, mixed-token, or tampered-inventory run cannot be
 resumed. A second resumer loses the claim and fails closed.
 
+The supported operator entrypoint is
+`scripts/ops/staging_data_lifecycle_gc.py`. It loads the normal control-plane
+database and object-store settings from their existing secret-bearing
+environment, never accepts secret values on argv, and supports four explicit
+actions: `inventory`, `dry-run`, `apply`, and `resume`. `inventory` is purely
+read-only and returns every blocker together. `apply` additionally requires the
+operator to echo the exact live inventory digest and provide a mutation request
+ID; a newly observed row, object, or epoch therefore invalidates authorization.
+Evidence output can be written once to a new mode-0600 file. `resume` accepts
+only an exact failed run ID and its request authority; it does not rebuild or
+broaden the deletion plan from current prefixes.
+
 ## Rollout checkpoint versus disaster recovery
 
 The synchronous rollout checkpoint contains only state the rollout can mutate
