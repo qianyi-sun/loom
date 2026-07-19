@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.failure_authority import classify_rollout_failure
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.operator import worker as worker_module
 from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope, transition_backup_job
@@ -201,6 +202,21 @@ def test_worker_records_failed_driver_and_clears_active() -> None:
     assert run_attempt(valid_envelope(), bundle.deps) == 1
     assert "attempt_failed" in bundle.order
     assert bundle.store.active is None
+
+
+def test_worker_publishes_normalized_driver_failure_stage() -> None:
+    bundle = worker_fakes(driver_rc=2)
+    bundle.deps.read_driver_failure = lambda envelope: classify_rollout_failure(
+        step_number=15,
+        step_name="smoke",
+        reason="protected route failed",
+    )
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    terminal = bundle.store.events[-1]
+    assert terminal.event == "attempt_failed"
+    assert terminal.reason == "final.smoke.failed@final-only"
+    assert terminal.current_step == "15-smoke"
 
 
 def test_worker_observes_cancel_marker_without_editing_rollout_state() -> None:

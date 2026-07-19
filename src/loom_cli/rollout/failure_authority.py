@@ -8,6 +8,7 @@ belongs to and whether it escaped the invariant's earliest declared stage.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -91,6 +92,57 @@ class RolloutFailureEvidence:
             "step_name": self.step_name,
             "step_number": self.step_number,
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> RolloutFailureEvidence:
+        expected = {
+            "check_id",
+            "coverage_defect",
+            "declared_stage",
+            "declared_tier",
+            "discovered_stage",
+            "discovered_tier",
+            "failure_code",
+            "reason",
+            "schema_version",
+            "step_name",
+            "step_number",
+        }
+        if set(data) != expected:
+            raise ValueError("rollout failure evidence fields are invalid")
+        strings = (
+            data["check_id"],
+            data["failure_code"],
+            data["step_name"],
+            data["reason"],
+        )
+        if (
+            not all(isinstance(value, str) for value in strings)
+            or type(data["schema_version"]) is not int
+            or type(data["declared_tier"]) is not int
+            or type(data["discovered_tier"]) is not int
+            or type(data["step_number"]) is not int
+            or type(data["coverage_defect"]) is not bool
+        ):
+            raise ValueError("rollout failure evidence types are invalid")
+        try:
+            declared_stage = StageCapability(str(data["declared_stage"]))
+            discovered_stage = StageCapability(str(data["discovered_stage"]))
+        except ValueError as exc:
+            raise ValueError("rollout failure evidence stage is invalid") from exc
+        return cls(
+            schema_version=data["schema_version"],
+            check_id=str(data["check_id"]),
+            failure_code=str(data["failure_code"]),
+            declared_stage=declared_stage,
+            discovered_stage=discovered_stage,
+            declared_tier=data["declared_tier"],
+            discovered_tier=data["discovered_tier"],
+            step_number=data["step_number"],
+            step_name=str(data["step_name"]),
+            coverage_defect=data["coverage_defect"],
+            reason=str(data["reason"]),
+        )
 
 
 def classify_rollout_failure(

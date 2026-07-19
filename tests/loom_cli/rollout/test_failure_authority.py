@@ -44,6 +44,7 @@ def test_justified_final_only_failure_is_not_coverage_defect() -> None:
     assert failure.check_id == "final.browser"
     assert failure.failure_code == "final.browser.failed"
     assert not failure.coverage_defect
+    assert type(failure).from_dict(failure.to_dict()) == failure
 
 
 def test_unclassified_rollout_step_fails_closed() -> None:

@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Never, TextIO
 
+from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.failure_authority import RolloutFailureEvidence
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 
 from .backup_job import (
@@ -107,6 +109,7 @@ class WorkerDependencies:
         | None
     ) = None
     finalize_backup: Callable[[PreflightRequest, VerifiedBackupJob], DriverEnvelope] | None = None
+    read_driver_failure: Callable[[DriverEnvelope], RolloutFailureEvidence | None] | None = None
 
 
 @dataclass(slots=True)
@@ -188,6 +191,7 @@ def _event(
     event: str,
     status: str,
     reason: str | None = None,
+    current_step: str | None = None,
 ) -> RequestEvent:
     return RequestEvent(
         request_id=envelope.request_id,
@@ -199,6 +203,7 @@ def _event(
         unit_name=_unit_name(envelope),
         status=status,  # type: ignore[arg-type]
         reason=reason,
+        current_step=current_step,
     )
 
 
@@ -297,12 +302,26 @@ def run_attempt(
             )
             return_code = 0
         else:
+            failure = (
+                dependencies.read_driver_failure(envelope)
+                if dependencies.read_driver_failure is not None
+                else None
+            )
             terminal_event = _event(
                 envelope,
                 dependencies=dependencies,
                 event="attempt_failed",
                 status="failed",
-                reason="driver_failed",
+                reason=(
+                    f"{failure.failure_code}@{failure.discovered_stage.value}"
+                    if failure is not None
+                    else "driver_failed"
+                ),
+                current_step=(
+                    f"{failure.step_number:02d}-{failure.step_name}"
+                    if failure is not None
+                    else None
+                ),
             )
             return_code = 1
         dependencies.store.append_event(terminal_event)
@@ -613,7 +632,17 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             request,
             verified,
         ),
+        read_driver_failure=lambda envelope: _read_driver_failure(config, envelope),
     )
+
+
+def _read_driver_failure(
+    config: OperatorConfig,
+    envelope: DriverEnvelope,
+) -> RolloutFailureEvidence | None:
+    evidence = EvidenceDirectory(config.rollout_root, envelope.rollout_id)
+    payload = evidence.read_failure()
+    return None if payload is None else RolloutFailureEvidence.from_dict(payload)
 
 
 def main(
