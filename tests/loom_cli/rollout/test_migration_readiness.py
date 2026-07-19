@@ -13,10 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def test_repository_migration_plan_is_linear_and_policy_bound() -> None:
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0066"
+    assert result.head == "0067"
     assert result.base == "0001"
-    assert result.revision_count == 66
-    assert len(result.revision_sha256) == 66
+    assert result.revision_count == 67
+    assert len(result.revision_sha256) == 67
     assert result.graph_policy == "single-linear-head"
     assert result.upgrade_policy == "expand-contract-before-destructive-change"
     assert result.downgrade_policy == "revision-declared-fail-closed"
