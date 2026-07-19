@@ -11,6 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from loom_cli.environment_state import EnvironmentStateProfile, load_environment_state_profile
+from loom_llm_gateway.yibuapi_pricing import DEFAULT_YIBUAPI_PRICING_URL
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -223,12 +224,10 @@ def _normalized_yibuapi_sync(profile: EnvironmentStateProfile) -> dict[str, str]
     group = raw.get("group", "default")
     if not isinstance(group, str) or not group.strip():
         raise ValueError("production defaults rate-card sync is invalid")
-    result = {"group": group.strip()}
-    if raw.get("source_url") is not None:
-        source_url = raw["source_url"]
-        if not isinstance(source_url, str) or not source_url.strip():
-            raise ValueError("production defaults rate-card sync is invalid")
-        result["source_url"] = source_url.strip()
+    source_url = raw.get("source_url", DEFAULT_YIBUAPI_PRICING_URL)
+    if not isinstance(source_url, str) or not source_url.strip():
+        raise ValueError("production defaults rate-card sync is invalid")
+    result = {"group": group.strip(), "source_url": source_url.strip()}
     return result
 
 

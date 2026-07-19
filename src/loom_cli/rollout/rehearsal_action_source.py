@@ -103,6 +103,7 @@ class RehearsalPlan:
     rendered_manifest_path: Path
     manifest_artifact_sha256: str
     rendered_manifest_sha256: str
+    production_defaults_sha256: str
     migration_plan_sha256: str
     migration_target_revision: str
     browser_report_schema_sha256: str
@@ -129,6 +130,7 @@ class RehearsalPlan:
                     self.artifact_bundle_sha256,
                     self.manifest_artifact_sha256,
                     self.rendered_manifest_sha256,
+                    self.production_defaults_sha256,
                     self.migration_plan_sha256,
                     self.browser_report_schema_sha256,
                 )
@@ -198,8 +200,9 @@ class RehearsalPlan:
             },
             "rendered_manifest_path": str(self.rendered_manifest_path),
             "rendered_manifest_sha256": self.rendered_manifest_sha256,
+            "production_defaults_sha256": self.production_defaults_sha256,
             "schema_revision": self.schema_revision,
-            "schema_version": 2,
+            "schema_version": 3,
             "smoke_authority": self.smoke_authority.to_record(),
         }
 
@@ -229,6 +232,7 @@ class RehearsalPlan:
             "resources",
             "rendered_manifest_path",
             "rendered_manifest_sha256",
+            "production_defaults_sha256",
             "schema_revision",
             "schema_version",
             "smoke_authority",
@@ -240,7 +244,7 @@ class RehearsalPlan:
         if (
             set(value) != expected
             or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 2
+            or value.get("schema_version") != 3
             or type(mutation_epoch) is not int
             or not isinstance(resources, Mapping)
             or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
@@ -273,6 +277,7 @@ class RehearsalPlan:
             "object_inventory_root",
             "rendered_manifest_path",
             "rendered_manifest_sha256",
+            "production_defaults_sha256",
             "schema_revision",
         )
         if any(not isinstance(value.get(field), str) for field in string_fields) or any(
@@ -300,6 +305,7 @@ class RehearsalPlan:
             rendered_manifest_path=Path(str(value["rendered_manifest_path"])),
             manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
             rendered_manifest_sha256=str(value["rendered_manifest_sha256"]),
+            production_defaults_sha256=str(value["production_defaults_sha256"]),
             migration_plan_sha256=str(value["migration_plan_sha256"]),
             migration_target_revision=str(value["migration_target_revision"]),
             browser_report_schema_sha256=str(value["browser_report_schema_sha256"]),
@@ -373,6 +379,7 @@ class RehearsalActionSource:
             artifacts,
             manifests,
             migration,
+            production_defaults,
         )
         plan = self._plan(
             candidate,
@@ -477,6 +484,7 @@ class RehearsalActionSource:
             rendered_manifest_path=publication.rendered_manifest_path,
             manifest_artifact_sha256=publication.manifest_artifact_sha256,
             rendered_manifest_sha256=publication.rendered_manifest_sha256,
+            production_defaults_sha256=publication.production_defaults_sha256,
             migration_plan_sha256=self.migration_plan_sha256,
             migration_target_revision=self.migration_target_revision,
             browser_report_schema_sha256=self.browser_report_schema_sha256,
@@ -491,6 +499,7 @@ class RehearsalActionSource:
         artifacts: ImageArtifactSet,
         manifests: ManifestArtifact,
         migration: MigrationManifestArtifact,
+        production_defaults: ProductionDefaultsArtifact,
     ) -> str:
         payload = {
             "browser_report_schema_sha256": self.browser_report_schema_sha256,
@@ -503,13 +512,14 @@ class RehearsalActionSource:
             "image_tag": candidate.image_tag,
             "manifest_artifact_sha256": manifests.artifact_digest,
             "rendered_manifest_sha256": manifests.rendered_sha256,
+            "production_defaults_sha256": production_defaults.artifact_digest,
             "migration_plan_sha256": self.migration_plan_sha256,
             "migration_manifest_artifact_sha256": migration.artifact_digest,
             "migration_manifest_sha256": migration.rendered_sha256,
             "migration_target_revision": self.migration_target_revision,
             "route_origin": self.route_origin,
             "smoke_authority": self.smoke_authority.to_record(),
-            "schema_version": 2,
+            "schema_version": 3,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

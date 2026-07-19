@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.operator.protected_apply_executor import (
     KubernetesProtectedConvergenceExecutor,
     MigrationEpochProtectedApplyExecutor,
@@ -34,6 +35,9 @@ class Runner:
         if "SELECT version_num FROM alembic_version" in command:
             self.calls.append("migration-read")
             return (self.revision + "\n").encode()
+        if "FROM rate_cards" in command and "FROM provider_connections" not in command:
+            self.calls.append("defaults-read")
+            return b'{"rate_cards":[]}'
         if "WITH bootstrapped AS" in command:
             self.calls.append("epoch-apply")
             variables = {
@@ -92,18 +96,48 @@ def _attempt(state_root: Path) -> None:
     path.mkdir(parents=True, mode=0o700)
 
 
+def _plan(tmp_path: Path):
+    plan = _published_plan(tmp_path)
+    token_path = tmp_path / "service-token"
+    token_path.write_text("service-secret\n")
+    token_path.chmod(0o600)
+    trusted = read_trusted_file(
+        token_path,
+        service_uid=os.geteuid(),
+        private=True,
+        require_nonempty=True,
+    )
+    return replace(
+        plan,
+        service_token_source=f"file:{token_path}",
+        secret_metadata_fingerprints={
+            **plan.secret_metadata_fingerprints,
+            "service": f"sha256:{trusted.metadata_fingerprint}",
+        },
+    )
+
+
+def _defaults_request(**kwargs):
+    assert kwargs["method"] == "GET"
+    assert kwargs["path"] == "/api/v1/provider-connections"
+    assert kwargs["token"] == "service-secret"
+    assert kwargs["payload"] is None
+    return 200, b'{"items":[]}'
+
+
 def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     tmp_path: Path,
 ) -> None:
     state = tmp_path / "state"
     _attempt(state)
-    plan = _published_plan(tmp_path)
+    plan = _plan(tmp_path)
     runner = Runner(revision="0066", epoch=7)
     runner.plan_digest = plan.plan_digest
     executor = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
+        production_defaults_request=_defaults_request,
     )
 
     result = executor("final.protected-apply", CheckOperation.APPLY, plan)
@@ -124,7 +158,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     state = tmp_path / "state"
     _attempt(state)
     plan = replace(
-        _published_plan(tmp_path),
+        _plan(tmp_path),
         schema_revision="0065",
         starting_mutation_epoch=0,
     )
@@ -134,6 +168,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
+        production_defaults_request=_defaults_request,
     )
 
     result = executor("final.protected-apply", CheckOperation.APPLY, plan)
@@ -144,6 +179,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[0].name == "00-database-migration"
     assert roots[1].name == "01-mutation-epoch-claim"
     assert roots[2].name == "02-staging-manifests"
+    assert roots[3].name == "03-production-defaults"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
@@ -153,19 +189,20 @@ def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
         runner=Runner(revision="0066", epoch=7),
     )
     with pytest.raises(ValueError, match="operation is invalid"):
-        executor("final.browser", CheckOperation.VERIFY, _published_plan(tmp_path))
+        executor("final.browser", CheckOperation.VERIFY, _plan(tmp_path))
 
 
 def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -> None:
     state = tmp_path / "state"
     _attempt(state)
-    plan = _published_plan(tmp_path)
+    plan = _plan(tmp_path)
     runner = Runner(revision="0066", epoch=7)
     runner.plan_digest = plan.plan_digest
     applied = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
+        production_defaults_request=_defaults_request,
     )("final.protected-apply", CheckOperation.APPLY, plan)
     assert applied.ready
     before = tuple(runner.calls)
@@ -173,6 +210,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     result = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
         runner=runner,
+        production_defaults_request=_defaults_request,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
     assert result.ready
@@ -182,11 +220,12 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     assert "migration-read" in convergence_calls
     assert "epoch-read" in convergence_calls
     assert "manifest-diff" in convergence_calls
+    assert "defaults-read" not in convergence_calls
     assert all(not call.endswith("-apply") for call in convergence_calls)
 
 
 def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
-    plan = _published_plan(tmp_path)
+    plan = _plan(tmp_path)
     runner = Runner(revision="0066", epoch=9)
     runner.plan_digest = plan.plan_digest
     runner.manifest_status = 1
@@ -194,6 +233,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
     result = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
         runner=runner,
+        production_defaults_request=_defaults_request,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
     assert not result.ready
@@ -201,6 +241,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         "database-migration",
         "mutation-epoch-claim",
         "staging-manifests",
+        "production-defaults",
     }
     assert all(not call.endswith("-apply") for call in runner.calls)
 
@@ -211,9 +252,9 @@ def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -
         runner=Runner(revision="0067", epoch=8),
     )
     with pytest.raises(ValueError, match="operation is invalid"):
-        executor("final.convergence", CheckOperation.APPLY, _published_plan(tmp_path))
+        executor("final.convergence", CheckOperation.APPLY, _plan(tmp_path))
     with pytest.raises(ValueError, match="operation is invalid"):
-        executor("final.summary", CheckOperation.VERIFY, _published_plan(tmp_path))
+        executor("final.summary", CheckOperation.VERIFY, _plan(tmp_path))
 
 
 def test_subprocess_runner_has_fixed_environment_and_redacted_failure(

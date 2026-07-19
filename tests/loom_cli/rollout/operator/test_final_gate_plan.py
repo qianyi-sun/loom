@@ -106,7 +106,10 @@ def _attestation() -> PreflightAttestation:
         environment="staging",
         namespace="loom-staging",
         route="https://yylx.world/dev",
-        secret_metadata_fingerprints={"admin": "sha256:abc len=32"},
+        secret_metadata_fingerprints={
+            "admin": "sha256:abc len=32",
+            "service": "sha256:" + "f" * 64,
+        },
         gb10_inventory_digest="5" * 64,
         gb10_boot_ids={"trt-gb10-1": "boot-1"},
         gb10_mount_digest="6" * 64,
@@ -226,7 +229,11 @@ def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Pa
     assert plan.backup_lease_id == _lease().lease_id
     assert plan.backup_source_request_id == "req-source01"
     assert plan.image_digests["api"] == "sha256:" + "1" * 64
-    assert plan.secret_metadata_fingerprints == {"admin": "sha256:abc len=32"}
+    assert plan.secret_metadata_fingerprints == {
+        "admin": "sha256:abc len=32",
+        "service": "sha256:" + "f" * 64,
+    }
+    assert plan.service_token_source == _envelope(_attestation()).service_token_source
     assert plan.protected_baseline_digest == _baseline().baseline_digest
     assert plan.protected_baseline_resource_digests == _baseline().resource_digests
 

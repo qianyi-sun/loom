@@ -106,6 +106,7 @@ def _verify_artifact_publication(plan: RehearsalPlan) -> None:
         or publication.image_artifact_sha256 != plan.image_artifact_sha256
         or publication.manifest_artifact_sha256 != plan.manifest_artifact_sha256
         or publication.rendered_manifest_sha256 != plan.rendered_manifest_sha256
+        or publication.production_defaults_sha256 != plan.production_defaults_sha256
         or publication.migration_plan_sha256 != plan.migration_plan_sha256
         or publication.migration_target_revision != plan.migration_target_revision
         or publication.browser_report_schema_sha256 != plan.browser_report_schema_sha256

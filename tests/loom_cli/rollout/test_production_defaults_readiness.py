@@ -78,6 +78,28 @@ def test_production_defaults_artifact_rejects_tamper_and_duplicate_names(tmp_pat
         replace(artifact, providers=(artifact.providers[0], artifact.providers[0]))
 
 
+def test_production_defaults_materializes_default_sync_url(tmp_path: Path) -> None:
+    profile = _profile(tmp_path)
+    profile.write_text(
+        profile.read_text().replace(
+            'source_url = "https://rates.example.invalid/catalog.json"\n', ""
+        )
+    )
+
+    artifact = build_production_defaults_artifact(
+        profile,
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        image_tag="staging-aaaaaaa",
+        environment="staging",
+    )
+
+    assert artifact.yibuapi_sync == {
+        "group": "default",
+        "source_url": "https://yibuapi.com/api/pricing",
+    }
+
+
 def test_production_defaults_plan_check_binds_exact_candidate(tmp_path: Path) -> None:
     captured: list[ProductionDefaultsArtifact] = []
     check = build_production_defaults_plan_check(

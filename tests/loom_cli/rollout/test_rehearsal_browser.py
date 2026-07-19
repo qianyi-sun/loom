@@ -61,6 +61,7 @@ def _plan(tmp_path: Path) -> RehearsalPlan:
         rendered_manifest_path=rendered,
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256=hashlib.sha256(b"---\n").hexdigest(),
+        production_defaults_sha256="9" * 64,
         migration_plan_sha256="3" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="4" * 64,

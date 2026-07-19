@@ -14,7 +14,7 @@ import json
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -34,6 +34,11 @@ from .protected_epoch_component import (
 )
 from .protected_manifest_component import KubernetesProtectedManifestComponent
 from .protected_migration_component import KubernetesProtectedMigrationComponent
+from .protected_production_defaults_component import (
+    HttpxProductionDefaultsTransport,
+    KubernetesProtectedProductionDefaultsComponent,
+    ProductionDefaultsTransport,
+)
 
 PROTECTED_KUBECONFIG_PATH = Path("/var/lib/loom-staging-rollout/kubeconfig")
 _MAX_OUTPUT_BYTES = 1024 * 1024
@@ -213,6 +218,9 @@ class MigrationEpochProtectedApplyExecutor:
     state_root: Path
     service_uid: int
     runner: ProtectedApplyCommandRunner
+    production_defaults_request: ProductionDefaultsTransport = field(
+        default_factory=HttpxProductionDefaultsTransport
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -248,10 +256,17 @@ class MigrationEpochProtectedApplyExecutor:
             service_uid=self.service_uid,
             epoch_guard=epoch.classify,
         ).component(plan)
+        production_defaults = KubernetesProtectedProductionDefaultsComponent(
+            runner=self.runner,
+            environment=environment,
+            service_uid=self.service_uid,
+            epoch_guard=epoch.classify,
+            request=self.production_defaults_request,
+        ).component(plan)
         components = (
-            (migration, epoch, manifests)
+            (migration, epoch, manifests, production_defaults)
             if requires_legacy_epoch_bootstrap(plan)
-            else (epoch, migration, manifests)
+            else (epoch, migration, manifests, production_defaults)
         )
         terminals = ProtectedApplyJournal(
             self.state_root,
@@ -280,6 +295,9 @@ class KubernetesProtectedConvergenceExecutor:
 
     service_uid: int
     runner: ProtectedApplyCommandRunner
+    production_defaults_request: ProductionDefaultsTransport = field(
+        default_factory=HttpxProductionDefaultsTransport
+    )
 
     def __post_init__(self) -> None:
         if self.service_uid < 0:
@@ -313,6 +331,13 @@ class KubernetesProtectedConvergenceExecutor:
                 service_uid=self.service_uid,
                 epoch_guard=epoch.classify,
             ).classify(plan),
+            "production-defaults": KubernetesProtectedProductionDefaultsComponent(
+                runner=self.runner,
+                environment=environment,
+                service_uid=self.service_uid,
+                epoch_guard=epoch.classify,
+                request=self.production_defaults_request,
+            ).classify(plan),
         }
         expected_epoch = plan.starting_mutation_epoch + 1
         blockers = {
@@ -324,6 +349,8 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["mutation-epoch-claim"] = "protected-epoch-not-exact"
         if observations["staging-manifests"].observed_epoch != expected_epoch:
             blockers["staging-manifests"] = "protected-epoch-not-exact"
+        if observations["production-defaults"].observed_epoch != expected_epoch:
+            blockers["production-defaults"] = "protected-epoch-not-exact"
         return FinalGateResult(
             check_id=check_id,
             operation=operation,

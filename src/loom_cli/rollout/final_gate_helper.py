@@ -106,6 +106,7 @@ def _verify_driver_envelope(plan: FinalGatePlan) -> None:
         or (plan.source_mode == "merged-dev" and envelope.resolved_tree is not None)
         or envelope.runner_config_sha256 != plan.runner_config_hash
         or envelope.preflight_attestation_sha256 != plan.attestation_digest
+        or envelope.service_token_source != plan.service_token_source
     ):
         raise ValueError("final gate helper driver envelope drifted")
 

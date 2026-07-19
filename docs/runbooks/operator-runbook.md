@@ -2161,6 +2161,14 @@ rehearsal and protected final apply consume that exact digest-addressed file;
 neither stage may reopen the environment profile or discover provider defaults
 after backup.
 
+The protected component reads the service token only from the exact `file:`
+source already bound into the request envelope and verifies its preflight
+metadata fingerprint immediately before use. Provider/rate-card classification
+is read-only; only the fixed Service API sync/update operations may mutate, and
+the component journal is not terminal until an identical post-apply classifier
+returns exact. Do not substitute an ambient CLI login, direct SQL update or a
+newly resolved environment profile.
+
 Step 15 defaults to `user-token` mode. In that mode, pass a replayable
 `--smoke-api-token env:VAR` or `--smoke-api-token file:PATH` source; the
 legacy `LOOM_SMOKE_API_TOKEN` environment variable remains an interactive

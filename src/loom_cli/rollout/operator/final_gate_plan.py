@@ -86,6 +86,7 @@ class FinalGatePlan:
     environment: str
     namespace: str
     route: str
+    service_token_source: str
     runner_source_sha: str
     runner_source_tree: str
     runner_install_hash: str
@@ -105,7 +106,7 @@ class FinalGatePlan:
         validate_safe_identifier(self.request_id, "request_id")
         validate_safe_identifier(self.rollout_id, "rollout_id")
         if (
-            self.schema_version != 1
+            self.schema_version != 2
             or type(self.attempt_number) is not int
             or self.attempt_number < 1
             or self.source_mode not in {"merged-dev", "sealed-cumulative"}
@@ -159,6 +160,15 @@ class FinalGatePlan:
             path = Path(value)
             if not path.is_absolute() or ".." in path.parts:
                 raise ValueError("final gate plan path is invalid")
+        if not self.service_token_source.startswith("file:"):
+            raise ValueError("final gate service token source is invalid")
+        service_token_path = Path(self.service_token_source.removeprefix("file:"))
+        if (
+            not service_token_path.is_absolute()
+            or ".." in service_token_path.parts
+            or any(character in str(service_token_path) for character in ("\n", "\r", "\x00"))
+        ):
+            raise ValueError("final gate service token source is invalid")
         if Path(self.artifact_descriptor_path).parent != Path(self.rendered_manifest_path).parent:
             raise ValueError("final gate preflight artifact roots differ")
         if Path(self.artifact_descriptor_path).parent != Path(self.migration_manifest_path).parent:
@@ -297,7 +307,7 @@ class FinalGatePlan:
         ):
             raise ValueError("final gate plan inputs drifted")
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "request_id": envelope.request_id,
             "rollout_id": envelope.rollout_id,
             "attempt_number": envelope.attempt_number,
@@ -338,6 +348,7 @@ class FinalGatePlan:
             "environment": bindings.environment,
             "namespace": bindings.namespace,
             "route": bindings.route,
+            "service_token_source": envelope.service_token_source,
             "runner_source_sha": bindings.runner_source_sha,
             "runner_source_tree": bindings.runner_source_tree,
             "runner_install_hash": bindings.runner_install_hash,
@@ -404,6 +415,7 @@ class FinalGatePlan:
             environment=_string(value, "environment"),
             namespace=_string(value, "namespace"),
             route=_string(value, "route"),
+            service_token_source=_string(value, "service_token_source"),
             runner_source_sha=_string(value, "runner_source_sha"),
             runner_source_tree=_string(value, "runner_source_tree"),
             runner_install_hash=_string(value, "runner_install_hash"),

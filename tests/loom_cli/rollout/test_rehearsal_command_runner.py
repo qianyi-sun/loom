@@ -50,6 +50,7 @@ def _plan() -> RehearsalPlan:
         ),
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256="8" * 64,
+        production_defaults_sha256="9" * 64,
         migration_plan_sha256="3" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="4" * 64,

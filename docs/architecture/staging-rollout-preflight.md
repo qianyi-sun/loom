@@ -131,6 +131,17 @@ beside the rendered and migration manifests, so rehearsal and final protected
 apply consume the same desired values instead of reopening an ambient or
 mutable environment profile after backup.
 
+The rehearsal identity includes that defaults digest. Protected apply later
+uses one journaled `production-defaults` component after the mutation epoch,
+migration and Kubernetes manifests are exact. Its single classifier reads the
+token-scoped provider view from the Service API and only the relevant global
+rate-card projection from PostgreSQL; apply uses that same Service API with the
+attested `file:` service-token path, then the same
+classifier must observe exact state before terminal evidence is published.
+Missing or duplicate provider identities, token metadata drift, an unexpected
+route or HTTP operation, and a changed artifact all fail closed. The token
+value is never written to the plan, journal, argv or evidence.
+
 `PreflightRuntimeSources` is the typed composition root for those checks. It
 accepts only the low-level command/probe boundaries and exact expected
 identities, derives every context input from the same registered-check helpers,
