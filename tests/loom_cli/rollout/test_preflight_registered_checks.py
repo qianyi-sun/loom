@@ -55,6 +55,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_lifecycle_launch_cancel_check,
     build_manifest_preflight_checks,
     build_migration_plan_check,
+    build_staging_baseline_checks,
     build_systemd_render_check,
     build_systemd_user_manager_check,
     build_tools_runtime_check,
@@ -63,6 +64,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     gb10_target_inventory_digest,
 )
 from loom_cli.rollout.runtime_readiness import REQUIRED_EXECUTABLES, REQUIRED_IMPORTS
+from loom_cli.rollout.staging_baseline_readiness import BaselineProbeResult
 
 BOOT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
@@ -1417,3 +1419,60 @@ def test_registered_browser_runtime_binds_exact_image_token_and_schema(tmp_path:
     assert result.evidence["image-id"] == browser.image_id
     assert result.evidence["report-schema-digest"] == browser_report_schema_digest()
     assert "--network=none" in calls[0]
+
+
+def test_registered_staging_baseline_runs_independent_readonly_blockers() -> None:
+    check_ids = (
+        "staging.health",
+        "staging.auth",
+        "staging.catalog-task",
+        "staging.storage-db",
+        "staging.network",
+    )
+    calls: list[str] = []
+
+    def result(check_id: str) -> BaselineProbeResult:
+        calls.append(check_id)
+        return BaselineProbeResult(
+            check_id=check_id,
+            environment="staging",
+            namespace="loom-staging",
+            route="https://yylx.world/dev",
+            readonly_principal="loom-rollout-readonly",
+            observed_mutation_epoch=8,
+            resource_digest=hashlib.sha256(check_id.encode()).hexdigest(),
+            blockers={"dns": "canonical-route-unresolved"} if check_id == "staging.network" else {},
+        )
+
+    checks = build_staging_baseline_checks(
+        {check_id: lambda check_id=check_id: result(check_id) for check_id in check_ids},
+        environment="staging",
+        namespace="loom-staging",
+        route="https://yylx.world/dev",
+        mutation_epoch=8,
+    )
+    context = CheckContext(
+        {
+            "environment": "staging",
+            "namespace": "loom-staging",
+            "readonly.principal.sha256": hashlib.sha256(b"loom-rollout-readonly").hexdigest(),
+            "route": "https://yylx.world/dev",
+            "staging.mutation-epoch": 8,
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("kubernetes.client"),
+            _passing_dependency("credentials.metadata"),
+            *checks,
+        )
+    )
+
+    executions = dag.run(context, through_tier=2)
+    by_id = {execution.check_id: execution for execution in executions}
+    assert set(calls) == set(check_ids)
+    assert not by_id["staging.network"].passed
+    assert by_id["staging.network"].evidence["blockers"] == {"dns": "canonical-route-unresolved"}
+    assert by_id["staging.storage-db"].passed
+    assert by_id["staging.release-baseline"].blocked_by == ("staging.network",)

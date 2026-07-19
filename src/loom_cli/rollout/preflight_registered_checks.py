@@ -92,6 +92,11 @@ from loom_cli.rollout.runtime_readiness import (
     ModuleImporter,
     probe_runtime_readiness,
 )
+from loom_cli.rollout.staging_baseline_readiness import (
+    BaselineProbeResult,
+    ReadonlyProbe,
+    StagingBaselineSession,
+)
 from loom_cli.rollout.systemd_readiness import CommandRunner, probe_user_manager_readonly
 from loom_cli.rollout.systemd_unit_readiness import (
     CommandRunner as SystemdAnalyzeRunner,
@@ -1823,6 +1828,160 @@ def _empty_browser_runtime_probe() -> CheckProbe:
     )
 
 
+def build_staging_baseline_checks(
+    probes: Mapping[str, ReadonlyProbe],
+    *,
+    environment: str,
+    namespace: str,
+    route: str,
+    mutation_epoch: int,
+) -> tuple[RegisteredCheck, ...]:
+    """Build all Tier 2 current-staging readonly baseline checks."""
+    session = StagingBaselineSession(
+        probes,
+        expected_environment=environment,
+        expected_namespace=namespace,
+        expected_route=route,
+        expected_mutation_epoch=mutation_epoch,
+    )
+    principal_digest = hashlib.sha256(b"loom-rollout-readonly").hexdigest()
+    bindings = {
+        "environment": environment,
+        "namespace": namespace,
+        "readonly.principal.sha256": principal_digest,
+        "route": route,
+        "staging.mutation-epoch": mutation_epoch,
+    }
+
+    def bindings_match(context: CheckContext) -> bool:
+        return all(context.bindings[key] == value for key, value in bindings.items())
+
+    dependencies = {
+        "staging.health": ("kubernetes.client",),
+        "staging.auth": ("staging.health", "credentials.metadata"),
+        "staging.catalog-task": ("staging.auth",),
+        "staging.storage-db": ("staging.health",),
+        "staging.network": ("staging.health",),
+    }
+    failure_codes = {
+        "staging.health": "staging.health.failed",
+        "staging.auth": "staging.auth.failed",
+        "staging.catalog-task": "staging.catalog-task.failed",
+        "staging.storage-db": "staging.storage-db.failed",
+        "staging.network": "staging.network.failed",
+    }
+    remediations = {
+        "staging.health": "restore readonly current-staging workload health",
+        "staging.auth": "restore readonly current-staging authentication baseline",
+        "staging.catalog-task": "restore catalog, task, provider and worker compatibility",
+        "staging.storage-db": "restore PostgreSQL and MinIO readonly health and inventory",
+        "staging.network": "restore canonical staging ingress, TLS and DNS",
+    }
+    common_inputs = tuple(sorted(bindings))
+    checks: list[RegisteredCheck] = []
+    for check_id in dependencies:
+
+        def probe(context: CheckContext, *, check_id: str = check_id) -> CheckProbe:
+            if not bindings_match(context):
+                return _empty_baseline_probe()
+            try:
+                result = session.probe(check_id)
+            except (OSError, RuntimeError, ValueError):
+                return _empty_baseline_probe()
+            return _baseline_probe(result)
+
+        checks.append(
+            RegisteredCheck(
+                spec=CheckSpec(
+                    check_id=check_id,
+                    failure_code=failure_codes[check_id],
+                    tier=2,
+                    stage=StageCapability.BASELINE_LIVE_READONLY,
+                    dependencies=dependencies[check_id],
+                    mutation_class=MutationClass.NONE,
+                    input_keys=common_inputs,
+                    evidence_schema=_baseline_evidence_schema(),
+                    timeout_seconds=60,
+                    freshness_ttl_seconds=120,
+                    remediation=remediations[check_id],
+                    secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                ),
+                implementation_version="v1",
+                operations={CheckOperation.PROBE: probe},
+            )
+        )
+
+    def probe_release_baseline(context: CheckContext) -> CheckProbe:
+        if not bindings_match(context):
+            return _empty_baseline_probe()
+        try:
+            return _baseline_probe(session.aggregate())
+        except (OSError, RuntimeError, ValueError):
+            return _empty_baseline_probe()
+
+    checks.append(
+        RegisteredCheck(
+            spec=CheckSpec(
+                check_id="staging.release-baseline",
+                failure_code="staging.release-baseline.drift",
+                tier=2,
+                stage=StageCapability.BASELINE_LIVE_READONLY,
+                dependencies=(
+                    "staging.catalog-task",
+                    "staging.storage-db",
+                    "staging.network",
+                ),
+                mutation_class=MutationClass.NONE,
+                input_keys=common_inputs,
+                evidence_schema=_baseline_evidence_schema(),
+                timeout_seconds=10,
+                freshness_ttl_seconds=120,
+                remediation="restore every candidate-independent current-staging baseline",
+                secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            ),
+            implementation_version="v1",
+            operations={CheckOperation.PROBE: probe_release_baseline},
+        )
+    )
+    return tuple(checks)
+
+
+def _baseline_evidence_schema() -> tuple[EvidenceField, ...]:
+    return (
+        EvidenceField("ready", "boolean"),
+        EvidenceField("readonly-principal", "string"),
+        EvidenceField("observed-epoch", "integer"),
+        EvidenceField("resource-digest", "sha256"),
+        EvidenceField("blockers", "string-map"),
+    )
+
+
+def _baseline_probe(result: BaselineProbeResult) -> CheckProbe:
+    return CheckProbe(
+        passed=result.ready,
+        evidence={
+            "ready": result.ready,
+            "readonly-principal": result.readonly_principal,
+            "observed-epoch": result.observed_mutation_epoch,
+            "resource-digest": result.resource_digest,
+            "blockers": dict(result.blockers),
+        },
+    )
+
+
+def _empty_baseline_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "ready": False,
+            "readonly-principal": "unavailable",
+            "observed-epoch": 0,
+            "resource-digest": "0" * 64,
+            "blockers": {"binding": "staging-baseline-unavailable"},
+        },
+    )
+
+
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
@@ -1840,6 +1999,7 @@ __all__ = [
     "build_manifest_preflight_checks",
     "build_migration_plan_check",
     "build_runner_install_check",
+    "build_staging_baseline_checks",
     "build_systemd_render_check",
     "build_systemd_user_manager_check",
     "build_tools_runtime_check",
