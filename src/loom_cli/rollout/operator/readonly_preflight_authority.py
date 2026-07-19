@@ -11,6 +11,10 @@ from pathlib import Path
 
 from loom.data_lifecycle import StagingCapacity
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.preflight_credential_paths import (
+    READONLY_KUBECONFIG_PATH,
+    READONLY_TOKEN_PATH,
+)
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from loom_cli.rollout.readonly_authority_source import probe_readonly_authority
 from loom_cli.rollout.staging_baseline_readiness import ReadonlyProbe
@@ -25,12 +29,6 @@ from loom_cli.rollout.staging_baseline_source import (
 
 from .config import OperatorConfig
 
-READONLY_KUBECONFIG_PATH = Path(
-    "/var/lib/loom-staging-rollout/credentials/readonly-kubeconfig"
-)
-READONLY_TOKEN_PATH = Path(
-    "/var/lib/loom-staging-rollout/credentials/readonly-probe-token"
-)
 _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)+$")
 _ROUTE_RE = re.compile(r"^/[a-z0-9](?:[-a-z0-9/]{0,126}[a-z0-9])?$")
 

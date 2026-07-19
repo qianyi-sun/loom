@@ -78,6 +78,10 @@ def test_loader_binds_installed_static_authorities_without_secret_values(tmp_pat
         "worker",
         "service",
         "catalog",
+        "readonly-probe",
+        "readonly-kubeconfig",
+        "rehearsal-kubeconfig",
+        "server-dry-run-kubeconfig",
     }
     assert all("secret" not in repr(source) for source in inputs.credential_sources)
     assert inputs.migration_policy_digest == hashlib.sha256(policy.read_bytes()).hexdigest()

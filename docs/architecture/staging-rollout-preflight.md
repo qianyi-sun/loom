@@ -146,6 +146,15 @@ account, Role, and RoleBinding, with token automount disabled and only
 `get/list/watch`. No ClusterRole, secret access, token material, wildcard, or
 write verb is admitted. Runtime credentials use a bounded TokenRequest and are
 validated by the server-observed review before any Tier 2 call.
+The TokenRequest is rendered into a minified kubeconfig with no inherited
+client certificate or root credential. The shared renderer accepts only the
+exact service-account subject, a non-empty API audience, a lifetime no longer
+than 24 hours, and at least two hours of remaining validity. Installed
+preflight treats the readonly application token, readonly kubeconfig,
+rehearsal kubeconfig, and server-dry-run kubeconfig as distinct private
+credential authorities; all four must pass the same stable-read, owner, mode,
+ACL, and metadata-fingerprint gate. Token values never enter an attestation or
+install record.
 
 `CandidatePreflightOrchestrator` is the restart boundary between admission and
 rehearsal. The broker executes Tier 0–2 from a runtime factory before it

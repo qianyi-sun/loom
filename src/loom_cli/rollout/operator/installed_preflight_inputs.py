@@ -11,6 +11,11 @@ from loom_cli.rollout.credential_authority import TrustedFileRead, read_trusted_
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.install_attestation import VerifiedRunnerInstall, verify_runner_install
 from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
+from loom_cli.rollout.preflight_credential_paths import (
+    READONLY_KUBECONFIG_PATH,
+    READONLY_TOKEN_PATH,
+    REHEARSAL_KUBECONFIG_PATH,
+)
 from loom_cli.rollout.preflight_registered_checks import CredentialProbeSource
 
 from .config import OperatorConfig
@@ -167,6 +172,26 @@ def _credential_sources(
     if catalog is None:
         raise ValueError("installed preflight catalog authority is unavailable")
     entries.append(CredentialProbeSource(label="catalog", path=catalog))
+    entries.extend(
+        (
+            CredentialProbeSource(
+                label="readonly-probe",
+                path=READONLY_TOKEN_PATH,
+            ),
+            CredentialProbeSource(
+                label="readonly-kubeconfig",
+                path=READONLY_KUBECONFIG_PATH,
+            ),
+            CredentialProbeSource(
+                label="rehearsal-kubeconfig",
+                path=REHEARSAL_KUBECONFIG_PATH,
+            ),
+            CredentialProbeSource(
+                label="server-dry-run-kubeconfig",
+                path=config.kubeconfig_path,
+            ),
+        )
+    )
     return tuple(entries)
 
 

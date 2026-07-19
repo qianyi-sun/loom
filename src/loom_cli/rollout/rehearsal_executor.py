@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
+from loom_cli.rollout.preflight_credential_paths import REHEARSAL_KUBECONFIG_PATH
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 from loom_cli.rollout.rehearsal_browser import (
     BROWSER_INGRESS_NAME,
@@ -51,7 +52,7 @@ from loom_cli.rollout.systemd_readiness import (
     parse_systemctl_properties,
 )
 
-REHEARSAL_KUBECONFIG = Path("/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig")
+REHEARSAL_KUBECONFIG = REHEARSAL_KUBECONFIG_PATH
 _MAX_OUTPUT_BYTES = 1024 * 1024
 _KUBERNETES_UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"

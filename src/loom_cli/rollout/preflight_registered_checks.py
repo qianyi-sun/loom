@@ -127,7 +127,16 @@ class CredentialProbeSource:
     expected_content_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
-        if self.label not in {"admin", "worker", "service", "catalog"}:
+        if self.label not in {
+            "admin",
+            "worker",
+            "service",
+            "catalog",
+            "readonly-probe",
+            "readonly-kubeconfig",
+            "rehearsal-kubeconfig",
+            "server-dry-run-kubeconfig",
+        }:
             raise ValueError("credential probe label is not allowlisted")
         if not self.path.is_absolute() or ".." in self.path.parts:
             raise ValueError("credential probe path is invalid")
