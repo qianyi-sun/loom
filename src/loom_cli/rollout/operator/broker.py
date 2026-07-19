@@ -18,6 +18,7 @@ from typing import Any, Never, TextIO, cast
 from uuid import uuid4
 
 from loom_cli.rollout.evidence import new_rollout_id
+from loom_cli.rollout.preflight_pipeline import PreflightPipelineResult
 
 from .backup import (
     BackupCreator,
@@ -123,6 +124,7 @@ class BrokerDependencies:
     stdout: TextIO
     stderr: TextIO
     known_secrets: Callable[[], Iterable[str]]
+    authorize_preflight: Callable[[CandidateBinding], PreflightPipelineResult] | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -189,9 +191,12 @@ def _request(
     dependencies: BrokerDependencies,
     caller: CallerIdentity,
     candidate: CandidateBinding,
+    preflight: PreflightPipelineResult,
     *,
     preview: bool,
 ) -> RolloutRequest:
+    if not preflight.passed or preflight.attestation is None:
+        raise ValueError("rollout request requires a complete preflight attestation")
     request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
     rollout_id = validate_safe_identifier(
         dependencies.new_rollout_id(candidate),
@@ -204,6 +209,9 @@ def _request(
         candidate=candidate,
         requested_at=_timestamp(dependencies.now),
         runner_config_sha256=dependencies.config.config_sha256,
+        preflight_attestation_sha256=preflight.attestation.attestation_digest,
+        preflight_registry_sha256=preflight.registry_digest,
+        preflight_coverage_sha256=preflight.coverage_digest,
         status="preview" if preview else "pending",
     )
 
@@ -234,6 +242,9 @@ def _envelope(
         backup_manifest_path=str(backup.manifest_path),
         backup_manifest_sha256=backup.manifest_sha256,
         runner_config_sha256=request.runner_config_sha256,
+        preflight_attestation_sha256=request.preflight_attestation_sha256,
+        preflight_registry_sha256=request.preflight_registry_sha256,
+        preflight_coverage_sha256=request.preflight_coverage_sha256,
         cluster_name=config.cluster_name,
         namespace=config.namespace,
         environment=config.environment,
@@ -271,7 +282,19 @@ def _start(
             _write_json(dependencies.stderr, report.to_dict())
             return 1
         candidate = dependencies.bind_candidate()
-        request = _request(dependencies, caller, candidate, preview=dry_run)
+        if dependencies.authorize_preflight is None:
+            return _safe_error(dependencies, "deep rollout preflight is not configured")
+        deep_preflight = dependencies.authorize_preflight(candidate)
+        if not deep_preflight.passed:
+            _write_json(dependencies.stderr, deep_preflight.to_dict())
+            return 1
+        request = _request(
+            dependencies,
+            caller,
+            candidate,
+            deep_preflight,
+            preview=dry_run,
+        )
         dependencies.store.create_request(request)
         dependencies.store.append_event(
             _event(
@@ -409,6 +432,9 @@ def _resume_binding_matches(
     return (
         request.runner_config_sha256 == config.config_sha256
         and envelope.runner_config_sha256 == config.config_sha256
+        and request.preflight_attestation_sha256 == envelope.preflight_attestation_sha256
+        and request.preflight_registry_sha256 == envelope.preflight_registry_sha256
+        and request.preflight_coverage_sha256 == envelope.preflight_coverage_sha256
         and envelope.request_id == request.request_id
         and envelope.rollout_id == request.rollout_id
         and envelope.initiating_operator == request.caller.username

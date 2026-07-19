@@ -95,6 +95,9 @@ def make_driver_envelope(**overrides: object) -> DriverEnvelope:
         ),
         "backup_manifest_sha256": "1" * 64,
         "runner_config_sha256": "2" * 64,
+        "preflight_attestation_sha256": "3" * 64,
+        "preflight_registry_sha256": "4" * 64,
+        "preflight_coverage_sha256": "5" * 64,
         "cluster_name": "loom-staging",
         "namespace": "loom-staging",
         "environment": "staging",
@@ -132,6 +135,9 @@ def make_request(**overrides: object) -> RolloutRequest:
         "candidate": candidate,
         "requested_at": "2026-07-13T20:00:01Z",
         "runner_config_sha256": "2" * 64,
+        "preflight_attestation_sha256": "3" * 64,
+        "preflight_registry_sha256": "4" * 64,
+        "preflight_coverage_sha256": "5" * 64,
         "command": "start",
         "status": "pending",
     }
@@ -555,6 +561,9 @@ def test_driver_envelope_keeps_attempt_actor_out_of_immutable_inputs() -> None:
         "backup_manifest_path": envelope.backup_manifest_path,
         "backup_manifest_sha256": envelope.backup_manifest_sha256,
         "runner_config_sha256": envelope.runner_config_sha256,
+        "preflight_attestation_sha256": envelope.preflight_attestation_sha256,
+        "preflight_registry_sha256": envelope.preflight_registry_sha256,
+        "preflight_coverage_sha256": envelope.preflight_coverage_sha256,
     }
     assert "attempt_operator" not in immutable
     assert "attempt_number" not in immutable

@@ -201,6 +201,9 @@ def _read_envelope(path: Path, config: OperatorConfig, *, effective_uid: int) ->
         "resolved_tree": request.candidate.resolved_tree,
         "approved_base_sha": request.candidate.approved_base_sha,
         "runner_config_sha256": request.runner_config_sha256,
+        "preflight_attestation_sha256": request.preflight_attestation_sha256,
+        "preflight_registry_sha256": request.preflight_registry_sha256,
+        "preflight_coverage_sha256": request.preflight_coverage_sha256,
     }
     envelope_binding = {
         "request_id": envelope.request_id,
@@ -216,6 +219,9 @@ def _read_envelope(path: Path, config: OperatorConfig, *, effective_uid: int) ->
         "resolved_tree": envelope.resolved_tree,
         "approved_base_sha": envelope.approved_base_sha,
         "runner_config_sha256": envelope.runner_config_sha256,
+        "preflight_attestation_sha256": envelope.preflight_attestation_sha256,
+        "preflight_registry_sha256": envelope.preflight_registry_sha256,
+        "preflight_coverage_sha256": envelope.preflight_coverage_sha256,
     }
     if request_binding != envelope_binding:
         raise EnvelopeValidationError("driver envelope does not match immutable request binding")

@@ -82,7 +82,13 @@ def _attestation() -> PreflightAttestation:
         browser_image_digest="sha256:" + "8" * 64,
         browser_report_schema="v3",
     )
-    return PreflightAttestation.issue(bindings=bindings, executions=executions, issued_at=NOW)
+    return PreflightAttestation.issue(
+        bindings=bindings,
+        executions=executions,
+        issued_at=NOW,
+        registry_digest="9" * 64,
+        coverage_digest="a" * 64,
+    )
 
 
 def test_store_is_private_immutable_and_reuses_exact_attestation(tmp_path: Path) -> None:

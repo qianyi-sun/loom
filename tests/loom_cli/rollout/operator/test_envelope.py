@@ -120,6 +120,9 @@ def _envelope(config: OperatorConfig, **overrides: object) -> DriverEnvelope:
         "backup_manifest_path": str(manifest),
         "backup_manifest_sha256": digest,
         "runner_config_sha256": config.config_sha256,
+        "preflight_attestation_sha256": "3" * 64,
+        "preflight_registry_sha256": "4" * 64,
+        "preflight_coverage_sha256": "5" * 64,
         "cluster_name": config.cluster_name,
         "namespace": config.namespace,
         "environment": config.environment,
@@ -159,6 +162,9 @@ def _publish(config: OperatorConfig, envelope: DriverEnvelope) -> Path:
         ),
         requested_at="2026-07-13T20:00:01Z",
         runner_config_sha256=envelope.runner_config_sha256,
+        preflight_attestation_sha256=envelope.preflight_attestation_sha256,
+        preflight_registry_sha256=envelope.preflight_registry_sha256,
+        preflight_coverage_sha256=envelope.preflight_coverage_sha256,
     )
     _private_file(
         request_dir / "request.json",

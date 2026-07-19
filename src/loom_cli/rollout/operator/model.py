@@ -334,6 +334,9 @@ class RolloutRequest:
     candidate: CandidateBinding
     requested_at: str
     runner_config_sha256: str
+    preflight_attestation_sha256: str
+    preflight_registry_sha256: str
+    preflight_coverage_sha256: str
     command: RequestCommand = "start"
     status: RequestStatus = "pending"
     schema_version: SchemaVersion = 1
@@ -347,6 +350,9 @@ class RolloutRequest:
             raise ValueError("candidate must be a CandidateBinding")
         _require_string(self.requested_at, "requested_at")
         _require_sha256(self.runner_config_sha256, "runner_config_sha256")
+        _require_sha256(self.preflight_attestation_sha256, "preflight_attestation_sha256")
+        _require_sha256(self.preflight_registry_sha256, "preflight_registry_sha256")
+        _require_sha256(self.preflight_coverage_sha256, "preflight_coverage_sha256")
         _require_literal(self.command, _REQUEST_COMMANDS, "command", "request command")
         _require_literal(self.status, _REQUEST_STATUSES, "status", "request status")
         _require_schema(self.schema_version)
@@ -359,6 +365,9 @@ class RolloutRequest:
             "candidate": self.candidate.to_dict(),
             "requested_at": self.requested_at,
             "runner_config_sha256": self.runner_config_sha256,
+            "preflight_attestation_sha256": self.preflight_attestation_sha256,
+            "preflight_registry_sha256": self.preflight_registry_sha256,
+            "preflight_coverage_sha256": self.preflight_coverage_sha256,
             "command": self.command,
             "status": self.status,
             "schema_version": self.schema_version,
@@ -373,6 +382,9 @@ class RolloutRequest:
             "candidate",
             "requested_at",
             "runner_config_sha256",
+            "preflight_attestation_sha256",
+            "preflight_registry_sha256",
+            "preflight_coverage_sha256",
             "command",
             "status",
             "schema_version",
@@ -388,6 +400,15 @@ class RolloutRequest:
             requested_at=_require_string(data["requested_at"], "requested_at"),
             runner_config_sha256=_require_sha256(
                 data["runner_config_sha256"], "runner_config_sha256"
+            ),
+            preflight_attestation_sha256=_require_sha256(
+                data["preflight_attestation_sha256"], "preflight_attestation_sha256"
+            ),
+            preflight_registry_sha256=_require_sha256(
+                data["preflight_registry_sha256"], "preflight_registry_sha256"
+            ),
+            preflight_coverage_sha256=_require_sha256(
+                data["preflight_coverage_sha256"], "preflight_coverage_sha256"
             ),
             command=cast(RequestCommand, command),
             status=cast(RequestStatus, status),
@@ -489,6 +510,9 @@ class DriverEnvelope:
     backup_manifest_path: str
     backup_manifest_sha256: str
     runner_config_sha256: str
+    preflight_attestation_sha256: str
+    preflight_registry_sha256: str
+    preflight_coverage_sha256: str
     cluster_name: str
     namespace: str
     environment: str
@@ -537,6 +561,9 @@ class DriverEnvelope:
         _require_absolute_path(self.backup_manifest_path, "backup_manifest_path")
         _require_sha256(self.backup_manifest_sha256, "backup_manifest_sha256")
         _require_sha256(self.runner_config_sha256, "runner_config_sha256")
+        _require_sha256(self.preflight_attestation_sha256, "preflight_attestation_sha256")
+        _require_sha256(self.preflight_registry_sha256, "preflight_registry_sha256")
+        _require_sha256(self.preflight_coverage_sha256, "preflight_coverage_sha256")
         if self.cluster_name != "loom-staging":
             raise ValueError("cluster_name must be loom-staging")
         if self.namespace != "loom-staging":
@@ -577,6 +604,9 @@ class DriverEnvelope:
             "backup_manifest_path": self.backup_manifest_path,
             "backup_manifest_sha256": self.backup_manifest_sha256,
             "runner_config_sha256": self.runner_config_sha256,
+            "preflight_attestation_sha256": self.preflight_attestation_sha256,
+            "preflight_registry_sha256": self.preflight_registry_sha256,
+            "preflight_coverage_sha256": self.preflight_coverage_sha256,
         }
         if self.source_mode == "sealed-cumulative":
             value.update(
@@ -626,6 +656,15 @@ class DriverEnvelope:
             ),
             runner_config_sha256=_require_sha256(
                 data["runner_config_sha256"], "runner_config_sha256"
+            ),
+            preflight_attestation_sha256=_require_sha256(
+                data["preflight_attestation_sha256"], "preflight_attestation_sha256"
+            ),
+            preflight_registry_sha256=_require_sha256(
+                data["preflight_registry_sha256"], "preflight_registry_sha256"
+            ),
+            preflight_coverage_sha256=_require_sha256(
+                data["preflight_coverage_sha256"], "preflight_coverage_sha256"
             ),
             cluster_name=_require_string(data["cluster_name"], "cluster_name"),
             namespace=_require_string(data["namespace"], "namespace"),

@@ -276,6 +276,8 @@ def test_attestation_binds_all_evidence_and_invalidates_drift() -> None:
         bindings=_bindings(),
         executions=result,
         issued_at=NOW,
+        registry_digest="9" * 64,
+        coverage_digest="a" * 64,
     )
     assert attestation.valid_for(_bindings(), now=NOW + timedelta(seconds=1))
     assert not attestation.valid_for(
@@ -294,6 +296,8 @@ def test_attestation_round_trip_preserves_exact_digest_and_immutable_maps() -> N
         bindings=_bindings(),
         executions=result,
         issued_at=NOW,
+        registry_digest="9" * 64,
+        coverage_digest="a" * 64,
     )
 
     decoded = PreflightAttestation.from_dict(attestation.to_dict())
@@ -313,6 +317,8 @@ def test_attestation_round_trip_rejects_payload_and_digest_tampering() -> None:
         bindings=_bindings(),
         executions=result,
         issued_at=NOW,
+        registry_digest="9" * 64,
+        coverage_digest="a" * 64,
     )
     payload = attestation.to_dict()
     bindings = dict(payload["bindings"])  # type: ignore[arg-type]
@@ -334,7 +340,13 @@ def test_attestation_rejects_incomplete_or_expired_results() -> None:
         now=lambda: NOW,
     )
     with pytest.raises(ValueError, match="every non-final check"):
-        PreflightAttestation.issue(bindings=_bindings(), executions=failed, issued_at=NOW)
+        PreflightAttestation.issue(
+            bindings=_bindings(),
+            executions=failed,
+            issued_at=NOW,
+            registry_digest="9" * 64,
+            coverage_digest="a" * 64,
+        )
 
     passed = PreflightDag([_check("candidate.identity")]).run(
         _context(),
@@ -345,4 +357,6 @@ def test_attestation_rejects_incomplete_or_expired_results() -> None:
             bindings=_bindings(),
             executions=passed,
             issued_at=NOW + timedelta(minutes=11),
+            registry_digest="9" * 64,
+            coverage_digest="a" * 64,
         )

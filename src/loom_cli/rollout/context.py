@@ -118,6 +118,9 @@ class RolloutContext:
     backup_manifest_max_total_bytes: int | None = None
     backup_manifest_sha256: str | None = None
     runner_config_sha256: str | None = None
+    preflight_attestation_sha256: str | None = None
+    preflight_registry_sha256: str | None = None
+    preflight_coverage_sha256: str | None = None
     request_id: str | None = None
     initiating_operator: str | None = None
     initiating_uid: int | None = None
@@ -176,6 +179,16 @@ class RolloutContext:
         for value in values:
             if value is not None and (type(value) is not int or value <= 0):
                 raise ValueError("backup traversal limits must be positive integers")
+        if self.request_id is not None:
+            for label, digest in (
+                ("preflight attestation", self.preflight_attestation_sha256),
+                ("preflight registry", self.preflight_registry_sha256),
+                ("preflight coverage", self.preflight_coverage_sha256),
+            ):
+                if digest is None or len(digest) != 64 or any(
+                    character not in "0123456789abcdef" for character in digest
+                ):
+                    raise ValueError(f"brokered {label} digest is invalid")
 
     def backup_traversal_limits(self) -> tuple[int, int, int] | None:
         if self.backup_manifest_max_files is None:
@@ -247,6 +260,9 @@ class RolloutContext:
                 "backup_manifest_path": str(self.backup_manifest_path),
                 "backup_manifest_sha256": self.backup_manifest_sha256,
                 "runner_config_sha256": self.runner_config_sha256,
+                "preflight_attestation_sha256": self.preflight_attestation_sha256,
+                "preflight_registry_sha256": self.preflight_registry_sha256,
+                "preflight_coverage_sha256": self.preflight_coverage_sha256,
                 "request_id": self.request_id,
                 "initiating_operator": self.initiating_operator,
                 "initiating_uid": self.initiating_uid,

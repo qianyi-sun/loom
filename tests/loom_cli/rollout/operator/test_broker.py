@@ -344,6 +344,13 @@ def fakes(tmp_path: Path, *, backup: FakeBackup | None = None) -> FakeBundle:
         stdout=stdout,
         stderr=stderr,
         known_secrets=lambda: ("known-secret",),
+        authorize_preflight=lambda _candidate: SimpleNamespace(
+            passed=True,
+            attestation=SimpleNamespace(attestation_digest="3" * 64),
+            registry_digest="4" * 64,
+            coverage_digest="5" * 64,
+            to_dict=lambda: {"passed": True},
+        ),
     )
     return FakeBundle(
         deps,
@@ -398,6 +405,16 @@ def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
     assert deps.store.read_active() is None
     assert deps.store.read_request(REQUEST_ID).status == "preview"
     assert deps.store.read_events(REQUEST_ID)[-1].event == "preview"
+
+
+def test_start_refuses_missing_deep_preflight_before_request_or_backup(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    deps.dependencies.authorize_preflight = None
+
+    assert broker_main(["start"], dependencies=deps.dependencies) == 1
+    assert deps.store.requests == {}
+    assert deps.backup.create_count == 0
+    assert "deep rollout preflight is not configured" in deps.stderr.getvalue()
 
 
 def test_sealed_cumulative_start_rejects_non_coordinator_before_preflight_or_request(

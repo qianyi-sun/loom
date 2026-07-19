@@ -90,6 +90,9 @@ def make_request(
         ),
         requested_at="2026-07-13T20:00:01Z",
         runner_config_sha256="2" * 64,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
         command="start",
         status=status,  # type: ignore[arg-type]
     )
@@ -122,6 +125,9 @@ def make_envelope(
         ),
         backup_manifest_sha256="1" * 64,
         runner_config_sha256="2" * 64,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
         cluster_name="loom-staging",
         namespace="loom-staging",
         environment="staging",
@@ -234,6 +240,9 @@ def test_publish_attempt_envelope_is_private_and_no_replace(tmp_path: Path) -> N
         },
         {"fetched_at": "2026-07-13T20:00:02Z"},
         {"runner_config_sha256": "3" * 64},
+        {"preflight_attestation_sha256": "6" * 64},
+        {"preflight_registry_sha256": "7" * 64},
+        {"preflight_coverage_sha256": "8" * 64},
     ],
 )
 def test_attempt_envelope_must_match_immutable_request_binding(

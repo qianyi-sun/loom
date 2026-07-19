@@ -98,6 +98,9 @@ def make_request(
         ),
         requested_at="2026-07-13T19:59:30Z",
         runner_config_sha256=config.config_sha256,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
     )
 
 
@@ -126,6 +129,9 @@ def make_envelope(
         ),
         backup_manifest_sha256="2" * 64,
         runner_config_sha256=request.runner_config_sha256,
+        preflight_attestation_sha256=request.preflight_attestation_sha256,
+        preflight_registry_sha256=request.preflight_registry_sha256,
+        preflight_coverage_sha256=request.preflight_coverage_sha256,
         cluster_name=config.cluster_name,
         namespace=config.namespace,
         environment=config.environment,

@@ -152,6 +152,8 @@ class PreflightPipeline:
             bindings=bindings,
             executions=executions,
             issued_at=self._clock(),
+            registry_digest=self._registry.registry_digest,
+            coverage_digest=self._registry.coverage_digest,
         )
         self._store.publish(attestation)
         return PreflightPipelineResult(
@@ -177,6 +179,8 @@ class PreflightPipeline:
         expected = dict(self._registry.implementation_digests)
         if (
             not attestation.valid_for(bindings, now=now)
+            or attestation.registry_digest != self._registry.registry_digest
+            or attestation.coverage_digest != self._registry.coverage_digest
             or dict(attestation.check_implementation_digests) != expected
             or set(attestation.evidence_hashes) != set(expected)
         ):

@@ -106,6 +106,9 @@ def make_request() -> RolloutRequest:
         candidate=candidate,
         requested_at="2026-07-13T20:00:00Z",
         runner_config_sha256="2" * 64,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
     )
 
 

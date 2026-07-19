@@ -738,6 +738,8 @@ class AttestationBindings:
 class PreflightAttestation:
     schema_version: int
     bindings: AttestationBindings
+    registry_digest: str
+    coverage_digest: str
     check_implementation_digests: Mapping[str, str]
     evidence_hashes: Mapping[str, str]
     issued_at: datetime
@@ -749,6 +751,11 @@ class PreflightAttestation:
             raise ValueError("preflight attestation schema is unsupported")
         if not isinstance(self.bindings, AttestationBindings):
             raise ValueError("preflight attestation bindings are invalid")
+        if (
+            _SHA256_RE.fullmatch(self.registry_digest) is None
+            or _SHA256_RE.fullmatch(self.coverage_digest) is None
+        ):
+            raise ValueError("preflight attestation registry identity is invalid")
         if self.issued_at.tzinfo is None or self.expires_at.tzinfo is None:
             raise ValueError("preflight attestation timestamps must be timezone-aware")
         if self.expires_at <= self.issued_at:
@@ -776,6 +783,8 @@ class PreflightAttestation:
         bindings: AttestationBindings,
         executions: Sequence[CheckExecution],
         issued_at: datetime,
+        registry_digest: str,
+        coverage_digest: str,
     ) -> PreflightAttestation:
         if issued_at.tzinfo is None:
             raise ValueError("attestation issue time must be timezone-aware")
@@ -798,6 +807,8 @@ class PreflightAttestation:
         payload = {
             "schema_version": 1,
             "bindings": _attestation_bindings_payload(bindings),
+            "registry_digest": registry_digest,
+            "coverage_digest": coverage_digest,
             "check_implementation_digests": digests,
             "evidence_hashes": evidence,
             "issued_at": issued_at.isoformat(),
@@ -806,6 +817,8 @@ class PreflightAttestation:
         return cls(
             schema_version=1,
             bindings=bindings,
+            registry_digest=registry_digest,
+            coverage_digest=coverage_digest,
             check_implementation_digests=MappingProxyType(digests),
             evidence_hashes=MappingProxyType(evidence),
             issued_at=issued_at,
@@ -823,6 +836,8 @@ class PreflightAttestation:
         expected = {
             "schema_version",
             "bindings",
+            "registry_digest",
+            "coverage_digest",
             "check_implementation_digests",
             "evidence_hashes",
             "issued_at",
@@ -833,12 +848,19 @@ class PreflightAttestation:
             raise ValueError("preflight attestation fields are invalid")
         schema_version = data["schema_version"]
         raw_bindings = data["bindings"]
+        raw_registry = data["registry_digest"]
+        raw_coverage = data["coverage_digest"]
         raw_implementation = data["check_implementation_digests"]
         raw_evidence = data["evidence_hashes"]
         raw_issued = data["issued_at"]
         raw_expires = data["expires_at"]
         raw_digest = data["attestation_digest"]
-        if type(schema_version) is not int or not isinstance(raw_bindings, Mapping):
+        if (
+            type(schema_version) is not int
+            or not isinstance(raw_bindings, Mapping)
+            or not isinstance(raw_registry, str)
+            or not isinstance(raw_coverage, str)
+        ):
             raise ValueError("preflight attestation schema or bindings are invalid")
         if not isinstance(raw_issued, str) or not isinstance(raw_expires, str):
             raise ValueError("preflight attestation timestamps are invalid")
@@ -852,6 +874,8 @@ class PreflightAttestation:
         attestation = cls(
             schema_version=schema_version,
             bindings=AttestationBindings.from_dict(raw_bindings),
+            registry_digest=raw_registry,
+            coverage_digest=raw_coverage,
             check_implementation_digests=_validate_digest_map(
                 raw_implementation,
                 "implementation",
@@ -906,6 +930,8 @@ def _preflight_attestation_payload(attestation: PreflightAttestation) -> dict[st
     return {
         "schema_version": attestation.schema_version,
         "bindings": attestation.bindings.to_dict(),
+        "registry_digest": attestation.registry_digest,
+        "coverage_digest": attestation.coverage_digest,
         "check_implementation_digests": dict(attestation.check_implementation_digests),
         "evidence_hashes": dict(attestation.evidence_hashes),
         "issued_at": attestation.issued_at.isoformat(),

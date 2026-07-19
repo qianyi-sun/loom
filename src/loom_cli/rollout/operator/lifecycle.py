@@ -618,6 +618,9 @@ def _binding_matches(request: RolloutRequest, envelope: DriverEnvelope) -> bool:
         and request.candidate.resolved_tree == envelope.resolved_tree
         and request.candidate.approved_base_sha == envelope.approved_base_sha
         and request.runner_config_sha256 == envelope.runner_config_sha256
+        and request.preflight_attestation_sha256 == envelope.preflight_attestation_sha256
+        and request.preflight_registry_sha256 == envelope.preflight_registry_sha256
+        and request.preflight_coverage_sha256 == envelope.preflight_coverage_sha256
     )
 
 
