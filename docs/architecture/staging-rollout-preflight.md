@@ -318,6 +318,14 @@ isolated namespace cannot safely borrow a protected GB10 worker or its Docker
 authority; the final gate consumes the same identity, payload, fanout-failure
 and terminal-result predicates and is not weakened.
 
+`browser_report_contract` is likewise the sole sanitized browser-report
+predicate for rehearsal and final acceptance. Both modes require the complete
+schema-v4 check set, exact route, candidate identity, represented user, audit
+event, Chromium identity, and logout proof; they differ only in the typed
+rollout-envelope or rehearsal-plan binding. The attested report-schema digest
+is computed from that same contract, so adding or weakening a consumed field
+cannot leave an unchanged digest behind.
+
 The Tier 3 API probe runs from the exact `loom-service` image with a fixed
 module invocation. It reads a dedicated root-owned mode-`0440` regular-file
 projection of the cloned admin secret with `O_NOFOLLOW`, stable metadata and a

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -11,10 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from loom_cli.rollout.browser_report_contract import (
+    BROWSER_REPORT_SCHEMA_VERSION,
+    browser_report_schema_digest,
+)
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.image_readiness import BROWSER_IMAGE, ImageArtifactSet
 
-BROWSER_REPORT_SCHEMA_VERSION = 4
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RUNTIME_OUTPUT = {"runtime": "ready", "schema_version": BROWSER_REPORT_SCHEMA_VERSION}
 _NODE_PROBE = (
@@ -59,34 +61,6 @@ class BrowserRuntimeEvidence:
             or not self.launch_ready
         ):
             raise ValueError("browser runtime evidence is invalid")
-
-
-def browser_report_schema_digest() -> str:
-    contract = {
-        "cleanup": ["logout_status", "auth_me_after_logout_status"],
-        "deployment_identity": [
-            "expected_deployed_sha",
-            "observed_deployed_sha",
-            "matched",
-        ],
-        "failure_code": "string-or-null",
-        "rollout_binding": [
-            "request_id",
-            "attempt_number",
-            "request_envelope_sha256",
-            "resolved_sha",
-        ],
-        "rehearsal_binding": [
-            "plan_sha256",
-            "isolation_id",
-            "resolved_sha",
-        ],
-        "schema_version": BROWSER_REPORT_SCHEMA_VERSION,
-        "status": "pass-or-fail",
-    }
-    return hashlib.sha256(
-        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
 
 
 def browser_runtime_command(

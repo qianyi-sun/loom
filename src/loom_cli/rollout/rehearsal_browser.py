@@ -9,52 +9,21 @@ from dataclasses import dataclass
 
 import yaml  # type: ignore[import-untyped]
 
-from loom_cli.rollout.browser_runtime_readiness import BROWSER_REPORT_SCHEMA_VERSION
+from loom_cli.rollout.browser_report_contract import (
+    BROWSER_ACCEPTANCE_USERNAME,
+    BROWSER_REPORT_CHECK_IDS,
+    RehearsalBrowserReportAuthority,
+    browser_report_ready,
+)
 from loom_cli.rollout.image_readiness import BROWSER_IMAGE
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
 
-BROWSER_ACCEPTANCE_USERNAME = "qianyi"
 BROWSER_JOB_NAME = "loom-rehearsal-browser"
 BROWSER_INGRESS_NAME = "loom-rehearsal-browser"
 BROWSER_NETWORK_POLICY_NAME = "loom-rehearsal-browser"
 INGRESS_CONTROLLER_NAMESPACE = "ingress-nginx"
 INGRESS_CONTROLLER_SERVICE = "ingress-nginx-controller"
 _REPORT_PATH = "/evidence/rehearsal-browser-report.json"
-BROWSER_REPORT_CHECK_IDS = frozenset(
-    {
-        "bootstrap_status_204",
-        "bootstrap_empty_body",
-        "bootstrap_no_store",
-        "deployed_build_sha_present",
-        "deployed_build_sha_matches_expected",
-        "secure_http_only_lax_cookie",
-        "authenticated_target_user",
-        "platform_admin_authority",
-        "audit_event_correlated",
-        "admin_access_document_2xx",
-        "authenticated_react_mount",
-        "admin_tabs_accessibility",
-        "admin_requests_apis_200",
-        "admin_requests_ui_visible",
-        "admin_accounts_apis_200",
-        "admin_accounts_ui_visible",
-        "admin_teams_api_200",
-        "admin_teams_ui_visible",
-        "admin_invites_apis_200",
-        "admin_invites_ui_visible",
-        "admin_tokens_api_200",
-        "admin_tokens_ui_visible",
-        "admin_audit_api_200",
-        "all_admin_tabs_operable",
-        "audit_tab_event_visible",
-        "rate_cards_api_200",
-        "rate_cards_ui_visible",
-        "browser_console_clean",
-        "browser_page_errors_clean",
-        "browser_request_failures_clean",
-        "browser_server_errors_clean",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,58 +189,15 @@ def rehearsal_browser_pod_complete(
 
 def rehearsal_browser_report_ready(payload: object, *, plan: RehearsalPlan) -> bool:
     """Validate the complete sanitized schema-v4 rehearsal report."""
-    if not isinstance(payload, Mapping) or set(payload) != {
-        "schema_version",
-        "status",
-        "deployment_identity",
-        "route",
-        "request_id",
-        "rehearsal_binding",
-        "target",
-        "audit_event_id",
-        "browser",
-        "checks",
-        "cleanup",
-        "failure_code",
-    }:
-        return False
-    deployment = payload.get("deployment_identity")
-    binding = payload.get("rehearsal_binding")
-    target = payload.get("target")
-    checks = payload.get("checks")
-    cleanup = payload.get("cleanup")
     isolation_id = plan.resources.namespace.removeprefix("loom-rehearsal-")
-    return bool(
-        payload.get("schema_version") == BROWSER_REPORT_SCHEMA_VERSION
-        and payload.get("status") == "pass"
-        and payload.get("failure_code") is None
-        and payload.get("route") == plan.resources.route
-        and isinstance(payload.get("request_id"), str)
-        and isinstance(deployment, Mapping)
-        and deployment
-        == {
-            "expected_deployed_sha": plan.candidate_sha,
-            "observed_deployed_sha": plan.candidate_sha,
-            "matched": True,
-        }
-        and isinstance(binding, Mapping)
-        and binding
-        == {
-            "plan_sha256": plan.plan_digest,
-            "isolation_id": isolation_id,
-            "resolved_sha": plan.candidate_sha,
-        }
-        and isinstance(target, Mapping)
-        and target.get("username") == BROWSER_ACCEPTANCE_USERNAME
-        and isinstance(target.get("user_id"), str)
-        and isinstance(payload.get("audit_event_id"), str)
-        and isinstance(checks, Mapping)
-        and set(checks) == BROWSER_REPORT_CHECK_IDS
-        and all(value is True for value in checks.values())
-        and isinstance(cleanup, Mapping)
-        and cleanup.get("logout_status") == 204
-        and cleanup.get("auth_me_after_logout_status") == 401
-        and "rollout_binding" not in payload
+    return browser_report_ready(
+        payload,
+        authority=RehearsalBrowserReportAuthority(
+            plan_sha256=plan.plan_digest,
+            isolation_id=isolation_id,
+            candidate_sha=plan.candidate_sha,
+            route=plan.resources.route,
+        ),
     )
 
 

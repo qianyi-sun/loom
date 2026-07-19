@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
+from loom_cli.rollout.browser_report_contract import BROWSER_REPORT_CHECK_IDS
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.s14_browser_acceptance import (
     BrowserAcceptanceStep,
@@ -80,6 +81,11 @@ def test_browser_acceptance_runs_hardened_candidate_image(
                 "request_envelope_sha256": hashlib.sha256(envelope).hexdigest(),
                 "resolved_sha": ctx.resolved_sha,
             },
+            "route": "https://yylx.world/dev",
+            "target": {"username": "qianyi", "user_id": "user-qianyi"},
+            "audit_event_id": "audit-event",
+            "browser": {"name": "chromium", "version": "1.2.3"},
+            "checks": {name: True for name in BROWSER_REPORT_CHECK_IDS},
             "cleanup": {
                 "logout_status": 204,
                 "auth_me_after_logout_status": 401,

@@ -956,7 +956,7 @@ def test_browser_executes_exact_isolated_job_and_validates_report() -> None:
             "matched": True,
         },
         "route": plan.resources.route,
-        "request_id": "staging-admin-browser-request",
+        "request_id": "rehearsal-" + "5" * 24,
         "rehearsal_binding": {
             "plan_sha256": plan.plan_digest,
             "isolation_id": "5" * 24,

@@ -240,7 +240,7 @@ def test_browser_report_requires_complete_exact_rehearsal_binding(tmp_path: Path
             "matched": True,
         },
         "route": plan.resources.route,
-        "request_id": "staging-admin-browser-request",
+        "request_id": "rehearsal-" + "5" * 24,
         "rehearsal_binding": {
             "plan_sha256": plan.plan_digest,
             "isolation_id": "5" * 24,

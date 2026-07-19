@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import cast
 
 from loom_cli.cluster_config import load_cluster_config
-from loom_cli.rollout.browser_runtime_readiness import BROWSER_REPORT_SCHEMA_VERSION
+from loom_cli.rollout.browser_report_contract import (
+    BROWSER_ACCEPTANCE_USERNAME,
+    RolloutBrowserReportAuthority,
+    browser_report_ready,
+)
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.evidence import StepDir
@@ -26,7 +30,6 @@ from loom_cli.rollout.steps.s02_build_images import image_tag
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 BROWSER_ACCEPTANCE_IMAGE = BROWSER_IMAGE
-BROWSER_ACCEPTANCE_USERNAME = "qianyi"
 _OUTPUT_DIRECTORY_NAME = "browser-output"
 _REPORT_NAME = "staging-admin-browser-acceptance.json"
 _MAX_ENVELOPE_BYTES = 128 * 1024
@@ -135,32 +138,17 @@ def _report_is_valid(
     ctx: RolloutContext,
     envelope_sha256: str,
 ) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    deployment = payload.get("deployment_identity")
-    binding = payload.get("rollout_binding")
-    cleanup = payload.get("cleanup")
-    return bool(
-        payload.get("schema_version") == BROWSER_REPORT_SCHEMA_VERSION
-        and payload.get("status") == "pass"
-        and payload.get("failure_code") is None
-        and payload.get("request_id") == ctx.request_id
-        and isinstance(deployment, dict)
-        and deployment.get("expected_deployed_sha") == ctx.resolved_sha
-        and deployment.get("observed_deployed_sha") == ctx.resolved_sha
-        and deployment.get("matched") is True
-        and isinstance(binding, dict)
-        and binding
-        == {
-            "request_id": ctx.request_id,
-            "attempt_number": ctx.attempt_number,
-            "request_envelope_sha256": envelope_sha256,
-            "resolved_sha": ctx.resolved_sha,
-        }
-        and "rehearsal_binding" not in payload
-        and isinstance(cleanup, dict)
-        and cleanup.get("logout_status") == 204
-        and cleanup.get("auth_me_after_logout_status") == 401
+    assert ctx.request_id is not None
+    assert ctx.attempt_number is not None
+    return browser_report_ready(
+        payload,
+        authority=RolloutBrowserReportAuthority(
+            request_id=ctx.request_id,
+            attempt_number=ctx.attempt_number,
+            request_envelope_sha256=envelope_sha256,
+            candidate_sha=ctx.resolved_sha,
+            route=_browser_route(ctx),
+        ),
     )
 
 
