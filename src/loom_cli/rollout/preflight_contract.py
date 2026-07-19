@@ -161,6 +161,28 @@ class CheckSpec:
         elif self.final_only_justification is not None:
             raise ValueError("only final-only checks may carry a final-only justification")
 
+    @property
+    def contract_digest(self) -> str:
+        payload = {
+            "check_id": self.check_id,
+            "dependencies": self.dependencies,
+            "evidence_schema": [
+                {"name": field.name, "value_type": field.value_type}
+                for field in self.evidence_schema
+            ],
+            "failure_code": self.failure_code,
+            "final_only_justification": self.final_only_justification,
+            "freshness_ttl_seconds": self.freshness_ttl_seconds,
+            "input_keys": self.input_keys,
+            "mutation_class": self.mutation_class.value,
+            "remediation": self.remediation,
+            "secret_redaction_policy": self.secret_redaction_policy.value,
+            "stage": self.stage.value,
+            "tier": self.tier,
+            "timeout_seconds": self.timeout_seconds,
+        }
+        return _hash_json(payload)
+
 
 @dataclass(frozen=True, slots=True)
 class CheckContext:
@@ -200,7 +222,7 @@ class RegisteredCheck:
     @property
     def implementation_digest(self) -> str:
         digest = hashlib.sha256()
-        digest.update(self.spec.check_id.encode())
+        digest.update(self.spec.contract_digest.encode())
         digest.update(b"\0")
         digest.update(self.implementation_version.encode())
         for operation, implementation in sorted(self.operations.items()):

@@ -192,3 +192,10 @@ manifest entry through the requested tier: one implementation per check with
 the same failure code, dependencies, stage, mutation class, and final-only
 justification. Missing, duplicate, unexpected, or drifted implementations fail
 closed instead of silently shrinking coverage.
+
+The runtime `PreflightRegistry` hashes the checked-in manifest together with
+every check's complete contract and implementation. Input keys, evidence
+schema, timeout, freshness TTL, remediation, or redaction-policy drift therefore
+changes the registry identity even when a check keeps the same name. The
+registry is order-independent and constructs the only DAG eligible to issue an
+attestation.
