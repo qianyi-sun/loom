@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 
 from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
-from loom_cli.rollout.admin_smoke_contract import AdminSmokeAuthority
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.manifest_readiness import RenderManifest
 from loom_cli.rollout.operator.backup import SubprocessBackupCommandRunner
@@ -26,11 +25,6 @@ from loom_cli.rollout.rehearsal_action_source import RehearsalActionSource
 from loom_cli.rollout.rehearsal_command_runner import InstalledRehearsalStepRunner
 from loom_cli.rollout.rehearsal_journal_backend import JournaledRehearsalBackend
 from loom_cli.rollout.rehearsal_readiness import RehearsalAction
-from loom_cli.rollout.steps.s13_smoke import (
-    DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL,
-    DEFAULT_CURRENT_GB10_SMOKE_TASK_ID,
-    DEFAULT_SMOKE_AGENT,
-)
 
 from .checkpoint_inventory_provider import KubernetesLifecycleInventoryProvider
 from .checkpoint_lease import CriticalCheckpointEvidence
@@ -45,9 +39,8 @@ from .policy import sanitized_child_environment
 from .preflight import probe_gb10_shared_mount_readonly
 from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
 from .readonly_preflight_authority import JsonRunner, ReadonlyPreflightAuthority
+from .staging_smoke_authority import staging_smoke_authority
 from .store import RequestStore
-
-_STAGING_SMOKE_ADMIN_ACTOR = "codex-v1-release-gate"
 
 
 def build_installed_deep_preflight_composition(
@@ -116,14 +109,7 @@ def build_installed_deep_preflight_composition(
     route_origin = f"{parsed_route.scheme}://{parsed_route.netloc}"
     if not parsed_route.path or route_origin + parsed_route.path != route:
         raise ValueError("installed staging route is not canonical")
-    smoke_authority = AdminSmokeAuthority(
-        represented_username=config.smoke_on_behalf_username,
-        team_id=config.smoke_on_behalf_team_id,
-        admin_actor=_STAGING_SMOKE_ADMIN_ACTOR,
-        task_id=DEFAULT_CURRENT_GB10_SMOKE_TASK_ID,
-        required_worker_pool=DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL,
-        agent=DEFAULT_SMOKE_AGENT,
-    )
+    smoke_authority = staging_smoke_authority(config)
     rehearsal_root = config.state_root / "rehearsals"
     rehearsal_runner = InstalledRehearsalStepRunner(
         state_root=rehearsal_root,

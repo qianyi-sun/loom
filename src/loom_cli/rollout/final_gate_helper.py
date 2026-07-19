@@ -162,14 +162,6 @@ def _verify_checkpoint(plan: FinalGatePlan) -> None:
         raise ValueError("final gate helper checkpoint identity drifted")
 
 
-def _unavailable_execute(
-    _check_id: str,
-    _operation: CheckOperation,
-    _plan: FinalGatePlan,
-) -> FinalGateResult:
-    raise ValueError("installed final gate executor is unavailable")
-
-
 def _record(result: FinalGateResult) -> Mapping[str, object]:
     return {
         "attestation_digest": result.attestation_digest,
@@ -198,7 +190,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(
     argv: Sequence[str] | None = None,
     *,
-    execute: FinalGateExecute = _unavailable_execute,
+    execute: FinalGateExecute | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -211,6 +203,12 @@ def main(
         if operation is not expected:
             raise ValueError("final gate helper operation is invalid")
         plan = _load_plan(args.plan, args.plan_sha256)
+        if execute is None:
+            from loom_cli.rollout.operator.installed_final_gate_executor import (
+                build_installed_final_gate_executor,
+            )
+
+            execute = build_installed_final_gate_executor()
         result = execute(args.check_id, operation, plan)
         successful_apply = bool(
             args.check_id in PROTECTED_MUTATION_CHECK_IDS and not result.blockers
