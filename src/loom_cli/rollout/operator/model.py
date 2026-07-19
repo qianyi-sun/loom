@@ -325,6 +325,126 @@ class CandidateBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class PreflightRequest:
+    """Immutable Tier 0-2 admission identity created before backup I/O."""
+
+    request_id: str
+    rollout_id: str
+    caller: CallerIdentity
+    candidate: CandidateBinding
+    candidate_tree: str
+    requested_at: str
+    runner_config_sha256: str
+    preflight_assessment_sha256: str
+    preflight_registry_sha256: str
+    preflight_coverage_sha256: str
+    mutation_epoch: int
+    environment: str
+    namespace: str
+    command: RequestCommand = "start"
+    status: RequestStatus = "pending"
+    schema_version: SchemaVersion = 1
+
+    def __post_init__(self) -> None:
+        validate_safe_identifier(self.request_id, "request_id")
+        validate_safe_identifier(self.rollout_id, "rollout_id")
+        if not isinstance(self.caller, CallerIdentity):
+            raise ValueError("caller must be a CallerIdentity")
+        if not isinstance(self.candidate, CandidateBinding):
+            raise ValueError("candidate must be a CandidateBinding")
+        _require_sha(self.candidate_tree, "candidate_tree")
+        if (
+            self.candidate.resolved_tree is not None
+            and self.candidate.resolved_tree != self.candidate_tree
+        ):
+            raise ValueError("candidate_tree does not match sealed candidate")
+        _require_string(self.requested_at, "requested_at")
+        _require_sha256(self.runner_config_sha256, "runner_config_sha256")
+        _require_sha256(self.preflight_assessment_sha256, "preflight_assessment_sha256")
+        _require_sha256(self.preflight_registry_sha256, "preflight_registry_sha256")
+        _require_sha256(self.preflight_coverage_sha256, "preflight_coverage_sha256")
+        _require_nonnegative_int(self.mutation_epoch, "mutation_epoch")
+        if self.environment != "staging":
+            raise ValueError("preflight request environment must be staging")
+        namespace = _require_string(self.namespace, "namespace")
+        if namespace != namespace.strip():
+            raise ValueError("namespace must not contain surrounding whitespace")
+        _require_literal(self.command, _REQUEST_COMMANDS, "command", "request command")
+        _require_literal(self.status, _REQUEST_STATUSES, "status", "request status")
+        _require_schema(self.schema_version)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "rollout_id": self.rollout_id,
+            "caller": self.caller.to_dict(),
+            "candidate": self.candidate.to_dict(),
+            "candidate_tree": self.candidate_tree,
+            "requested_at": self.requested_at,
+            "runner_config_sha256": self.runner_config_sha256,
+            "preflight_assessment_sha256": self.preflight_assessment_sha256,
+            "preflight_registry_sha256": self.preflight_registry_sha256,
+            "preflight_coverage_sha256": self.preflight_coverage_sha256,
+            "mutation_epoch": self.mutation_epoch,
+            "environment": self.environment,
+            "namespace": self.namespace,
+            "command": self.command,
+            "status": self.status,
+            "schema_version": self.schema_version,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> PreflightRequest:
+        expected = {
+            "request_id",
+            "rollout_id",
+            "caller",
+            "candidate",
+            "candidate_tree",
+            "requested_at",
+            "runner_config_sha256",
+            "preflight_assessment_sha256",
+            "preflight_registry_sha256",
+            "preflight_coverage_sha256",
+            "mutation_epoch",
+            "environment",
+            "namespace",
+            "command",
+            "status",
+            "schema_version",
+        }
+        _require_exact_keys(data, expected, "preflight request")
+        command = _require_literal(data["command"], _REQUEST_COMMANDS, "command", "request command")
+        status = _require_literal(data["status"], _REQUEST_STATUSES, "status", "request status")
+        return cls(
+            request_id=validate_safe_identifier(data["request_id"], "request_id"),
+            rollout_id=validate_safe_identifier(data["rollout_id"], "rollout_id"),
+            caller=CallerIdentity.from_dict(_require_mapping(data["caller"], "caller")),
+            candidate=CandidateBinding.from_dict(_require_mapping(data["candidate"], "candidate")),
+            candidate_tree=_require_sha(data["candidate_tree"], "candidate_tree"),
+            requested_at=_require_string(data["requested_at"], "requested_at"),
+            runner_config_sha256=_require_sha256(
+                data["runner_config_sha256"], "runner_config_sha256"
+            ),
+            preflight_assessment_sha256=_require_sha256(
+                data["preflight_assessment_sha256"], "preflight_assessment_sha256"
+            ),
+            preflight_registry_sha256=_require_sha256(
+                data["preflight_registry_sha256"], "preflight_registry_sha256"
+            ),
+            preflight_coverage_sha256=_require_sha256(
+                data["preflight_coverage_sha256"], "preflight_coverage_sha256"
+            ),
+            mutation_epoch=_require_nonnegative_int(data["mutation_epoch"], "mutation_epoch"),
+            environment=_require_string(data["environment"], "environment"),
+            namespace=_require_string(data["namespace"], "namespace"),
+            command=cast(RequestCommand, command),
+            status=cast(RequestStatus, status),
+            schema_version=_require_schema(data["schema_version"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RolloutRequest:
     """Immutable request created before any backup is attempted."""
 

@@ -18,6 +18,7 @@ from loom_cli.rollout.lifecycle_protocol import LifecycleAction
 from loom_cli.rollout.operator.backup_job import (
     BackupJobEnvelope,
     BackupJobState,
+    PreflightBackupJobEnvelope,
     transition_backup_job,
 )
 from loom_cli.rollout.operator.config import APPROVED_REMOTE_URL
@@ -26,6 +27,7 @@ from loom_cli.rollout.operator.model import (
     CallerIdentity,
     CandidateBinding,
     DriverEnvelope,
+    PreflightRequest,
     RequestEvent,
     RolloutRequest,
 )
@@ -205,6 +207,51 @@ def make_backup_job() -> BackupJobEnvelope:
     )
 
 
+def make_preflight_request() -> PreflightRequest:
+    return PreflightRequest(
+        request_id=REQUEST_ID,
+        rollout_id="staging-abcdef1",
+        caller=CallerIdentity("hongjian", 2002),
+        candidate=CandidateBinding(
+            remote_url=APPROVED_REMOTE_URL,
+            target_ref="origin/dev",
+            resolved_sha=RESOLVED_SHA,
+            image_tag="staging-abcdef1",
+            fetched_at="2026-07-13T20:00:00Z",
+            source_mode="sealed-cumulative",
+            resolved_tree="b" * 40,
+            approved_base_sha="c" * 40,
+        ),
+        candidate_tree="b" * 40,
+        requested_at="2026-07-13T20:00:01Z",
+        runner_config_sha256="2" * 64,
+        preflight_assessment_sha256="6" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
+        mutation_epoch=4,
+        environment="staging",
+        namespace="loom-staging",
+    )
+
+
+def make_preflight_backup_job() -> PreflightBackupJobEnvelope:
+    return PreflightBackupJobEnvelope(
+        job_id="job-20260713-abcdef12",
+        request_id=REQUEST_ID,
+        payload_id="payload-20260713-abcdef12",
+        candidate_sha=RESOLVED_SHA,
+        candidate_tree="b" * 40,
+        preflight_assessment_sha256="6" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
+        mutation_epoch=4,
+        environment="staging",
+        namespace="loom-staging",
+        bundle_name="20260713T200000Z-stg-20260713-abcdef12",
+        created_at=datetime(2026, 7, 13, 20, tzinfo=UTC),
+    )
+
+
 def test_create_request_is_private_and_no_replace(tmp_path: Path) -> None:
     store = RequestStore(tmp_path)
     request = make_request()
@@ -219,6 +266,60 @@ def test_create_request_is_private_and_no_replace(tmp_path: Path) -> None:
     with pytest.raises(RequestStoreError, match="already exists"):
         store.create_request(request)
     assert store.read_request(REQUEST_ID) == request
+
+
+def test_preflight_request_backup_and_promotion_are_separate_immutable_authorities(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    preliminary = make_preflight_request()
+    path = store.create_preflight_request(preliminary)
+    job = make_preflight_backup_job()
+
+    job_path = store.publish_preflight_backup_job(job)
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    running = transition_backup_job(
+        state,
+        LifecycleAction.START_BACKUP,
+        updated_at=datetime(2026, 7, 13, 20, 1, tzinfo=UTC),
+    )
+    store.replace_preflight_backup_job_state(running, expected_sequence=0)
+
+    assert path.name == "preflight.json"
+    assert store.read_preflight_request(REQUEST_ID) == preliminary
+    assert job_path.parent.name == "preflight-backup"
+    assert store.read_preflight_backup_job(REQUEST_ID) == job
+    assert store.read_preflight_backup_job_state(REQUEST_ID) == running
+    store.append_event(make_event(event="backup_started"))
+    assert store.read_events(REQUEST_ID)[-1].event == "backup_started"
+    with pytest.raises(RequestStoreError, match="not promoted"):
+        store.read_request(REQUEST_ID)
+
+    promoted = replace(
+        make_backup_job_request(),
+        preflight_attestation_sha256="7" * 64,
+    )
+    request_path = store.promote_preflight_request(promoted)
+
+    assert request_path.name == "request.json"
+    assert store.read_request(REQUEST_ID) == promoted
+    assert store.read_preflight_request(REQUEST_ID) == preliminary
+    with pytest.raises(RequestStoreError, match="already exists"):
+        store.promote_preflight_request(promoted)
+
+
+def test_preflight_promotion_and_backup_reject_identity_drift(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    store.create_preflight_request(make_preflight_request())
+
+    with pytest.raises(RequestStoreError, match="preflight request binding"):
+        store.publish_preflight_backup_job(
+            replace(make_preflight_backup_job(), mutation_epoch=5)
+        )
+    with pytest.raises(RequestStoreError, match="preflight authority"):
+        store.promote_preflight_request(
+            replace(make_backup_job_request(), runner_config_sha256="8" * 64)
+        )
 
 
 def test_backup_job_is_immutable_private_and_state_uses_compare_and_swap(

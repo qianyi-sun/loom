@@ -51,6 +51,109 @@ def _parse_timestamp(value: object, field: str) -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
+class PreflightBackupJobEnvelope:
+    """Immutable detached-backup input bound to a Tier 0-2 assessment."""
+
+    job_id: str
+    request_id: str
+    payload_id: str
+    candidate_sha: str
+    candidate_tree: str
+    preflight_assessment_sha256: str
+    preflight_registry_sha256: str
+    preflight_coverage_sha256: str
+    mutation_epoch: int
+    environment: str
+    namespace: str
+    bundle_name: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if any(
+            _SAFE_ID_RE.fullmatch(value) is None
+            for value in (self.job_id, self.request_id, self.payload_id)
+        ):
+            raise ValueError("preflight backup job identifier is invalid")
+        if (
+            _SHA_RE.fullmatch(self.candidate_sha) is None
+            or _SHA_RE.fullmatch(self.candidate_tree) is None
+            or _SHA256_RE.fullmatch(self.preflight_assessment_sha256) is None
+            or _SHA256_RE.fullmatch(self.preflight_registry_sha256) is None
+            or _SHA256_RE.fullmatch(self.preflight_coverage_sha256) is None
+            or self.mutation_epoch < 0
+            or self.environment != "staging"
+            or not self.namespace
+            or self.namespace != self.namespace.strip()
+            or not self.bundle_name
+            or "/" in self.bundle_name
+            or self.bundle_name != self.bundle_name.strip()
+        ):
+            raise ValueError("preflight backup job binding is invalid")
+        _timestamp(self.created_at, "created_at")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "bundle_name": self.bundle_name,
+            "candidate_sha": self.candidate_sha,
+            "candidate_tree": self.candidate_tree,
+            "created_at": _timestamp(self.created_at, "created_at"),
+            "environment": self.environment,
+            "job_id": self.job_id,
+            "mutation_epoch": self.mutation_epoch,
+            "namespace": self.namespace,
+            "payload_id": self.payload_id,
+            "preflight_assessment_sha256": self.preflight_assessment_sha256,
+            "preflight_coverage_sha256": self.preflight_coverage_sha256,
+            "preflight_registry_sha256": self.preflight_registry_sha256,
+            "request_id": self.request_id,
+            "schema_version": 1,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> PreflightBackupJobEnvelope:
+        expected = {
+            "bundle_name",
+            "candidate_sha",
+            "candidate_tree",
+            "created_at",
+            "environment",
+            "job_id",
+            "mutation_epoch",
+            "namespace",
+            "payload_id",
+            "preflight_assessment_sha256",
+            "preflight_coverage_sha256",
+            "preflight_registry_sha256",
+            "request_id",
+            "schema_version",
+        }
+        _exact_keys(data, expected, "preflight backup job envelope")
+        if data["schema_version"] != 1 or type(data["mutation_epoch"]) is not int:
+            raise ValueError("preflight backup job envelope version or epoch is invalid")
+        return cls(
+            job_id=_string(data, "job_id"),
+            request_id=_string(data, "request_id"),
+            payload_id=_string(data, "payload_id"),
+            candidate_sha=_string(data, "candidate_sha"),
+            candidate_tree=_string(data, "candidate_tree"),
+            preflight_assessment_sha256=_string(data, "preflight_assessment_sha256"),
+            preflight_registry_sha256=_string(data, "preflight_registry_sha256"),
+            preflight_coverage_sha256=_string(data, "preflight_coverage_sha256"),
+            mutation_epoch=data["mutation_epoch"],
+            environment=_string(data, "environment"),
+            namespace=_string(data, "namespace"),
+            bundle_name=_string(data, "bundle_name"),
+            created_at=_parse_timestamp(data["created_at"], "created_at"),
+        )
+
+    @property
+    def evidence_digest(self) -> str:
+        return hashlib.sha256(
+            json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
 class BackupJobEnvelope:
     """Immutable input published before the long-running worker is dispatched."""
 
@@ -285,7 +388,10 @@ def transition_backup_job(
     )
 
 
-def validate_job_binding(envelope: BackupJobEnvelope, state: BackupJobState) -> None:
+def validate_job_binding(
+    envelope: BackupJobEnvelope | PreflightBackupJobEnvelope,
+    state: BackupJobState,
+) -> None:
     """Fail closed if mutable state was substituted across immutable jobs."""
     if envelope.job_id != state.job_id or envelope.request_id != state.request_id:
         raise ValueError("backup job state does not match immutable envelope")
@@ -294,6 +400,7 @@ def validate_job_binding(envelope: BackupJobEnvelope, state: BackupJobState) -> 
 __all__ = [
     "BackupJobEnvelope",
     "BackupJobState",
+    "PreflightBackupJobEnvelope",
     "transition_backup_job",
     "validate_job_binding",
 ]

@@ -38,15 +38,24 @@ digest, input fingerprint, evidence hash, discovered stage, start/finish time,
 and expiry.
 
 Execution has an explicit pre-backup boundary. Tiers 0–2 first produce one
-digest-addressed `PreflightAssessment`; no rollout request or backup job may be
-published if it contains a blocker. The same in-memory check sessions are then
-retained while a request-specific checkpoint is created and restore-verified.
+digest-addressed `PreflightAssessment`; no preliminary request or backup job may
+be published if it contains a blocker. The same registered check plan and
+immutable build/baseline artifacts are retained while a request-specific
+checkpoint is created and restore-verified.
 Tier 3 reruns the earlier probes as drift checks, reuses the immutable image,
 manifest, and baseline artifacts instead of rebuilding them, and refuses to
 attest if any input fingerprint, implementation digest, evidence hash, or TTL
 differs from the assessment. This removes the previous circular dependency in
 which clone rehearsal needed a verified lease while the broker demanded the
 rehearsal attestation before it could create that lease.
+
+Persistence makes that distinction explicit. `preflight.json` reserves the
+candidate/tree, epoch, config, registry, coverage, and assessment identity.
+The detached `preflight-backup/job.json` may bind only that preliminary
+authority. After restore verification and Tier 3, `request.json` is published
+beside (never over) the preliminary record and binds the complete attestation.
+Attempt envelopes and protected launch refuse a directory that contains only
+the preliminary record.
 
 ## Tiers
 

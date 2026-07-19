@@ -7,16 +7,22 @@ import fcntl
 import json
 import os
 import stat
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from .backup_job import BackupJobEnvelope, BackupJobState, validate_job_binding
+from .backup_job import (
+    BackupJobEnvelope,
+    BackupJobState,
+    PreflightBackupJobEnvelope,
+    validate_job_binding,
+)
 from .model import (
     ActivePointer,
     DriverEnvelope,
+    PreflightRequest,
     RequestEvent,
     RolloutRequest,
     validate_safe_identifier,
@@ -319,17 +325,95 @@ class RequestStore:
             raise
 
     def _require_request_directory(self, request_id: object) -> Path:
+        request_directory = self._require_record_directory(request_id)
+        try:
+            _read_private_bytes(request_directory / "request.json", "request.json")
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                raise RequestStoreError("rollout request is not promoted") from exc
+            raise
+        return request_directory
+
+    def _require_record_directory(self, request_id: object) -> Path:
         validated_request_id = _request_id(request_id)
         self._validate_request_roots()
         request_directory = self.requests_root / validated_request_id
         try:
             _validate_private_directory(request_directory, "request directory")
-            _read_private_bytes(request_directory / "request.json", "request.json")
         except RequestStoreError as exc:
             if "does not exist" in str(exc):
                 raise RequestStoreError("request does not exist") from exc
             raise
+        for name in ("request.json", "preflight.json"):
+            try:
+                _read_private_bytes(request_directory / name, name)
+            except RequestStoreError as exc:
+                if "does not exist" not in str(exc):
+                    raise
+            else:
+                break
+        else:
+            raise RequestStoreError("request identity document does not exist")
         return request_directory
+
+    def _require_preflight_request_directory(self, request_id: object) -> Path:
+        request_directory = self._require_record_directory(request_id)
+        try:
+            _read_private_bytes(request_directory / "preflight.json", "preflight.json")
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                raise RequestStoreError("preflight request does not exist") from exc
+            raise
+        return request_directory
+
+    def create_preflight_request(self, request: PreflightRequest) -> Path:
+        """Reserve one immutable Tier 0-2 request before detached backup I/O."""
+        try:
+            payload = request.to_dict()
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        self._ensure_store()
+        request_directory = self._request_directory(request.request_id)
+        try:
+            request_directory.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
+        except FileExistsError as exc:
+            raise RequestStoreError(f"request {request.request_id} already exists") from exc
+        except OSError as exc:
+            raise RequestStoreError("could not create request directory") from exc
+        request_directory.chmod(_PRIVATE_DIRECTORY_MODE)
+        _validate_private_directory(request_directory, "request directory")
+        _fsync_directory(self.requests_root)
+        return _publish_immutable(request_directory / "preflight.json", payload)
+
+    def read_preflight_request(self, request_id: str) -> PreflightRequest:
+        request_directory = self._require_preflight_request_directory(request_id)
+        payload = _read_json(request_directory / "preflight.json", "preflight.json")
+        try:
+            request = PreflightRequest.from_dict(payload)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if request.request_id != request_id:
+            raise RequestStoreError("preflight.json request_id does not match its directory")
+        return request
+
+    def promote_preflight_request(self, request: RolloutRequest) -> Path:
+        """Publish final Tier 0-3 authority without replacing preliminary evidence."""
+        preliminary = self.read_preflight_request(request.request_id)
+        if preliminary.status != "pending" or request.status != "pending":
+            raise RequestStoreError("only pending preflight requests may be promoted")
+        if (
+            request.request_id != preliminary.request_id
+            or request.rollout_id != preliminary.rollout_id
+            or request.caller != preliminary.caller
+            or request.candidate != preliminary.candidate
+            or request.requested_at != preliminary.requested_at
+            or request.runner_config_sha256 != preliminary.runner_config_sha256
+            or request.preflight_registry_sha256 != preliminary.preflight_registry_sha256
+            or request.preflight_coverage_sha256 != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("promoted request does not match preflight authority")
+        request_directory = self._require_preflight_request_directory(request.request_id)
+        return _publish_immutable(request_directory / "request.json", request.to_dict())
 
     def create_request(self, request: RolloutRequest) -> Path:
         """Persist the immutable pre-backup request without replacement."""
@@ -393,6 +477,74 @@ class RequestStore:
             raise
         return path
 
+    def publish_preflight_backup_job(self, envelope: PreflightBackupJobEnvelope) -> Path:
+        """Publish one detached job bound to immutable Tier 0-2 authority."""
+        request = self.read_preflight_request(envelope.request_id)
+        if request.status != "pending":
+            raise RequestStoreError("preview request cannot publish a backup job")
+        if (
+            request.candidate.resolved_sha != envelope.candidate_sha
+            or request.candidate_tree != envelope.candidate_tree
+            or request.preflight_assessment_sha256
+            != envelope.preflight_assessment_sha256
+            or request.preflight_registry_sha256 != envelope.preflight_registry_sha256
+            or request.preflight_coverage_sha256 != envelope.preflight_coverage_sha256
+            or request.mutation_epoch != envelope.mutation_epoch
+            or request.environment != envelope.environment
+            or request.namespace != envelope.namespace
+        ):
+            raise RequestStoreError("backup job does not match preflight request binding")
+        request_directory = self._require_preflight_request_directory(envelope.request_id)
+        backup_directory = request_directory / "preflight-backup"
+        _ensure_private_directory(backup_directory, "preflight backup job directory")
+        path = _publish_immutable(backup_directory / "job.json", envelope.to_dict())
+        initial = BackupJobState(
+            job_id=envelope.job_id,
+            request_id=envelope.request_id,
+            updated_at=envelope.created_at,
+        )
+        _publish_immutable(backup_directory / "state.json", initial.to_dict())
+        return path
+
+    def read_preflight_backup_job(self, request_id: str) -> PreflightBackupJobEnvelope:
+        directory = self._require_preflight_backup_job_directory(request_id)
+        try:
+            envelope = PreflightBackupJobEnvelope.from_dict(
+                _read_json(directory / "job.json", "preflight backup job envelope")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if envelope.request_id != request_id:
+            raise RequestStoreError("preflight backup job identity does not match directory")
+        return envelope
+
+    def read_preflight_backup_job_state(self, request_id: str) -> BackupJobState:
+        directory = self._require_preflight_backup_job_directory(request_id)
+        try:
+            state = BackupJobState.from_dict(
+                _read_json(directory / "state.json", "preflight backup job state")
+            )
+            validate_job_binding(self.read_preflight_backup_job(request_id), state)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        return state
+
+    def replace_preflight_backup_job_state(
+        self,
+        state: BackupJobState,
+        *,
+        expected_sequence: int,
+    ) -> Path:
+        """CAS-update preflight backup state without holding the launch lock."""
+        directory = self._require_preflight_backup_job_directory(state.request_id)
+        return self._replace_job_state(
+            directory,
+            state,
+            expected_sequence=expected_sequence,
+            current=lambda: self.read_preflight_backup_job_state(state.request_id),
+            envelope=lambda: self.read_preflight_backup_job(state.request_id),
+        )
+
     def read_backup_job(self, request_id: str) -> BackupJobEnvelope:
         directory = self._require_backup_job_directory(request_id)
         try:
@@ -423,9 +575,26 @@ class RequestStore:
         expected_sequence: int,
     ) -> Path:
         """Atomically publish a single-writer state transition with CAS."""
+        directory = self._require_backup_job_directory(state.request_id)
+        return self._replace_job_state(
+            directory,
+            state,
+            expected_sequence=expected_sequence,
+            current=lambda: self.read_backup_job_state(state.request_id),
+            envelope=lambda: self.read_backup_job(state.request_id),
+        )
+
+    def _replace_job_state(
+        self,
+        directory: Path,
+        state: BackupJobState,
+        *,
+        expected_sequence: int,
+        current: Callable[[], BackupJobState],
+        envelope: Callable[[], BackupJobEnvelope | PreflightBackupJobEnvelope],
+    ) -> Path:
         if expected_sequence < 0 or state.sequence != expected_sequence + 1:
             raise RequestStoreError("backup job state sequence is not the next generation")
-        directory = self._require_backup_job_directory(state.request_id)
         lock_path = directory / ".state.lock"
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -440,11 +609,11 @@ class RequestStore:
                 raise RequestStoreError("backup job state lock is unsafe")
             fcntl.flock(fd, fcntl.LOCK_EX)
             locked = True
-            current = self.read_backup_job_state(state.request_id)
-            if current.sequence != expected_sequence:
+            current_state = current()
+            if current_state.sequence != expected_sequence:
                 raise RequestStoreError("backup job state changed concurrently")
             try:
-                validate_job_binding(self.read_backup_job(state.request_id), state)
+                validate_job_binding(envelope(), state)
             except ValueError as exc:
                 raise RequestStoreError(str(exc)) from exc
             return _replace_mutable(directory / "state.json", state.to_dict())
@@ -460,6 +629,12 @@ class RequestStore:
         request_directory = self._require_request_directory(request_id)
         directory = request_directory / "backup"
         _validate_private_directory(directory, "backup job directory")
+        return directory
+
+    def _require_preflight_backup_job_directory(self, request_id: str) -> Path:
+        request_directory = self._require_preflight_request_directory(request_id)
+        directory = request_directory / "preflight-backup"
+        _validate_private_directory(directory, "preflight backup job directory")
         return directory
 
     def publish_attempt_envelope(self, envelope: DriverEnvelope) -> Path:
@@ -686,7 +861,7 @@ class RequestStore:
             payload = _json_bytes(event.to_dict())
         except ValueError as exc:
             raise RequestStoreError(str(exc)) from exc
-        request_directory = self._require_request_directory(event.request_id)
+        request_directory = self._require_record_directory(event.request_id)
         path = request_directory / "events.jsonl"
         flags = (
             os.O_WRONLY
@@ -724,7 +899,7 @@ class RequestStore:
         return path
 
     def read_events(self, request_id: str) -> list[RequestEvent]:
-        request_directory = self._require_request_directory(request_id)
+        request_directory = self._require_record_directory(request_id)
         path = request_directory / "events.jsonl"
         try:
             path.lstat()

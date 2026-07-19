@@ -333,6 +333,14 @@ than claiming that `st_mode` is unchanged.
 
 ### Backup and locking
 
+A request directory has two non-interchangeable immutable identities. A
+Tier 0-2 `preflight.json` may authorize only a detached backup job; it is not a
+rollout request and cannot publish an attempt envelope. Only after the backup
+lease is restore-verified and Tier 3 succeeds may the broker publish the full
+Tier 0-3 `request.json` beside the retained assessment evidence. Identity drift
+across candidate/tree, config, registry, coverage, epoch, environment, or
+namespace rejects that promotion.
+
 A non-dry `start` creates and verifies a new immutable backup manifest before
 the rollout can mutate staging. It never relies on a mutable `latest` pointer.
 A failed backup keeps the prior valid backup and prevents unit launch. An

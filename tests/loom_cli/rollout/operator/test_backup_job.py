@@ -8,6 +8,7 @@ from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.operator.backup_job import (
     BackupJobEnvelope,
     BackupJobState,
+    PreflightBackupJobEnvelope,
     transition_backup_job,
     validate_job_binding,
 )
@@ -36,6 +37,27 @@ def test_job_identity_binds_candidate_epoch_attestation_and_bundle() -> None:
 
     assert envelope.to_dict()["mutation_epoch"] == 8
     assert envelope.to_dict()["candidate_tree"] == "b" * 40
+    assert len(envelope.evidence_digest) == 64
+
+
+def test_preflight_job_binds_assessment_registry_coverage_and_round_trips() -> None:
+    envelope = PreflightBackupJobEnvelope(
+        job_id="job-12345678",
+        request_id="req-12345678",
+        payload_id="payload-12345678",
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        preflight_assessment_sha256="c" * 64,
+        preflight_registry_sha256="d" * 64,
+        preflight_coverage_sha256="e" * 64,
+        mutation_epoch=8,
+        environment="staging",
+        namespace="loom-staging",
+        bundle_name="20260719T210000Z-req-12345678",
+        created_at=NOW,
+    )
+
+    assert PreflightBackupJobEnvelope.from_dict(envelope.to_dict()) == envelope
     assert len(envelope.evidence_digest) == 64
 
 
