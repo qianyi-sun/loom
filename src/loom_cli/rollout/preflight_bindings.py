@@ -55,6 +55,7 @@ def derive_attestation_bindings(
         "credentials.metadata",
         "backup.lease-eligibility",
         "images.contract",
+        "migration.manifest",
         "migration.plan",
         "systemd.render",
         "gb10.shared-mount",

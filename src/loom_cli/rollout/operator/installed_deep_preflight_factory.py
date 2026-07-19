@@ -150,6 +150,7 @@ def build_installed_deep_preflight_composition(
             source = RehearsalActionSource(
                 image_artifacts=lambda: loaded.images,
                 manifest_artifacts=lambda: loaded.manifests,
+                migration_artifacts=lambda: loaded.migration,
                 artifact_store=artifact_store,
                 migration_plan_sha256=loaded.publication.migration_plan_sha256,
                 migration_target_revision=loaded.publication.migration_target_revision,

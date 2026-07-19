@@ -17,6 +17,9 @@ from loom_cli.rollout.image_readiness import (
     inspect_exact_images,
 )
 from loom_cli.rollout.manifest_readiness import ManifestArtifact, inspect_rendered_manifests
+from loom_cli.rollout.migration_manifest_readiness import (
+    build_migration_manifest_artifact,
+)
 from loom_cli.rollout.preflight_artifact_store import (
     PreflightArtifactStore,
     PreflightArtifactStoreError,
@@ -70,6 +73,7 @@ def _publish(store: PreflightArtifactStore):
         mutation_epoch=8,
         images=images,
         manifests=_manifests(images),
+        migration=_migration(images),
         migration_plan_sha256="1" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="2" * 64,
@@ -80,6 +84,26 @@ def _publish(store: PreflightArtifactStore):
 class _Result:
     returncode: int
     stdout: str
+
+
+def _migration(
+    images: ImageArtifactSet,
+    *,
+    candidate_tree: str = "f" * 40,
+    image_tag: str = "staging-aaaaaaa",
+    migration_plan_sha256: str = "1" * 64,
+    migration_target_revision: str = "0067",
+):
+    return build_migration_manifest_artifact(
+        lambda _manifest: _Result(0, ""),
+        candidate_sha="a" * 40,
+        candidate_tree=candidate_tree,
+        image_tag=image_tag,
+        image_id=images.image_digests["loom-control-plane"],
+        namespace="loom-staging",
+        migration_plan_sha256=migration_plan_sha256,
+        migration_target_revision=migration_target_revision,
+    )
 
 
 def _docker(argv, _cwd):
@@ -150,7 +174,11 @@ def test_store_publishes_and_reuses_exact_private_artifacts(tmp_path: Path) -> N
     assert second == first == store.read(first.bundle_digest)
     assert first.rendered_manifest_path.read_text().startswith("apiVersion")
     assert first.descriptor_path.parent.name == first.bundle_digest
-    for path in (first.descriptor_path, first.rendered_manifest_path):
+    for path in (
+        first.descriptor_path,
+        first.rendered_manifest_path,
+        first.migration_manifest_path,
+    ):
         assert path.stat().st_uid == os.geteuid()
         assert path.stat().st_mode & 0o777 == 0o600
     assert first.descriptor_path.parent.stat().st_mode & 0o777 == 0o700
@@ -166,6 +194,15 @@ def test_store_rejects_content_and_path_authority_drift(tmp_path: Path) -> None:
     publication.rendered_manifest_path.unlink()
     publication.rendered_manifest_path.symlink_to(tmp_path / "elsewhere")
     with pytest.raises(PreflightArtifactStoreError, match="invalid"):
+        store.read(publication.bundle_digest)
+
+
+def test_store_rejects_migration_artifact_drift(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    publication = _publish(store)
+    publication.migration_manifest_path.write_text("changed\n")
+
+    with pytest.raises(PreflightArtifactStoreError, match="drift"):
         store.read(publication.bundle_digest)
 
 
@@ -198,6 +235,7 @@ def test_store_rejects_cross_artifact_image_drift(tmp_path: Path) -> None:
             mutation_epoch=8,
             images=images,
             manifests=drifted,
+            migration=_migration(images),
             migration_plan_sha256="1" * 64,
             migration_target_revision="0067",
             browser_report_schema_sha256="2" * 64,
@@ -213,6 +251,7 @@ def test_store_rejects_unbounded_migration_target(tmp_path: Path) -> None:
             mutation_epoch=8,
             images=images,
             manifests=_manifests(images),
+            migration=_migration(images),
             migration_plan_sha256="1" * 64,
             migration_target_revision="head",
             browser_report_schema_sha256="2" * 64,
@@ -228,6 +267,11 @@ def test_store_loads_one_exact_publication_without_rebuild_or_render(tmp_path: P
         mutation_epoch=8,
         images=images,
         manifests=manifests,
+        migration=_migration(
+            images,
+            image_tag=image_tag,
+            migration_target_revision="0066",
+        ),
         migration_plan_sha256="1" * 64,
         migration_target_revision="0066",
         browser_report_schema_sha256="2" * 64,
@@ -257,6 +301,12 @@ def test_store_rejects_ambiguous_exact_publications(tmp_path: Path) -> None:
             mutation_epoch=8,
             images=images,
             manifests=manifests,
+            migration=_migration(
+                images,
+                image_tag=image_tag,
+                migration_plan_sha256=migration_digest,
+                migration_target_revision="0066",
+            ),
             migration_plan_sha256=migration_digest,
             migration_target_revision="0066",
             browser_report_schema_sha256="2" * 64,
@@ -280,6 +330,11 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
         store=store,
         image_artifact=lambda: images,
         manifest_artifact=lambda: manifests,
+        migration_manifest_artifact=lambda: _migration(
+            images,
+            image_tag=image_tag,
+            migration_target_revision="0066",
+        ),
         candidate_sha="a" * 40,
         candidate_tree="f" * 40,
         mutation_epoch=8,
@@ -305,6 +360,7 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
         "images.contract",
         "manifests.server-schema",
         "migration.plan",
+        "migration.manifest",
         "browser.runtime",
     )
     loaded = store.load_exact(
@@ -318,3 +374,8 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
     assert outcome.evidence["bundle-digest"] == loaded.publication.bundle_digest
     assert loaded.publication.migration_plan_sha256 == "1" * 64
     assert loaded.publication.migration_target_revision == "0066"
+    assert loaded.migration == _migration(
+        images,
+        image_tag=image_tag,
+        migration_target_revision="0066",
+    )

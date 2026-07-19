@@ -58,6 +58,7 @@ def _executions() -> tuple[CheckExecution, ...]:
             {"image-digests": {"browser": f"sha256:{'e' * 64}"}},
         ),
         _execution("migration.plan", {"plan-digest": "f" * 64}),
+        _execution("migration.manifest", {"artifact-digest": "0" * 64}),
         _execution("systemd.render", {"unit-set-digest": "1" * 64}),
         _execution("gb10.shared-mount", {"mount-digest": "2" * 64}),
         _execution(

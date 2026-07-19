@@ -34,6 +34,7 @@ from loom_cli.rollout.manifest_readiness import (
     RenderManifest,
     ServerDryRun,
 )
+from loom_cli.rollout.migration_manifest_readiness import MigrationManifestArtifact
 from loom_cli.rollout.migration_readiness import MigrationPlanEvidence
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.candidate import GitRunner
@@ -59,6 +60,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_kubernetes_client_check,
     build_lifecycle_launch_cancel_check,
     build_manifest_preflight_checks,
+    build_migration_manifest_check,
     build_migration_plan_check,
     build_preflight_artifact_publication_check,
     build_readonly_authority_check,
@@ -215,9 +217,11 @@ class PreflightRuntimeSources:
         )
         manifest_artifacts: dict[str, ManifestArtifact] = {}
         migration_artifacts: dict[str, MigrationPlanEvidence] = {}
+        migration_manifest_artifacts: dict[str, MigrationManifestArtifact] = {}
         manifest_session: ManifestRenderSession | None = None
         if self.loaded_artifacts is not None:
             manifest_artifacts["exact"] = self.loaded_artifacts.manifests
+            migration_manifest_artifacts["exact"] = self.loaded_artifacts.migration
             manifest_session = ManifestRenderSession(
                 self.render_manifest,
                 self.server_dry_run,
@@ -252,6 +256,15 @@ class PreflightRuntimeSources:
                 )
             return artifact.plan_digest, artifact.head
 
+        def capture_migration_manifest(artifact: MigrationManifestArtifact) -> None:
+            migration_manifest_artifacts["exact"] = artifact
+
+        def exact_migration_manifest() -> MigrationManifestArtifact:
+            try:
+                return migration_manifest_artifacts["exact"]
+            except KeyError as exc:
+                raise ValueError("preflight migration manifest was not produced") from exc
+
         def groups() -> tuple[
             tuple[RegisteredCheck, ...],
             tuple[RegisteredCheck, ...],
@@ -265,6 +278,8 @@ class PreflightRuntimeSources:
                 manifest_session=manifest_session,
                 capture_migration=capture_migration,
                 exact_migration=exact_migration,
+                capture_migration_manifest=capture_migration_manifest,
+                exact_migration_manifest=exact_migration_manifest,
                 mutation_epoch=mutation_epoch,
             )
             tier2 = build_staging_baseline_checks(
@@ -375,6 +390,8 @@ class PreflightRuntimeSources:
         manifest_session: ManifestRenderSession | None,
         capture_migration: Callable[[MigrationPlanEvidence], None],
         exact_migration: Callable[[], tuple[str, str]],
+        capture_migration_manifest: Callable[[MigrationManifestArtifact], None],
+        exact_migration_manifest: Callable[[], MigrationManifestArtifact],
         mutation_epoch: int,
     ) -> tuple[RegisteredCheck, ...]:
         image_checks = build_image_preflight_checks(
@@ -409,6 +426,16 @@ class PreflightRuntimeSources:
             ),
             *image_checks,
             *manifest_checks,
+            build_migration_manifest_check(
+                self.server_dry_run,
+                image_artifact=image_session.verify,
+                migration_plan=exact_migration,
+                candidate_sha=self.candidate.resolved_sha,
+                candidate_tree=self.candidate.resolved_tree or "",
+                image_tag=self.candidate.image_tag,
+                namespace=self.config.namespace,
+                artifact_sink=capture_migration_manifest,
+            ),
             build_browser_runtime_check(
                 self.browser_run,
                 image_session.verify,
@@ -422,6 +449,7 @@ class PreflightRuntimeSources:
                 store=self.artifact_store,
                 image_artifact=image_session.verify,
                 manifest_artifact=exact_manifest,
+                migration_manifest_artifact=exact_migration_manifest,
                 candidate_sha=self.candidate.resolved_sha,
                 candidate_tree=self.candidate.resolved_tree or "",
                 mutation_epoch=mutation_epoch,

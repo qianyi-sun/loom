@@ -271,6 +271,12 @@ the declared head, expand/contract before destructive upgrades, revision-owned
 fail-closed downgrade behavior, and rehearsal before protected apply. Its plan
 digest binds every revision source hash and the policy digest; clone rehearsal
 and final apply must consume that same plan rather than rediscovering a head.
+`migration.manifest` then renders the one exact Kubernetes Job with a
+deterministic candidate/tree/plan-derived name, binds the built control-plane
+image ID, and performs server-side dry-run. The private artifact publication
+stores that Job beside the standing render under its own content and artifact
+digests. Rehearsal and final apply may reconstruct and verify it, but may not
+rerender it after checkpoint creation.
 
 ### Tier 2: current staging readonly baseline
 
@@ -290,8 +296,9 @@ forbidden.
 
 `RehearsalActionSource` is the sole plan and resource-name authority for these
 actions. Its identity factory and action factory consume the same checkpoint,
-candidate tree, image artifact set, migration plan, browser report schema and
-route origin. The represented username, team UUID, admin audit actor, smoke
+candidate tree, image artifact set, migration plan and manifest artifact,
+browser report schema and route origin. The represented username, team UUID,
+admin audit actor, smoke
 task, required worker pool and agent are strict non-secret authority fields in
 that same plan; changing any of them changes the isolation identity before the
 helper can run. Namespace, database, object-prefix, route and transient-unit

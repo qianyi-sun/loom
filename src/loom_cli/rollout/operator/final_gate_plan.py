@@ -61,6 +61,11 @@ class FinalGatePlan:
     artifact_descriptor_path: str
     rendered_manifest_path: str
     rendered_manifest_sha256: str
+    migration_manifest_path: str
+    migration_manifest_sha256: str
+    migration_manifest_artifact_sha256: str
+    migration_job_name: str
+    migration_image_id: str
     image_digests: Mapping[str, str]
     migration_plan_digest: str
     migration_target_revision: str
@@ -121,6 +126,8 @@ class FinalGatePlan:
             self.coverage_digest,
             self.artifact_bundle_digest,
             self.rendered_manifest_sha256,
+            self.migration_manifest_sha256,
+            self.migration_manifest_artifact_sha256,
             self.migration_plan_digest,
             self.browser_report_schema,
             self.backup_manifest_sha256,
@@ -140,6 +147,7 @@ class FinalGatePlan:
         for value in (
             self.artifact_descriptor_path,
             self.rendered_manifest_path,
+            self.migration_manifest_path,
             self.backup_manifest_path,
         ):
             path = Path(value)
@@ -147,6 +155,13 @@ class FinalGatePlan:
                 raise ValueError("final gate plan path is invalid")
         if Path(self.artifact_descriptor_path).parent != Path(self.rendered_manifest_path).parent:
             raise ValueError("final gate preflight artifact roots differ")
+        if Path(self.artifact_descriptor_path).parent != Path(self.migration_manifest_path).parent:
+            raise ValueError("final gate migration artifact root differs")
+        if (
+            not self.migration_job_name
+            or self.migration_image_id != self.image_digests.get("loom-control-plane")
+        ):
+            raise ValueError("final gate migration artifact identity is invalid")
         if not self.migration_target_revision or not self.db_snapshot_identity:
             raise ValueError("final gate migration or snapshot identity is missing")
         if not self.backup_lease_id or not self.schema_revision:
@@ -257,6 +272,8 @@ class FinalGatePlan:
             or artifacts.candidate_tree != bindings.candidate_tree
             or artifacts.mutation_epoch != bindings.staging_mutation_epoch
             or artifacts.migration_plan_sha256 != bindings.migration_plan_digest
+            or artifacts.migration_image_id
+            != bindings.image_digests.get("loom-control-plane")
             or artifacts.browser_report_schema_sha256 != bindings.browser_report_schema
             or lease.lease_id != bindings.backup_lease_id
             or lease.evidence_digest != bindings.backup_lease_digest
@@ -290,6 +307,11 @@ class FinalGatePlan:
             "artifact_descriptor_path": str(artifacts.descriptor_path),
             "rendered_manifest_path": str(artifacts.rendered_manifest_path),
             "rendered_manifest_sha256": artifacts.rendered_manifest_sha256,
+            "migration_manifest_path": str(artifacts.migration_manifest_path),
+            "migration_manifest_sha256": artifacts.migration_manifest_sha256,
+            "migration_manifest_artifact_sha256": artifacts.migration_manifest_artifact_sha256,
+            "migration_job_name": artifacts.migration_job_name,
+            "migration_image_id": artifacts.migration_image_id,
             "image_digests": dict(bindings.image_digests),
             "migration_plan_digest": bindings.migration_plan_digest,
             "migration_target_revision": artifacts.migration_target_revision,
@@ -348,6 +370,13 @@ class FinalGatePlan:
             artifact_descriptor_path=_string(value, "artifact_descriptor_path"),
             rendered_manifest_path=_string(value, "rendered_manifest_path"),
             rendered_manifest_sha256=_string(value, "rendered_manifest_sha256"),
+            migration_manifest_path=_string(value, "migration_manifest_path"),
+            migration_manifest_sha256=_string(value, "migration_manifest_sha256"),
+            migration_manifest_artifact_sha256=_string(
+                value, "migration_manifest_artifact_sha256"
+            ),
+            migration_job_name=_string(value, "migration_job_name"),
+            migration_image_id=_string(value, "migration_image_id"),
             image_digests=_string_map(value, "image_digests"),
             migration_plan_digest=_string(value, "migration_plan_digest"),
             migration_target_revision=_string(value, "migration_target_revision"),

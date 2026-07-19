@@ -16,6 +16,7 @@ from loom_cli.rollout.admin_smoke_contract import (
 )
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ImageArtifactSet
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
+from loom_cli.rollout.migration_manifest_readiness import MigrationManifestArtifact
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
@@ -334,6 +335,7 @@ class RehearsalActionSource:
 
     image_artifacts: Callable[[], ImageArtifactSet]
     manifest_artifacts: Callable[[], ManifestArtifact]
+    migration_artifacts: Callable[[], MigrationManifestArtifact]
     artifact_store: PreflightArtifactStore
     migration_plan_sha256: str
     migration_target_revision: str
@@ -361,13 +363,21 @@ class RehearsalActionSource:
     ) -> tuple[str, str]:
         artifacts = self.image_artifacts()
         manifests = self.manifest_artifacts()
-        isolation_id = self._isolation_id(candidate, checkpoint, artifacts, manifests)
+        migration = self.migration_artifacts()
+        isolation_id = self._isolation_id(
+            candidate,
+            checkpoint,
+            artifacts,
+            manifests,
+            migration,
+        )
         plan = self._plan(
             candidate,
             checkpoint,
             isolation_id=isolation_id,
             artifacts=artifacts,
             manifests=manifests,
+            migration=migration,
         )
         return isolation_id, plan.plan_digest
 
@@ -386,6 +396,7 @@ class RehearsalActionSource:
             isolation_id=isolation_id,
             artifacts=self.image_artifacts(),
             manifests=self.manifest_artifacts(),
+            migration=self.migration_artifacts(),
         )
         if plan.plan_digest != expected_digest:
             raise ValueError("rehearsal plan identity drifted")
@@ -419,6 +430,7 @@ class RehearsalActionSource:
         isolation_id: str,
         artifacts: ImageArtifactSet,
         manifests: ManifestArtifact,
+        migration: MigrationManifestArtifact,
     ) -> RehearsalPlan:
         if (
             checkpoint.environment != "staging"
@@ -433,6 +445,7 @@ class RehearsalActionSource:
             mutation_epoch=checkpoint.mutation_epoch,
             images=artifacts,
             manifests=manifests,
+            migration=migration,
             migration_plan_sha256=self.migration_plan_sha256,
             migration_target_revision=self.migration_target_revision,
             browser_report_schema_sha256=self.browser_report_schema_sha256,
@@ -470,6 +483,7 @@ class RehearsalActionSource:
         checkpoint: CriticalCheckpointEvidence,
         artifacts: ImageArtifactSet,
         manifests: ManifestArtifact,
+        migration: MigrationManifestArtifact,
     ) -> str:
         payload = {
             "browser_report_schema_sha256": self.browser_report_schema_sha256,
@@ -483,6 +497,8 @@ class RehearsalActionSource:
             "manifest_artifact_sha256": manifests.artifact_digest,
             "rendered_manifest_sha256": manifests.rendered_sha256,
             "migration_plan_sha256": self.migration_plan_sha256,
+            "migration_manifest_artifact_sha256": migration.artifact_digest,
+            "migration_manifest_sha256": migration.rendered_sha256,
             "migration_target_revision": self.migration_target_revision,
             "route_origin": self.route_origin,
             "smoke_authority": self.smoke_authority.to_record(),

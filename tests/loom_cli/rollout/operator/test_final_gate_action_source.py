@@ -35,7 +35,11 @@ from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope, _lea
 from tests.loom_cli.rollout.operator.test_protected_apply_baseline import (
     _baseline_executions,
 )
-from tests.loom_cli.rollout.test_preflight_artifact_store import _images, _manifests
+from tests.loom_cli.rollout.test_preflight_artifact_store import (
+    _images,
+    _manifests,
+    _migration,
+)
 
 NOW = datetime(2026, 7, 19, 21, tzinfo=UTC)
 
@@ -101,6 +105,11 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
         mutation_epoch=7,
         images=images,
         manifests=_manifests(images),
+        migration=_migration(
+            images,
+            candidate_tree="b" * 40,
+            migration_plan_sha256="4" * 64,
+        ),
         migration_plan_sha256="4" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="8" * 64,

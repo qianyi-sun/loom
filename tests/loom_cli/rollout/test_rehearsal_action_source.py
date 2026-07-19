@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +13,9 @@ from loom_cli.rollout.image_readiness import (
     ImageDescriptor,
 )
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
+from loom_cli.rollout.migration_manifest_readiness import (
+    build_migration_manifest_artifact,
+)
 from loom_cli.rollout.operator.checkpoint_lease import CriticalCheckpointEvidence
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
@@ -95,6 +98,25 @@ def _manifests() -> ManifestArtifact:
     )
 
 
+@dataclass(frozen=True)
+class _DryRunResult:
+    returncode: int = 0
+
+
+def _migration():
+    artifacts = _artifacts()
+    return build_migration_manifest_artifact(
+        lambda _manifest: _DryRunResult(),
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        image_tag="staging-aaaaaaa",
+        image_id=artifacts.image_digests["loom-control-plane"],
+        namespace="loom-staging",
+        migration_plan_sha256="b" * 64,
+        migration_target_revision="0067",
+    )
+
+
 class Backend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, RehearsalPlan]] = []
@@ -115,6 +137,7 @@ def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
     return RehearsalActionSource(
         image_artifacts=_artifacts,
         manifest_artifacts=_manifests,
+        migration_artifacts=_migration,
         artifact_store=PreflightArtifactStore(tmp_path / "state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
@@ -174,6 +197,7 @@ def test_isolation_identity_changes_with_browser_contract(tmp_path: Path) -> Non
     changed = RehearsalActionSource(
         image_artifacts=_artifacts,
         manifest_artifacts=_manifests,
+        migration_artifacts=_migration,
         artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
@@ -194,6 +218,7 @@ def test_isolation_identity_changes_with_smoke_authority(tmp_path: Path) -> None
     changed = RehearsalActionSource(
         image_artifacts=_artifacts,
         manifest_artifacts=_manifests,
+        migration_artifacts=_migration,
         artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",

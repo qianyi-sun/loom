@@ -62,6 +62,10 @@ from loom_cli.rollout.manifest_readiness import (
     RenderManifest,
     ServerDryRun,
 )
+from loom_cli.rollout.migration_manifest_readiness import (
+    MigrationManifestArtifact,
+    build_migration_manifest_artifact,
+)
 from loom_cli.rollout.migration_readiness import (
     DEFAULT_MIGRATION_POLICY,
     MigrationPlanEvidence,
@@ -1555,6 +1559,95 @@ def build_migration_plan_check(
     )
 
 
+def build_migration_manifest_check(
+    server_dry_run: ServerDryRun,
+    *,
+    image_artifact: Callable[[], ImageArtifactSet],
+    migration_plan: Callable[[], tuple[str, str]],
+    candidate_sha: str,
+    candidate_tree: str,
+    image_tag: str,
+    namespace: str,
+    artifact_sink: Callable[[MigrationManifestArtifact], None] | None = None,
+) -> RegisteredCheck:
+    """Render and server-validate the exact migration Job once in Tier 1."""
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != candidate_sha
+            or context.bindings["candidate.tree"] != candidate_tree
+        ):
+            return _empty_migration_manifest_probe()
+        try:
+            plan_digest, target_revision = migration_plan()
+            images = image_artifact()
+            artifact = build_migration_manifest_artifact(
+                server_dry_run,
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+                image_tag=image_tag,
+                image_id=images.image_digests["loom-control-plane"],
+                namespace=namespace,
+                migration_plan_sha256=plan_digest,
+                migration_target_revision=target_revision,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return _empty_migration_manifest_probe()
+        if artifact_sink is not None:
+            artifact_sink(artifact)
+        return CheckProbe(
+            passed=True,
+            evidence={
+                "artifact-digest": artifact.artifact_digest,
+                "manifest-digest": artifact.rendered_sha256,
+                "job-name": artifact.job_name,
+                "image-id": artifact.image_id,
+                "target-revision": artifact.migration_target_revision,
+                "server-valid": True,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="migration.manifest",
+            failure_code="migration.manifest.invalid",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("images.contract", "migration.plan", "kubernetes.client"),
+            mutation_class=MutationClass.NONE,
+            input_keys=("candidate.sha", "candidate.tree"),
+            evidence_schema=(
+                EvidenceField("artifact-digest", "sha256"),
+                EvidenceField("manifest-digest", "sha256"),
+                EvidenceField("job-name", "string"),
+                EvidenceField("image-id", "string"),
+                EvidenceField("target-revision", "string"),
+                EvidenceField("server-valid", "boolean"),
+            ),
+            timeout_seconds=120,
+            freshness_ttl_seconds=3600,
+            remediation="restore exact image, migration graph and readonly schema validation",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_migration_manifest_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "artifact-digest": "0" * 64,
+            "manifest-digest": "0" * 64,
+            "job-name": "unavailable",
+            "image-id": "unavailable",
+            "target-revision": "unavailable",
+            "server-valid": False,
+        },
+    )
+
+
 def _empty_migration_plan_probe(policy_digest: str) -> CheckProbe:
     return CheckProbe(
         passed=False,
@@ -1856,6 +1949,7 @@ def build_preflight_artifact_publication_check(
     store: PreflightArtifactStore,
     image_artifact: Callable[[], ImageArtifactSet],
     manifest_artifact: Callable[[], ManifestArtifact],
+    migration_manifest_artifact: Callable[[], MigrationManifestArtifact],
     candidate_sha: str,
     candidate_tree: str,
     mutation_epoch: int,
@@ -1882,6 +1976,7 @@ def build_preflight_artifact_publication_check(
                 mutation_epoch=mutation_epoch,
                 images=image_artifact(),
                 manifests=manifest_artifact(),
+                migration=migration_manifest_artifact(),
                 migration_plan_sha256=migration_plan_sha256,
                 migration_target_revision=migration_target_revision,
                 browser_report_schema_sha256=browser_report_schema_sha256,
@@ -1895,6 +1990,8 @@ def build_preflight_artifact_publication_check(
                 "image-artifact-digest": publication.image_artifact_sha256,
                 "manifest-artifact-digest": publication.manifest_artifact_sha256,
                 "rendered-manifest-digest": publication.rendered_manifest_sha256,
+                "migration-manifest-digest": publication.migration_manifest_sha256,
+                "migration-artifact-digest": publication.migration_manifest_artifact_sha256,
             },
         )
 
@@ -1908,6 +2005,7 @@ def build_preflight_artifact_publication_check(
                 "images.contract",
                 "manifests.server-schema",
                 "migration.plan",
+                "migration.manifest",
                 "browser.runtime",
             ),
             mutation_class=MutationClass.NONE,
@@ -1923,6 +2021,8 @@ def build_preflight_artifact_publication_check(
                 EvidenceField("image-artifact-digest", "sha256"),
                 EvidenceField("manifest-artifact-digest", "sha256"),
                 EvidenceField("rendered-manifest-digest", "sha256"),
+                EvidenceField("migration-manifest-digest", "sha256"),
+                EvidenceField("migration-artifact-digest", "sha256"),
             ),
             timeout_seconds=60,
             freshness_ttl_seconds=3600,
@@ -1931,7 +2031,7 @@ def build_preflight_artifact_publication_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -1944,6 +2044,8 @@ def _empty_artifact_publication_probe() -> CheckProbe:
             "image-artifact-digest": "0" * 64,
             "manifest-artifact-digest": "0" * 64,
             "rendered-manifest-digest": "0" * 64,
+            "migration-manifest-digest": "0" * 64,
+            "migration-artifact-digest": "0" * 64,
         },
     )
 
@@ -2533,6 +2635,7 @@ __all__ = [
     "build_kubernetes_client_check",
     "build_lifecycle_launch_cancel_check",
     "build_manifest_preflight_checks",
+    "build_migration_manifest_check",
     "build_migration_plan_check",
     "build_preflight_artifact_publication_check",
     "build_rehearsal_checks",
