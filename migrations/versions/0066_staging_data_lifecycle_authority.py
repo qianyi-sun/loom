@@ -254,7 +254,6 @@ def upgrade() -> None:
         sa.Column(
             "object_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("data_lifecycle_objects.id", ondelete="RESTRICT"),
             primary_key=True,
         ),
         sa.Column("deletion_token", postgresql.UUID(as_uuid=True), nullable=False),

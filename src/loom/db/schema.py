@@ -413,7 +413,6 @@ class DataLifecycleGcItem(Base):
     )
     object_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
-        ForeignKey("data_lifecycle_objects.id", ondelete="RESTRICT"),
         primary_key=True,
     )
     deletion_token: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
