@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.data_lifecycle_registry import ensure_trial_event_lifecycle_authority
 from loom.db.schema import LlmCall
 from loom.request_params import coerce_request_params, normalize_request_params
 from loom_llm_gateway.dialect import TokenUsage
@@ -63,6 +64,12 @@ async def record_call(
             "ref": f"llm_calls/{llm_call_id}/provider_extras/_loom_raw_provider_log",
         }
 
+    lifecycle_authority_id = await ensure_trial_event_lifecycle_authority(
+        session,
+        trial_id=trial_id,
+        expected_team_id=team_id,
+    )
+
     await session.execute(
         insert(LlmCall).values(
             id=llm_call_id,
@@ -78,6 +85,7 @@ async def record_call(
             cost_usd=cost_usd,
             rate_card_hash=rate_card_hash,
             attempt=attempt,
+            lifecycle_authority_id=lifecycle_authority_id,
         )
     )
     await session.commit()
@@ -131,6 +139,12 @@ async def record_failed_call(
     if failure_error_type:
         provider_extras["_loom_failure_error_type"] = failure_error_type
 
+    lifecycle_authority_id = await ensure_trial_event_lifecycle_authority(
+        session,
+        trial_id=trial_id,
+        expected_team_id=team_id,
+    )
+
     await session.execute(
         insert(LlmCall).values(
             team_id=team_id,
@@ -145,6 +159,7 @@ async def record_failed_call(
             cost_usd=0,
             rate_card_hash="failed-upstream",
             attempt=max(int(attempt or 1), 1),
+            lifecycle_authority_id=lifecycle_authority_id,
         )
     )
     await session.commit()

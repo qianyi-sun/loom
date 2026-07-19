@@ -20,6 +20,10 @@ from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
     Task,
     Team,
     TeamQuota,
@@ -79,6 +83,10 @@ def seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, UUID, str, str]]:
             s.execute(delete(Worker))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team))
             s.execute(delete(Task))
             s.commit()
@@ -354,7 +362,16 @@ def test_append_events_persists_kind_source_payload(
                     TrialEvent.source,
                     TrialEvent.schema_version,
                     TrialEvent.payload,
-                ).where(TrialEvent.trial_id == trial_id),
+                    DataLifecycleAuthority.data_class,
+                    DataLifecycleAuthority.owner_kind,
+                    DataLifecycleAuthority.owner_id,
+                    DataLifecycleAuthority.team_id,
+                )
+                .join(
+                    DataLifecycleAuthority,
+                    DataLifecycleAuthority.id == TrialEvent.lifecycle_authority_id,
+                )
+                .where(TrialEvent.trial_id == trial_id),
             ).one()
     finally:
         engine.dispose()
@@ -364,3 +381,7 @@ def test_append_events_persists_kind_source_payload(
     assert row.schema_version == 1
     assert row.payload["model"] == "gpt-4o"
     assert row.payload["input_tokens"] == 100
+    assert row.data_class == "event"
+    assert row.owner_kind == "trial"
+    assert row.owner_id == str(trial_id)
+    assert row.team_id is not None

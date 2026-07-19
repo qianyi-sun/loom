@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -13,6 +14,11 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from loom.auth import verify_bearer_token
+from loom.data_lifecycle_registry import (
+    bind_existing_trial_lifecycle_authority,
+    ensure_artifact_lifecycle_authority,
+    ensure_trial_event_lifecycle_authority,
+)
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch
 from loom.db.schema import Trial as TrialRow
 
@@ -31,7 +37,7 @@ router = APIRouter()
 # worker should give up and let the reclaim-sweep / runner reassign.
 _INSERT_EVENT_SQL = sql_text("""
 INSERT INTO trial_events (
-    trial_id, seq, kind, source, schema_version, payload
+    trial_id, seq, kind, source, schema_version, payload, lifecycle_authority_id
 )
 VALUES (
     (:trial_id)::uuid,
@@ -39,7 +45,8 @@ VALUES (
     (:kind)::text,
     (:source)::text,
     (:schema_version)::int,
-    :payload
+    :payload,
+    (:lifecycle_authority_id)::uuid
 )
 ON CONFLICT (trial_id, seq) DO NOTHING
 RETURNING seq;
@@ -421,6 +428,11 @@ async def _sync_typed_artifacts_from_index(
     )).scalar_one_or_none()
     if trial is None:
         return
+    await bind_existing_trial_lifecycle_authority(
+        session,
+        trial_id=trial.id,
+        expected_team_id=trial.team_id,
+    )
     batch: Batch | None = None
     if trial.batch_id is not None:
         batch = (await session.execute(
@@ -449,9 +461,32 @@ async def _sync_typed_artifacts_from_index(
             (descriptor["artifact_type"], artifact_key),
         )
         if artifact is None:
-            artifact = Artifact(id=uuid4(), **descriptor)
+            artifact_id = uuid4()
+            created_at = datetime.now(UTC)
+            lifecycle_authority_id = await ensure_artifact_lifecycle_authority(
+                session,
+                artifact_id=artifact_id,
+                team_id=trial.team_id,
+                created_at=created_at,
+            )
+            artifact = Artifact(
+                id=artifact_id,
+                created_at=created_at,
+                lifecycle_authority_id=lifecycle_authority_id,
+                **descriptor,
+            )
             session.add(artifact)
         else:
+            lifecycle_authority_id = await ensure_artifact_lifecycle_authority(
+                session,
+                artifact_id=artifact.id,
+                team_id=artifact.team_id,
+                created_at=artifact.created_at,
+            )
+            if artifact.lifecycle_authority_id is None:
+                artifact.lifecycle_authority_id = lifecycle_authority_id
+            elif artifact.lifecycle_authority_id != lifecycle_authority_id:
+                raise RuntimeError("artifact lifecycle authority conflicts")
             for field, value in descriptor.items():
                 setattr(artifact, field, value)
         synced.append(artifact)
@@ -677,8 +712,14 @@ async def append_events(
                 status_code=409, detail="worker lost claim",
             )
 
+        lifecycle_authority_id = await ensure_trial_event_lifecycle_authority(
+            session,
+            trial_id=trial_id,
+        )
+
         inserted = 0
         for row_params in rows:
+            row_params["lifecycle_authority_id"] = lifecycle_authority_id
             result = await session.execute(_INSERT_EVENT_SQL, row_params)
             if result.first() is not None:
                 inserted += 1

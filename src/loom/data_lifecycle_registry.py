@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +17,7 @@ from loom.data_lifecycle import (
     LifecycleAuthoritySpec,
     OwnerKind,
 )
-from loom.db.schema import DataLifecycleAuthority
+from loom.db.schema import DataLifecycleAuthority, Trial
 
 _PROTECTED_ENVIRONMENTS = frozenset({"staging", "production"})
 
@@ -189,9 +189,100 @@ async def ensure_trial_lifecycle_authority(
     )
 
 
+async def ensure_trial_event_lifecycle_authority(
+    session: AsyncSession,
+    *,
+    trial_id: UUID,
+    expected_team_id: UUID | None = None,
+) -> UUID:
+    """Bind a trial and return its shared event-stream authority.
+
+    The lazy parent bind lets workers safely continue trials that were admitted
+    immediately before the lifecycle migration, without permitting a child row
+    to commit unclassified. A conflicting team or parent authority fails the
+    caller's transaction.
+    """
+    _parent_authority_id, team_id, submitted_at = (
+        await bind_existing_trial_lifecycle_authority(
+            session,
+            trial_id=trial_id,
+            expected_team_id=expected_team_id,
+        )
+    )
+
+    scope = RuntimeLifecycleScope.from_environ()
+    return await ensure_lifecycle_authority(
+        session,
+        spec=scope.authority_spec(
+            team_id=team_id,
+            data_class=DataClass.EVENT,
+            owner_kind=OwnerKind.TRIAL,
+            owner_id=str(trial_id),
+            created_at=submitted_at,
+        ),
+    )
+
+
+async def bind_existing_trial_lifecycle_authority(
+    session: AsyncSession,
+    *,
+    trial_id: UUID,
+    expected_team_id: UUID | None = None,
+) -> tuple[UUID, UUID, datetime]:
+    """Return the exact parent authority, team, and creation time."""
+    trial = (
+        await session.execute(select(Trial).where(Trial.id == trial_id).with_for_update())
+    ).scalar_one_or_none()
+    if trial is None:
+        raise RuntimeError("trial lifecycle owner does not exist")
+    if expected_team_id is not None and trial.team_id != expected_team_id:
+        raise RuntimeError("trial lifecycle owner team conflicts with writer")
+    parent_authority_id = await ensure_trial_lifecycle_authority(
+        session,
+        trial_id=trial.id,
+        team_id=trial.team_id,
+        created_at=trial.submitted_at,
+    )
+    if trial.lifecycle_authority_id is None:
+        result = await session.execute(
+            update(Trial)
+            .where(Trial.id == trial.id, Trial.lifecycle_authority_id.is_(None))
+            .values(lifecycle_authority_id=parent_authority_id)
+            .returning(Trial.id)
+        )
+        if result.scalar_one_or_none() != trial.id:
+            raise RuntimeError("trial lifecycle parent binding raced")
+    elif trial.lifecycle_authority_id != parent_authority_id:
+        raise RuntimeError("trial lifecycle parent authority conflicts")
+    return parent_authority_id, trial.team_id, trial.submitted_at
+
+
+async def ensure_artifact_lifecycle_authority(
+    session: AsyncSession,
+    *,
+    artifact_id: UUID,
+    team_id: UUID,
+    created_at: datetime,
+) -> UUID:
+    scope = RuntimeLifecycleScope.from_environ()
+    return await ensure_lifecycle_authority(
+        session,
+        spec=scope.authority_spec(
+            team_id=team_id,
+            data_class=DataClass.ARTIFACT,
+            owner_kind=OwnerKind.ARTIFACT,
+            owner_id=str(artifact_id),
+            created_at=created_at,
+        ),
+    )
+
+
 __all__ = [
     "RuntimeLifecycleScope",
+    "bind_existing_trial_lifecycle_authority",
+    "ensure_artifact_lifecycle_authority",
     "ensure_batch_lifecycle_authority",
     "ensure_lifecycle_authority",
+    "ensure_trial_event_lifecycle_authority",
     "ensure_trial_lifecycle_authority",
 ]

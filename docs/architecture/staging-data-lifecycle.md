@@ -29,6 +29,14 @@ idempotency conflict returns the already-bound trial without creating another
 authority. A writer may not commit an execution owner with a null authority or
 leave an authority whose owner insert rolled back.
 
+Worker event ingestion and gateway LLM-call accounting share one event-stream
+authority per trial. Before either child row is written, the registry locks and
+validates the trial, lazily binds a pre-migration active trial when necessary,
+and rejects a missing owner, team mismatch, or conflicting authority. Typed
+trajectory artifacts receive a distinct artifact-class authority per exact
+artifact identity; updates verify and reuse that authority rather than creating
+an orphan or silently relabeling it.
+
 Staging defaults are:
 
 - ephemeral run, trial, event, and artifact data expires after 7 days;

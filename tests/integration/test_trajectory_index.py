@@ -12,6 +12,10 @@ from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
     Batch,
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
     Task,
     TaskSet,
     TaskSetManifest,
@@ -67,6 +71,10 @@ def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, str]]:
             s.execute(delete(Worker))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team))
             s.execute(delete(Task))
             s.commit()
@@ -203,12 +211,25 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
                 ArtifactLineageEdge.parent_artifact_id == parent_artifact_id,
             ),
         ).scalars())
-    engine.dispose()
-
     by_type = {artifact.artifact_type: artifact for artifact in artifacts}
     assert {"trajectory", "atif_projection", "evidence_bundle"}.issubset(by_type)
     assert by_type["evidence_bundle"].content_hash == "sha256:" + ("2" * 64)
     assert by_type["evidence_bundle"].storage["key"].endswith("/main/result.txt")
+    assert all(artifact.lifecycle_authority_id is not None for artifact in artifacts)
+    with sessionmaker(engine)() as s:
+        authorities = list(s.scalars(
+            select(DataLifecycleAuthority).where(
+                DataLifecycleAuthority.id.in_([
+                    artifact.lifecycle_authority_id for artifact in artifacts
+                ])
+            )
+        ))
+    assert len(authorities) == len(artifacts)
+    assert all(authority.data_class == "artifact" for authority in authorities)
+    assert {authority.owner_id for authority in authorities} == {
+        str(artifact.id) for artifact in artifacts
+    }
+    engine.dispose()
     assert all(edge.relation == "reused_as_input" for edge in edges)
     assert {edge.child_artifact_id for edge in edges} == {
         artifact.id for artifact in artifacts

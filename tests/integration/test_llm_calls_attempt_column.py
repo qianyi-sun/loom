@@ -21,7 +21,17 @@ import pytest
 from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import LlmCall, Team, Token
+from loom.db.schema import (
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
+    LlmCall,
+    Task,
+    Team,
+    Token,
+    Trial,
+)
 
 
 @pytest.fixture
@@ -43,14 +53,31 @@ def team_and_trial(postgres_url: str) -> Iterator[tuple[str, str]]:
             type="team", scopes=["read:own"], team_id=team_id,
             issued_at=now, expires_at=None,
         ))
+        s.execute(insert(Task).values(
+            id=f"llm-call-task-{trial_id}", checksum="0" * 64, config={},
+        ))
+        s.execute(insert(Trial).values(
+            id=trial_id,
+            team_id=team_id,
+            task_id=f"llm-call-task-{trial_id}",
+            config={},
+            requires_caps={},
+            state="submitted",
+        ))
         s.commit()
     try:
         yield (str(team_id), str(trial_id))
     finally:
         with session_local() as s:
             s.execute(delete(LlmCall).where(LlmCall.trial_id == trial_id))
+            s.execute(delete(Trial).where(Trial.id == trial_id))
             s.execute(delete(Token).where(Token.team_id == team_id))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team).where(Team.id == team_id))
+            s.execute(delete(Task).where(Task.id == f"llm-call-task-{trial_id}"))
             s.commit()
 
 
@@ -146,6 +173,11 @@ async def test_record_call_writes_attempt(
             ).scalar_one()
             assert row.attempt == 4
             assert row.input_tokens == 42
+            authority = s.get(DataLifecycleAuthority, row.lifecycle_authority_id)
+            assert authority is not None
+            assert authority.data_class == "event"
+            assert authority.owner_kind == "trial"
+            assert authority.owner_id == trial_id
     finally:
         await engine.dispose()
 
