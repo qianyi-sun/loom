@@ -29,7 +29,7 @@ _RESOLVE_REF = "refs/remotes/origin/dev^{commit}"
 # package.  Keep this runtime admission bound locked to the same value with a
 # cross-layer contract test so the broker cannot reject a source the installer
 # already accepted.
-MAX_CUMULATIVE_COMMITS = 64
+MAX_CUMULATIVE_COMMITS = 512
 
 
 class CommandResult(Protocol):

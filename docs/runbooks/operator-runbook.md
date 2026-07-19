@@ -1758,7 +1758,7 @@ it at the independently reviewed exact commit, retain only the approved GitHub
 origin URL, and record the exact commit tree and approved merged base. The
 sealed checkout and every parent must be root-owned and non-group/world-
 writable; it must be clean, detached, free of alternates, grafts, shallow or
-replacement objects, and contain a bounded linear chain of at most 64 commits
+replacement objects, and contain a bounded linear chain of at most 512 commits
 from the approved base. Do not fetch or resolve `origin/dev` in this mode.
 
 ```bash

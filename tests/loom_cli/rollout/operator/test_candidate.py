@@ -55,7 +55,7 @@ def fixed_now() -> datetime:
 
 
 def test_cumulative_history_bound_matches_root_sealed_source_validator() -> None:
-    assert candidate.MAX_CUMULATIVE_COMMITS == sealed_source.MAX_CUMULATIVE_COMMITS == 64
+    assert candidate.MAX_CUMULATIVE_COMMITS == sealed_source.MAX_CUMULATIVE_COMMITS == 512
 
 
 def _git(repo: Path, *args: str) -> str:

@@ -20,7 +20,10 @@ from typing import Protocol
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 APPROVED_REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
-MAX_CUMULATIVE_COMMITS = 64
+# Keep incident repair history finite without forcing a security-destroying
+# rebase once many independently evidenced blockers have accumulated.  The
+# runtime candidate validator is contract-tested against this exact value.
+MAX_CUMULATIVE_COMMITS = 512
 
 
 class SealedSourceError(RuntimeError):
