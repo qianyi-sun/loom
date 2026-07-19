@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
 from loom_cli.rollout.final_gate_command_runner import (
     FINAL_GATE_HELPER_PATH,
     CommandRunner,
@@ -62,13 +63,19 @@ class FinalGateActionSource:
         envelope: DriverEnvelope,
         attestation: PreflightAttestation,
         mutation_epoch: int,
+        admission: FinalAttestationAdmission,
     ) -> Mapping[str, FinalGateAction]:
-        if mutation_epoch != attestation.bindings.staging_mutation_epoch:
+        if (
+            mutation_epoch != attestation.bindings.staging_mutation_epoch
+            or admission.attestation != attestation
+        ):
             raise ValueError("final gate action source mutation epoch drifted")
         publication = self._publication(envelope, attestation)
         lease = self.request_store.read_backup_lease(attestation.bindings.backup_lease_digest)
-        rehearsal = self.request_store.read_preflight_rehearsal(envelope.request_id)
-        baseline = ProtectedApplyBaseline.from_executions(attestation, rehearsal.executions)
+        baseline = ProtectedApplyBaseline.from_executions(
+            attestation,
+            admission.tier2_executions,
+        )
         plan = FinalGatePlan.build(envelope, attestation, publication, lease, baseline)
         plan_path = FinalGatePlanStore(
             self.state_root,

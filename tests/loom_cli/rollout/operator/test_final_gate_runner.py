@@ -1,19 +1,29 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
+from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
 from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS, FinalGateResult
 from loom_cli.rollout.operator.final_gate_runner import FinalGateRunner
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import (
+    CheckExecution,
     CheckOperation,
+    CheckOutcome,
     PreflightAttestation,
+    StageCapability,
     _hash_json,
     _preflight_attestation_payload,
+)
+from tests.loom_cli.rollout.operator.test_protected_apply_baseline import (
+    _baseline_executions,
 )
 from tests.loom_cli.rollout.operator.test_worker import valid_envelope
 from tests.loom_cli.rollout.test_attested_final_gate import (
@@ -28,6 +38,29 @@ def _valid_attestation() -> PreflightAttestation:
         provisional,
         attestation_digest=_hash_json(_preflight_attestation_payload(provisional)),
     )
+
+
+def _admission(attestation: PreflightAttestation) -> FinalAttestationAdmission:
+    evidence = MappingProxyType({"ready": True})
+    tier0 = CheckExecution(
+        check_id="candidate.identity",
+        failure_code="candidate.identity.failed",
+        tier=0,
+        stage=StageCapability.STATIC,
+        operation=CheckOperation.PROBE,
+        outcome=CheckOutcome.PASS,
+        input_fingerprint="1" * 64,
+        implementation_digest="2" * 64,
+        evidence=evidence,
+        evidence_hash=hashlib.sha256(
+            json.dumps(dict(evidence), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        started_at=NOW,
+        finished_at=NOW,
+        expires_at=attestation.expires_at,
+        remediation=None,
+    )
+    return FinalAttestationAdmission(attestation, (tier0,), _baseline_executions())
 
 
 def _actions(calls, attestation_digest: str):
@@ -62,7 +95,7 @@ def _runner(tmp_path: Path, calls, *, epoch: int = 7) -> FinalGateRunner:
     os.chmod(attempt, 0o700)
     return FinalGateRunner(
         attestation_store=store,
-        actions_factory=lambda _envelope, _attestation, _epoch: _actions(
+        actions_factory=lambda _envelope, _attestation, _epoch, _admission: _actions(
             calls, attestation.attestation_digest
         ),
         read_mutation_epoch=lambda: epoch,
@@ -89,11 +122,11 @@ def test_final_gate_runner_journals_once_and_resumes_without_reapply(tmp_path: P
     calls = []
     runner = _runner(tmp_path, calls)
 
-    assert runner(_envelope()) == 0
+    assert runner(_envelope(), _admission(_valid_attestation())) == 0
     first_calls = list(calls)
     assert len(first_calls) == 6
 
-    assert runner(_envelope()) == 0
+    assert runner(_envelope(), _admission(_valid_attestation())) == 0
     assert calls == first_calls
 
 
@@ -102,6 +135,6 @@ def test_final_gate_runner_refuses_epoch_drift_before_actions(tmp_path: Path) ->
     runner = _runner(tmp_path, calls, epoch=8)
 
     with pytest.raises(ValueError, match="epoch drifted"):
-        runner(_envelope())
+        runner(_envelope(), _admission(_valid_attestation()))
 
     assert calls == []

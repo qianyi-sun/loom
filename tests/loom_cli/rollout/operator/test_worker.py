@@ -222,7 +222,7 @@ def test_worker_refuses_driver_when_final_attestation_admission_fails() -> None:
 def test_worker_uses_attested_final_gates_instead_of_legacy_driver() -> None:
     bundle = worker_fakes()
 
-    def run_final(_envelope: DriverEnvelope) -> int:
+    def run_final(_envelope: DriverEnvelope, _admission: object) -> int:
         bundle.order.append("final-gates-run")
         return 0
 
@@ -242,6 +242,19 @@ def test_attested_worker_never_falls_back_to_legacy_driver() -> None:
     assert "driver-run" not in bundle.order
     assert bundle.store.events[-1].reason == ("final.protected-apply.runner-unavailable@final-only")
     assert bundle.store.events[-1].current_step == "00-final-gate-runner"
+    assert bundle.store.active is None
+
+
+def test_final_gate_runner_without_admission_never_reaches_driver() -> None:
+    bundle = worker_fakes()
+    bundle.deps.run_final_gates = lambda _envelope, _admission: 0
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    assert "driver-run" not in bundle.order
+    assert bundle.store.events[-1].reason == (
+        "preflight.attestation.final-admission-missing@static"
+    )
+    assert bundle.store.events[-1].current_step == "00-final-admission"
     assert bundle.store.active is None
 
 

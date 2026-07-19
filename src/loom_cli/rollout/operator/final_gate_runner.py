@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from loom_cli.rollout.attested_final_gate import AttestedFinalGateAuthority
+from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
 from loom_cli.rollout.final_gate_readiness import FinalGateAction
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import CheckExecution, PreflightAttestation
@@ -16,7 +17,7 @@ from .final_gate_store import FinalGateExecutionStore
 from .model import DriverEnvelope
 
 FinalGateActionsFactory = Callable[
-    [DriverEnvelope, PreflightAttestation, int],
+    [DriverEnvelope, PreflightAttestation, int, FinalAttestationAdmission],
     Mapping[str, FinalGateAction],
 ]
 
@@ -42,10 +43,15 @@ class FinalGateRunner:
         ):
             raise ValueError("final gate runner authority is invalid")
 
-    def __call__(self, envelope: DriverEnvelope) -> int:
+    def __call__(
+        self,
+        envelope: DriverEnvelope,
+        admission: FinalAttestationAdmission,
+    ) -> int:
         attestation = self.attestation_store.read(envelope.preflight_attestation_sha256)
         if (
-            attestation.attestation_digest != envelope.preflight_attestation_sha256
+            admission.attestation != attestation
+            or attestation.attestation_digest != envelope.preflight_attestation_sha256
             or attestation.registry_digest != envelope.preflight_registry_sha256
             or attestation.coverage_digest != envelope.preflight_coverage_sha256
             or attestation.bindings.candidate_sha != envelope.resolved_sha
@@ -70,7 +76,7 @@ class FinalGateRunner:
         prior = journal.read_all()
         authority = AttestedFinalGateAuthority(
             attestation=attestation,
-            actions=self.actions_factory(envelope, attestation, mutation_epoch),
+            actions=self.actions_factory(envelope, attestation, mutation_epoch, admission),
             candidate_sha=envelope.resolved_sha,
             mutation_epoch=mutation_epoch,
             now=self.now(),

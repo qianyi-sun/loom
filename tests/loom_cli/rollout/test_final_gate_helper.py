@@ -8,12 +8,13 @@ from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_final_gate_action_source import _authority
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope
+from tests.loom_cli.rollout.operator.test_final_gate_runner import _admission
 
 
 def _prepared(tmp_path: Path, monkeypatch):
     source, attestation, _calls = _authority(tmp_path)
     envelope = _envelope(attestation)
-    source(envelope, attestation, 7)
+    source(envelope, attestation, 7, _admission(attestation))
     state = tmp_path / "state"
     path = state / "requests/req-alpha/attempts/1/final-gate-plan.json"
     digest = FinalGatePlanStore(state, request_id="req-alpha", attempt_number=1).read().plan_digest

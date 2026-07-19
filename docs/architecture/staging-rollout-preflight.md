@@ -440,6 +440,12 @@ empty blocker set, implementation digest, resource evidence, and exact
 evidence hash. A health, auth, catalog/task, storage/database, network, or
 aggregate release-baseline change after rehearsal therefore stops before the
 first protected component rather than being rediscovered after apply.
+The worker passes that exact `FinalAttestationAdmission` object into the final
+runner; a final runner without admission evidence fails before the attempt is
+marked running. `FinalGateActionSource` derives the protected baseline embedded
+in `FinalGatePlan` from these freshly rechecked Tier 2 executions, not from the
+older rehearsal record. The final runner also requires the admission's full
+attestation to equal the digest-addressed attestation it reloads.
 
 `FinalGateActionSource` obtains the artifact bundle identity only from the
 immutable passing `artifacts.publish` execution in the request's Tier 0–3

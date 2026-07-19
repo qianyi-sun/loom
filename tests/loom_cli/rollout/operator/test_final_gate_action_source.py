@@ -32,6 +32,7 @@ from tests.loom_cli.rollout.operator.test_final_gate_plan import (
     _attestation as binding_attestation,
 )
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope, _lease
+from tests.loom_cli.rollout.operator.test_final_gate_runner import _admission
 from tests.loom_cli.rollout.operator.test_protected_apply_baseline import (
     _baseline_executions,
 )
@@ -180,7 +181,7 @@ def test_final_gate_action_source_uses_attested_bundle_and_fixed_helper(tmp_path
     source, attestation, calls = _authority(tmp_path)
     envelope = _envelope(attestation)
 
-    actions = source(envelope, attestation, 7)
+    actions = source(envelope, attestation, 7, _admission(attestation))
     result = actions["final.browser"](CheckOperation.VERIFY)
 
     assert set(actions) == set(FINAL_CHECK_IDS)
@@ -195,6 +196,6 @@ def test_final_gate_action_source_rejects_attested_publication_mismatch(tmp_path
     source, attestation, calls = _authority(tmp_path, tamper=True)
 
     with pytest.raises(ValueError, match="publication drifted"):
-        source(_envelope(attestation), attestation, 7)
+        source(_envelope(attestation), attestation, 7, _admission(attestation))
 
     assert calls == []

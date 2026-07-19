@@ -17,6 +17,7 @@ from typing import Any, Never, TextIO
 
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.failure_authority import RolloutFailureEvidence
+from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 
 from .backup_job import (
@@ -111,8 +112,8 @@ class WorkerDependencies:
     ) = None
     finalize_backup: Callable[[PreflightRequest, VerifiedBackupJob], DriverEnvelope] | None = None
     read_driver_failure: Callable[[DriverEnvelope], RolloutFailureEvidence | None] | None = None
-    final_admission: Callable[[DriverEnvelope], object] | None = None
-    run_final_gates: Callable[[DriverEnvelope], int] | None = None
+    final_admission: Callable[[DriverEnvelope], FinalAttestationAdmission] | None = None
+    run_final_gates: Callable[[DriverEnvelope, FinalAttestationAdmission], int] | None = None
 
 
 @dataclass(slots=True)
@@ -262,9 +263,24 @@ def run_attempt(
             pointer.unit_name,
         ):
             raise ValueError("worker attempt does not own the active staging pointer")
+        final_admission: FinalAttestationAdmission | None = None
+        if dependencies.final_admission is None and dependencies.run_final_gates is not None:
+            dependencies.store.append_event(
+                _event(
+                    envelope,
+                    dependencies=dependencies,
+                    event="attempt_failed",
+                    status="failed",
+                    reason="preflight.attestation.final-admission-missing@static",
+                    current_step="00-final-admission",
+                )
+            )
+            signal_controller.seal_terminal(event_cancelled=False)
+            dependencies.lifecycle.release_active(pointer)
+            return 1
         if dependencies.final_admission is not None:
             try:
-                dependencies.final_admission(envelope)
+                final_admission = dependencies.final_admission(envelope)
             except Exception:
                 dependencies.store.append_event(
                     _event(
@@ -309,11 +325,12 @@ def run_attempt(
         else:
             try:
                 with signal_controller.driver_window():
-                    driver_rc = (
-                        dependencies.run_final_gates(envelope)
-                        if dependencies.run_final_gates is not None
-                        else dependencies.run_driver(envelope_path, envelope.resume)
-                    )
+                    if dependencies.run_final_gates is not None:
+                        if final_admission is None:
+                            raise ValueError("final gate admission evidence is missing")
+                        driver_rc = dependencies.run_final_gates(envelope, final_admission)
+                    else:
+                        driver_rc = dependencies.run_driver(envelope_path, envelope.resume)
             except _CancellationSignal:
                 cancelled_by_signal = True
             except BaseException:
@@ -655,7 +672,7 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             argv.append("--resume")
         return dispatch(argv)
 
-    def final_admission(envelope: DriverEnvelope) -> object:
+    def final_admission(envelope: DriverEnvelope) -> FinalAttestationAdmission:
         candidate = CandidateBinding(
             remote_url=envelope.remote_url,
             target_ref=envelope.target_ref,
