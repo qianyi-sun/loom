@@ -271,6 +271,7 @@ async def test_legacy_team_token_whoami_reports_compatibility_credential(
 
 async def test_readonly_probe_is_get_only_and_does_not_update_usage(
     svc_setup: tuple[FastAPI, str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, _raw, team_id = svc_setup
     raw = f"loom_readonly_{uuid4().hex}"
@@ -288,6 +289,16 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
         await session.commit()
 
     transport = httpx.ASGITransport(app=app)
+    head_buckets: list[str] = []
+
+    def _head_bucket(*, Bucket: str) -> None:  # noqa: N803 - boto3 API
+        head_buckets.append(Bucket)
+
+    monkeypatch.setattr(
+        app.state.minio_client,
+        "head_bucket",
+        _head_bucket,
+    )
     async with httpx.AsyncClient(
         transport=transport, base_url="http://svc",
     ) as ac:
@@ -305,6 +316,10 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
                 "expires_in_days": 1,
             },
         )
+        readiness = await ac.get(
+            "/api/v1/health/ready",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
 
     assert whoami.status_code == 200, whoami.text
     assert whoami.json()["credential_type"] == "staging_readonly_probe"
@@ -312,6 +327,10 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
     assert whoami.json()["allowed_http_methods"] == ["GET", "HEAD"]
     assert whoami.json()["readonly_authority_version"] == "v1"
     assert rejected.status_code == 401
+    assert readiness.status_code == 200, readiness.text
+    assert readiness.json()["status"] == "ready"
+    assert readiness.json()["blockers"] == []
+    assert head_buckets == ["artifacts", "trajectories"]
     async with app.state.session_factory() as session:
         usage = (await session.execute(
             select(Token.last_seen_at, Token.last_used_at).where(
