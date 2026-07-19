@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -22,7 +24,17 @@ from loom_cli.rollout.credential_authority import read_trusted_file
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _NAMESPACE_RE = re.compile(r"loom-rehearsal-[0-9a-f]{24}\Z")
+_DATABASE_RE = re.compile(r"loom_rehearsal_[0-9a-f]{24}\Z")
 _SECRET_NAMES = ("loom-admin-secret", "loom-secrets", "loom-staging-tls")
+_DATABASE_URL_KEYS = (
+    "cp-db-url",
+    "cp-db-url-pool",
+    "gw-db-url",
+    "gw-db-url-pool",
+    "svc-db-url",
+    "svc-db-url-pool",
+)
+_DATABASE_KEYS = ("postgres-password", "postgres-user", *_DATABASE_URL_KEYS)
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_SECRET_BYTES = 1024 * 1024
 
@@ -52,6 +64,7 @@ def build_rehearsal_secret_artifact(
     *,
     manifest_sha256: str,
     namespace: str,
+    database: str,
     plan_digest: str,
     service_uid: int | None = None,
 ) -> RehearsalSecretArtifact:
@@ -61,6 +74,7 @@ def build_rehearsal_secret_artifact(
         uid < 0
         or _SHA256_RE.fullmatch(manifest_sha256) is None
         or _NAMESPACE_RE.fullmatch(namespace) is None
+        or _DATABASE_RE.fullmatch(database) is None
         or _SHA256_RE.fullmatch(plan_digest) is None
         or not manifest_path.is_absolute()
         or manifest_path.name != "backup-manifest.json"
@@ -107,6 +121,7 @@ def build_rehearsal_secret_artifact(
             secrets_path / f"{name}.yaml",
             name=name,
             namespace=namespace,
+            database=database,
             plan_digest=plan_digest,
             service_uid=uid,
         )
@@ -152,6 +167,7 @@ def _read_secret(
     *,
     name: str,
     namespace: str,
+    database: str,
     plan_digest: str,
     service_uid: int,
 ) -> dict[str, object]:
@@ -187,9 +203,27 @@ def _read_secret(
         or not secret_type
     ):
         raise ValueError("rehearsal checkpoint Secret identity is invalid")
+    try:
+        if any(not base64.b64decode(value, validate=True) for value in data.values()):
+            raise ValueError("rehearsal checkpoint Secret data is empty")
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("rehearsal checkpoint Secret data encoding is invalid") from exc
+    cloned_data = dict(data)
+    if name == "loom-secrets":
+        if any(key not in cloned_data for key in _DATABASE_KEYS):
+            raise ValueError("rehearsal checkpoint database Secret authority is incomplete")
+        direct_url = f"postgresql+psycopg://loom_rehearsal@loom-postgres:5432/{database}"
+        replacements = {
+            "postgres-password": "rehearsal-trust-only",
+            "postgres-user": "loom_rehearsal",
+            **{key: direct_url for key in _DATABASE_URL_KEYS},
+        }
+        cloned_data.update(
+            {key: base64.b64encode(value.encode()).decode() for key, value in replacements.items()}
+        )
     return {
         "apiVersion": "v1",
-        "data": dict(data),
+        "data": cloned_data,
         "kind": "Secret",
         "metadata": {
             "annotations": {"loom.openai.dev/plan-sha256": plan_digest},
