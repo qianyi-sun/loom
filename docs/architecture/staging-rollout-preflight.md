@@ -446,14 +446,24 @@ intentionally unavailable and exits without mutation.
 Protected apply is further divided into an ordered component journal beneath
 the request attempt. Each component publishes an immutable intent before
 observing or changing live state. The shared classifier must return exactly
-`absent`, `exact`, or `drifted`: only `absent` may call apply, `drifted` stops
+`ready`, `exact`, or `drifted`: `ready` proves the live precondition still
+matches its attested baseline and may call apply, while `drifted` stops
 the chain, and terminal evidence is published only after an `exact` readback.
 After a crash, an existing intent is classified before any retry; an exact
-effect is recorded without repetition, an absent effect may be applied, and a
+effect is recorded without repetition, a still-ready precondition may be applied, and a
 partial or ambiguous effect fails closed. Reused terminal records are also
 reclassified and must retain the same evidence digest and epoch. The chain is
 serialized by a private attempt-scoped lock and neither the plan nor a
 component implementation/fingerprint may change underneath an intent.
+
+The final plan also carries one canonical protected baseline extracted from
+exactly the six passing Tier 2 executions. It binds their common readonly
+principal, mutation epoch, resource digests, implementation digests and
+attested evidence hashes. Missing, duplicate, failed, non-readonly, mixed
+principal, epoch-drifted or unattested baseline evidence cannot create a final
+plan. Component classifiers use these exact resource digests as their
+pre-apply authority instead of treating any arbitrary live difference as safe
+to overwrite.
 
 ## Immutable attestation
 

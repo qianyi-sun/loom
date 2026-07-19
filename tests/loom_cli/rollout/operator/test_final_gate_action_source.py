@@ -32,6 +32,9 @@ from tests.loom_cli.rollout.operator.test_final_gate_plan import (
     _attestation as binding_attestation,
 )
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope, _lease
+from tests.loom_cli.rollout.operator.test_protected_apply_baseline import (
+    _baseline_executions,
+)
 from tests.loom_cli.rollout.test_preflight_artifact_store import _images, _manifests
 
 NOW = datetime(2026, 7, 19, 21, tzinfo=UTC)
@@ -103,10 +106,11 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
         browser_report_schema_sha256="8" * 64,
     )
     execution = _execution(publication, image_digest="f" * 64 if tamper else None)
+    baseline_executions = _baseline_executions()
     base = binding_attestation()
     attestation = PreflightAttestation.issue(
         bindings=base.bindings,
-        executions=(execution,),
+        executions=(execution, *baseline_executions),
         issued_at=NOW,
         registry_digest="9" * 64,
         coverage_digest="a" * 64,
@@ -114,7 +118,7 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
     rehearsal = PreflightRehearsal.from_executions(
         registry_digest=attestation.registry_digest,
         coverage_digest=attestation.coverage_digest,
-        executions=(execution,),
+        executions=(execution, *baseline_executions),
     )
     attempt = state / "requests" / "req-alpha" / "attempts" / "1"
     attempt.mkdir(parents=True, mode=0o700)

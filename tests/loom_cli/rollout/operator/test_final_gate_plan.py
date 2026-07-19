@@ -15,6 +15,7 @@ from loom_cli.rollout.operator.final_gate_plan import (
     FinalGatePlanStore,
 )
 from loom_cli.rollout.operator.model import DriverEnvelope
+from loom_cli.rollout.operator.protected_apply_baseline import ProtectedApplyBaseline
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
@@ -178,9 +179,33 @@ def _artifacts(tmp_path: Path) -> PreflightArtifactPublication:
     )
 
 
+def _baseline() -> ProtectedApplyBaseline:
+    checks = (
+        "staging.health",
+        "staging.auth",
+        "staging.catalog-task",
+        "staging.storage-db",
+        "staging.network",
+        "staging.release-baseline",
+    )
+    return ProtectedApplyBaseline(
+        schema_version=1,
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=7,
+        readonly_principal="loom-staging-preflight-readonly",
+        resource_digests={check_id: "b" * 64 for check_id in checks},
+        implementation_digests={check_id: "c" * 64 for check_id in checks},
+        evidence_hashes={check_id: "d" * 64 for check_id in checks},
+        baseline_digest="e" * 64,
+    )
+
+
 def _plan(tmp_path: Path) -> FinalGatePlan:
     attestation = _attestation()
-    return FinalGatePlan.build(_envelope(attestation), attestation, _artifacts(tmp_path), _lease())
+    return FinalGatePlan.build(
+        _envelope(attestation), attestation, _artifacts(tmp_path), _lease(), _baseline()
+    )
 
 
 def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Path) -> None:
@@ -193,6 +218,8 @@ def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Pa
     assert plan.backup_source_request_id == "req-source01"
     assert plan.image_digests["api"] == "sha256:" + "1" * 64
     assert plan.secret_metadata_fingerprints == {"admin": "sha256:abc len=32"}
+    assert plan.protected_baseline_digest == _baseline().baseline_digest
+    assert plan.protected_baseline_resource_digests == _baseline().resource_digests
 
 
 def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None:
@@ -205,6 +232,7 @@ def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None
             attestation,
             _artifacts(tmp_path),
             _lease(),
+            _baseline(),
         )
 
     payload = _plan(tmp_path).to_dict()

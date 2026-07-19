@@ -2,8 +2,8 @@
 
 The outer final-gate journal cannot distinguish a crash immediately before a
 mutation from a crash immediately after it.  This journal publishes an
-immutable intent before each component, classifies live state, applies only an
-exactly-absent component, and publishes terminal evidence only after live
+immutable intent before each component, classifies live state, applies only a
+component whose attested precondition is ready, and publishes terminal evidence only after live
 state is exact.  A restart therefore verifies an in-flight intent instead of
 blindly repeating protected work.
 """
@@ -38,7 +38,7 @@ class ProtectedApplyJournalError(RuntimeError):
 
 
 class ComponentState(StrEnum):
-    ABSENT = "absent"
+    READY = "ready"
     EXACT = "exact"
     DRIFTED = "drifted"
 
@@ -325,7 +325,7 @@ class ProtectedApplyJournal:
                 f"protected component {component.component_id} live state drifted"
             )
         applied = False
-        if before.state is ComponentState.ABSENT:
+        if before.state is ComponentState.READY:
             component.apply(plan)
             applied = True
         after = component.classify(plan)

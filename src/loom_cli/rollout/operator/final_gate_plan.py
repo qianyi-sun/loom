@@ -18,12 +18,23 @@ from loom_cli.rollout.preflight_contract import PreflightAttestation
 
 from .backup_lease import BackupLease, component_set_digest
 from .model import DriverEnvelope, validate_safe_identifier
+from .protected_apply_baseline import ProtectedApplyBaseline
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _MAX_PLAN_BYTES = 2 * 1024 * 1024
+_PROTECTED_BASELINE_IDS = frozenset(
+    {
+        "staging.health",
+        "staging.auth",
+        "staging.catalog-task",
+        "staging.storage-db",
+        "staging.network",
+        "staging.release-baseline",
+    }
+)
 
 
 class FinalGatePlanError(RuntimeError):
@@ -78,6 +89,8 @@ class FinalGatePlan:
     gb10_unit_digest: str
     check_implementation_digests: Mapping[str, str]
     evidence_hashes: Mapping[str, str]
+    protected_baseline_digest: str
+    protected_baseline_resource_digests: Mapping[str, str]
     plan_digest: str
 
     def __post_init__(self) -> None:
@@ -119,6 +132,7 @@ class FinalGatePlan:
             self.gb10_inventory_digest,
             self.gb10_mount_digest,
             self.gb10_unit_digest,
+            self.protected_baseline_digest,
             self.plan_digest,
         )
         if any(_SHA256_RE.fullmatch(value) is None for value in digest_fields):
@@ -149,6 +163,7 @@ class FinalGatePlan:
             "GB10 boot": self.gb10_boot_ids,
             "check implementation": self.check_implementation_digests,
             "evidence": self.evidence_hashes,
+            "protected baseline": self.protected_baseline_resource_digests,
         }
         for label, values in maps.items():
             if (
@@ -179,12 +194,18 @@ class FinalGatePlan:
             raise ValueError("final gate browser image digest is invalid")
         if any(
             _SHA256_RE.fullmatch(value) is None
-            for values in (self.check_implementation_digests, self.evidence_hashes)
+            for values in (
+                self.check_implementation_digests,
+                self.evidence_hashes,
+                self.protected_baseline_resource_digests,
+            )
             for value in values.values()
         ):
             raise ValueError("final gate check digest map is invalid")
         if self.check_implementation_digests.keys() != self.evidence_hashes.keys():
             raise ValueError("final gate check evidence maps differ")
+        if self.protected_baseline_resource_digests.keys() != _PROTECTED_BASELINE_IDS:
+            raise ValueError("final gate protected baseline coverage differs")
         if any(
             not value.startswith("sha256:") or len(value) > 96
             for value in self.secret_metadata_fingerprints.values()
@@ -203,6 +224,11 @@ class FinalGatePlan:
             MappingProxyType(dict(self.check_implementation_digests)),
         )
         object.__setattr__(self, "evidence_hashes", MappingProxyType(dict(self.evidence_hashes)))
+        object.__setattr__(
+            self,
+            "protected_baseline_resource_digests",
+            MappingProxyType(dict(self.protected_baseline_resource_digests)),
+        )
 
     @classmethod
     def build(
@@ -211,6 +237,7 @@ class FinalGatePlan:
         attestation: PreflightAttestation,
         artifacts: PreflightArtifactPublication,
         lease: BackupLease,
+        baseline: ProtectedApplyBaseline,
     ) -> FinalGatePlan:
         bindings = attestation.bindings
         if (
@@ -241,6 +268,9 @@ class FinalGatePlan:
             or lease.db_snapshot_identity != bindings.db_snapshot_identity
             or lease.schema_revision != bindings.schema_revision
             or lease.object_inventory_root != bindings.object_inventory_root
+            or baseline.environment != bindings.environment
+            or baseline.namespace != bindings.namespace
+            or baseline.mutation_epoch != bindings.staging_mutation_epoch
         ):
             raise ValueError("final gate plan inputs drifted")
         payload = {
@@ -288,6 +318,8 @@ class FinalGatePlan:
             "gb10_unit_digest": bindings.gb10_unit_digest,
             "check_implementation_digests": dict(attestation.check_implementation_digests),
             "evidence_hashes": dict(attestation.evidence_hashes),
+            "protected_baseline_digest": baseline.baseline_digest,
+            "protected_baseline_resource_digests": dict(baseline.resource_digests),
         }
         return cls.from_dict({**payload, "plan_digest": _hash_json(payload)})
 
@@ -344,6 +376,10 @@ class FinalGatePlan:
             gb10_unit_digest=_string(value, "gb10_unit_digest"),
             check_implementation_digests=_string_map(value, "check_implementation_digests"),
             evidence_hashes=_string_map(value, "evidence_hashes"),
+            protected_baseline_digest=_string(value, "protected_baseline_digest"),
+            protected_baseline_resource_digests=_string_map(
+                value, "protected_baseline_resource_digests"
+            ),
             plan_digest=_string(value, "plan_digest"),
         )
         if _hash_json(_plan_payload(plan, include_digest=False)) != plan.plan_digest:

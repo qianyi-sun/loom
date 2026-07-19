@@ -23,7 +23,7 @@ class _Backend:
 
     def component(self, component_id: str, ordinal: int) -> ProtectedApplyComponent:
         def classify(_plan):
-            state = self.states.get(component_id, ComponentState.ABSENT)
+            state = self.states.get(component_id, ComponentState.READY)
             return ComponentObservation(
                 state=state,
                 evidence_digest=f"{ordinal + 1:064x}",
