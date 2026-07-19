@@ -44,6 +44,12 @@ from loom_cli.rollout.lifecycle_protocol import (
     lifecycle_protocol_digest,
     run_lifecycle_self_test,
 )
+from loom_cli.rollout.manifest_readiness import (
+    ManifestArtifact,
+    ManifestRenderSession,
+    RenderManifest,
+    ServerDryRun,
+)
 from loom_cli.rollout.migration_readiness import (
     DEFAULT_MIGRATION_POLICY,
     inspect_migration_plan,
@@ -1493,10 +1499,11 @@ def build_image_preflight_checks(
     candidate_root: Path,
     image_tag: str,
     expected_candidate_sha: str,
+    session: ImageBuildSession | None = None,
 ) -> tuple[RegisteredCheck, RegisteredCheck]:
     """Build the Tier 1 build-once and immutable image contract checks."""
     expected_plan_digest = image_plan_digest()
-    session = ImageBuildSession(
+    image_session = session or ImageBuildSession(
         run,
         candidate_root=candidate_root,
         image_tag=image_tag,
@@ -1510,7 +1517,7 @@ def build_image_preflight_checks(
         ):
             return _empty_image_probe()
         try:
-            artifact = session.build()
+            artifact = image_session.build()
         except (OSError, RuntimeError, ValueError):
             return _empty_image_probe()
         return _image_probe(artifact)
@@ -1522,7 +1529,7 @@ def build_image_preflight_checks(
         ):
             return _empty_image_probe()
         try:
-            artifact = session.verify()
+            artifact = image_session.verify()
         except (OSError, RuntimeError, ValueError):
             return _empty_image_probe()
         return _image_probe(artifact)
@@ -1600,6 +1607,131 @@ def _empty_image_probe() -> CheckProbe:
     )
 
 
+def build_manifest_preflight_checks(
+    render: RenderManifest,
+    server_dry_run: ServerDryRun,
+    image_artifact: Callable[[], ImageArtifactSet],
+    *,
+    image_tag: str,
+    namespace: str,
+    expected_candidate_sha: str,
+    expected_config_digest: str,
+) -> tuple[RegisteredCheck, RegisteredCheck]:
+    """Build the Tier 1 render-once and server-schema checks."""
+    manifest_session: ManifestRenderSession | None = None
+
+    def get_session() -> ManifestRenderSession:
+        nonlocal manifest_session
+        if manifest_session is None:
+            manifest_session = ManifestRenderSession(
+                render,
+                server_dry_run,
+                image_tag=image_tag,
+                namespace=namespace,
+                image_digests=image_artifact().image_digests,
+            )
+        return manifest_session
+
+    def bindings_match(context: CheckContext) -> bool:
+        return bool(
+            context.bindings["candidate.sha"] == expected_candidate_sha
+            and context.bindings["runner.config.sha256"] == expected_config_digest
+        )
+
+    def probe_render(context: CheckContext) -> CheckProbe:
+        if not bindings_match(context):
+            return _empty_manifest_probe()
+        try:
+            artifact = get_session().render()
+        except (OSError, RuntimeError, ValueError):
+            return _empty_manifest_probe()
+        return _manifest_probe(artifact, server_valid=False)
+
+    def probe_server_schema(context: CheckContext) -> CheckProbe:
+        if not bindings_match(context):
+            return _empty_manifest_probe()
+        try:
+            artifact = get_session().server_validate()
+        except (OSError, RuntimeError, ValueError):
+            return _empty_manifest_probe()
+        return _manifest_probe(artifact, server_valid=True)
+
+    common_inputs = ("candidate.sha", "runner.config.sha256")
+    common_evidence = (
+        EvidenceField("rendered-sha256", "sha256"),
+        EvidenceField("resource-count", "integer"),
+        EvidenceField("resource-set-digest", "sha256"),
+        EvidenceField("image-identities", "string-map"),
+        EvidenceField("artifact-digest", "sha256"),
+        EvidenceField("server-valid", "boolean"),
+    )
+    rendered = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="manifests.render",
+            failure_code="manifests.render.failed",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("candidate.identity", "images.contract"),
+            mutation_class=MutationClass.NONE,
+            input_keys=common_inputs,
+            evidence_schema=common_evidence,
+            timeout_seconds=120,
+            freshness_ttl_seconds=3600,
+            remediation="restore exact candidate rendering and immutable image bindings",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe_render},
+    )
+    server_schema = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="manifests.server-schema",
+            failure_code="manifests.server-schema.invalid",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("manifests.render", "kubernetes.client"),
+            mutation_class=MutationClass.NONE,
+            input_keys=common_inputs,
+            evidence_schema=common_evidence,
+            timeout_seconds=120,
+            freshness_ttl_seconds=300,
+            remediation="restore schema-valid resources and readonly server dry-run access",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe_server_schema},
+    )
+    return rendered, server_schema
+
+
+def _manifest_probe(artifact: ManifestArtifact, *, server_valid: bool) -> CheckProbe:
+    return CheckProbe(
+        passed=True,
+        evidence={
+            "rendered-sha256": artifact.rendered_sha256,
+            "resource-count": artifact.resource_count,
+            "resource-set-digest": artifact.resource_set_digest,
+            "image-identities": dict(artifact.image_identities),
+            "artifact-digest": artifact.artifact_digest,
+            "server-valid": server_valid,
+        },
+    )
+
+
+def _empty_manifest_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "rendered-sha256": "0" * 64,
+            "resource-count": 0,
+            "resource-set-digest": "0" * 64,
+            "image-identities": {},
+            "artifact-digest": "0" * 64,
+            "server-valid": False,
+        },
+    )
+
+
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
@@ -1613,6 +1745,7 @@ __all__ = [
     "build_image_preflight_checks",
     "build_kubernetes_client_check",
     "build_lifecycle_launch_cancel_check",
+    "build_manifest_preflight_checks",
     "build_migration_plan_check",
     "build_runner_install_check",
     "build_systemd_render_check",

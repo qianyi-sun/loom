@@ -6,6 +6,7 @@ import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,6 +50,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_image_preflight_checks,
     build_kubernetes_client_check,
     build_lifecycle_launch_cancel_check,
+    build_manifest_preflight_checks,
     build_migration_plan_check,
     build_systemd_render_check,
     build_systemd_user_manager_check,
@@ -1289,3 +1291,68 @@ def test_registered_image_build_rejects_candidate_drift_without_docker(tmp_path:
     )
     assert not result.passed
     assert calls == []
+
+
+def _rendered_image_manifest(image_tag: str = "staging-1111111") -> str:
+    containers = "\n".join(
+        f"        - name: {name}\n          image: {name}:{image_tag}"
+        for name, _path in ALL_BUILD_IMAGES
+        if name != BROWSER_IMAGE
+    )
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exact-candidate
+  namespace: loom-staging
+spec:
+  template:
+    spec:
+      containers:
+{containers}
+"""
+
+
+def test_registered_manifest_checks_render_once_then_server_validate() -> None:
+    revision = "1" * 40
+    digests = {
+        name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    image_artifact = SimpleNamespace(image_digests=digests)
+    render_calls: list[object] = []
+    server_payloads: list[str] = []
+    rendered, server_schema = build_manifest_preflight_checks(
+        lambda: render_calls.append(object()) or _rendered_image_manifest(),
+        lambda payload: (
+            server_payloads.append(payload) or subprocess.CompletedProcess([], 0, "", "")
+        ),
+        lambda: image_artifact,  # type: ignore[arg-type,return-value]
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        expected_candidate_sha=revision,
+        expected_config_digest="a" * 64,
+    )
+    context = CheckContext(
+        {
+            "candidate.sha": revision,
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("candidate.identity"),
+            _passing_dependency("images.contract"),
+            _passing_dependency("kubernetes.client"),
+            rendered,
+            server_schema,
+        )
+    )
+
+    results = dag.run(context, through_tier=1)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["manifests.render"].passed
+    assert by_id["manifests.render"].evidence["server-valid"] is False
+    assert by_id["manifests.server-schema"].passed
+    assert by_id["manifests.server-schema"].evidence["server-valid"] is True
+    assert len(render_calls) == 1
+    assert server_payloads == [_rendered_image_manifest()]
