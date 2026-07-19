@@ -11,6 +11,7 @@ from typing import Protocol
 from uuid import UUID
 
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
+from loom_cli.rollout.staging_baseline_source import ObjectStoreBaselineEvidence
 
 _MAX_RESPONSE_BYTES = 1 << 20
 _VALUE_RE = re.compile(r"^[a-z0-9*][a-z0-9*/.:-]{0,127}$")
@@ -36,6 +37,10 @@ class CommandResult(Protocol):
 
 JsonCommandRunner = Callable[[Sequence[str], bytes], CommandResult]
 ApplicationObservation = Callable[[], bytes]
+
+_MINIO_HEALTH_URI = (
+    "/api/v1/namespaces/loom-staging/services/http:loom-minio:9000/proxy/minio/health/ready"
+)
 
 
 def _object(payload: bytes) -> Mapping[str, object]:
@@ -282,4 +287,49 @@ def probe_readonly_authority(
     )
 
 
-__all__ = ["JsonCommandRunner", "probe_readonly_authority"]
+def probe_readonly_object_store_health(
+    run: JsonCommandRunner,
+    *,
+    kubeconfig: Path,
+    namespace: str,
+) -> ObjectStoreBaselineEvidence:
+    """Probe only the exact MinIO health endpoint through Kubernetes proxy."""
+    if namespace != "loom-staging" or not kubeconfig.is_absolute() or ".." in kubeconfig.parts:
+        raise ValueError("readonly object-store health target is invalid")
+    result = run(
+        (
+            "kubectl",
+            "--kubeconfig",
+            str(kubeconfig),
+            "get",
+            "--raw",
+            _MINIO_HEALTH_URI,
+            "--request-timeout=10s",
+        ),
+        b"",
+    )
+    if result.returncode != 0 or not isinstance(result.stdout, str):
+        raise ValueError("readonly object-store health probe failed")
+    payload = result.stdout.encode()
+    if len(payload) > 4096:
+        raise ValueError("readonly object-store health response is invalid")
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "namespace": namespace,
+                "response_sha256": hashlib.sha256(payload).hexdigest(),
+                "uri": _MINIO_HEALTH_URI,
+                "version": "v1",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return ObjectStoreBaselineEvidence(True, digest)
+
+
+__all__ = [
+    "JsonCommandRunner",
+    "probe_readonly_authority",
+    "probe_readonly_object_store_health",
+]

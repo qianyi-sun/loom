@@ -21,6 +21,7 @@ from loom_cli.rollout.preflight_artifact_store import (
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_runtime import RehearsalActionFactory, RehearsalIdentityFactory
 from loom_cli.rollout.preflight_runtime_sources import BackupAdmissionAuthority
+from loom_cli.rollout.readonly_authority_source import probe_readonly_object_store_health
 from loom_cli.rollout.rehearsal_action_source import RehearsalActionSource
 from loom_cli.rollout.rehearsal_command_runner import InstalledRehearsalStepRunner
 from loom_cli.rollout.rehearsal_journal_backend import JournaledRehearsalBackend
@@ -40,9 +41,9 @@ from .installed_deep_preflight import InstalledDeepPreflightComposition
 from .installed_preflight_commands import InstalledPreflightCommands
 from .installed_preflight_inputs import InstalledPreflightInputs
 from .model import CandidateBinding
-from .mutation_epoch_provider import KubernetesMutationEpochProvider
 from .policy import sanitized_child_environment
 from .preflight import probe_gb10_shared_mount_readonly
+from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
 from .readonly_preflight_authority import JsonRunner, ReadonlyPreflightAuthority
 from .store import RequestStore
 
@@ -64,20 +65,24 @@ def build_installed_deep_preflight_composition(
     commands = InstalledPreflightCommands(config, child_environment)
     inputs = InstalledPreflightInputs.load(config, service_uid=service_uid)
     command_runner = SubprocessBackupCommandRunner()
-    epoch_source = KubernetesMutationEpochProvider(
-        config,
-        runner=command_runner,
-        environment=child_environment,
-    )
     inventory_source = KubernetesLifecycleInventoryProvider(
         config,
         runner=command_runner,
         environment=child_environment,
     )
+    database_evidence = InstalledReadonlyDatabaseEvidenceSource(
+        service_uid=service_uid,
+    )
     readonly = ReadonlyPreflightAuthority(
         config,
         service_uid=service_uid,
         kubernetes_run=cast(JsonRunner, commands.readonly_json),
+        database_evidence=database_evidence,
+        object_store_probe=lambda: probe_readonly_object_store_health(
+            cast(JsonRunner, commands.readonly_json),
+            kubeconfig=readonly.kubeconfig_path,
+            namespace=config.namespace,
+        ),
     )
     artifact_store = PreflightArtifactStore(config.state_root, service_uid=service_uid)
     attestation_store = PreflightAttestationStore(config.state_root)
@@ -196,7 +201,7 @@ def build_installed_deep_preflight_composition(
         baseline_probe_factory=readonly.baseline_probes,
         route=route,
         rehearsal_factory=rehearsal_factory,
-        read_mutation_epoch=epoch_source,
+        read_mutation_epoch=readonly.mutation_epoch,
         now=now,
     )
 

@@ -100,6 +100,47 @@ class ReadonlyDatabaseEvidence:
             raise ValueError("database epoch authority is invalid")
         if (int(self.schema_revision) >= _CAPACITY_FIRST_REVISION) != (capacity is not None):
             raise ValueError("database capacity authority is incomplete")
+        if capacity is not None:
+            expected_capacity = {
+                "environment",
+                "namespace",
+                "object_count",
+                "bytes_used",
+                "disk_free_percent",
+                "inode_free_percent",
+                "policy_sha256",
+                "evidence_sha256",
+                "source",
+                "observed_at_epoch",
+            }
+            if (
+                set(capacity) != expected_capacity
+                or capacity["environment"] != "staging"
+                or capacity["namespace"] != "loom-staging"
+                or capacity["source"] != "exact-object-inventory-v1"
+            ):
+                raise ValueError("database capacity authority is incomplete")
+            capacity_ints = {
+                name: _integer(capacity[name], label=f"capacity-{name}")
+                for name in (
+                    "object_count",
+                    "bytes_used",
+                    "disk_free_percent",
+                    "inode_free_percent",
+                    "observed_at_epoch",
+                )
+            }
+            capacity_value = StagingCapacity(
+                object_count=capacity_ints["object_count"],
+                bytes_used=capacity_ints["bytes_used"],
+                disk_free_percent=capacity_ints["disk_free_percent"],
+                inode_free_percent=capacity_ints["inode_free_percent"],
+            )
+            if (
+                capacity["policy_sha256"] != staging_capacity_policy_digest()
+                or capacity["evidence_sha256"] != capacity_value.evidence_digest
+            ):
+                raise ValueError("database capacity authority is incomplete")
         object.__setattr__(self, "baseline_counts", MappingProxyType(counts))
         object.__setattr__(
             self,

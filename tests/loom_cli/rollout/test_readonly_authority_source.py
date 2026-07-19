@@ -11,6 +11,7 @@ import pytest
 from loom_cli.rollout.readonly_authority_source import (
     JsonCommandRunner,
     probe_readonly_authority,
+    probe_readonly_object_store_health,
 )
 
 
@@ -134,6 +135,39 @@ def test_server_observed_authority_rejects_ambiguous_data_authority() -> None:
             application_observation=_application,
             database_authority_digest="a" * 64,
         )
+
+
+def test_object_store_probe_uses_only_exact_health_proxy() -> None:
+    calls: list[tuple[tuple[str, ...], bytes]] = []
+
+    def run(argv: tuple[str, ...], stdin: bytes) -> _Result:
+        calls.append((tuple(argv), stdin))
+        return _Result(0, "")
+
+    evidence = probe_readonly_object_store_health(
+        cast(JsonCommandRunner, run),
+        kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),
+        namespace="loom-staging",
+    )
+
+    assert evidence.ready
+    assert calls == [
+        (
+            (
+                "kubectl",
+                "--kubeconfig",
+                "/var/lib/loom-staging-rollout/readonly-kubeconfig",
+                "get",
+                "--raw",
+                (
+                    "/api/v1/namespaces/loom-staging/services/"
+                    "http:loom-minio:9000/proxy/minio/health/ready"
+                ),
+                "--request-timeout=10s",
+            ),
+            b"",
+        )
+    ]
 
 
 @pytest.mark.parametrize(

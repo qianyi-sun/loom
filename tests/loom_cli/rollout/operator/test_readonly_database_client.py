@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from loom_cli.rollout.operator.readonly_database_client import (
+    InstalledReadonlyDatabaseEvidenceSource,
     open_readonly_database_query,
 )
+from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
 from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredential
 
 
@@ -178,3 +181,45 @@ def test_client_rejects_public_or_symlinked_credential(tmp_path: Path) -> None:
             credential_path=credential_path,
         ):
             raise AssertionError("unreachable")
+
+
+def test_installed_evidence_source_is_single_flight_under_concurrent_dag() -> None:
+    evidence = ReadonlyDatabaseEvidence(
+        schema_revision="0065",
+        mutation_epoch=0,
+        epoch_authority="legacy-pre-0066",
+        baseline_counts={
+            "agents": 0,
+            "provider_models": 0,
+            "tasks": 0,
+            "teams": 0,
+            "users": 0,
+        },
+        capacity=None,
+        evidence_sha256="a" * 64,
+    )
+    calls: list[int] = []
+    entered = threading.Barrier(4)
+
+    def probe(*, service_uid: int) -> ReadonlyDatabaseEvidence:
+        calls.append(service_uid)
+        return evidence
+
+    source = InstalledReadonlyDatabaseEvidenceSource(
+        service_uid=os.getuid(),
+        probe=probe,
+    )
+    results: list[ReadonlyDatabaseEvidence] = []
+
+    def invoke() -> None:
+        entered.wait()
+        results.append(source())
+
+    threads = [threading.Thread(target=invoke) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results == [evidence] * 4
+    assert calls == [os.getuid()]

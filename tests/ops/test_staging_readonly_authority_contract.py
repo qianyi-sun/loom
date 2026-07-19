@@ -28,6 +28,7 @@ def test_readonly_preflight_rbac_is_namespace_scoped_and_non_mutating() -> None:
     assert rules
     ordinary = [rule for rule in rules if rule["resources"] != ["pods/portforward"]]
     transport = [rule for rule in rules if rule["resources"] == ["pods/portforward"]]
+    object_health = [rule for rule in rules if rule["resources"] == ["services/proxy"]]
     assert all(set(rule["verbs"]) <= {"get", "list", "watch"} for rule in ordinary)
     assert transport == [
         {
@@ -35,6 +36,14 @@ def test_readonly_preflight_rbac_is_namespace_scoped_and_non_mutating() -> None:
             "resources": ["pods/portforward"],
             "resourceNames": ["loom-postgres-0"],
             "verbs": ["create"],
+        }
+    ]
+    assert object_health == [
+        {
+            "apiGroups": [""],
+            "resources": ["services/proxy"],
+            "resourceNames": ["loom-minio"],
+            "verbs": ["get"],
         }
     ]
     resources = {resource for rule in rules for resource in rule["resources"]}

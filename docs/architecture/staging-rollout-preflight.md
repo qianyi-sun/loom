@@ -147,7 +147,9 @@ account, Role, and RoleBinding, with token automount disabled and only
 `pods/portforward` subresource for the exact `loom-postgres-0` pod. The latter
 is only a transport to a separately authenticated SELECT-only PostgreSQL role;
 it cannot create or update a Kubernetes object and cannot connect to another
-pod. No ClusterRole, secret access, token material, wildcard, or other write
+pod. A second exact `get` rule permits only the `services/proxy` health path
+for `loom-minio`; it cannot list buckets or read objects. No ClusterRole,
+secret access, token material, wildcard, or other write
 verb is admitted. Runtime credentials use a bounded TokenRequest and are
 validated by the server-observed review before any Tier 2 call.
 The TokenRequest is rendered into a minified kubeconfig with no inherited
@@ -168,6 +170,10 @@ service-owned 0600 copy. The password is never placed in argv, stdout,
 install evidence, or an attestation. Reinstall revokes table and sequence
 authority before granting SELECT back to the fixed allowlist, so privilege
 drift cannot silently accumulate.
+The concurrent DAG shares one process-local, single-flight database snapshot;
+Tier 0 capacity, Tier 2 baseline, capability evidence, and mutation-epoch
+binding cannot race through separate transactions. The exact tunnel and DB
+session are always rolled back and closed after evidence collection.
 Installed preflight treats the readonly application token, readonly kubeconfig,
 rehearsal kubeconfig, and server-dry-run kubeconfig as distinct private
 credential authorities; all four must pass the same stable-read, owner, mode,

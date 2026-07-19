@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -11,7 +10,11 @@ from loom_cli.rollout.operator.readonly_preflight_authority import (
     ReadonlyPreflightAuthority,
     derive_staging_route,
 )
-from loom_cli.rollout.staging_baseline_source import BaselineHttpResponse
+from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
+from loom_cli.rollout.staging_baseline_source import (
+    BaselineHttpResponse,
+    ObjectStoreBaselineEvidence,
+)
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
 
 
@@ -24,7 +27,7 @@ class _Result:
 def _write_authority(tmp_path: Path) -> tuple[Path, Path]:
     cluster = tmp_path / "cluster.toml"
     cluster.write_text(
-        '\n'.join(
+        "\n".join(
             (
                 'namespace = "loom-staging"',
                 'runtime_environment = "staging"',
@@ -42,51 +45,38 @@ def _write_authority(tmp_path: Path) -> tuple[Path, Path]:
     return cluster, token
 
 
-def _http(url: str, token: str) -> BaselineHttpResponse:
-    assert token == "loom_readonly_exact"
-    if url.endswith("/auth/whoami"):
-        return BaselineHttpResponse(
-            200,
-            "HTTP/2",
-            {
-                "auth_kind": "readonly_probe",
-                "credential_type": "staging_readonly_probe",
-                "principal_type": "readonly_probe",
-                "readonly_authority_version": "v1",
-                "scopes": ["read:own"],
-                "allowed_http_methods": ["GET", "HEAD"],
-                "team_id": "00000000-0000-0000-0000-000000000001",
-            },
-        )
+def _database() -> ReadonlyDatabaseEvidence:
     capacity = StagingCapacity(1, 2, 80, 90)
-    return BaselineHttpResponse(
-        200,
-        "HTTP/2",
-        {
-            "status": "ready",
-            "postgres": "ready",
-            "object_store": "ready",
-            "resource_digest": "a" * 64,
+    return ReadonlyDatabaseEvidence(
+        schema_revision="0067",
+        mutation_epoch=11,
+        epoch_authority="staging-mutation-epoch-v1",
+        baseline_counts={
+            "agents": 1,
+            "provider_models": 2,
+            "tasks": 3,
+            "teams": 4,
+            "users": 5,
+        },
+        capacity={
             "environment": "staging",
             "namespace": "loom-staging",
-            "mutation_epoch": 11,
-            "capacity_ready": True,
-            "capacity": {
-                "object_count": capacity.object_count,
-                "bytes_used": capacity.bytes_used,
-                "disk_free_percent": capacity.disk_free_percent,
-                "inode_free_percent": capacity.inode_free_percent,
-                "policy_sha256": staging_capacity_policy_digest(),
-                "evidence_sha256": capacity.evidence_digest,
-            },
-            "blockers": [],
+            "object_count": capacity.object_count,
+            "bytes_used": capacity.bytes_used,
+            "disk_free_percent": capacity.disk_free_percent,
+            "inode_free_percent": capacity.inode_free_percent,
+            "policy_sha256": staging_capacity_policy_digest(),
+            "evidence_sha256": capacity.evidence_digest,
+            "source": "exact-object-inventory-v1",
+            "observed_at_epoch": 1_721_390_400,
         },
+        evidence_sha256="a" * 64,
     )
 
 
 def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    cluster, token = _write_authority(tmp_path)
+    cluster, _token = _write_authority(tmp_path)
     object.__setattr__(config, "cluster_config_path", cluster)
     calls: list[tuple[tuple[str, ...], bytes]] = []
     payloads = iter(
@@ -94,9 +84,7 @@ def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Pat
             {
                 "status": {
                     "userInfo": {
-                        "username": (
-                            "system:serviceaccount:loom-staging:loom-rollout-readonly"
-                        )
+                        "username": ("system:serviceaccount:loom-staging:loom-rollout-readonly")
                     }
                 }
             },
@@ -123,9 +111,7 @@ def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Pat
                             "verbs": ["create"],
                         },
                     ],
-                    "nonResourceRules": [
-                        {"nonResourceURLs": ["/api", "/apis"], "verbs": ["get"]}
-                    ],
+                    "nonResourceRules": [{"nonResourceURLs": ["/api", "/apis"], "verbs": ["get"]}],
                 }
             },
         )
@@ -139,8 +125,9 @@ def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Pat
         config=config,
         service_uid=os.getuid(),
         kubernetes_run=kubernetes,
-        http_get=_http,
-        token_path=token,
+        database_evidence=_database,
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
+        public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
         kubeconfig_path=tmp_path / "readonly-kubeconfig",
     )
 
@@ -176,25 +163,17 @@ def test_route_authority_rejects_frontend_api_drift(tmp_path: Path) -> None:
         raise AssertionError("route drift was accepted")
 
 
-def test_authority_exposes_no_token_in_evidence(tmp_path: Path) -> None:
+def test_authority_exposes_no_database_credential_in_evidence(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    cluster, token = _write_authority(tmp_path)
+    cluster, _token = _write_authority(tmp_path)
     object.__setattr__(config, "cluster_config_path", cluster)
-    seen: list[str] = []
-
-    def http(url: str, raw_token: str) -> BaselineHttpResponse:
-        seen.append(raw_token)
-        return _http(url, raw_token)
-
     authority = ReadonlyPreflightAuthority(
         config=config,
         service_uid=os.getuid(),
         kubernetes_run=lambda _argv, _stdin: _Result(1, ""),
-        http_get=http,
-        token_path=token,
+        database_evidence=_database,
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
         kubeconfig_path=tmp_path / "readonly-kubeconfig",
     )
-    digest = hashlib.sha256(str(authority.capacity()).encode()).hexdigest()
-    assert len(digest) == 64
-    assert seen == ["loom_readonly_exact"]
-    assert "loom_readonly_exact" not in digest
+    assert authority.capacity() == StagingCapacity(1, 2, 80, 90)
+    assert "password" not in repr(authority.capacity()).lower()

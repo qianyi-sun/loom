@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
+from threading import Lock
 from typing import Any, Protocol
 
 import psycopg
@@ -225,9 +226,33 @@ def probe_installed_readonly_database(
         return probe_readonly_database(query)
 
 
+class InstalledReadonlyDatabaseEvidenceSource:
+    """Single-flight process-local snapshot shared by the concurrent DAG."""
+
+    def __init__(
+        self,
+        *,
+        service_uid: int,
+        probe: Callable[..., ReadonlyDatabaseEvidence] = probe_installed_readonly_database,
+    ) -> None:
+        if service_uid < 1:
+            raise ValueError("readonly database evidence source identity is invalid")
+        self._service_uid = service_uid
+        self._probe = probe
+        self._lock = Lock()
+        self._evidence: ReadonlyDatabaseEvidence | None = None
+
+    def __call__(self) -> ReadonlyDatabaseEvidence:
+        with self._lock:
+            if self._evidence is None:
+                self._evidence = self._probe(service_uid=self._service_uid)
+            return self._evidence
+
+
 __all__ = [
     "Connect",
     "DatabaseConnection",
+    "InstalledReadonlyDatabaseEvidenceSource",
     "PortAllocator",
     "Spawn",
     "TunnelProcess",
