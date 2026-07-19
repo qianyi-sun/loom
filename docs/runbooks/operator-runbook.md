@@ -1671,6 +1671,17 @@ records that the whole default ACL was absent. Because the ACL mask is represent
 the numeric group mode bits, inspect `getfacl` raw/effective entries rather than
 using mode alone as the permission proof.
 
+Protected credential leaves have a stricter convergence rule than data
+directories. Their access ACL may retain the owning group object, including its
+existing read permission, but may contain no named user except `loom-rollout`
+and no named group. The installer removes such stale named readers in the same
+planned `setfacl -n` transition that converges the service entry. Before any ACL
+write it persists the complete access-ACL preimage and expected postimage in a
+root-owned snapshot ledger; plan/apply drift fails closed, retry is idempotent,
+`check` requires the postimage, and uninstall restores the exact preimage. Do
+not repair this condition with an ad-hoc `setfacl` command because that bypasses
+the install ledger and rollback authority.
+
 Protected-input parents intentionally grant only traverse (`--x`) permission;
 the leaf grants read (`r--`). Linux preflight opens those parent descriptors
 with `O_PATH|O_DIRECTORY|O_NOFOLLOW`, preserving no-listing access while still

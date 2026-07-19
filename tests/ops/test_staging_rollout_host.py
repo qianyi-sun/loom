@@ -578,12 +578,16 @@ class FakeSystem:
             self.data_acls.add(Path(f"{grant.path}#{grant.default}"))
         else:
             self.input_acls.add(grant.path)
-        if plan.mask_adjustment is not None:
+        if plan.mask_adjustment is not None or plan.snapshot_adjustment is not None:
             self.acl_adjustment_states[grant] = "after"
         return grant
 
-    def acl_adjustment_state(self, adjustment: host.AclMaskAdjustment) -> str:
-        grant = host.AclGrant(adjustment.path, default=adjustment.default)
+    def acl_adjustment_state(
+        self,
+        adjustment: host.AclMaskAdjustment | host.AclSnapshotAdjustment,
+    ) -> str:
+        default = adjustment.default if isinstance(adjustment, host.AclMaskAdjustment) else False
+        grant = host.AclGrant(adjustment.path, default=default)
         return self.acl_adjustment_states.get(grant, "before")
 
     def ensure_input_acl(self, path: Path) -> tuple[host.AclGrant, ...]:
@@ -628,11 +632,11 @@ class FakeSystem:
     def remove_acl(
         self,
         grant: host.AclGrant,
-        mask_adjustment: host.AclMaskAdjustment | None = None,
+        adjustment: host.AclMaskAdjustment | host.AclSnapshotAdjustment | None = None,
         *,
         remove_service_entry: bool = True,
     ) -> None:
-        if mask_adjustment is not None:
+        if adjustment is not None:
             self.acl_adjustment_states[grant] = "before"
         if remove_service_entry:
             self.input_acls.discard(grant.path)
@@ -3836,6 +3840,129 @@ def test_acl_convergence_uses_named_no_mask_entry_without_owner_or_mode_changes(
     assert all("admin-token-fixture" not in " ".join(call) for call in runner.calls)
 
 
+def test_protected_input_acl_sanitizes_only_undeclared_named_readers() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    before = (
+        "user::rw-",
+        "user:2012:r--",
+        "user:loom-rollout:r--",
+        "group::r--",
+        "group:obsolete:r--",
+        "mask::r--",
+        "other::---",
+    )
+    runner = StatefulAclRunner()
+    runner.seed(path, access=before)
+    system = host.HostSystem(runner)
+
+    plan = system._plan_acl(
+        path,
+        permissions="r--",
+        default=False,
+        sanitize_named_entries=True,
+    )
+
+    assert plan is not None
+    assert plan.adds_service_entry is False
+    assert plan.mask_adjustment is None
+    assert plan.snapshot_adjustment is not None
+    assert "group::r--" in plan.after_acl
+    assert "user:loom-rollout:r--" in plan.after_acl
+    assert all("2012" not in entry and "obsolete" not in entry for entry in plan.after_acl)
+    system.apply_acl(plan)
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == plan.after_acl
+    assert any(call[:4] == ["setfacl", "-n", "-x", "u:2012,g:obsolete"] for call in runner.calls)
+
+    assert (
+        system._plan_acl(
+            path,
+            permissions="r--",
+            default=False,
+            sanitize_named_entries=True,
+        )
+        is None
+    )
+    system.remove_acl(plan.grant, plan.snapshot_adjustment, remove_service_entry=False)
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == before
+
+
+def test_protected_input_acl_sanitation_adds_service_and_restores_full_preimage() -> None:
+    path = host.PROTECTED_INPUTS[1]
+    before = (
+        "user::rw-",
+        "user:2012:r--",
+        "group::r--",
+        "mask::r--",
+        "other::---",
+    )
+    runner = StatefulAclRunner()
+    runner.seed(path, access=before)
+    system = host.HostSystem(runner)
+
+    plan = system._plan_acl(
+        path,
+        permissions="r--",
+        default=False,
+        sanitize_named_entries=True,
+    )
+
+    assert plan is not None and plan.snapshot_adjustment is not None
+    assert plan.adds_service_entry is True
+    system.apply_acl(plan)
+    assert system._acl_entry(path, default=False) == ("r--", "r--")
+    system.remove_acl(plan.grant, plan.snapshot_adjustment, remove_service_entry=True)
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == before
+
+
+def test_acl_snapshot_adjustment_record_rejects_drift_and_unmanaged_scope() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    assert host.AclSnapshotAdjustment.from_dict(adjustment.to_dict()) == adjustment
+    assert host.HostInstaller._record_snapshot_adjustments(
+        {"acl_snapshot_adjustments": [adjustment.to_dict()]}
+    ) == {host.AclGrant(path): adjustment}
+
+    value = adjustment.to_dict()
+    value["path"] = "/tmp/unmanaged"
+    with pytest.raises(host.InstallError, match="snapshot ledger"):
+        host.HostInstaller._record_snapshot_adjustments({"acl_snapshot_adjustments": [value]})
+
+    runner = StatefulAclRunner()
+    runner.seed(path, access=adjustment.before_acl)
+    system = host.HostSystem(runner)
+    plan = host.AclPlan(
+        grant=host.AclGrant(path),
+        permissions="r--",
+        adds_service_entry=False,
+        before_acl=adjustment.before_acl,
+        after_acl=adjustment.after_acl,
+        snapshot_adjustment=adjustment,
+    )
+    runner.acls[str(path)][False][("user", "racer")] = "r--"
+    with pytest.raises(host.InstallError, match="changed before convergence"):
+        system.apply_acl(plan)
+    assert all(call[0] != "setfacl" for call in runner.calls)
+
+
 def test_acl_converges_masked_preexisting_service_and_restores_without_removing_it() -> None:
     path = host.PROTECTED_INPUTS[3]
     before = (
@@ -4139,6 +4266,66 @@ def _fake_mask_plan(path: Path, *, service_preexisting: bool = False) -> host.Ac
         after_acl=adjustment.after_acl,
         mask_adjustment=adjustment,
     )
+
+
+def _fake_snapshot_plan(path: Path, *, service_preexisting: bool = False) -> host.AclPlan:
+    before = ["user::rw-", "user:2012:r--"]
+    if service_preexisting:
+        before.append("user:loom-rollout:r--")
+    before.extend(["group::r--", "mask::r--", "other::---"])
+    after = ["user::rw-", "user:loom-rollout:r--", "group::r--", "mask::r--", "other::---"]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": before,
+            "after_acl": after,
+        }
+    )
+    return host.AclPlan(
+        grant=host.AclGrant(path),
+        permissions="r--",
+        adds_service_entry=not service_preexisting,
+        before_acl=adjustment.before_acl,
+        after_acl=adjustment.after_acl,
+        snapshot_adjustment=adjustment,
+    )
+
+
+def test_install_persists_snapshot_preimage_before_acl_sanitation_and_uninstall_restores_it(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    path = host.PROTECTED_INPUTS[0]
+    plan = _fake_snapshot_plan(path)
+    assert plan.snapshot_adjustment is not None
+
+    def planned_input(candidate: Path) -> tuple[host.AclPlan, ...]:
+        if candidate != path or system.acl_adjustment_states.get(plan.grant) == "after":
+            return ()
+        return (plan,)
+
+    system.plan_input_acl = planned_input  # type: ignore[method-assign]
+    system.plan_data_acl = lambda candidate: ()  # type: ignore[method-assign]
+    original_apply = system.apply_acl
+
+    def assert_preimage_persisted(candidate: host.AclPlan) -> host.AclGrant:
+        record = installer.filesystem.load_install_record()
+        assert record is not None
+        assert record["installation_state"] == "installing"
+        assert record["acl_snapshot_adjustments"] == [plan.snapshot_adjustment.to_dict()]
+        return original_apply(candidate)
+
+    system.apply_acl = assert_preimage_persisted  # type: ignore[method-assign]
+    assert installer.install(TEAM_ID)["ok"] is True
+    ready = installer.filesystem.load_install_record()
+    assert ready is not None
+    assert host.HostInstaller._record_snapshot_adjustments(ready) == {
+        plan.grant: plan.snapshot_adjustment
+    }
+
+    installer.uninstall(retain_ledger=True)
+    assert system.acl_adjustment_states[plan.grant] == "before"
+    assert path not in system.input_acls
 
 
 def test_partial_acl_apply_persists_all_mask_preimages_and_retries(tmp_path: Path) -> None:

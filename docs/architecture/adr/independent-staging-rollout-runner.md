@@ -331,6 +331,15 @@ complete initialization remains reversible. POSIX ACL masks are also reflected i
 numeric group mode bits, so validation uses raw and effective ACL entries rather
 than claiming that `st_mode` is unchanged.
 
+Protected credential leaves are also normalized to a single named principal:
+`loom-rollout`. Stale named users and named groups are removed while the
+pre-existing owning group object and its raw permissions remain unchanged. This
+is a distinct, reversible snapshot transition: the root install record stores
+the exact before/after access ACL before mutation, install retries accept only
+one of those states, runtime check requires the after state, and uninstall
+restores the before state. Parent traversal ACLs and writable data-directory
+ACLs are outside this sanitation scope.
+
 ### Backup and locking
 
 A request directory has two non-interchangeable immutable identities. A

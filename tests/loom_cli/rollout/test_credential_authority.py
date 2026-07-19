@@ -104,6 +104,30 @@ def test_private_authority_rejects_undeclared_named_acl_reader(
         read_trusted_file(path, service_uid=os.getuid(), private=True)
 
 
+def test_private_authority_accepts_sanitized_service_acl_and_group_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "admin-token"
+    _private(path)
+    undefined = 0xFFFFFFFF
+    payload = _acl_payload(
+        (0x01, 0x6, undefined),
+        (0x02, 0x4, os.getuid()),
+        (0x04, 0x4, undefined),
+        (0x10, 0x4, undefined),
+        (0x20, 0x0, undefined),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.credential_authority._get_acl_xattr",
+        lambda _fd, _name: payload,
+    )
+
+    trusted = read_trusted_file(path, service_uid=os.getuid(), private=True)
+
+    assert trusted.payload == b"credential\n"
+
+
 def test_private_authority_rejects_acl_drift_during_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

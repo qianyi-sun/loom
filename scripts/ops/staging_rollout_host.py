@@ -438,6 +438,87 @@ class AclMaskAdjustment:
 
 
 @dataclass(frozen=True, slots=True)
+class AclSnapshotAdjustment:
+    path: Path
+    before_acl: tuple[str, ...]
+    after_acl: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": str(self.path),
+            "before_acl": list(self.before_acl),
+            "after_acl": list(self.after_acl),
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> AclSnapshotAdjustment:
+        if not isinstance(value, dict) or set(value) != {
+            "path",
+            "before_acl",
+            "after_acl",
+        }:
+            raise InstallError("install record contains an invalid ACL snapshot adjustment")
+        raw_path = value["path"]
+        raw_before_acl = value["before_acl"]
+        raw_after_acl = value["after_acl"]
+        if (
+            not isinstance(raw_path, str)
+            or not isinstance(raw_before_acl, list)
+            or not isinstance(raw_after_acl, list)
+        ):
+            raise InstallError("install record contains an invalid ACL snapshot adjustment")
+        path = Path(raw_path)
+        if not path.is_absolute() or ".." in path.parts:
+            raise InstallError("install record contains an unsafe ACL snapshot path")
+        before_acl = tuple(raw_before_acl)
+        after_acl = tuple(raw_after_acl)
+        before = _acl_snapshot_map(before_acl, allow_empty=False)
+        after = _acl_snapshot_map(after_acl, allow_empty=False)
+        service_key = ("user", SERVICE_USER)
+        removable = {
+            key
+            for key in before
+            if (key[0] == "user" and bool(key[1]) and key != service_key)
+            or (key[0] == "group" and bool(key[1]))
+        }
+        if not removable or any(key in after for key in removable):
+            raise InstallError("install record ACL snapshot does not sanitize named readers")
+        if any(
+            (key[0] == "user" and bool(key[1]) and key != service_key)
+            or (key[0] == "group" and bool(key[1]))
+            for key in after
+        ):
+            raise InstallError("install record ACL snapshot retains an undeclared reader")
+        stable_before = {
+            key: permissions
+            for key, permissions in before.items()
+            if key not in removable | {service_key, ("mask", "")}
+        }
+        stable_after = {
+            key: permissions
+            for key, permissions in after.items()
+            if key not in {service_key, ("mask", "")}
+        }
+        if stable_before != stable_after or service_key not in after:
+            raise InstallError("install record ACL snapshot changes unrelated entries")
+        if service_key in before and before[service_key] != after[service_key]:
+            raise InstallError("install record ACL snapshot changes the service entry")
+        before_mask = before.get(("mask", ""))
+        after_mask = after.get(("mask", ""))
+        if after_mask is None or (
+            before_mask is not None
+            and any(
+                wanted != "-" and after_mask[index] != wanted
+                for index, wanted in enumerate(before_mask)
+            )
+        ):
+            raise InstallError("install record ACL snapshot narrows the ACL mask")
+        if before_acl == after_acl:
+            raise InstallError("install record ACL snapshot adjustment is empty")
+        return cls(path=path, before_acl=before_acl, after_acl=after_acl)
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedAclEntry:
     default: bool
     tag: str
@@ -454,6 +535,7 @@ class AclPlan:
     before_acl: tuple[str, ...] = ()
     after_acl: tuple[str, ...] = ()
     mask_adjustment: AclMaskAdjustment | None = None
+    snapshot_adjustment: AclSnapshotAdjustment | None = None
 
 
 class Runner(Protocol):
@@ -2746,6 +2828,7 @@ class HostSystem:
         default: bool,
         permissions: str,
         existing: tuple[str, str] | None,
+        sanitize_named_entries: bool,
     ) -> tuple[tuple[str, ...], tuple[str, ...], str | None, str]:
         before_acl = self._acl_snapshot(entries, default=default)
         before = _acl_snapshot_map(before_acl, allow_empty=default)
@@ -2758,6 +2841,15 @@ class HostSystem:
             )
             after = {key: access[key] for key in (("user", ""), ("group", ""), ("other", ""))}
         service_key = ("user", SERVICE_USER)
+        if sanitize_named_entries:
+            after = {
+                key: value
+                for key, value in after.items()
+                if not (
+                    (key[0] == "user" and bool(key[1]) and key != service_key)
+                    or (key[0] == "group" and bool(key[1]))
+                )
+            }
         after[service_key] = existing[0] if existing is not None else permissions
         before_mask = before.get(("mask", ""))
         mask_baseline = before_mask or after[("group", "")]
@@ -2773,11 +2865,29 @@ class HostSystem:
     def _acl_entry(self, path: Path, *, default: bool) -> tuple[str, str] | None:
         return self._acl_entry_from(self._acl_entries(path), default=default)
 
-    def _plan_acl(self, path: Path, *, permissions: str, default: bool) -> AclPlan | None:
+    def _plan_acl(
+        self,
+        path: Path,
+        *,
+        permissions: str,
+        default: bool,
+        sanitize_named_entries: bool = False,
+    ) -> AclPlan | None:
         entries = self._acl_entries(path)
         existing = self._acl_entry_from(entries, default=default)
+        before_acl = self._acl_snapshot(entries, default=default)
+        before = _acl_snapshot_map(before_acl, allow_empty=default)
+        service_key = ("user", SERVICE_USER)
+        has_undeclared_named_entries = sanitize_named_entries and any(
+            (key[0] == "user" and bool(key[1]) and key != service_key)
+            or (key[0] == "group" and bool(key[1]))
+            for key in before
+        )
         if existing is not None:
-            if all(self._permissions_allow(value, permissions) for value in existing):
+            if (
+                all(self._permissions_allow(value, permissions) for value in existing)
+                and not has_undeclared_named_entries
+            ):
                 return None
             if not self._permissions_allow(existing[0], permissions):
                 raise InstallError("pre-existing service ACL is insufficient")
@@ -2786,9 +2896,19 @@ class HostSystem:
             default=default,
             permissions=permissions,
             existing=existing,
+            sanitize_named_entries=sanitize_named_entries,
         )
+        snapshot_adjustment = None
         adjustment = None
-        if before_mask != after_mask:
+        if has_undeclared_named_entries:
+            snapshot_adjustment = AclSnapshotAdjustment.from_dict(
+                {
+                    "path": str(path),
+                    "before_acl": list(before_acl),
+                    "after_acl": list(after_acl),
+                }
+            )
+        elif before_mask != after_mask:
             adjustment = AclMaskAdjustment(
                 path=path,
                 default=default,
@@ -2804,6 +2924,7 @@ class HostSystem:
             before_acl=before_acl,
             after_acl=after_acl,
             mask_adjustment=adjustment,
+            snapshot_adjustment=snapshot_adjustment,
         )
 
     @staticmethod
@@ -2887,15 +3008,18 @@ class HostSystem:
             raise InstallError("service ACL did not become effective")
         return plan.grant
 
-    def acl_adjustment_state(self, adjustment: AclMaskAdjustment) -> str:
+    def acl_adjustment_state(
+        self,
+        adjustment: AclMaskAdjustment | AclSnapshotAdjustment,
+    ) -> str:
         self._assert_acl_transition_safe(
             adjustment.before_acl,
             adjustment.after_acl,
-            default=adjustment.default,
+            default=(adjustment.default if isinstance(adjustment, AclMaskAdjustment) else False),
         )
         current = self._acl_snapshot(
             self._acl_entries(adjustment.path),
-            default=adjustment.default,
+            default=(adjustment.default if isinstance(adjustment, AclMaskAdjustment) else False),
         )
         if current == adjustment.before_acl:
             return "before"
@@ -2913,7 +3037,12 @@ class HostSystem:
                 plans.append(plan)
             if parent == Path("/shared_work"):
                 break
-        plan = self._plan_acl(path, permissions="r--", default=False)
+        plan = self._plan_acl(
+            path,
+            permissions="r--",
+            default=False,
+            sanitize_named_entries=True,
+        )
         if plan is not None:
             plans.append(plan)
         return tuple(plans)
@@ -2938,21 +3067,24 @@ class HostSystem:
     def remove_acl(
         self,
         grant: AclGrant,
-        mask_adjustment: AclMaskAdjustment | None = None,
+        adjustment: AclMaskAdjustment | AclSnapshotAdjustment | None = None,
         *,
         remove_service_entry: bool = True,
     ) -> None:
         entries = self._acl_entries(grant.path)
         current_acl = self._acl_snapshot(entries, default=grant.default)
         service_key = ("user", SERVICE_USER)
-        if mask_adjustment is not None:
-            if (mask_adjustment.path, mask_adjustment.default) != (
+        if adjustment is not None:
+            adjustment_default = (
+                adjustment.default if isinstance(adjustment, AclMaskAdjustment) else False
+            )
+            if (adjustment.path, adjustment_default) != (
                 grant.path,
                 grant.default,
             ):
-                raise InstallError("ACL mask ledger scope is inconsistent")
+                raise InstallError("ACL adjustment ledger scope is inconsistent")
             before = _acl_snapshot_map(
-                mask_adjustment.before_acl,
+                adjustment.before_acl,
                 allow_empty=grant.default,
             )
             target = dict(before)
@@ -2962,8 +3094,8 @@ class HostSystem:
             if current_acl == target_acl:
                 return
             if current_acl not in {
-                mask_adjustment.before_acl,
-                mask_adjustment.after_acl,
+                adjustment.before_acl,
+                adjustment.after_acl,
             }:
                 raise InstallError("service ACL changed before removal")
         else:
@@ -3750,17 +3882,44 @@ class HostInstaller:
             adjustments[grant] = adjustment
         return adjustments
 
+    @classmethod
+    def _record_snapshot_adjustments(
+        cls,
+        record: dict[str, object] | None,
+    ) -> dict[AclGrant, AclSnapshotAdjustment]:
+        if record is None:
+            return {}
+        raw = record.get("acl_snapshot_adjustments", [])
+        if not isinstance(raw, list):
+            raise InstallError("install record ACL snapshot ledger is invalid")
+        adjustments: dict[AclGrant, AclSnapshotAdjustment] = {}
+        protected_grants = {AclGrant(path) for path in PROTECTED_INPUTS}
+        for value in raw:
+            adjustment = AclSnapshotAdjustment.from_dict(value)
+            grant = AclGrant(adjustment.path)
+            if grant in adjustments or grant not in protected_grants:
+                raise InstallError("install record ACL snapshot ledger is invalid")
+            adjustments[grant] = adjustment
+        return adjustments
+
     @staticmethod
     def _validate_acl_ledgers(
         grants: set[AclGrant],
         adjustments: dict[AclGrant, AclMaskAdjustment],
+        snapshot_adjustments: dict[AclGrant, AclSnapshotAdjustment],
     ) -> None:
         service_key = ("user", SERVICE_USER)
+        if set(adjustments) & set(snapshot_adjustments):
+            raise InstallError("install record ACL ledgers overlap")
         for grant, adjustment in adjustments.items():
             before = _acl_snapshot_map(
                 adjustment.before_acl,
                 allow_empty=grant.default,
             )
+            if service_key not in before and grant not in grants:
+                raise InstallError("install record ACL ledgers are inconsistent")
+        for grant, adjustment in snapshot_adjustments.items():
+            before = _acl_snapshot_map(adjustment.before_acl, allow_empty=False)
             if service_key not in before and grant not in grants:
                 raise InstallError("install record ACL ledgers are inconsistent")
 
@@ -4080,12 +4239,23 @@ class HostInstaller:
         acl_plans = list(acl_plan_by_grant.values())
         grants = self._record_grants(previous_record)
         mask_adjustments = self._record_mask_adjustments(previous_record)
-        self._validate_acl_ledgers(grants, mask_adjustments)
+        snapshot_adjustments = self._record_snapshot_adjustments(previous_record)
+        self._validate_acl_ledgers(grants, mask_adjustments, snapshot_adjustments)
         grants.update(plan.grant for plan in acl_plans if plan.adds_service_entry)
         for plan in acl_plans:
+            snapshot_adjustment = plan.snapshot_adjustment
+            if snapshot_adjustment is not None:
+                previous_snapshot = snapshot_adjustments.get(plan.grant)
+                if previous_snapshot is not None and previous_snapshot != snapshot_adjustment:
+                    raise InstallError("ACL snapshot ledger conflicts with the live baseline")
+                if plan.grant in mask_adjustments:
+                    raise InstallError("ACL adjustment ledgers overlap")
+                snapshot_adjustments[plan.grant] = snapshot_adjustment
             adjustment = plan.mask_adjustment
             if adjustment is None:
                 continue
+            if plan.grant in snapshot_adjustments:
+                raise InstallError("ACL adjustment ledgers overlap")
             previous_adjustment = mask_adjustments.get(plan.grant)
             if previous_adjustment is not None and previous_adjustment != adjustment:
                 raise InstallError("ACL mask ledger conflicts with the live baseline")
@@ -4097,6 +4267,14 @@ class HostInstaller:
                 state == "before" and (live_plan is None or live_plan.mask_adjustment != adjustment)
             ):
                 raise InstallError("ACL mask ledger does not match the live ACL")
+        for grant, adjustment in snapshot_adjustments.items():
+            state = self.system.acl_adjustment_state(adjustment)
+            live_plan = acl_plan_by_grant.get(grant)
+            if state == "drift" or (
+                state == "before"
+                and (live_plan is None or live_plan.snapshot_adjustment != adjustment)
+            ):
+                raise InstallError("ACL snapshot ledger does not match the live ACL")
         previous_fingerprint = (
             previous_record.get("service_key_fingerprint") if previous_record is not None else None
         )
@@ -4174,6 +4352,14 @@ class HostInstaller:
                     for _, adjustment in sorted(
                         mask_adjustments.items(),
                         key=lambda item: (str(item[0].path), item[0].default),
+                    )
+                ]
+            if snapshot_adjustments:
+                value["acl_snapshot_adjustments"] = [
+                    adjustment.to_dict()
+                    for _, adjustment in sorted(
+                        snapshot_adjustments.items(),
+                        key=lambda item: str(item[0].path),
                     )
                 ]
             if legacy_trust_source_sha is not None:
@@ -4613,8 +4799,9 @@ class HostInstaller:
         if not trust_requires_revocation or not trust_ledger_migrated:
             return {"ok": False, "failures": ["trust-ledger-incomplete"]}
         mask_adjustments = self._record_mask_adjustments(record)
+        snapshot_adjustments = self._record_snapshot_adjustments(record)
         grants = self._record_grants(record)
-        self._validate_acl_ledgers(grants, mask_adjustments)
+        self._validate_acl_ledgers(grants, mask_adjustments, snapshot_adjustments)
         self._bind_existing_source(record)
         expected = (
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755),
@@ -4750,6 +4937,9 @@ class HostInstaller:
             if self.system.acl_adjustment_state(adjustment) != "after":
                 namespace = "default" if grant.default else "access"
                 failures.append(f"acl-mask:{namespace}:{grant.path}")
+        for grant, adjustment in snapshot_adjustments.items():
+            if self.system.acl_adjustment_state(adjustment) != "after":
+                failures.append(f"acl-snapshot:access:{grant.path}")
         return {"ok": not failures, "failures": failures}
 
     def uninstall(
@@ -4774,7 +4964,8 @@ class HostInstaller:
         self._bind_existing_source(record)
         grants = self._record_grants(record)
         mask_adjustments = self._record_mask_adjustments(record)
-        self._validate_acl_ledgers(grants, mask_adjustments)
+        snapshot_adjustments = self._record_snapshot_adjustments(record)
+        self._validate_acl_ledgers(grants, mask_adjustments, snapshot_adjustments)
         enabled_linger = self._record_flag(record, "enabled_linger")
         added_operator_memberships = self._record_operator_memberships(record)
         added_docker_membership = self._record_flag(record, "added_docker_membership")
@@ -4895,7 +5086,7 @@ class HostInstaller:
             trust_ledger_removed = not trust_ledger_migrated
             persist_uninstall_record()
 
-        acl_scopes = grants | set(mask_adjustments)
+        acl_scopes = grants | set(mask_adjustments) | set(snapshot_adjustments)
         removed: list[str] = []
         for grant in reversed(
             sorted(
@@ -4905,7 +5096,7 @@ class HostInstaller:
         ):
             self.system.remove_acl(
                 grant,
-                mask_adjustments.get(grant),
+                mask_adjustments.get(grant) or snapshot_adjustments.get(grant),
                 remove_service_entry=grant in grants,
             )
         if enabled_linger:
