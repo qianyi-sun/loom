@@ -70,7 +70,19 @@ def inspect_migration_plan(
     """Inspect one exact linear graph without connecting to a database."""
     policy, policy_digest = _load_policy(policy_path)
     try:
-        directory = ScriptDirectory.from_config(Config(str(alembic_ini)))
+        if (
+            not alembic_ini.is_absolute()
+            or alembic_ini.name != "alembic.ini"
+            or alembic_ini.parent.name != "migrations"
+            or not alembic_ini.is_file()
+        ):
+            raise ValueError
+        config = Config(str(alembic_ini))
+        if config.get_main_option("script_location") != "migrations":
+            raise ValueError
+        config.set_main_option("path_separator", "os")
+        config.set_main_option("script_location", str(alembic_ini.parent))
+        directory = ScriptDirectory.from_config(config)
         heads = tuple(directory.get_heads())
         bases = tuple(directory.get_bases())
         scripts = tuple(directory.walk_revisions(base="base", head="heads"))

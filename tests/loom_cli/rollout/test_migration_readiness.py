@@ -24,6 +24,28 @@ def test_repository_migration_plan_is_linear_and_policy_bound() -> None:
     assert len(result.plan_digest) == 64
 
 
+def test_repository_migration_plan_is_independent_of_process_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
+
+    assert result.head == "0067"
+    assert result.revision_count == 67
+
+
+def test_migration_plan_rejects_noncanonical_script_location(tmp_path: Path) -> None:
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    ini = migrations / "alembic.ini"
+    ini.write_text("[alembic]\nscript_location = ../outside\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="graph is unreadable"):
+        inspect_migration_plan(ini, policy_path=REPO_ROOT / "config/staging-migration-policy.json")
+
+
 def test_policy_head_drift_fails_closed(tmp_path: Path) -> None:
     policy = json.loads((REPO_ROOT / "config/staging-migration-policy.json").read_text())
     policy["expected_head"] = "0065"
