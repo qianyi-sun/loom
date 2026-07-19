@@ -106,6 +106,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
             lambda *_inner: {},
             lambda *_inner: ("rehearsal-exact", "9" * 64),
         ),
+        final_gate_run=lambda *_args: command(),
         read_mutation_epoch=lambda: 9,
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
     )

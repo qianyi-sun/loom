@@ -402,12 +402,14 @@ means a published successful `final.protected-apply` is never repeated after a
 worker crash; an incomplete or failed execution cannot be treated as resume
 authority.
 
-An attested worker may not fall back to the historical 18-step driver. Until
-the installed final-action source supplies the complete six-check mapping, the
-attempt fails with `final.protected-apply.runner-unavailable@final-only` and
-clears its pending active pointer. This fail-closed transition prevents a
-partially migrated installation from rebuilding images, rerendering manifests,
-or rediscovering an early predicate after backup.
+An attested worker may not fall back to the historical 18-step driver. The
+production worker composition always injects the six-check `FinalGateRunner`;
+an unavailable composition fails with
+`final.protected-apply.runner-unavailable@final-only`, while a missing or
+invalid installed helper fails its fixed command boundary without invoking a
+protected action. These fail-closed transitions prevent a partially migrated
+installation from rebuilding images, rerendering manifests, or rediscovering
+an early predicate after backup.
 
 Before those actions can run, `FinalGatePlan` joins the driver envelope, the
 digest-addressed attestation, and the build-once preflight artifact publication

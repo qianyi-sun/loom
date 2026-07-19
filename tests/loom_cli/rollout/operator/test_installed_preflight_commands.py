@@ -33,6 +33,17 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
     commands.git(["git", "status", "--porcelain=v1"])
     commands.readonly_json(("kubectl", "create", "--raw", "/review"), b'{"kind":"x"}')
     commands.manifest_server_dry_run("apiVersion: v1\nkind: ConfigMap\n")
+    commands.final_gate_helper(
+        ("/usr/local/libexec/loom-staging-rollout-final-gate", "execute"),
+        {
+            "HOME": "/var/lib/loom-staging-rollout",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+            "XDG_RUNTIME_DIR": "/run/user/501",
+        },
+        3600,
+    )
 
     assert calls[0]["cwd"] == config.runner_repo
     assert calls[1]["input"] == '{"kind":"x"}'
@@ -42,6 +53,7 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
     }
     assert calls[2]["argv"][-2:] == ("-f", "-")
     assert calls[2]["input"] == "apiVersion: v1\nkind: ConfigMap\n"
+    assert calls[3]["timeout"] == 3600
 
 
 def test_image_and_rehearsal_adapters_reject_authority_drift(tmp_path: Path) -> None:

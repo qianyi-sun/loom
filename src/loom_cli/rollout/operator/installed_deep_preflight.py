@@ -10,6 +10,7 @@ from datetime import datetime
 from loom.data_lifecycle import StagingCapacity
 from loom_cli.rollout.browser_runtime_readiness import CommandRunner as BrowserCommandRunner
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
+from loom_cli.rollout.final_gate_command_runner import CommandRunner as FinalGateCommandRunner
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.image_readiness import DockerRunner as ImageDockerRunner
 from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
@@ -72,6 +73,7 @@ class InstalledDeepPreflightComposition:
     baseline_probe_factory: Callable[[int], Mapping[str, ReadonlyProbe]]
     route: str
     rehearsal_factory: RehearsalFactory
+    final_gate_run: FinalGateCommandRunner
     read_mutation_epoch: Callable[[], int]
     now: Callable[[], datetime]
     importer: ModuleImporter = importlib.import_module

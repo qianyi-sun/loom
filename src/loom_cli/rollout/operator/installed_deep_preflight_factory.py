@@ -201,6 +201,7 @@ def build_installed_deep_preflight_composition(
         baseline_probe_factory=readonly.baseline_probes,
         route=route,
         rehearsal_factory=rehearsal_factory,
+        final_gate_run=commands.final_gate_helper,
         read_mutation_epoch=readonly.mutation_epoch,
         now=now,
     )

@@ -134,6 +134,23 @@ class InstalledPreflightCommands:
             raise ValueError("rehearsal helper execution authority is invalid")
         return self._execute(argv, environment=environment, timeout=timeout)
 
+    def final_gate_helper(
+        self,
+        argv: Sequence[str],
+        environment: Mapping[str, str],
+        timeout: int,
+    ) -> CommandResult:
+        expected = {
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "PATH",
+            "XDG_RUNTIME_DIR",
+        }
+        if set(environment) != expected or not 1 <= timeout <= 3600:
+            raise ValueError("final gate helper execution authority is invalid")
+        return self._execute(argv, environment=environment, timeout=timeout)
+
     def _execute(
         self,
         argv: Sequence[str],
@@ -148,7 +165,7 @@ class InstalledPreflightCommands:
             not command
             or any(not isinstance(item, str) or not item or "\x00" in item for item in command)
             or (cwd is not None and (not cwd.is_absolute() or ".." in cwd.parts))
-            or not 1 <= timeout <= 1800
+            or not 1 <= timeout <= 3600
         ):
             raise ValueError("installed preflight command is invalid")
         child = dict(self.child_environment if environment is None else environment)

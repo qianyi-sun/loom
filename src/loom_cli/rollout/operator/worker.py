@@ -604,6 +604,8 @@ def _run(
 
 
 def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> WorkerDependencies:
+    from .final_gate_action_source import FinalGateActionSource
+    from .final_gate_runner import FinalGateRunner
     from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
     from .installed_detached_preflight import build_installed_detached_preflight_runner
 
@@ -623,13 +625,14 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         service_gid = pwd.getpwnam(config.service_user).pw_gid
     except (KeyError, OSError) as exc:
         raise ValueError("worker service account is unavailable") from exc
-    deep_preflight = build_installed_deep_preflight_composition(
+    composition = build_installed_deep_preflight_composition(
         config,
         service_uid=service_uid,
         service_gid=service_gid,
         store=store,
         now=clock,
-    ).authority()
+    )
+    deep_preflight = composition.authority()
     detached_preflight = build_installed_detached_preflight_runner(
         config,
         service_uid=service_uid,
@@ -670,6 +673,22 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             expected_coverage_digest=envelope.preflight_coverage_sha256,
         )
 
+    final_actions = FinalGateActionSource(
+        request_store=store,
+        artifact_store=composition.artifact_store,
+        state_root=config.state_root,
+        service_uid=service_uid,
+        run=composition.final_gate_run,
+    )
+    final_gates = FinalGateRunner(
+        attestation_store=composition.attestation_store,
+        actions_factory=final_actions,
+        read_mutation_epoch=composition.read_mutation_epoch,
+        now=clock,
+        state_root=config.state_root,
+        service_uid=service_uid,
+    )
+
     return WorkerDependencies(
         store=store,
         lifecycle=lifecycle,
@@ -699,6 +718,7 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         ),
         read_driver_failure=lambda envelope: _read_driver_failure(config, envelope),
         final_admission=final_admission,
+        run_final_gates=final_gates,
     )
 
 
