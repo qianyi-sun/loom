@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from loom_cli.rollout.preflight_contract import MutationClass, StageCapability
 from loom_cli.rollout.preflight_coverage import (
     DEFAULT_COVERAGE_MANIFEST,
     load_coverage_manifest,
@@ -65,3 +66,16 @@ def test_known_late_failures_are_shifted_before_final_only() -> None:
         "rehearsal.browser",
     ):
         assert entries[check_id].tier < 4
+
+
+def test_systemd_activation_is_classified_as_isolated_rehearsal() -> None:
+    entries = {entry.check_id: entry for entry in load_coverage_manifest().checks}
+
+    manager = entries["systemd.user-manager"]
+    activation = entries["rehearsal.systemd-launch"]
+    assert manager.tier == 0
+    assert manager.mutation_class is MutationClass.NONE
+    assert activation.tier == 3
+    assert activation.stage is StageCapability.ISOLATED_REHEARSAL
+    assert activation.mutation_class is MutationClass.ISOLATED
+    assert "rehearsal.systemd-launch" in entries["rehearsal.cleanup"].dependencies
