@@ -203,6 +203,15 @@ class PreflightRehearsal:
             "rehearsal_digest": self.rehearsal_digest,
         }
 
+    def to_record(self) -> dict[str, object]:
+        return {
+            "coverage_digest": self.coverage_digest,
+            "executions": [execution.to_dict() for execution in self.executions],
+            "registry_digest": self.registry_digest,
+            "rehearsal_digest": self.rehearsal_digest,
+            "schema_version": 1,
+        }
+
     def require_integrity(self) -> None:
         try:
             executions_round_trip = all(
@@ -258,6 +267,38 @@ class PreflightRehearsal:
             ),
         )
         rehearsal.require_integrity()
+        return rehearsal
+
+    @classmethod
+    def from_record(cls, data: Mapping[str, object]) -> PreflightRehearsal:
+        expected = {
+            "coverage_digest",
+            "executions",
+            "registry_digest",
+            "rehearsal_digest",
+            "schema_version",
+        }
+        raw = data.get("executions")
+        if (
+            set(data) != expected
+            or data.get("schema_version") != 1
+            or not isinstance(data.get("registry_digest"), str)
+            or not isinstance(data.get("coverage_digest"), str)
+            or not isinstance(data.get("rehearsal_digest"), str)
+            or not isinstance(raw, list)
+            or not raw
+            or not all(isinstance(item, Mapping) for item in raw)
+        ):
+            raise ValueError("preflight rehearsal record is invalid")
+        rehearsal = cls.from_executions(
+            registry_digest=cast(str, data["registry_digest"]),
+            coverage_digest=cast(str, data["coverage_digest"]),
+            executions=tuple(
+                CheckExecution.from_dict(cast(Mapping[str, object], item)) for item in raw
+            ),
+        )
+        if rehearsal.rehearsal_digest != data["rehearsal_digest"]:
+            raise ValueError("preflight rehearsal record digest is invalid")
         return rehearsal
 
 

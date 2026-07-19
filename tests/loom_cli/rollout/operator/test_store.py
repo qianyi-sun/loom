@@ -356,6 +356,12 @@ def test_preflight_request_backup_and_promotion_are_separate_immutable_authoriti
     )
 
     job_path = store.publish_preflight_backup_job(job)
+    rehearsal = PreflightPipeline(
+        registry=_registry(),
+        store=PreflightAttestationStore(tmp_path / "attestations"),
+        now=lambda: datetime(2026, 7, 13, 20, tzinfo=UTC),
+    ).rehearse(context=_context(_registry()), assessment=assessment)
+    rehearsal_path = store.publish_preflight_rehearsal(REQUEST_ID, rehearsal)
     state = store.read_preflight_backup_job_state(REQUEST_ID)
     running = transition_backup_job(
         state,
@@ -368,6 +374,8 @@ def test_preflight_request_backup_and_promotion_are_separate_immutable_authoriti
     assert store.read_preflight_request(REQUEST_ID) == preliminary
     assert job_path.parent.name == "preflight-backup"
     assert store.read_preflight_backup_job(REQUEST_ID) == job
+    assert rehearsal_path.name == "rehearsal.json"
+    assert store.read_preflight_rehearsal(REQUEST_ID) == rehearsal
     assert store.read_preflight_backup_job_state(REQUEST_ID) == running
     store.append_event(make_event(event="backup_started"))
     assert store.read_events(REQUEST_ID)[-1].event == "backup_started"

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from loom_cli.rollout.preflight_pipeline import PreflightAssessment
+    from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightRehearsal
 
 from .backup_job import (
     BackupJobEnvelope,
@@ -532,6 +532,40 @@ class RequestStore:
         ):
             raise RequestStoreError("preflight assessment does not match request authority")
         return assessment
+
+    def publish_preflight_rehearsal(
+        self,
+        request_id: str,
+        rehearsal: PreflightRehearsal,
+    ) -> Path:
+        """Publish exact Tier 0-3 rehearsal evidence before lease attestation."""
+        preliminary = self.read_preflight_request(request_id)
+        if (
+            not rehearsal.passed
+            or rehearsal.registry_digest != preliminary.preflight_registry_sha256
+            or rehearsal.coverage_digest != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("preflight rehearsal does not match request authority")
+        directory = self._require_preflight_backup_job_directory(request_id)
+        return _publish_immutable(directory / "rehearsal.json", rehearsal.to_record())
+
+    def read_preflight_rehearsal(self, request_id: str) -> PreflightRehearsal:
+        from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
+
+        directory = self._require_preflight_backup_job_directory(request_id)
+        try:
+            rehearsal = PreflightRehearsal.from_record(
+                _read_json(directory / "rehearsal.json", "preflight rehearsal")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        preliminary = self.read_preflight_request(request_id)
+        if (
+            rehearsal.registry_digest != preliminary.preflight_registry_sha256
+            or rehearsal.coverage_digest != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("preflight rehearsal does not match request authority")
+        return rehearsal
 
     def promote_preflight_request(self, request: RolloutRequest) -> Path:
         """Publish final Tier 0-3 authority without replacing preliminary evidence."""

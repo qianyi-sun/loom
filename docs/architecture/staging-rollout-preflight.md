@@ -86,6 +86,16 @@ must pass; and the terminal cleanup must be verified. The report digest binds
 all Tier 3 implementation, input, evidence, and journal digests together with
 the critical-checkpoint evidence digest.
 
+The complete Tier 3 rehearsal is published once as
+`preflight-backup/rehearsal.json` before restore evidence is issued. Reads
+strictly reconstruct every typed execution, recompute the rehearsal digest, and
+reject replacement or drift. `RehearsalLeaseAttestor` is the only coordinator
+bridge from that record to restore proof and then to the final attestation: it
+first persists the passing rehearsal, derives the exact restore proof, later
+re-reads the same immutable record, and binds the newly published backup lease.
+This makes process restart or worker handoff unable to substitute a second
+rehearsal, an operator assertion, or a pre-existing lease.
+
 The resulting attestation binds the restore-verified lease ID and digest, the
 checkpoint manifest and component-set digests, DB snapshot identity, schema
 revision, and immutable-object inventory root. Pre-backup reuse evidence cannot

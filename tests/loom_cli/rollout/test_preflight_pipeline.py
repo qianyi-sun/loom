@@ -204,6 +204,7 @@ def test_rehearsal_and_attestation_are_separate_restore_authority_steps(
     rehearsal = pipeline.rehearse(context=context, assessment=assessment)
 
     assert rehearsal.passed
+    assert type(rehearsal).from_record(rehearsal.to_record()) == rehearsal
     assert {execution.tier for execution in rehearsal.executions} == {0, 1, 2, 3}
     assert len(rehearsal.rehearsal_digest) == 64
     assert not store.root.exists()
@@ -217,6 +218,11 @@ def test_rehearsal_and_attestation_are_separate_restore_authority_steps(
             rehearsal=replace(rehearsal, rehearsal_digest="0" * 64),
             bindings=_bindings(),
         )
+
+    record = rehearsal.to_record()
+    record["rehearsal_digest"] = "0" * 64
+    with pytest.raises(ValueError, match="record digest"):
+        type(rehearsal).from_record(record)
 
 
 def test_tier_two_assessment_rejects_input_drift_before_attestation(tmp_path: Path) -> None:
