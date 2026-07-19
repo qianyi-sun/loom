@@ -56,7 +56,7 @@ def test_browser_runtime_launches_exact_image_without_network(tmp_path: Path) ->
         return subprocess.CompletedProcess(
             argv,
             0,
-            json.dumps({"runtime": "ready", "schema_version": 3}, separators=(",", ":")),
+            json.dumps({"runtime": "ready", "schema_version": 4}, separators=(",", ":")),
             "",
         )
 
@@ -75,7 +75,7 @@ def test_browser_runtime_launches_exact_image_without_network(tmp_path: Path) ->
     assert _artifact().descriptors[BROWSER_IMAGE].image_id in command
     assert token.read_text() not in " ".join(command)
     assert evidence.report_schema_digest == browser_report_schema_digest()
-    assert BROWSER_REPORT_SCHEMA_VERSION == 3
+    assert BROWSER_REPORT_SCHEMA_VERSION == 4
 
 
 def test_browser_runtime_rejects_unsafe_token_before_docker(tmp_path: Path) -> None:

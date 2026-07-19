@@ -65,7 +65,7 @@ def test_browser_acceptance_runs_hardened_candidate_image(
         commands.append(command)
         envelope = ctx.request_envelope_path.read_bytes()
         report = {
-            "schema_version": 3,
+            "schema_version": 4,
             "status": "pass",
             "failure_code": None,
             "request_id": ctx.request_id,

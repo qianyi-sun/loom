@@ -157,6 +157,7 @@ def _report_is_valid(
             "request_envelope_sha256": envelope_sha256,
             "resolved_sha": ctx.resolved_sha,
         }
+        and "rehearsal_binding" not in payload
         and isinstance(cleanup, dict)
         and cleanup.get("logout_status") == 204
         and cleanup.get("auth_me_after_logout_status") == 401

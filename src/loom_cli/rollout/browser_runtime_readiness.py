@@ -14,7 +14,7 @@ from typing import Protocol
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.image_readiness import BROWSER_IMAGE, ImageArtifactSet
 
-BROWSER_REPORT_SCHEMA_VERSION = 3
+BROWSER_REPORT_SCHEMA_VERSION = 4
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RUNTIME_OUTPUT = {"runtime": "ready", "schema_version": BROWSER_REPORT_SCHEMA_VERSION}
 _NODE_PROBE = (
@@ -74,6 +74,11 @@ def browser_report_schema_digest() -> str:
             "request_id",
             "attempt_number",
             "request_envelope_sha256",
+            "resolved_sha",
+        ],
+        "rehearsal_binding": [
+            "plan_sha256",
+            "isolation_id",
             "resolved_sha",
         ],
         "schema_version": BROWSER_REPORT_SCHEMA_VERSION,

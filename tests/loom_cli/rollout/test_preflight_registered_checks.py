@@ -1540,7 +1540,7 @@ def test_registered_browser_runtime_binds_exact_image_token_and_schema(tmp_path:
         return subprocess.CompletedProcess(
             argv,
             0,
-            json.dumps({"runtime": "ready", "schema_version": 3}, separators=(",", ":")),
+            json.dumps({"runtime": "ready", "schema_version": 4}, separators=(",", ":")),
             "",
         )
 

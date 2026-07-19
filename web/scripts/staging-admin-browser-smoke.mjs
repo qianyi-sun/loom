@@ -30,6 +30,7 @@ const ADMIN_TABS = Object.freeze([
 const SHA_RE = /^[0-9a-f]{40}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const ROLLOUT_REQUEST_RE = /^req-[0-9a-f]{16}$/;
+const REHEARSAL_ID_RE = /^[0-9a-f]{24}$/;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$/;
@@ -87,13 +88,16 @@ function requiredValue(argv, index) {
   return value;
 }
 
-export function canonicalStagingRoute(value) {
+export function canonicalStagingRoute(value, rehearsalIsolationId = "") {
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
     throw new SafeSmokeError("invalid_route", "route URL is malformed");
   }
+  const expectedPath = rehearsalIsolationId
+    ? `/dev/rehearsal/${rehearsalIsolationId}`
+    : "/dev";
   if (
     parsed.origin !== "https://yylx.world" ||
     parsed.username ||
@@ -101,14 +105,16 @@ export function canonicalStagingRoute(value) {
     parsed.port ||
     parsed.search ||
     parsed.hash ||
-    !["/dev", "/dev/"].includes(parsed.pathname)
+    ![expectedPath, `${expectedPath}/`].includes(parsed.pathname)
   ) {
     throw new SafeSmokeError(
       "invalid_route",
-      "route must be the canonical https://yylx.world/dev staging route",
+      "route must match the exact canonical staging binding",
     );
   }
-  return CANONICAL_STAGING_ROUTE;
+  return rehearsalIsolationId
+    ? `${CANONICAL_STAGING_ROUTE}/rehearsal/${rehearsalIsolationId}`
+    : CANONICAL_STAGING_ROUTE;
 }
 
 export function parseArgs(argv) {
@@ -121,6 +127,9 @@ export function parseArgs(argv) {
     rolloutRequestId: "",
     rolloutAttemptNumber: 0,
     requestEnvelopeSha256: "",
+    rehearsalPlanSha256: "",
+    rehearsalIsolationId: "",
+    emitSanitizedReport: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     insecureForKind: false,
     viewport: { ...DEFAULT_VIEWPORT },
@@ -135,6 +144,8 @@ export function parseArgs(argv) {
     "--rollout-request-id",
     "--rollout-attempt-number",
     "--request-envelope-sha256",
+    "--rehearsal-plan-sha256",
+    "--rehearsal-isolation-id",
     "--timeout-ms",
   ]);
   const seen = new Set();
@@ -154,6 +165,17 @@ export function parseArgs(argv) {
       }
       seen.add(argument);
       options.insecureForKind = true;
+      continue;
+    }
+    if (argument === "--emit-sanitized-report") {
+      if (seen.has(argument)) {
+        throw new SafeSmokeError(
+          "invalid_arguments",
+          "arguments may not be repeated",
+        );
+      }
+      seen.add(argument);
+      options.emitSanitizedReport = true;
       continue;
     }
     if (!valueArguments.has(argument)) {
@@ -187,6 +209,12 @@ export function parseArgs(argv) {
     if (argument === "--request-envelope-sha256") {
       options.requestEnvelopeSha256 = value;
     }
+    if (argument === "--rehearsal-plan-sha256") {
+      options.rehearsalPlanSha256 = value;
+    }
+    if (argument === "--rehearsal-isolation-id") {
+      options.rehearsalIsolationId = value;
+    }
     if (argument === "--timeout-ms") options.timeoutMs = Number(value);
   }
 
@@ -196,41 +224,70 @@ export function parseArgs(argv) {
     !options.expectedDeployedSha ||
     !options.adminTokenSource ||
     !options.username ||
-    !options.reportPath ||
-    !options.rolloutRequestId ||
-    !options.rolloutAttemptNumber ||
-    !options.requestEnvelopeSha256
+    !options.reportPath
   ) {
     throw new SafeSmokeError(
       "invalid_arguments",
-      "route, deployed SHA, token source, username, report, rollout request, " +
-        "attempt, and envelope digest are required",
+      "route, deployed SHA, token source, username, and report are required",
     );
   }
-  options.route = canonicalStagingRoute(options.route);
   if (!SHA_RE.test(options.expectedDeployedSha)) {
     throw new SafeSmokeError(
       "invalid_deployed_identity",
       "deployed SHA must be 40 lowercase hexadecimal characters",
     );
   }
-  if (!ROLLOUT_REQUEST_RE.test(options.rolloutRequestId)) {
+  const hasRolloutBinding = Boolean(
+    options.rolloutRequestId ||
+      options.rolloutAttemptNumber ||
+      options.requestEnvelopeSha256,
+  );
+  const hasRehearsalBinding = Boolean(
+    options.rehearsalPlanSha256 || options.rehearsalIsolationId,
+  );
+  if (hasRolloutBinding === hasRehearsalBinding) {
+    throw new SafeSmokeError(
+      "invalid_stage_binding",
+      "exactly one rollout or rehearsal binding is required",
+    );
+  }
+  if (hasRolloutBinding && !ROLLOUT_REQUEST_RE.test(options.rolloutRequestId)) {
     throw new SafeSmokeError(
       "invalid_rollout_binding",
       "rollout request id must use the broker request format",
     );
   }
-  if (
+  if (hasRolloutBinding && (
     !Number.isInteger(options.rolloutAttemptNumber) ||
     options.rolloutAttemptNumber < 1 ||
     options.rolloutAttemptNumber > 1000 ||
     !SHA256_RE.test(options.requestEnvelopeSha256)
-  ) {
+  )) {
     throw new SafeSmokeError(
       "invalid_rollout_binding",
       "rollout attempt and envelope digest are invalid",
     );
   }
+  if (hasRehearsalBinding && (
+    !SHA256_RE.test(options.rehearsalPlanSha256) ||
+    !REHEARSAL_ID_RE.test(options.rehearsalIsolationId)
+  )) {
+    throw new SafeSmokeError(
+      "invalid_rehearsal_binding",
+      "rehearsal plan and isolation identities are invalid",
+    );
+  }
+  if (options.emitSanitizedReport && !hasRehearsalBinding) {
+    throw new SafeSmokeError(
+      "invalid_report_output",
+      "sanitized stdout report is restricted to isolated rehearsal",
+    );
+  }
+  options.bindingMode = hasRehearsalBinding ? "rehearsal" : "rollout";
+  options.route = canonicalStagingRoute(
+    options.route,
+    options.rehearsalIsolationId,
+  );
   const username = options.username.trim().toLowerCase();
   if (!USERNAME_RE.test(username)) {
     throw new SafeSmokeError(
@@ -1082,7 +1139,8 @@ export async function executeSmoke(
     stdin,
   });
   const playwright = playwrightModule ?? (await import("@playwright/test"));
-  const requestId = options.rolloutRequestId;
+  const requestId = options.rolloutRequestId ||
+    `rehearsal-${options.rehearsalIsolationId}`;
   const checks = initialChecks();
   const cleanup = {
     logout_status: null,
@@ -1263,8 +1321,24 @@ export async function executeSmoke(
   ) {
     failureCode ??= "cleanup_failed";
   }
+  const binding = options.bindingMode === "rehearsal"
+    ? {
+        rehearsal_binding: {
+          plan_sha256: options.rehearsalPlanSha256,
+          isolation_id: options.rehearsalIsolationId,
+          resolved_sha: options.expectedDeployedSha,
+        },
+      }
+    : {
+        rollout_binding: {
+          request_id: options.rolloutRequestId,
+          attempt_number: options.rolloutAttemptNumber,
+          request_envelope_sha256: options.requestEnvelopeSha256,
+          resolved_sha: options.expectedDeployedSha,
+        },
+      };
   const report = {
-    schema_version: 3,
+    schema_version: 4,
     status: reportStatus(checks, cleanup, failureCode),
     deployment_identity: {
       expected_deployed_sha: options.expectedDeployedSha,
@@ -1275,12 +1349,7 @@ export async function executeSmoke(
     },
     route: options.route,
     request_id: requestId,
-    rollout_binding: {
-      request_id: options.rolloutRequestId,
-      attempt_number: options.rolloutAttemptNumber,
-      request_envelope_sha256: options.requestEnvelopeSha256,
-      resolved_sha: options.expectedDeployedSha,
-    },
+    ...binding,
     target: {
       username: options.username,
       user_id: targetUserId,
@@ -1313,7 +1382,8 @@ const USAGE =
   "--username <platform-admin> --report <sanitized.json> " +
   "--rollout-request-id <req-16hex> --rollout-attempt-number <n> " +
   "--request-envelope-sha256 <64-hex> " +
-  "[--timeout-ms <milliseconds>] [--insecure-for-kind]";
+  "OR --rehearsal-plan-sha256 <64-hex> --rehearsal-isolation-id <24-hex> " +
+  "[--emit-sanitized-report] [--timeout-ms <milliseconds>] [--insecure-for-kind]";
 
 async function main() {
   let options;
@@ -1325,15 +1395,33 @@ async function main() {
     }
     const report = await executeSmoke(options);
     await writeReport(options.reportPath, report);
-    process.stdout.write(
-      `${JSON.stringify({ status: report.status, report: options.reportPath })}\n`,
-    );
+    process.stdout.write(`${JSON.stringify(
+      options.emitSanitizedReport
+        ? report
+        : { status: report.status, report: options.reportPath },
+    )}\n`);
     process.exitCode = report.status === "pass" ? 0 : 1;
   } catch (error) {
     const code = error instanceof SafeSmokeError ? error.code : "execution_failed";
     if (options?.reportPath) {
+      const failureBinding = options.bindingMode === "rehearsal"
+        ? {
+            rehearsal_binding: {
+              plan_sha256: options.rehearsalPlanSha256,
+              isolation_id: options.rehearsalIsolationId,
+              resolved_sha: options.expectedDeployedSha,
+            },
+          }
+        : {
+            rollout_binding: {
+              request_id: options.rolloutRequestId,
+              attempt_number: options.rolloutAttemptNumber,
+              request_envelope_sha256: options.requestEnvelopeSha256,
+              resolved_sha: options.expectedDeployedSha,
+            },
+          };
       const failure = sanitizeReportValue({
-        schema_version: 3,
+        schema_version: 4,
         status: "fail",
         deployment_identity: {
           expected_deployed_sha: options.expectedDeployedSha,
@@ -1341,16 +1429,14 @@ async function main() {
           matched: false,
         },
         route: options.route,
-        rollout_binding: {
-          request_id: options.rolloutRequestId,
-          attempt_number: options.rolloutAttemptNumber,
-          request_envelope_sha256: options.requestEnvelopeSha256,
-          resolved_sha: options.expectedDeployedSha,
-        },
+        ...failureBinding,
         target: { username: options.username },
         failure_code: code,
       });
       await writeReport(options.reportPath, failure).catch(() => {});
+      if (options.emitSanitizedReport) {
+        process.stdout.write(`${JSON.stringify(failure)}\n`);
+      }
     }
     process.stderr.write(`${code}: staging admin browser smoke failed safely\n`);
     process.exitCode = 2;

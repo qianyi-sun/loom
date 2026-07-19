@@ -26,6 +26,8 @@ const RAW_ADMIN_TOKEN = `loom_admin_${"A".repeat(43)}`;
 const DEPLOYED_SHA = "a".repeat(40);
 const ROLLOUT_REQUEST_ID = "req-1111111111111111";
 const ENVELOPE_SHA256 = "b".repeat(64);
+const REHEARSAL_PLAN_SHA256 = "c".repeat(64);
+const REHEARSAL_ID = "d".repeat(24);
 const originalCi = process.env.CI;
 const originalGithubActions = process.env.GITHUB_ACTIONS;
 
@@ -48,6 +50,21 @@ function validArgs(tokenSource = "file:/run/secrets/admin-token") {
     "--request-envelope-sha256",
     ENVELOPE_SHA256,
   ];
+}
+
+function rehearsalArgs() {
+  const args = validArgs();
+  args.splice(args.indexOf("--rollout-request-id"), 6);
+  args[args.indexOf("--route") + 1] =
+    `https://yylx.world/dev/rehearsal/${REHEARSAL_ID}`;
+  args.push(
+    "--rehearsal-plan-sha256",
+    REHEARSAL_PLAN_SHA256,
+    "--rehearsal-isolation-id",
+    REHEARSAL_ID,
+    "--emit-sanitized-report",
+  );
+  return args;
 }
 
 afterEach(() => {
@@ -74,6 +91,34 @@ describe("staging admin browser smoke arguments", () => {
       requestEnvelopeSha256: ENVELOPE_SHA256,
       insecureForKind: true,
     });
+  });
+
+  it("accepts an exact isolated rehearsal binding", () => {
+    const options = parseArgs(rehearsalArgs());
+    expect(options).toMatchObject({
+      bindingMode: "rehearsal",
+      rehearsalPlanSha256: REHEARSAL_PLAN_SHA256,
+      rehearsalIsolationId: REHEARSAL_ID,
+      route: `https://yylx.world/dev/rehearsal/${REHEARSAL_ID}`,
+      emitSanitizedReport: true,
+    });
+  });
+
+  it("rejects mixed, partial, and unbound rehearsal routes", () => {
+    expect(() =>
+      parseArgs([...validArgs(), "--rehearsal-plan-sha256", REHEARSAL_PLAN_SHA256]),
+    ).toThrowError("exactly one rollout or rehearsal binding is required");
+    const partial = rehearsalArgs();
+    partial.splice(partial.indexOf("--rehearsal-isolation-id"), 2);
+    expect(() => parseArgs(partial)).toThrowError(
+      "rehearsal plan and isolation identities are invalid",
+    );
+    const wrongRoute = rehearsalArgs();
+    wrongRoute[wrongRoute.indexOf("--route") + 1] =
+      `https://yylx.world/dev/rehearsal/${"e".repeat(24)}`;
+    expect(() => parseArgs(wrongRoute)).toThrowError(
+      "route must match the exact canonical staging binding",
+    );
   });
 
   it.each(["file:/run/secrets/admin-token", "-"])(

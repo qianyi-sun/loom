@@ -292,6 +292,13 @@ derives one in-namespace `admin-token` key from the validated singleton admin
 TOML for the browser Job; the raw value stays inside the sensitive apply
 artifact and is never written to the rehearsal plan or evidence.
 
+Browser report schema v4 has two mutually exclusive bindings. Protected final
+acceptance retains the broker request/attempt/envelope binding; Tier 3 instead
+binds the rehearsal plan digest, isolation ID, and resolved candidate SHA. The
+script rejects mixed or partial modes, and only isolated rehearsal may emit the
+complete sanitized report on stdout for capture from a terminal Kubernetes
+Job. Final rollout continues to publish its private report file only.
+
 Tier 3 is therefore the first stage after the request-specific backup worker
 has published a restore-verified lease. The pre-backup assessment alone is
 never launch authority; only the complete Tier 0–3 attestation can be promoted
