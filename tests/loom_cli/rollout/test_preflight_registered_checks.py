@@ -13,6 +13,7 @@ import pytest
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_digest
 from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
+from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS, FinalGateResult
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
@@ -47,6 +48,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_credentials_metadata_check,
     build_docker_runtime_check,
+    build_final_gate_checks,
     build_gb10_host_readiness_check,
     build_gb10_shared_mount_check,
     build_gb10_ssh_topology_check,
@@ -1534,3 +1536,49 @@ def test_registered_rehearsal_runs_exact_isolated_journaled_actions() -> None:
         {CheckOperation.PROBE, CheckOperation.APPLY, CheckOperation.VERIFY} <= set(check.operations)
         for check in checks
     )
+
+
+def test_registered_final_gates_expose_only_declared_protected_apply() -> None:
+    def result(check_id: str, operation: CheckOperation) -> FinalGateResult:
+        return FinalGateResult(
+            check_id=check_id,
+            operation=operation,
+            candidate_sha="1" * 40,
+            attestation_digest="2" * 64,
+            observed_epoch=9 if operation is CheckOperation.APPLY else 8,
+            evidence_digest=hashlib.sha256(f"{check_id}:{operation.value}".encode()).hexdigest(),
+            protected_mutation=bool(
+                check_id == "final.protected-apply" and operation is CheckOperation.APPLY
+            ),
+            blockers={},
+        )
+
+    checks = build_final_gate_checks(
+        {
+            check_id: lambda operation, check_id=check_id: result(check_id, operation)
+            for check_id in FINAL_CHECK_IDS
+        },
+        candidate_sha="1" * 40,
+        attestation_digest="2" * 64,
+        mutation_epoch=8,
+    )
+    context = CheckContext(
+        {
+            "candidate.sha": "1" * 40,
+            "preflight.attestation.sha256": "2" * 64,
+            "staging.mutation-epoch": 8,
+        }
+    )
+    by_id = {check.spec.check_id: check for check in checks}
+    assert set(by_id) == set(FINAL_CHECK_IDS)
+    assert all(check.spec.stage is StageCapability.FINAL_ONLY for check in checks)
+    assert by_id["final.protected-apply"].spec.mutation_class is MutationClass.PROTECTED_STAGING
+    assert all(
+        check.spec.mutation_class is MutationClass.NONE
+        for check_id, check in by_id.items()
+        if check_id != "final.protected-apply"
+    )
+    probe = by_id["final.protected-apply"].operations[CheckOperation.PROBE](context)
+    applied = by_id["final.protected-apply"].operations[CheckOperation.APPLY](context)
+    assert probe.passed and probe.evidence["protected-mutation"] is False
+    assert applied.passed and applied.evidence["protected-mutation"] is True

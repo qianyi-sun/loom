@@ -25,6 +25,11 @@ from loom_cli.rollout.credential_authority import (
 )
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
+from loom_cli.rollout.final_gate_readiness import (
+    FinalGateAction,
+    FinalGateResult,
+    FinalGateSession,
+)
 from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
     GB10SharedMountReadiness,
@@ -2116,6 +2121,171 @@ def _empty_rehearsal_probe() -> CheckProbe:
     )
 
 
+def build_final_gate_checks(
+    actions: Mapping[str, FinalGateAction],
+    *,
+    candidate_sha: str,
+    attestation_digest: str,
+    mutation_epoch: int,
+) -> tuple[RegisteredCheck, ...]:
+    """Build the complete final-only gate chain from shared implementations."""
+    session = FinalGateSession(
+        actions,
+        candidate_sha=candidate_sha,
+        attestation_digest=attestation_digest,
+        mutation_epoch=mutation_epoch,
+    )
+    bindings = {
+        "candidate.sha": candidate_sha,
+        "preflight.attestation.sha256": attestation_digest,
+        "staging.mutation-epoch": mutation_epoch,
+    }
+    dependencies = {
+        "final.protected-apply": ("rehearsal.cleanup",),
+        "final.convergence": ("final.protected-apply",),
+        "final.drift": ("final.convergence",),
+        "final.smoke": ("final.drift", "rehearsal.api-smoke"),
+        "final.browser": ("final.smoke", "rehearsal.browser"),
+        "final.summary": ("final.browser",),
+    }
+    failure_codes = {
+        "final.protected-apply": "final.protected-apply.failed",
+        "final.convergence": "final.convergence.failed",
+        "final.drift": "final.attestation-drift",
+        "final.smoke": "final.smoke.failed",
+        "final.browser": "final.browser.failed",
+        "final.summary": "final.summary.incomplete",
+    }
+    justifications = {
+        "final.protected-apply": (
+            "Exact protected staging convergence necessarily mutates the protected namespace "
+            "after rehearsal."
+        ),
+        "final.convergence": (
+            "Only the protected live namespace can prove its final observed resource versions "
+            "and convergence."
+        ),
+        "final.drift": (
+            "The post-apply observation must bind the attestation to the protected live state "
+            "after mutation."
+        ),
+        "final.smoke": (
+            "The protected route and live data path cannot be proven by an isolated rehearsal "
+            "alone."
+        ),
+        "final.browser": (
+            "The final canonical protected route needs one acceptance proof, while token and "
+            "container contracts run earlier."
+        ),
+        "final.summary": (
+            "The terminal summary necessarily consumes evidence produced after protected "
+            "convergence."
+        ),
+    }
+
+    def bindings_match(context: CheckContext) -> bool:
+        return all(context.bindings[key] == value for key, value in bindings.items())
+
+    checks: list[RegisteredCheck] = []
+    for check_id, required in dependencies.items():
+
+        def execute(
+            context: CheckContext,
+            *,
+            check_id: str = check_id,
+            operation: CheckOperation,
+        ) -> CheckProbe:
+            if not bindings_match(context):
+                return _empty_final_gate_probe()
+            try:
+                result = session.execute(check_id, operation)
+            except (OSError, RuntimeError, ValueError):
+                return _empty_final_gate_probe()
+            return _final_gate_probe(result)
+
+        def operation_probe(
+            operation: CheckOperation,
+            *,
+            check_id: str = check_id,
+        ) -> Callable[[CheckContext], CheckProbe]:
+            def probe(context: CheckContext) -> CheckProbe:
+                return execute(context, check_id=check_id, operation=operation)
+
+            return probe
+
+        operations: dict[CheckOperation, Callable[[CheckContext], CheckProbe]] = {
+            CheckOperation.PROBE: operation_probe(CheckOperation.PROBE),
+            CheckOperation.VERIFY: operation_probe(CheckOperation.VERIFY),
+        }
+        if check_id == "final.protected-apply":
+            operations[CheckOperation.PLAN] = operation_probe(CheckOperation.PLAN)
+            operations[CheckOperation.APPLY] = operation_probe(CheckOperation.APPLY)
+        checks.append(
+            RegisteredCheck(
+                spec=CheckSpec(
+                    check_id=check_id,
+                    failure_code=failure_codes[check_id],
+                    tier=4,
+                    stage=StageCapability.FINAL_ONLY,
+                    dependencies=required,
+                    mutation_class=(
+                        MutationClass.PROTECTED_STAGING
+                        if check_id == "final.protected-apply"
+                        else MutationClass.NONE
+                    ),
+                    input_keys=tuple(sorted(bindings)),
+                    evidence_schema=(
+                        EvidenceField("ready", "boolean"),
+                        EvidenceField("candidate-sha", "string"),
+                        EvidenceField("attestation-digest", "sha256"),
+                        EvidenceField("observed-epoch", "integer"),
+                        EvidenceField("evidence-digest", "sha256"),
+                        EvidenceField("protected-mutation", "boolean"),
+                        EvidenceField("blockers", "string-map"),
+                    ),
+                    timeout_seconds=3600,
+                    freshness_ttl_seconds=3600,
+                    remediation=f"restore the exact attested {check_id} invariant",
+                    secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                    final_only_justification=justifications[check_id],
+                ),
+                implementation_version="v1",
+                operations=operations,
+            )
+        )
+    return tuple(checks)
+
+
+def _final_gate_probe(result: FinalGateResult) -> CheckProbe:
+    return CheckProbe(
+        passed=result.ready,
+        evidence={
+            "ready": result.ready,
+            "candidate-sha": result.candidate_sha,
+            "attestation-digest": result.attestation_digest,
+            "observed-epoch": result.observed_epoch,
+            "evidence-digest": result.evidence_digest,
+            "protected-mutation": result.protected_mutation,
+            "blockers": dict(result.blockers),
+        },
+    )
+
+
+def _empty_final_gate_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "ready": False,
+            "candidate-sha": "unavailable",
+            "attestation-digest": "0" * 64,
+            "observed-epoch": 0,
+            "evidence-digest": "0" * 64,
+            "protected-mutation": False,
+            "blockers": {"binding": "final-gate-unavailable"},
+        },
+    )
+
+
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
@@ -2124,6 +2294,7 @@ __all__ = [
     "build_capacity_high_water_check",
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
+    "build_final_gate_checks",
     "build_gb10_host_readiness_check",
     "build_gb10_shared_mount_check",
     "build_gb10_ssh_topology_check",
