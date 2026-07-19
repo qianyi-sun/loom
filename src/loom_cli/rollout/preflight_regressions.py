@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 
+from loom_cli.rollout.preflight_contract import (
+    CheckContext,
+    CheckOperation,
+    PreflightDag,
+    RegisteredCheck,
+)
 from loom_cli.rollout.preflight_coverage import CoverageManifest, load_coverage_manifest
 
 DEFAULT_REGRESSION_MANIFEST = (
@@ -94,6 +103,82 @@ class RegressionManifest:
                 raise ValueError(f"regression fixture {fixture.fixture_id} coverage drifted")
 
 
+@dataclass(frozen=True, slots=True)
+class RegressionReplayCase:
+    """One injected historical fault against its production check implementation."""
+
+    fixture_id: str
+    check: RegisteredCheck
+    context: CheckContext
+
+
+@dataclass(frozen=True, slots=True)
+class RegressionReplayEvidence:
+    """Normalized proof that every historical fault fails at its declared tier."""
+
+    implementation_digests: Mapping[str, str]
+    evidence_hashes: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        implementations = dict(self.implementation_digests)
+        evidence = dict(self.evidence_hashes)
+        if (
+            not implementations
+            or set(implementations) != set(evidence)
+            or any(_SHA256_RE.fullmatch(value) is None for value in (*implementations.values(), *evidence.values()))
+        ):
+            raise ValueError("preflight regression replay evidence is invalid")
+        object.__setattr__(self, "implementation_digests", MappingProxyType(implementations))
+        object.__setattr__(self, "evidence_hashes", MappingProxyType(evidence))
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def replay_regression_manifest(
+    cases: Sequence[RegressionReplayCase],
+    *,
+    manifest: RegressionManifest | None = None,
+) -> RegressionReplayEvidence:
+    """Execute every injected fault through its real registered probe, fail closed."""
+    expected = manifest or load_regression_manifest()
+    by_fixture = {case.fixture_id: case for case in cases}
+    fixtures = {fixture.fixture_id: fixture for fixture in expected.fixtures}
+    if len(by_fixture) != len(cases) or set(by_fixture) != set(fixtures):
+        raise ValueError("preflight regression replay coverage is incomplete")
+    implementations: dict[str, str] = {}
+    evidence_hashes: dict[str, str] = {}
+    for fixture_id in sorted(fixtures):
+        fixture = fixtures[fixture_id]
+        case = by_fixture[fixture_id]
+        check = case.check
+        if (
+            check.spec.check_id != fixture.check_id
+            or check.spec.failure_code != fixture.expected_failure_code
+            or check.spec.tier != fixture.declared_tier
+        ):
+            raise ValueError(f"preflight regression replay contract drifted for {fixture_id}")
+        isolated = replace(
+            check,
+            spec=replace(
+                check.spec,
+                dependencies=(),
+                run_after_failed_dependencies=False,
+            ),
+        )
+        execution = PreflightDag((isolated,), max_concurrency=1).run(
+            case.context,
+            operation=CheckOperation.PROBE,
+            through_tier=fixture.declared_tier,
+            now=lambda: datetime(2026, 7, 19, tzinfo=UTC),
+        )[0]
+        if execution.passed or execution.failure_code != fixture.expected_failure_code:
+            raise ValueError(f"historical blocker {fixture_id} no longer fails at preflight")
+        implementations[fixture_id] = check.implementation_digest
+        evidence_hashes[fixture_id] = execution.evidence_hash
+    return RegressionReplayEvidence(implementations, evidence_hashes)
+
+
 def load_regression_manifest(
     path: Path = DEFAULT_REGRESSION_MANIFEST,
 ) -> RegressionManifest:
@@ -130,6 +215,9 @@ __all__ = [
     "DEFAULT_REGRESSION_MANIFEST",
     "HistoricalBlockerFixture",
     "RegressionManifest",
+    "RegressionReplayCase",
+    "RegressionReplayEvidence",
     "is_preflight_coverage_defect",
     "load_regression_manifest",
+    "replay_regression_manifest",
 ]

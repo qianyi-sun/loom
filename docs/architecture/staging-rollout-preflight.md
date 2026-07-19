@@ -200,6 +200,14 @@ an unattested attempt runnable.
 
 ## Tiers
 
+Historical late failures are executable fixtures rather than names in a list.
+`replay_regression_manifest` requires one case for every checked-in fixture,
+verifies the production `RegisteredCheck` identity and declared tier, injects
+the fault through that check's real probe, validates its evidence schema, and
+requires the normalized failure code. Missing fixtures, an implementation
+substitution, or a historical fault that unexpectedly passes is a blocking
+coverage defect.
+
 ### Tier 0: admission, under two minutes
 
 Before request publication or backup I/O, verify exact candidate/tree/install
