@@ -6,6 +6,7 @@ import grp
 import hashlib
 import importlib
 import io
+import json
 import os
 import pwd
 import re
@@ -27,7 +28,7 @@ from loom_cli.rollout.credential_authority import (
     safe_content_fingerprint,
 )
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
-from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
+from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
 from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
 from loom_cli.rollout.runtime_readiness import ModuleImporter, probe_runtime_readiness
 
@@ -436,6 +437,60 @@ def _gb10_inputs(
     return Path(os.path.normpath(ssh_config)), identity, ACTIVE_GB10_HOSTS
 
 
+@dataclass(frozen=True, slots=True)
+class GB10PreflightInputs:
+    """Exact checked-in GB10 topology consumed by legacy and DAG preflight."""
+
+    ssh_config: Path
+    identity: Path
+    targets: tuple[GB10ProbeTarget, ...]
+
+
+def load_catalog_environment_path(
+    config: OperatorConfig,
+    *,
+    service_uid: int,
+) -> Path | None:
+    """Return the protected catalog environment path through the canonical parser."""
+    return _catalog_environment_path(config, service_uid=service_uid)
+
+
+def load_gb10_preflight_inputs(
+    config: OperatorConfig,
+    *,
+    service_uid: int,
+) -> GB10PreflightInputs | None:
+    """Return one typed GB10 authority without duplicating cluster parsing rules."""
+    legacy = _gb10_inputs(config, service_uid=service_uid)
+    cluster = _load_toml(config.cluster_config_path, service_uid=service_uid)
+    if legacy is None or cluster is None:
+        return None
+    pool = cluster.get("gb10_pool")
+    hosts = pool.get("hosts") if isinstance(pool, dict) else None
+    if not isinstance(hosts, list):
+        return None
+    targets: list[GB10ProbeTarget] = []
+    try:
+        for item in hosts:
+            if not isinstance(item, dict):
+                return None
+            target = item.get("ssh_target")
+            service = item.get("node_agent_service", "loom-gb10-node-agent.service")
+            if not isinstance(target, str) or not isinstance(service, str):
+                return None
+            targets.append(GB10ProbeTarget(target, service))
+    except ValueError:
+        return None
+    ssh_config, identity, expected_hosts = legacy
+    if tuple(target.ssh_target for target in targets) != expected_hosts:
+        return None
+    return GB10PreflightInputs(
+        ssh_config=ssh_config,
+        identity=identity,
+        targets=tuple(targets),
+    )
+
+
 def _shared_repository_binding(
     *,
     service_uid: int,
@@ -588,6 +643,35 @@ def _shared_repository_binding(
         "repository_device": repository.st_dev,
         "repository_inode": repository.st_ino,
     }
+
+
+def load_shared_repository_binding(*, service_uid: int) -> dict[str, int] | None:
+    """Return the held-descriptor mount authority used by every GB10 predicate."""
+    return _shared_repository_binding(service_uid=service_uid)
+
+
+def shared_repository_binding_digest(binding: dict[str, int]) -> str:
+    """Hash the complete non-secret local mount/UID/GID binding."""
+    expected = {
+        "authority_device",
+        "authority_inode",
+        "consumer_primary_gid",
+        "consumer_uid",
+        "parent_device",
+        "parent_inode",
+        "repository_device",
+        "repository_inode",
+        "service_primary_gid",
+        "service_uid",
+        "shared_gid",
+    }
+    if set(binding) != expected or any(
+        type(value) is not int or value < 0 for value in binding.values()
+    ):
+        raise ValueError("shared repository binding is invalid")
+    return hashlib.sha256(
+        json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _validate_gb10_shared_mount_output(
@@ -1056,10 +1140,15 @@ def collect_preflight(
 __all__ = [
     "CommandResult",
     "CommandRunner",
+    "GB10PreflightInputs",
     "PreflightCheck",
     "PreflightReport",
     "catalog_secret_values",
     "collect_preflight",
+    "load_catalog_environment_path",
+    "load_gb10_preflight_inputs",
+    "load_shared_repository_binding",
     "probe_gb10_shared_mount_readonly",
     "safe_fingerprint",
+    "shared_repository_binding_digest",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import struct
 import subprocess
@@ -76,6 +77,29 @@ def test_preflight_report_contains_only_named_checks_and_safe_remediation() -> N
         ],
         "passed": False,
     }
+
+
+def test_public_preflight_authorities_reuse_the_legacy_topology_parser(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    gb10 = preflight_module.load_gb10_preflight_inputs(
+        config,
+        service_uid=os.geteuid(),
+    )
+    binding = preflight_module.load_shared_repository_binding(service_uid=os.geteuid())
+
+    assert gb10 is not None
+    assert tuple(target.ssh_target for target in gb10.targets) == preflight_module.ACTIVE_GB10_HOSTS
+    assert {target.node_agent_service for target in gb10.targets} == {
+        "loom-gb10-node-agent.service"
+    }
+    assert binding == _test_shared_repository_binding(service_uid=os.geteuid())
+    assert (
+        preflight_module.shared_repository_binding_digest(binding)
+        == hashlib.sha256(
+            json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
 
 
 def test_preflight_rejects_secret_shaped_remediation() -> None:
