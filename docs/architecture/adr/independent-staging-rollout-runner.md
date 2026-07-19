@@ -341,6 +341,18 @@ Tier 0-3 `request.json` beside the retained assessment evidence. Identity drift
 across candidate/tree, config, registry, coverage, epoch, environment, or
 namespace rejects that promotion.
 
+The detached worker surface has a separate fixed
+`run-backup --job <state-root>/requests/<request-id>/preflight-backup/job.json`
+unit. Both the user-manager launcher and worker independently derive and
+validate the request identity from that exact path. The worker moves the
+immutable job through compare-and-swap lifecycle generations and may publish a
+verified state only with exact manifest and lease digests. Cancellation is a
+durable `backup_cancel_requested` transition; a cancelled or failed job cannot
+publish launch authority. The long backup operation therefore does not require
+the admission mutex. The broker does not use this surface until the default
+backup implementation, lease verifier, and post-backup Tier 3 promotion are
+wired together and validated.
+
 A non-dry `start` creates and verifies a new immutable backup manifest before
 the rollout can mutate staging. It never relies on a mutable `latest` pointer.
 A failed backup keeps the prior valid backup and prevents unit launch. An

@@ -15,10 +15,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Never, TextIO
 
+from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
+
+from .backup_job import (
+    BackupJobState,
+    PreflightBackupJobEnvelope,
+    transition_backup_job,
+)
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path, load_validated_envelope
 from .lifecycle import LifecycleCoordinator
-from .model import ActivePointer, DriverEnvelope, RequestEvent
+from .model import ActivePointer, DriverEnvelope, PreflightRequest, RequestEvent
 from .policy import sanitized_child_environment
 from .redaction import redact_rollout_text
 from .store import RequestStore
@@ -47,7 +54,29 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     attempt = commands.add_parser("run-attempt")
     attempt.add_argument("--envelope", type=Path, required=True)
+    backup = commands.add_parser("run-backup")
+    backup.add_argument("--job", type=Path, required=True)
     return parser
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedBackupJob:
+    manifest_path: Path
+    manifest_sha256: str
+    lease_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.manifest_path.is_absolute()
+            or ".." in self.manifest_path.parts
+            or len(self.manifest_sha256) != 64
+            or len(self.lease_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in (self.manifest_sha256 + self.lease_digest)
+            )
+        ):
+            raise ValueError("verified backup job identity is invalid")
 
 
 @dataclass(slots=True)
@@ -59,6 +88,14 @@ class WorkerDependencies:
     stderr: TextIO
     envelope_path: Callable[[DriverEnvelope], Path] | None = None
     load_envelope: Callable[[Path], DriverEnvelope] | None = None
+    load_backup_job: Callable[[Path], PreflightBackupJobEnvelope] | None = None
+    run_backup: (
+        Callable[
+            [PreflightRequest, PreflightBackupJobEnvelope, Callable[[], bool]],
+            VerifiedBackupJob,
+        ]
+        | None
+    ) = None
 
 
 @dataclass(slots=True)
@@ -114,6 +151,29 @@ def _path(dependencies: WorkerDependencies, envelope: DriverEnvelope) -> Path:
     )
 
 
+def _load_backup_job(
+    config: OperatorConfig,
+    store: RequestStore,
+    path: Path,
+) -> PreflightBackupJobEnvelope:
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("backup job path is outside the protected request store")
+    try:
+        relative = path.relative_to(config.state_root)
+    except ValueError as exc:
+        raise ValueError("backup job path is outside the protected request store") from exc
+    if len(relative.parts) != 4:
+        raise ValueError("backup job path does not identify one immutable job")
+    requests_dir, request_id, backup_dir, filename = relative.parts
+    if (
+        requests_dir != "requests"
+        or backup_dir != "preflight-backup"
+        or filename != "job.json"
+    ):
+        raise ValueError("backup job path does not identify one immutable job")
+    return store.read_preflight_backup_job(request_id)
+
+
 def _event(
     envelope: DriverEnvelope,
     *,
@@ -144,6 +204,13 @@ def _cancel_requested(dependencies: WorkerDependencies, envelope: DriverEnvelope
         and event.event in {"cancel_requested", "cancel_failed"}
     ]
     return bool(directives and directives[-1].event == "cancel_requested")
+
+
+def _worker_now(dependencies: WorkerDependencies) -> datetime:
+    value = datetime.fromisoformat(dependencies.now().replace("Z", "+00:00"))
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("worker clock must be timezone-aware")
+    return value.astimezone(UTC)
 
 
 def run_attempt(
@@ -236,6 +303,133 @@ def run_attempt(
         return return_code
 
 
+def _seal_backup_failure(
+    dependencies: WorkerDependencies,
+    state: BackupJobState,
+    *,
+    action: LifecycleAction,
+    failure_code: str,
+) -> None:
+    failed = transition_backup_job(
+        state,
+        action,
+        updated_at=_worker_now(dependencies),
+        failure_code=failure_code,
+    )
+    dependencies.store.replace_preflight_backup_job_state(
+        failed,
+        expected_sequence=state.sequence,
+    )
+
+
+def run_backup_job(
+    envelope: PreflightBackupJobEnvelope,
+    dependencies: WorkerDependencies,
+    *,
+    signals: _SignalController | None = None,
+) -> int:
+    """Run one detached backup and publish only verified CAS state."""
+    if dependencies.run_backup is None:
+        raise ValueError("backup worker implementation is unavailable")
+    persisted = dependencies.store.read_preflight_backup_job(envelope.request_id)
+    if persisted != envelope:
+        raise ValueError("worker backup envelope does not match immutable job")
+    request = dependencies.store.read_preflight_request(envelope.request_id)
+    dependencies.store.read_preflight_assessment(envelope.request_id)
+    state = dependencies.store.read_preflight_backup_job_state(envelope.request_id)
+    if state.phase is not LifecyclePhase.BACKUP_PENDING:
+        raise ValueError("backup worker job is not pending")
+    running = transition_backup_job(
+        state,
+        LifecycleAction.START_BACKUP,
+        updated_at=_worker_now(dependencies),
+    )
+    dependencies.store.replace_preflight_backup_job_state(
+        running,
+        expected_sequence=state.sequence,
+    )
+    signal_controller = signals or _SignalController()
+
+    def cancelled() -> bool:
+        current = dependencies.store.read_preflight_backup_job_state(envelope.request_id)
+        return (
+            signal_controller.requested or current.phase is LifecyclePhase.BACKUP_CANCEL_REQUESTED
+        )
+
+    try:
+        with signal_controller.driver_window():
+            verified = dependencies.run_backup(request, envelope, cancelled)
+    except _CancellationSignal:
+        current = dependencies.store.read_preflight_backup_job_state(envelope.request_id)
+        if current.phase is LifecyclePhase.BACKUP_RUNNING:
+            requested = transition_backup_job(
+                current,
+                LifecycleAction.REQUEST_CANCEL,
+                updated_at=_worker_now(dependencies),
+            )
+            dependencies.store.replace_preflight_backup_job_state(
+                requested,
+                expected_sequence=current.sequence,
+            )
+            current = requested
+        _seal_backup_failure(
+            dependencies,
+            current,
+            action=LifecycleAction.SEAL_CANCELLED,
+            failure_code="backup_cancelled",
+        )
+        return 130
+    except BaseException:
+        current = dependencies.store.read_preflight_backup_job_state(envelope.request_id)
+        action = (
+            LifecycleAction.SEAL_CANCELLED
+            if current.phase is LifecyclePhase.BACKUP_CANCEL_REQUESTED
+            else LifecycleAction.FAIL_BACKUP
+        )
+        _seal_backup_failure(
+            dependencies,
+            current,
+            action=action,
+            failure_code=(
+                "backup_cancelled" if action is LifecycleAction.SEAL_CANCELLED else "backup_failed"
+            ),
+        )
+        return 1
+
+    current = dependencies.store.read_preflight_backup_job_state(envelope.request_id)
+    if cancelled():
+        if current.phase is LifecyclePhase.BACKUP_RUNNING:
+            requested = transition_backup_job(
+                current,
+                LifecycleAction.REQUEST_CANCEL,
+                updated_at=_worker_now(dependencies),
+            )
+            dependencies.store.replace_preflight_backup_job_state(
+                requested,
+                expected_sequence=current.sequence,
+            )
+            current = requested
+        _seal_backup_failure(
+            dependencies,
+            current,
+            action=LifecycleAction.SEAL_CANCELLED,
+            failure_code="backup_cancelled",
+        )
+        return 130
+    completed = transition_backup_job(
+        current,
+        LifecycleAction.VERIFY_BACKUP,
+        updated_at=_worker_now(dependencies),
+        manifest_sha256=verified.manifest_sha256,
+        lease_digest=verified.lease_digest,
+    )
+    dependencies.store.replace_preflight_backup_job_state(
+        completed,
+        expected_sequence=current.sequence,
+    )
+    return 0
+
+
 def _run(
     argv: list[str],
     *,
@@ -293,6 +487,7 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             config,
             effective_uid=service_uid,
         ),
+        load_backup_job=lambda path: _load_backup_job(config, store, path),
     )
 
 
@@ -306,8 +501,6 @@ def main(
         args = _parser().parse_args(list(argv) if argv is not None else None)
     except (_ArgumentError, SystemExit):
         return 2
-    if args.command != "run-attempt":
-        return 2
     signal_controller = _SignalController()
     previous_term = signal.signal(signal.SIGTERM, signal_controller.handle)
     previous_int = signal.signal(signal.SIGINT, signal_controller.handle)
@@ -318,10 +511,17 @@ def main(
             if os.geteuid() != service_uid:
                 raise ValueError("worker effective UID does not match service account")
             dependencies = _default_dependencies(config, service_uid=service_uid)
-        if dependencies.load_envelope is None:
-            raise ValueError("worker envelope loader is unavailable")
-        envelope = dependencies.load_envelope(args.envelope)
-        return run_attempt(envelope, dependencies, signals=signal_controller)
+        if args.command == "run-attempt":
+            if dependencies.load_envelope is None:
+                raise ValueError("worker envelope loader is unavailable")
+            envelope = dependencies.load_envelope(args.envelope)
+            return run_attempt(envelope, dependencies, signals=signal_controller)
+        if args.command == "run-backup":
+            if dependencies.load_backup_job is None:
+                raise ValueError("worker backup loader is unavailable")
+            backup_job = dependencies.load_backup_job(args.job)
+            return run_backup_job(backup_job, dependencies, signals=signal_controller)
+        return 2
     except BaseException as exc:
         if isinstance(exc, KeyboardInterrupt):
             raise
@@ -339,4 +539,10 @@ if __name__ == "__main__":  # pragma: no cover - service entrypoint
     raise SystemExit(main())
 
 
-__all__ = ["WorkerDependencies", "main", "run_attempt"]
+__all__ = [
+    "VerifiedBackupJob",
+    "WorkerDependencies",
+    "main",
+    "run_attempt",
+    "run_backup_job",
+]

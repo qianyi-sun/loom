@@ -4,16 +4,30 @@ import io
 import signal
 import subprocess
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.operator import worker as worker_module
+from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope, transition_backup_job
 from loom_cli.rollout.operator.model import ActivePointer, DriverEnvelope, RequestEvent
 from loom_cli.rollout.operator.policy import sanitized_child_environment
-from loom_cli.rollout.operator.worker import WorkerDependencies, run_attempt
+from loom_cli.rollout.operator.store import RequestStore
+from loom_cli.rollout.operator.worker import (
+    VerifiedBackupJob,
+    WorkerDependencies,
+    run_attempt,
+    run_backup_job,
+)
 from loom_cli.rollout.operator.worker import main as worker_main
+from tests.loom_cli.rollout.operator.test_store import (
+    make_assessment,
+    make_preflight_backup_job,
+    make_preflight_request,
+)
 
 REQUEST_ID = "req-alpha"
 
@@ -255,6 +269,88 @@ def test_worker_parser_exposes_only_internal_run_attempt_surface() -> None:
         )
         == 2
     )
+
+
+def _backup_worker_store(tmp_path: Path) -> tuple[RequestStore, PreflightBackupJobEnvelope]:
+    store = RequestStore(tmp_path / "state")
+    assessment = make_assessment(tmp_path)
+    request = replace(
+        make_preflight_request(),
+        request_id=REQUEST_ID,
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    job = replace(
+        make_preflight_backup_job(),
+        request_id=REQUEST_ID,
+        job_id="job-alpha000",
+        payload_id="payload-alpha000",
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    store.create_preflight_request(request)
+    store.publish_preflight_assessment(REQUEST_ID, assessment)
+    store.publish_preflight_backup_job(job)
+    return store, job
+
+
+def test_backup_worker_publishes_only_verified_cas_state(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=lambda _request, _job, _cancelled: VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+        ),
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 0
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_VERIFIED
+    assert state.manifest_sha256 == "d" * 64
+    assert state.lease_digest == "e" * 64
+
+
+def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def cancel_during_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        state = store.read_preflight_backup_job_state(REQUEST_ID)
+        requested = transition_backup_job(
+            state,
+            LifecycleAction.REQUEST_CANCEL,
+            updated_at=datetime(2026, 7, 19, 22, tzinfo=UTC),
+        )
+        store.replace_preflight_backup_job_state(
+            requested,
+            expected_sequence=state.sequence,
+        )
+        return VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+        )
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=cancel_during_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 130
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "backup_cancelled"
 
 
 def _install_fake_signal_handlers(

@@ -211,6 +211,48 @@ def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
     ]
 
 
+def test_backup_start_argv_is_fixed_to_one_preflight_job() -> None:
+    manager = make_manager()
+    job = Path("/var/lib/loom-staging-rollout/requests/req-alpha/preflight-backup/job.json")
+
+    argv = manager.start_backup_argv(
+        job,
+        "loom-staging-backup-req-alpha.service",
+    )
+
+    assert argv[-5:] == [
+        "-m",
+        "loom_cli.rollout.operator.worker",
+        "run-backup",
+        "--job",
+        str(job),
+    ]
+    assert "--collect" in argv
+    assert "UMask=0077" in argv
+
+
+@pytest.mark.parametrize(
+    ("job", "unit"),
+    [
+        (
+            Path("requests/req-alpha/preflight-backup/job.json"),
+            "loom-staging-backup-req-alpha.service",
+        ),
+        (
+            Path("/tmp/requests/req-alpha/preflight-backup/job.json"),
+            "loom-staging-backup-req-alpha.service",
+        ),
+        (
+            Path("/var/lib/loom-staging-rollout/requests/req-other/preflight-backup/job.json"),
+            "loom-staging-backup-req-alpha.service",
+        ),
+    ],
+)
+def test_backup_start_rejects_path_or_identity_escape(job: Path, unit: str) -> None:
+    with pytest.raises(UnitLaunchError):
+        make_manager().start_backup_argv(job, unit)
+
+
 def test_start_timeout_is_a_fail_closed_launch_error() -> None:
     def timeout_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(argv, timeout=120)

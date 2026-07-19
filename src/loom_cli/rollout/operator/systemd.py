@@ -150,6 +150,31 @@ def _attempt_identity(
     return request_id, attempt_number
 
 
+def _backup_identity(
+    config: OperatorConfig,
+    job_path: Path,
+    unit_name: str,
+) -> str:
+    prefix = "loom-staging-backup-"
+    suffix = ".service"
+    if not unit_name.startswith(prefix) or not unit_name.endswith(suffix):
+        raise UnitLaunchError("unit name is not an approved backup job")
+    request_id = unit_name[len(prefix) : -len(suffix)]
+    try:
+        validate_safe_identifier(request_id, "request_id")
+    except ValueError as exc:
+        raise UnitLaunchError("backup unit contains an invalid request id") from exc
+    if not job_path.is_absolute() or ".." in job_path.parts:
+        raise UnitLaunchError("backup job path is outside the protected request store")
+    try:
+        relative = job_path.relative_to(config.state_root)
+    except ValueError as exc:
+        raise UnitLaunchError("backup job path is outside the protected request store") from exc
+    if relative.parts != ("requests", request_id, "preflight-backup", "job.json"):
+        raise UnitLaunchError("backup job path does not identify one immutable job")
+    return request_id
+
+
 def _parse_nonnegative_int(value: str, property_name: str) -> int:
     if not value.isascii() or not value.isdecimal():
         raise SystemdQueryError(f"{property_name} is malformed")
@@ -317,6 +342,44 @@ class SystemdUserManager:
             raise UnitLaunchError("transient rollout unit could not be started") from exc
         if result.returncode != 0:
             raise UnitLaunchError("transient rollout unit launch failed")
+
+    def start_backup_argv(self, job_path: Path, unit_name: str) -> list[str]:
+        _backup_identity(self.config, job_path, unit_name)
+        environment = sanitized_child_environment(
+            self.config,
+            service_uid=self.service_uid,
+        )
+        python_path = self.config.runner_repo.parent / "venv" / "bin" / "python"
+        return [
+            "systemd-run",
+            "--user",
+            "--collect",
+            "--service-type=exec",
+            "--unit",
+            unit_name,
+            "--property",
+            "UMask=0077",
+            "--property",
+            f"WorkingDirectory={self.config.runner_repo}",
+            "/usr/bin/env",
+            "-i",
+            *(f"{key}={value}" for key, value in environment.items()),
+            str(python_path),
+            "-m",
+            "loom_cli.rollout.operator.worker",
+            "run-backup",
+            "--job",
+            str(job_path),
+        ]
+
+    def start_backup(self, job_path: Path, unit_name: str) -> None:
+        argv = self.start_backup_argv(job_path, unit_name)
+        try:
+            result = self._run(argv)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise UnitLaunchError("transient backup unit could not be started") from exc
+        if result.returncode != 0:
+            raise UnitLaunchError("transient backup unit launch failed")
 
     def show(self, unit_name: str) -> SystemdUnitStatus | None:
         _parse_unit_name(unit_name, error_type=SystemdQueryError)
