@@ -164,6 +164,22 @@ def test_release_artifact_isolates_exact_candidate_subset(tmp_path: Path) -> Non
             "loom-rehearsal-tmp"
         }
         assert {item["name"] for item in pod["volumes"]} >= {"loom-rehearsal-tmp"}
+        admin_probe_mounts = [
+            item
+            for item in pod["containers"][0]["volumeMounts"]
+            if item.get("subPath") == "secrets.toml"
+        ]
+        if name == "loom-service":
+            assert admin_probe_mounts == [
+                {
+                    "mountPath": "/var/run/loom/rehearsal-admin/secrets.toml",
+                    "name": "loom-admin-secret",
+                    "readOnly": True,
+                    "subPath": "secrets.toml",
+                }
+            ]
+        else:
+            assert admin_probe_mounts == []
         assert name in artifact.deployment_images
     postgres = next(
         resource

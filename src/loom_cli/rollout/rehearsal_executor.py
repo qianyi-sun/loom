@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import stat
 import subprocess
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -201,12 +203,102 @@ class IsolatedRehearsalExecutor:
             return self._migration(plan)
         if check_id == "rehearsal.release":
             return self._release(plan)
+        if check_id == "rehearsal.api-smoke":
+            return self._api_smoke(plan)
         if check_id == "rehearsal.cleanup":
             return self._cleanup(plan)
         return RehearsalStepOutcome(
             passed=False,
             details={"status": "blocked"},
             blockers={"executor": "isolated-action-not-implemented"},
+        )
+
+    def _api_smoke(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+        try:
+            release = self.release_artifacts(plan)
+        except (OSError, RuntimeError, ValueError):
+            return _blocked("api-smoke", "artifact-validation-failed")
+        pods = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "pods",
+                "--selector=" + rehearsal_selector_argument(release, "loom-service"),
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        pod_name = _exact_service_pod_name(pods, release=release, plan=plan)
+        if pod_name is None:
+            return _blocked("api-smoke", "service-pod-readback-drift")
+        authority = plan.smoke_authority
+        required_pool = authority.required_worker_pool
+        if required_pool is None:
+            return _blocked("api-smoke", "worker-pool-authority-missing")
+        suffix = plan.resources.namespace.removeprefix("loom-rehearsal-")
+        batch_name = f"rehearsal-{suffix}"
+        result = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "exec",
+                f"pod/{pod_name}",
+                "--container",
+                "loom-service",
+                "--",
+                "python",
+                "-m",
+                "loom_cli.rollout.rehearsal_smoke_probe",
+                "--plan-sha256",
+                plan.plan_digest,
+                "--batch-name",
+                batch_name,
+                "--represented-username",
+                authority.represented_username,
+                "--team-id",
+                authority.team_id,
+                "--admin-actor",
+                authority.admin_actor,
+                "--task-id",
+                authority.task_id,
+                "--required-worker-pool",
+                required_pool,
+                "--agent",
+                authority.agent,
+            ),
+            None,
+            timeout=120,
+        )
+        if result is None or not _api_smoke_result_ready(
+            result,
+            plan=plan,
+            batch_name=batch_name,
+        ):
+            return _blocked("api-smoke", "probe-failed")
+        batch_id = result["batch_id"]
+        assert isinstance(batch_id, str)
+        evidence = result["evidence"]
+        assert isinstance(evidence, dict)
+        return RehearsalStepOutcome(
+            passed=True,
+            details={
+                "batch-id": batch_id,
+                "evidence-sha256": hashlib.sha256(
+                    json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "status": "ready",
+            },
+            blockers={},
         )
 
     def _namespace(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
@@ -1358,6 +1450,81 @@ def _blocked(component: str, reason: str) -> RehearsalStepOutcome:
         passed=False,
         details={"status": "blocked"},
         blockers={component: reason},
+    )
+
+
+def _exact_service_pod_name(
+    value: dict[str, object] | None,
+    *,
+    release: RehearsalReleaseArtifact,
+    plan: RehearsalPlan,
+) -> str | None:
+    if value is None or not rehearsal_pods_ready(
+        value,
+        artifact=release,
+        deployment_name="loom-service",
+    ):
+        return None
+    items = value.get("items")
+    if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+        return None
+    metadata = items[0].get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    annotations = metadata.get("annotations")
+    name = metadata.get("name")
+    if (
+        not isinstance(annotations, dict)
+        or annotations.get("loom.openai.dev/plan-sha256") != plan.plan_digest
+        or not isinstance(name, str)
+        or re.fullmatch(r"loom-service-[a-z0-9](?:[-a-z0-9.]{0,61}[a-z0-9])?", name) is None
+    ):
+        return None
+    return name
+
+
+def _api_smoke_result_ready(
+    value: dict[str, object],
+    *,
+    plan: RehearsalPlan,
+    batch_name: str,
+) -> bool:
+    expected = {
+        "batch_id",
+        "batch_name",
+        "evidence",
+        "persisted",
+        "plan_sha256",
+        "recovered",
+        "schema_version",
+        "status",
+    }
+    evidence = value.get("evidence")
+    batch_id = value.get("batch_id")
+    try:
+        parsed_batch = uuid.UUID(batch_id) if isinstance(batch_id, str) else None
+    except ValueError:
+        return False
+    return bool(
+        set(value) == expected
+        and parsed_batch is not None
+        and parsed_batch.version == 4
+        and str(parsed_batch) == batch_id
+        and value.get("batch_name") == batch_name
+        and value.get("persisted") is True
+        and value.get("plan_sha256") == plan.plan_digest
+        and type(value.get("recovered")) is bool
+        and value.get("schema_version") == 1
+        and value.get("status") == "ready"
+        and isinstance(evidence, dict)
+        and 6 <= len(evidence) <= 7
+        and all(
+            isinstance(key, str)
+            and key.startswith(("get:/api/v1/", "post:/api/v1/"))
+            and isinstance(item, str)
+            and re.fullmatch(r"[0-9a-f]{64}", item) is not None
+            for key, item in evidence.items()
+        )
     )
 
 

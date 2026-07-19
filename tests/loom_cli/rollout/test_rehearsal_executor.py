@@ -527,6 +527,132 @@ def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
     assert all(command[0] == "docker" for command in calls)
 
 
+def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+    batch_id = "11111111-1111-4111-8111-111111111111"
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        calls.append(command)
+        if "get" in command and "pods" in command:
+            pod = {
+                "items": [
+                    {
+                        "metadata": {
+                            "annotations": {
+                                "loom.openai.dev/plan-sha256": plan.plan_digest,
+                            },
+                            "labels": {"app": "loom-service"},
+                            "name": "loom-service-abc123",
+                        },
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {
+                                    "imageID": "docker-pullable://loom-service@"
+                                    + plan.image_digests["loom-service"],
+                                    "name": "loom-service",
+                                    "ready": True,
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        if "exec" in command:
+            evidence = {
+                "get:/api/v1/auth/whoami": "1" * 64,
+                "get:/api/v1/batches": "2" * 64,
+                "get:/api/v1/batches/exact": "3" * 64,
+                "get:/api/v1/benchmarks": "4" * 64,
+                "get:/api/v1/health": "5" * 64,
+                "get:/api/v1/tasks/exact": "6" * 64,
+                "post:/api/v1/admin/batches/on-behalf": "7" * 64,
+            }
+            value = {
+                "batch_id": batch_id,
+                "batch_name": "rehearsal-" + "5" * 24,
+                "evidence": evidence,
+                "persisted": True,
+                "plan_sha256": plan.plan_digest,
+                "recovered": False,
+                "schema_version": 1,
+                "status": "ready",
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+    ).execute("rehearsal.api-smoke", plan)
+
+    assert outcome.passed
+    assert outcome.details["batch-id"] == batch_id
+    probe = next(command for command in calls if "exec" in command)
+    assert probe[:7] == (
+        "kubectl",
+        "--kubeconfig",
+        "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig",
+        "--namespace",
+        plan.resources.namespace,
+        "exec",
+        "pod/loom-service-abc123",
+    )
+    assert probe[probe.index("--") + 1 : probe.index("--") + 4] == (
+        "python",
+        "-m",
+        "loom_cli.rollout.rehearsal_smoke_probe",
+    )
+    assert "loom_admin_" not in " ".join(probe)
+
+
+def test_api_smoke_rejects_pod_or_probe_identity_drift() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+
+    def drifted_pod(argv, _payload, _timeout):
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "metadata": {
+                                "annotations": {"loom.openai.dev/plan-sha256": "0" * 64},
+                                "labels": {"app": "loom-service"},
+                                "name": "loom-service-abc123",
+                            },
+                            "status": {
+                                "phase": "Running",
+                                "conditions": [{"type": "Ready", "status": "True"}],
+                                "containerStatuses": [
+                                    {
+                                        "imageID": plan.image_digests["loom-service"],
+                                        "name": "loom-service",
+                                        "ready": True,
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            ),
+            "",
+        )
+
+    outcome = IsolatedRehearsalExecutor(
+        run=drifted_pod,
+        release_artifacts=lambda _plan: release,
+    ).execute("rehearsal.api-smoke", plan)
+    assert outcome.blockers == {"api-smoke": "service-pod-readback-drift"}
+
+
 def test_systemd_launch_uses_exact_isolated_transient_unit_and_budget() -> None:
     plan = _plan()
     calls: list[tuple[str, ...]] = []
@@ -775,7 +901,7 @@ def test_stream_runner_rejects_mode_and_read_time_drift(
     assert os.stat(source).st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("check_id", ("rehearsal.api-smoke", "rehearsal.browser"))
+@pytest.mark.parametrize("check_id", ("rehearsal.browser",))
 def test_unimplemented_rehearsal_steps_remain_fail_closed(check_id: str) -> None:
     outcome = IsolatedRehearsalExecutor().execute(check_id, _plan())
     assert outcome.blockers == {"executor": "isolated-action-not-implemented"}

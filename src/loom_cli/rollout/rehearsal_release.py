@@ -210,6 +210,15 @@ def _isolate_deployment(
         not isinstance(item, dict) or item.get("name") != "loom-admin-secret" for item in mounts
     ):
         raise ValueError("rehearsal deployment volume authority is invalid")
+    if name == "loom-service":
+        mounts.append(
+            {
+                "mountPath": "/var/run/loom/rehearsal-admin/secrets.toml",
+                "name": "loom-admin-secret",
+                "readOnly": True,
+                "subPath": "secrets.toml",
+            }
+        )
     mounts.append({"mountPath": "/tmp", "name": "loom-rehearsal-tmp"})
     volumes = pod.get("volumes")
     if volumes is None:
