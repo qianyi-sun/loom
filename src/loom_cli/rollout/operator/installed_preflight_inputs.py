@@ -10,7 +10,6 @@ from pathlib import Path
 from loom_cli.rollout.credential_authority import TrustedFileRead, read_trusted_file
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.install_attestation import VerifiedRunnerInstall, verify_runner_install
-from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
 from loom_cli.rollout.preflight_credential_paths import (
     READONLY_DATABASE_CREDENTIAL_PATH,
     READONLY_KUBECONFIG_PATH,
@@ -50,6 +49,7 @@ class InstalledPreflightInputs:
     gb10_identity_metadata_fingerprint: str
     gb10_mount_binding: dict[str, int]
     gb10_mount_binding_digest: str
+    migration_policy_path: Path
     migration_policy_digest: str
 
     def __post_init__(self) -> None:
@@ -70,6 +70,7 @@ class InstalledPreflightInputs:
             or not self.gb10_targets
             or not self.gb10_ssh_config.is_absolute()
             or not self.gb10_identity.is_absolute()
+            or not self.migration_policy_path.is_absolute()
         ):
             raise ValueError("installed preflight inputs are invalid")
 
@@ -84,7 +85,7 @@ class InstalledPreflightInputs:
         catalog_path_loader: CatalogPathLoader = load_catalog_environment_path,
         gb10_inputs_loader: GB10InputsLoader = load_gb10_preflight_inputs,
         shared_binding_loader: SharedBindingLoader = load_shared_repository_binding,
-        migration_policy_path: Path = DEFAULT_MIGRATION_POLICY,
+        migration_policy_path: Path | None = None,
     ) -> InstalledPreflightInputs:
         """Fail closed while reading all static installed authorities."""
         if service_uid < 0:
@@ -123,8 +124,17 @@ class InstalledPreflightInputs:
         ssh_digest = hashlib.sha256(ssh_config.payload).hexdigest()
         if ssh_digest != EXPECTED_GB10_SSH_CONFIG_SHA256:
             raise ValueError("installed preflight GB10 SSH topology drifted")
+        selected_migration_policy = (
+            config.runner_repo / "config/staging-migration-policy.json"
+            if migration_policy_path is None
+            else migration_policy_path
+        )
+        if not selected_migration_policy.is_absolute() or ".." in selected_migration_policy.parts:
+            raise ValueError("installed preflight migration policy path is invalid")
         try:
-            migration_policy_digest = hashlib.sha256(migration_policy_path.read_bytes()).hexdigest()
+            migration_policy_digest = hashlib.sha256(
+                selected_migration_policy.read_bytes()
+            ).hexdigest()
         except OSError as exc:
             raise ValueError("installed preflight migration policy is unavailable") from exc
         return cls(
@@ -138,6 +148,7 @@ class InstalledPreflightInputs:
             gb10_identity_metadata_fingerprint=identity.metadata_fingerprint,
             gb10_mount_binding=dict(binding),
             gb10_mount_binding_digest=shared_repository_binding_digest(binding),
+            migration_policy_path=selected_migration_policy,
             migration_policy_digest=migration_policy_digest,
         )
 

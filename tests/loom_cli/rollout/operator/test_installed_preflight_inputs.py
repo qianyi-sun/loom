@@ -86,6 +86,44 @@ def test_loader_binds_installed_static_authorities_without_secret_values(tmp_pat
     }
     assert all("secret" not in repr(source) for source in inputs.credential_sources)
     assert inputs.migration_policy_digest == hashlib.sha256(policy.read_bytes()).hexdigest()
+    assert inputs.migration_policy_path == policy
+
+
+def test_loader_uses_exact_candidate_policy_path_in_packaged_runtime(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    policy = config.runner_repo / "config/staging-migration-policy.json"
+    policy.parent.mkdir(parents=True)
+    policy.write_text("{}\n", encoding="utf-8")
+    ssh_config = tmp_path / "ssh-config"
+    identity = tmp_path / "identity"
+    ssh_payload = (
+        Path(__file__).resolve().parents[4] / "deploy/worker-pools/gb10/ssh_config"
+    ).read_bytes()
+
+    def read_file(path: Path, **_kwargs):
+        if path == ssh_config:
+            return SimpleNamespace(payload=ssh_payload, metadata_fingerprint="a" * 64)
+        return SimpleNamespace(payload=b"private", metadata_fingerprint="b" * 64)
+
+    inputs = InstalledPreflightInputs.load(
+        config,
+        service_uid=501,
+        verify_install=lambda **_kwargs: SimpleNamespace(
+            ready=True,
+            attestation=SimpleNamespace(payload_digest="d" * 64),
+        ),
+        read_file=read_file,
+        catalog_path_loader=lambda *_args, **_kwargs: tmp_path / "catalog.env",
+        gb10_inputs_loader=lambda *_args, **_kwargs: GB10PreflightInputs(
+            ssh_config=ssh_config,
+            identity=identity,
+            targets=(GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service"),),
+        ),
+        shared_binding_loader=lambda **_kwargs: _binding(),
+    )
+
+    assert inputs.migration_policy_path == policy
+    assert inputs.migration_policy_digest == hashlib.sha256(policy.read_bytes()).hexdigest()
 
 
 def test_loader_rejects_ssh_topology_digest_drift(tmp_path: Path) -> None:

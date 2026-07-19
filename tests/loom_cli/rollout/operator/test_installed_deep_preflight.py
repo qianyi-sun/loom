@@ -61,6 +61,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         gb10_identity_metadata_fingerprint="4" * 64,
         gb10_mount_binding={"service_uid": 501},
         gb10_mount_binding_digest="5" * 64,
+        migration_policy_path=tmp_path / "migration-policy.json",
         migration_policy_digest="6" * 64,
     )
 

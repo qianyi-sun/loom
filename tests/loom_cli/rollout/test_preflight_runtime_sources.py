@@ -104,6 +104,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
         gb10_mount_source=lambda: None,  # type: ignore[arg-type,return-value]
         gb10_mount_binding_digest="6" * 64,
         alembic_ini=tmp_path / "alembic.ini",
+        migration_policy_path=DEFAULT_MIGRATION_POLICY,
         migration_policy_digest=policy_digest,
         systemd_analyze_run=command,
         image_run=command,

@@ -141,6 +141,7 @@ class InstalledDeepPreflightComposition:
             gb10_mount_source=self.gb10_mount_source,
             gb10_mount_binding_digest=self.inputs.gb10_mount_binding_digest,
             alembic_ini=self.config.runner_repo / "migrations/alembic.ini",
+            migration_policy_path=self.inputs.migration_policy_path,
             migration_policy_digest=self.inputs.migration_policy_digest,
             systemd_analyze_run=self.systemd_analyze_run,
             image_run=self.image_run,

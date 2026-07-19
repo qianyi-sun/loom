@@ -175,6 +175,7 @@ class PreflightRuntimeSources:
     gb10_mount_source: Callable[[], GB10SharedMountReadiness]
     gb10_mount_binding_digest: str
     alembic_ini: Path
+    migration_policy_path: Path
     migration_policy_digest: str
     systemd_analyze_run: SystemdAnalyzeRunner
     image_run: ImageDockerRunner
@@ -199,6 +200,7 @@ class PreflightRuntimeSources:
             or self.service_uid < 0
             or self.service_gid < 0
             or not self.candidate_root.is_absolute()
+            or not self.migration_policy_path.is_absolute()
             or not self.route.startswith("https://")
         ):
             raise ValueError("preflight runtime sources are outside staging authority")
@@ -443,6 +445,7 @@ class PreflightRuntimeSources:
         return (
             build_migration_plan_check(
                 alembic_ini=self.alembic_ini,
+                policy_path=self.migration_policy_path,
                 expected_candidate_sha=self.candidate.resolved_sha,
                 expected_policy_digest=self.migration_policy_digest,
                 artifact_sink=capture_migration,
