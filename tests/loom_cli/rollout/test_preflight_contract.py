@@ -263,6 +263,87 @@ def test_attested_dependency_cannot_shadow_a_registered_check() -> None:
         )
 
 
+def test_final_dag_resumes_from_exact_persisted_apply_without_repeating_mutation() -> None:
+    apply_calls: list[str] = []
+    verify_calls: list[str] = []
+
+    apply = RegisteredCheck(
+        spec=_spec(
+            "final.apply",
+            dependencies=("rehearsal.cleanup",),
+            tier=4,
+            stage=StageCapability.FINAL_ONLY,
+            mutation_class=MutationClass.PROTECTED_STAGING,
+            final_only_justification="Only protected live state can prove this invariant.",
+        ),
+        implementation_version="v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: CheckProbe(
+                passed=True, evidence={"status.value": "ready"}
+            ),
+            CheckOperation.APPLY: lambda _context: (
+                apply_calls.append("apply")
+                or CheckProbe(passed=True, evidence={"status.value": "ready"})
+            ),
+        },
+    )
+    verify = RegisteredCheck(
+        spec=_spec(
+            "final.verify",
+            dependencies=("final.apply",),
+            tier=4,
+            stage=StageCapability.FINAL_ONLY,
+            final_only_justification="Only protected live state can prove this invariant.",
+        ),
+        implementation_version="v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: CheckProbe(
+                passed=True, evidence={"status.value": "ready"}
+            ),
+            CheckOperation.VERIFY: lambda _context: (
+                verify_calls.append("verify")
+                or CheckProbe(passed=True, evidence={"status.value": "ready"})
+            ),
+        },
+    )
+    dag = PreflightDag(
+        (apply, verify),
+        attested_dependencies=frozenset({"rehearsal.cleanup"}),
+    )
+    operations = {
+        "final.apply": CheckOperation.APPLY,
+        "final.verify": CheckOperation.VERIFY,
+    }
+    first = dag.run(_context(), operation=operations, through_tier=4, now=lambda: NOW)
+    persisted_apply = {first[0].check_id: first[0]}
+    apply_calls.clear()
+    verify_calls.clear()
+
+    resumed = dag.run(
+        _context(),
+        operation=operations,
+        through_tier=4,
+        now=lambda: NOW + timedelta(seconds=1),
+        prior_executions=persisted_apply,
+    )
+
+    assert all(result.passed for result in resumed)
+    assert apply_calls == []
+    assert verify_calls == ["verify"]
+
+
+def test_final_dag_refuses_drifted_prior_execution() -> None:
+    check = _check("candidate.identity")
+    result = PreflightDag((check,)).run(_context(), now=lambda: NOW)[0]
+
+    with pytest.raises(ValueError, match="expired or drifted"):
+        PreflightDag((check,)).run(
+            CheckContext({"candidate.sha": "b" * 40}),
+            now=lambda: NOW + timedelta(seconds=1),
+            prior_executions={result.check_id: result},
+        )
+
+
 def test_input_fingerprint_rejects_raw_secret_fields() -> None:
     spec = CheckSpec(
         check_id="token.metadata",

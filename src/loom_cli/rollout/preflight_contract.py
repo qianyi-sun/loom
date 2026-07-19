@@ -548,6 +548,8 @@ class PreflightDag:
         operation: CheckOperation | Mapping[str, CheckOperation] = CheckOperation.PROBE,
         through_tier: int = 3,
         now: Callable[[], datetime] | None = None,
+        prior_executions: Mapping[str, CheckExecution] | None = None,
+        on_execution: Callable[[CheckExecution], None] | None = None,
     ) -> tuple[CheckExecution, ...]:
         if through_tier not in {0, 1, 2, 3, 4}:
             raise ValueError("through_tier must be in [0, 4]")
@@ -570,8 +572,28 @@ class PreflightDag:
             operations = dict(operation)
         else:
             operations = {check_id: operation for check_id in selected}
-        pending = dict(selected)
-        results: dict[str, CheckExecution] = {}
+        validation_time = clock()
+        prior = dict(prior_executions or {})
+        if not set(prior) <= set(selected):
+            raise ValueError("prior check executions are outside the selected DAG")
+        for check_id, execution in prior.items():
+            check = selected[check_id]
+            if (
+                not execution.passed
+                or execution.check_id != check_id
+                or execution.failure_code != check.spec.failure_code
+                or execution.tier != check.spec.tier
+                or execution.stage is not check.spec.stage
+                or execution.operation is not operations[check_id]
+                or execution.input_fingerprint != check.input_fingerprint(context)
+                or execution.implementation_digest != check.implementation_digest
+                or execution.expires_at <= validation_time
+            ):
+                raise ValueError("prior check execution is expired or drifted")
+        pending = {
+            check_id: check for check_id, check in selected.items() if check_id not in prior
+        }
+        results: dict[str, CheckExecution] = dict(prior)
         while pending:
             ready = [
                 check
@@ -597,6 +619,8 @@ class PreflightDag:
                         blocked_by=blocked_by,
                         at=clock(),
                     )
+                    if on_execution is not None:
+                        on_execution(results[check.spec.check_id])
                 else:
                     runnable.append(check)
             executor = ThreadPoolExecutor(
@@ -634,6 +658,8 @@ class PreflightDag:
                             finished_at=at,
                         )
                     results[check.spec.check_id] = result
+                    if on_execution is not None:
+                        on_execution(result)
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
             for check in ready:
