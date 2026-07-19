@@ -14,6 +14,13 @@ from loom_cli.rollout.credential_authority import (
     safe_content_fingerprint,
 )
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, probe_gb10_fleet_readonly
+from loom_cli.rollout.operator.candidate import (
+    CandidateBindingError,
+    GitRunner,
+    verify_bound_candidate,
+)
+from loom_cli.rollout.operator.config import OperatorConfig
+from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
     CheckOperation,
@@ -44,6 +51,85 @@ class CredentialProbeSource:
             or len(self.expected_content_fingerprint) > 96
         ):
             raise ValueError("credential expected fingerprint is invalid")
+
+
+def build_candidate_identity_check(
+    *,
+    config: OperatorConfig,
+    candidate: CandidateBinding,
+    run: GitRunner,
+) -> RegisteredCheck:
+    """Build the Tier 0 exact candidate and installed source identity invariant."""
+    expected_base = candidate.approved_base_sha or "none"
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != candidate.resolved_sha
+            or context.bindings["candidate.source-mode"] != candidate.source_mode
+            or context.bindings["candidate.base.sha"] != expected_base
+            or context.bindings["runner.config.sha256"] != config.config_sha256
+        ):
+            return _empty_candidate_probe(candidate)
+        try:
+            identity = verify_bound_candidate(config, candidate, run=run)
+        except (CandidateBindingError, OSError, ValueError):
+            return _empty_candidate_probe(candidate)
+        return CheckProbe(
+            passed=True,
+            evidence={
+                "resolved-sha": identity.resolved_sha,
+                "resolved-tree": identity.resolved_tree,
+                "source-mode": identity.source_mode,
+                "approved-base": identity.approved_base_sha or "none",
+                "linear-history-count": identity.linear_history_count,
+                "identity-digest": identity.evidence_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="candidate.identity",
+            failure_code="candidate.identity.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=(),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "candidate.base.sha",
+                "candidate.sha",
+                "candidate.source-mode",
+                "runner.config.sha256",
+            ),
+            evidence_schema=(
+                EvidenceField("resolved-sha", "string"),
+                EvidenceField("resolved-tree", "string"),
+                EvidenceField("source-mode", "string"),
+                EvidenceField("approved-base", "string"),
+                EvidenceField("linear-history-count", "integer"),
+                EvidenceField("identity-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=300,
+            remediation="restore the exact clean candidate, source tree, approved base, and install config",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_candidate_probe(candidate: CandidateBinding) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "resolved-sha": candidate.resolved_sha,
+            "resolved-tree": candidate.resolved_tree or "unavailable",
+            "source-mode": candidate.source_mode,
+            "approved-base": candidate.approved_base_sha or "none",
+            "linear-history-count": 0,
+            "identity-digest": "0" * 64,
+        },
+    )
 
 
 def credential_source_set_digest(sources: tuple[CredentialProbeSource, ...]) -> str:
@@ -368,6 +454,7 @@ def _empty_gb10_probe(targets: tuple[GB10ProbeTarget, ...]) -> CheckProbe:
 
 __all__ = [
     "CredentialProbeSource",
+    "build_candidate_identity_check",
     "build_credentials_metadata_check",
     "build_gb10_host_readiness_check",
     "build_systemd_user_manager_check",

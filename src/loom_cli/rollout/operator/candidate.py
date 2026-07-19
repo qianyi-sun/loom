@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import pwd
 import re
 import stat
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -48,6 +51,16 @@ Clock = Callable[[], datetime]
 
 class CandidateBindingError(RuntimeError):
     """Raised when the trusted checkout cannot yield an approved candidate."""
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateIdentityEvidence:
+    resolved_sha: str
+    resolved_tree: str
+    source_mode: str
+    approved_base_sha: str | None
+    linear_history_count: int
+    evidence_digest: str
 
 
 def _service_uid(config: OperatorConfig) -> int:
@@ -240,6 +253,27 @@ def bind_configured_candidate(
     ):
         raise CandidateBindingError("sealed candidate config binding is incomplete")
 
+    binding = CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref=PINNED_TARGET_REF,
+        resolved_sha=config.source_commit_sha,
+        image_tag=f"staging-{config.source_commit_sha[:7]}",
+        fetched_at=_utc_timestamp(now()),
+        source_mode="sealed-cumulative",
+        resolved_tree=config.source_tree_sha,
+        approved_base_sha=config.source_base_sha,
+    )
+    verify_bound_candidate(config, binding, run=run)
+    return binding
+
+
+def verify_bound_candidate(
+    config: OperatorConfig,
+    binding: CandidateBinding,
+    *,
+    run: GitRunner,
+) -> CandidateIdentityEvidence:
+    """Prove one already-resolved candidate through the shared read-only predicate."""
     _validate_protected_config(config.config_path)
     service_uid = _service_uid(config)
     _validate_trusted_directory(config.runner_repo, service_uid=service_uid)
@@ -268,68 +302,110 @@ def bind_configured_candidate(
         raise CandidateBindingError("remote.origin.pushurl must be absent")
     if exact("status", "--porcelain=v1", "--untracked-files=all", operation="status inspection"):
         raise CandidateBindingError("trusted checkout must be clean")
-    symbolic = _invoke(
-        run,
-        _git_argv(config.runner_repo, "symbolic-ref", "-q", "HEAD"),
-        operation="HEAD mode inspection",
-    )
-    if not (symbolic.returncode == 1 and symbolic.stdout == "" and symbolic.stderr == ""):
-        raise CandidateBindingError("sealed candidate must use detached HEAD")
-    if (
-        exact("rev-parse", "--verify", "HEAD^{commit}", operation="commit inspection")
-        != config.source_commit_sha
-    ):
-        raise CandidateBindingError("sealed candidate commit identity drifted")
-    if (
-        exact("rev-parse", "--verify", "HEAD^{tree}", operation="tree inspection")
-        != config.source_tree_sha
-    ):
-        raise CandidateBindingError("sealed candidate tree identity drifted")
-    if (
-        exact(
-            "merge-base",
-            config.source_base_sha,
-            config.source_commit_sha,
-            operation="base inspection",
+    history_count = 0
+    approved_base: str | None = None
+    if binding.source_mode == "sealed-cumulative":
+        symbolic = _invoke(
+            run,
+            _git_argv(config.runner_repo, "symbolic-ref", "-q", "HEAD"),
+            operation="HEAD mode inspection",
         )
-        != config.source_base_sha
-    ):
-        raise CandidateBindingError("sealed candidate base identity drifted")
-    history = exact(
-        "rev-list",
-        "--reverse",
-        "--parents",
-        f"{config.source_base_sha}..{config.source_commit_sha}",
-        operation="history inspection",
-    ).splitlines()
-    expected_parent = config.source_base_sha
-    for line in history:
-        fields = line.split()
-        if len(fields) != 2 or fields[1] != expected_parent:
-            raise CandidateBindingError("sealed candidate history is not linear")
-        expected_parent = fields[0]
-    if (
-        not 1 <= len(history) <= MAX_CUMULATIVE_COMMITS
-        or expected_parent != config.source_commit_sha
-    ):
-        raise CandidateBindingError("sealed candidate history does not match config")
-    return CandidateBinding(
-        remote_url=APPROVED_REMOTE_URL,
-        target_ref=PINNED_TARGET_REF,
-        resolved_sha=config.source_commit_sha,
-        image_tag=f"staging-{config.source_commit_sha[:7]}",
-        fetched_at=_utc_timestamp(now()),
-        source_mode="sealed-cumulative",
-        resolved_tree=config.source_tree_sha,
-        approved_base_sha=config.source_base_sha,
+        if not (symbolic.returncode == 1 and symbolic.stdout == "" and symbolic.stderr == ""):
+            raise CandidateBindingError("sealed candidate must use detached HEAD")
+        if (
+            config.source_mode != "sealed-cumulative"
+            or config.source_commit_sha != binding.resolved_sha
+            or config.source_tree_sha != binding.resolved_tree
+            or config.source_base_sha != binding.approved_base_sha
+            or binding.resolved_tree is None
+            or binding.approved_base_sha is None
+        ):
+            raise CandidateBindingError("sealed candidate config binding drifted")
+        if (
+            exact("rev-parse", "--verify", "HEAD^{commit}", operation="commit inspection")
+            != binding.resolved_sha
+        ):
+            raise CandidateBindingError("sealed candidate commit identity drifted")
+        resolved_tree = exact("rev-parse", "--verify", "HEAD^{tree}", operation="tree inspection")
+        if resolved_tree != binding.resolved_tree:
+            raise CandidateBindingError("sealed candidate tree identity drifted")
+        if (
+            exact(
+                "merge-base",
+                binding.approved_base_sha,
+                binding.resolved_sha,
+                operation="base inspection",
+            )
+            != binding.approved_base_sha
+        ):
+            raise CandidateBindingError("sealed candidate base identity drifted")
+        history = exact(
+            "rev-list",
+            "--reverse",
+            "--parents",
+            f"{binding.approved_base_sha}..{binding.resolved_sha}",
+            operation="history inspection",
+        ).splitlines()
+        expected_parent = binding.approved_base_sha
+        for line in history:
+            fields = line.split()
+            if len(fields) != 2 or fields[1] != expected_parent:
+                raise CandidateBindingError("sealed candidate history is not linear")
+            expected_parent = fields[0]
+        if (
+            not 1 <= len(history) <= MAX_CUMULATIVE_COMMITS
+            or expected_parent != binding.resolved_sha
+        ):
+            raise CandidateBindingError("sealed candidate history does not match config")
+        history_count = len(history)
+        approved_base = binding.approved_base_sha
+    else:
+        if config.source_mode != "merged-dev":
+            raise CandidateBindingError("merged candidate config binding drifted")
+        if (
+            exact(
+                "rev-parse",
+                "--verify",
+                "refs/remotes/origin/dev^{commit}",
+                operation="remote candidate inspection",
+            )
+            != binding.resolved_sha
+        ):
+            raise CandidateBindingError("merged candidate commit identity drifted")
+        resolved_tree = exact(
+            "rev-parse",
+            "--verify",
+            f"{binding.resolved_sha}^{{tree}}",
+            operation="tree inspection",
+        )
+
+    digest_payload = {
+        "approved_base_sha": approved_base,
+        "linear_history_count": history_count,
+        "resolved_sha": binding.resolved_sha,
+        "resolved_tree": resolved_tree,
+        "source_mode": binding.source_mode,
+    }
+    evidence_digest = hashlib.sha256(
+        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return CandidateIdentityEvidence(
+        resolved_sha=binding.resolved_sha,
+        resolved_tree=resolved_tree,
+        source_mode=binding.source_mode,
+        approved_base_sha=approved_base,
+        linear_history_count=history_count,
+        evidence_digest=evidence_digest,
     )
 
 
 __all__ = [
     "CandidateBindingError",
+    "CandidateIdentityEvidence",
     "Clock",
     "CommandResult",
     "GitRunner",
     "bind_configured_candidate",
     "bind_fresh_origin_dev",
+    "verify_bound_candidate",
 ]

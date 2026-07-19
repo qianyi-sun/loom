@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 from loom_cli.rollout.credential_authority import safe_content_fingerprint
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
+from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
+from loom_cli.rollout.operator.config import OperatorConfig
+from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
     CheckOperation,
@@ -21,6 +25,7 @@ from loom_cli.rollout.preflight_contract import (
 )
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
+    build_candidate_identity_check,
     build_credentials_metadata_check,
     build_gb10_host_readiness_check,
     build_systemd_user_manager_check,
@@ -29,6 +34,123 @@ from loom_cli.rollout.preflight_registered_checks import (
 )
 
 BOOT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+def _candidate_config(tmp_path: Path) -> OperatorConfig:
+    return OperatorConfig(
+        schema_version=1,
+        service_user="loom-rollout",
+        operator_group="loom-staging-operators",
+        remote_url="https://github.com/qianyi-sun/loom.git",
+        target_ref="refs/heads/dev",
+        runner_repo=tmp_path / "runner",
+        state_root=tmp_path / "state",
+        runtime_root=tmp_path / "runtime",
+        rollout_root=tmp_path / "rollout",
+        kubeconfig_path=tmp_path / "kubeconfig",
+        cluster_config_path=tmp_path / "staging.cluster.toml",
+        admin_token_source=f"file:{tmp_path / 'admin'}",
+        worker_token_source=f"file:{tmp_path / 'worker'}",
+        service_token_source=f"file:{tmp_path / 'service'}",
+        expect_admin_token_fingerprint="sha256:abc123def456 len=64",
+        cluster_name="loom-staging",
+        namespace="loom-staging",
+        environment="staging",
+        cp_url="http://127.0.0.1:18081",
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="11111111-1111-4111-8111-111111111111",
+        scope="current-gb10",
+        gb10_prep_concurrency=8,
+        config_path=tmp_path / "staging-rollout.toml",
+        config_sha256="a" * 64,
+        source_mode="sealed-cumulative",
+        source_commit_sha="1" * 40,
+        source_tree_sha="2" * 40,
+        source_base_sha="3" * 40,
+    )
+
+
+def _candidate_binding() -> CandidateBinding:
+    return CandidateBinding(
+        remote_url="https://github.com/qianyi-sun/loom.git",
+        target_ref="origin/dev",
+        resolved_sha="1" * 40,
+        image_tag="staging-1111111",
+        fetched_at="2026-07-19T16:00:00Z",
+        source_mode="sealed-cumulative",
+        resolved_tree="2" * 40,
+        approved_base_sha="3" * 40,
+    )
+
+
+def _candidate_context(*, sha: str = "1" * 40) -> CheckContext:
+    return CheckContext(
+        {
+            "candidate.base.sha": "3" * 40,
+            "candidate.sha": sha,
+            "candidate.source-mode": "sealed-cumulative",
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+
+
+def test_registered_candidate_identity_uses_shared_verifier(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[CandidateBinding] = []
+
+    def verify(_config, binding, *, run):
+        del run
+        calls.append(binding)
+        return CandidateIdentityEvidence(
+            resolved_sha=binding.resolved_sha,
+            resolved_tree="2" * 40,
+            source_mode="sealed-cumulative",
+            approved_base_sha="3" * 40,
+            linear_history_count=46,
+            evidence_digest="4" * 64,
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.preflight_registered_checks.verify_bound_candidate",
+        verify,
+    )
+    candidate = _candidate_binding()
+    check = build_candidate_identity_check(
+        config=_candidate_config(tmp_path),
+        candidate=candidate,
+        run=lambda _argv: subprocess.CompletedProcess([], 0, "", ""),
+    )
+
+    result = PreflightDag((check,)).run(_candidate_context())[0]
+
+    assert result.passed
+    assert result.evidence["resolved-tree"] == "2" * 40
+    assert result.evidence["linear-history-count"] == 46
+    assert calls == [candidate]
+
+
+def test_registered_candidate_identity_rejects_binding_drift_before_git(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "loom_cli.rollout.preflight_registered_checks.verify_bound_candidate",
+        lambda *_args, **_kwargs: calls.append(object()),
+    )
+    check = build_candidate_identity_check(
+        config=_candidate_config(tmp_path),
+        candidate=_candidate_binding(),
+        run=lambda _argv: subprocess.CompletedProcess([], 0, "", ""),
+    )
+
+    result = PreflightDag((check,)).run(_candidate_context(sha="f" * 40))[0]
+
+    assert not result.passed
+    assert result.evidence["identity-digest"] == "0" * 64
+    assert calls == []
 
 
 def _tools_runtime_check() -> RegisteredCheck:
@@ -167,7 +289,7 @@ def _credential_context(sources: tuple[CredentialProbeSource, ...]) -> CheckCont
                 for source in sources
                 if source.expected_content_fingerprint is not None
             },
-            "service.uid": __import__("os").getuid(),
+            "service.uid": os.getuid(),
         }
     )
 
@@ -178,7 +300,7 @@ def test_registered_credentials_check_attests_metadata_without_secret_values(
     sources = _credential_sources(tmp_path)
     check = build_credentials_metadata_check(
         sources=sources,
-        service_uid=__import__("os").getuid(),
+        service_uid=os.getuid(),
     )
     dag = PreflightDag((_passing_dependency("runner.install"), check))
 
@@ -219,7 +341,7 @@ def test_registered_credentials_check_reports_all_unsafe_sources(
     (tmp_path / "worker").chmod(0o660)
     check = build_credentials_metadata_check(
         sources=sources,
-        service_uid=__import__("os").getuid(),
+        service_uid=os.getuid(),
     )
     dag = PreflightDag((_passing_dependency("runner.install"), check))
 
@@ -254,7 +376,7 @@ def test_registered_credentials_check_rejects_source_binding_drift_before_read(
     )
     check = build_credentials_metadata_check(
         sources=sources,
-        service_uid=__import__("os").getuid(),
+        service_uid=os.getuid(),
     )
     context = _credential_context(sources)
     drifted = CheckContext({**dict(context.bindings), "protected-inputs.sha256": "b" * 64})

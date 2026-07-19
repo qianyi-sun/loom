@@ -110,6 +110,15 @@ recompute the payload digest. An existing exact digest may be reused; a
 collision, symlink, mode/owner drift, unknown field, timestamp drift, or payload
 change fails closed.
 
+Candidate identity is also a shared predicate. Candidate resolution fixes the
+commit, then `verify_bound_candidate` proves the protected config and checkout
+authority, sole approved origin with no push URL, clean status, exact commit and
+tree, and—under sealed-cumulative mode—detached HEAD, approved base, and a
+bounded linear history. The `candidate.identity` DAG check calls that same
+verifier and emits only the exact Git identities, history count, and evidence
+digest. Later consumers must use the attested tree instead of re-resolving a
+branch or maintaining another identity test.
+
 Systemd readiness is single-source as well. The broker-facing Tier 0 probe and
 the final GB10 convergence step consume the same user-manager, oneshot service,
 and timer-state classifiers. The read-only probe binds the manager version,
