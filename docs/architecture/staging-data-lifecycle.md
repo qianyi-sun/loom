@@ -242,6 +242,14 @@ only an already-published byte-equivalent lease. Deletion is always a returned
 post-publication action: a crash can retain an extra old payload for retry, but
 cannot erase the current known-good payload or promote an unverified candidate.
 
+The lease constructor accepts only a strictly revalidated schema-v2 checkpoint.
+It binds the exact manifest and component hashes, identifies the PostgreSQL
+snapshot by its dump digest, parses the content-addressed object inventory, and
+requires its epoch, schema revision, environment, namespace, and clock to match.
+An isolated restore report must repeat every one of those fields and bind its
+own evidence digest before a lease can exist. A schema-v1 full-MinIO DR archive
+or a manifest-only backup can never become rollout lease authority.
+
 If any proof is unavailable, the operator must fail closed to a fresh verified
 checkpoint. A changed-epoch checkpoint plus restore must complete within 30
 minutes before shared staging rollout may proceed.
