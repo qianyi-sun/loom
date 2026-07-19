@@ -71,6 +71,10 @@ from loom_cli.rollout.runtime_readiness import (
     probe_runtime_readiness,
 )
 from loom_cli.rollout.systemd_readiness import CommandRunner, probe_user_manager_readonly
+from loom_cli.rollout.systemd_unit_readiness import (
+    CommandRunner as SystemdAnalyzeRunner,
+)
+from loom_cli.rollout.systemd_unit_readiness import inspect_systemd_units
 
 
 @dataclass(frozen=True, slots=True)
@@ -1412,6 +1416,68 @@ def _empty_migration_plan_probe(policy_digest: str) -> CheckProbe:
     )
 
 
+def build_systemd_render_check(
+    run: SystemdAnalyzeRunner,
+    *,
+    candidate_root: Path,
+    expected_candidate_sha: str,
+) -> RegisteredCheck:
+    """Build the Tier 1 exact unit source and systemd-analyze invariant."""
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if context.bindings["candidate.sha"] != expected_candidate_sha:
+            return _empty_systemd_render_probe()
+        try:
+            evidence = inspect_systemd_units(candidate_root, run=run)
+        except (OSError, RuntimeError, ValueError):
+            return _empty_systemd_render_probe()
+        return CheckProbe(
+            passed=evidence.ready,
+            evidence={
+                "unit-digests": dict(evidence.unit_sha256),
+                "failed-units": dict(evidence.failed_units),
+                "unit-count": len(evidence.unit_sha256),
+                "unit-set-digest": evidence.unit_set_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="systemd.render",
+            failure_code="systemd.render.invalid",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("candidate.identity", "systemd.user-manager"),
+            mutation_class=MutationClass.NONE,
+            input_keys=("candidate.sha", "runner.config.sha256"),
+            evidence_schema=(
+                EvidenceField("unit-digests", "string-map"),
+                EvidenceField("failed-units", "string-map"),
+                EvidenceField("unit-count", "integer"),
+                EvidenceField("unit-set-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=3600,
+            remediation="restore exact safe candidate units and pass static systemd verification",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_systemd_render_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "unit-digests": {},
+            "failed-units": {"candidate-units": "unavailable"},
+            "unit-count": 0,
+            "unit-set-digest": "0" * 64,
+        },
+    )
+
+
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
@@ -1426,6 +1492,7 @@ __all__ = [
     "build_lifecycle_launch_cancel_check",
     "build_migration_plan_check",
     "build_runner_install_check",
+    "build_systemd_render_check",
     "build_systemd_user_manager_check",
     "build_tools_runtime_check",
     "credential_source_set_digest",

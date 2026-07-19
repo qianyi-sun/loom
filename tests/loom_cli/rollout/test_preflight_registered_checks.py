@@ -42,6 +42,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_kubernetes_client_check,
     build_lifecycle_launch_cancel_check,
     build_migration_plan_check,
+    build_systemd_render_check,
     build_systemd_user_manager_check,
     build_tools_runtime_check,
     credential_source_set_digest,
@@ -1127,4 +1128,64 @@ def test_registered_migration_plan_rejects_candidate_drift_before_graph_read(
 
     assert not result.passed
     assert result.evidence["plan-digest"] == "0" * 64
+    assert calls == []
+
+
+def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    check = build_systemd_render_check(
+        lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+        candidate_root=repo_root,
+        expected_candidate_sha="1" * 40,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "candidate.sha": "1" * 40,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("candidate.identity"),
+            _passing_dependency("systemd.user-manager"),
+            check,
+        )
+    )
+
+    result = next(
+        item for item in dag.run(context, through_tier=1) if item.check_id == check.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["unit-count"] == 3
+    assert result.evidence["failed-units"] == {}
+
+
+def test_registered_systemd_render_rejects_candidate_drift_without_verifier() -> None:
+    calls: list[tuple[str, ...]] = []
+    check = build_systemd_render_check(
+        lambda argv: calls.append(tuple(argv)) or subprocess.CompletedProcess(argv, 0, "", ""),
+        candidate_root=Path("/missing/candidate"),
+        expected_candidate_sha="1" * 40,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "candidate.sha": "2" * 40,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("candidate.identity"),
+            _passing_dependency("systemd.user-manager"),
+            check,
+        )
+    )
+
+    result = next(
+        item for item in dag.run(context, through_tier=1) if item.check_id == check.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.evidence["unit-count"] == 0
     assert calls == []
