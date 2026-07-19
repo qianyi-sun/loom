@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.operator.protected_apply_executor import (
+    KubernetesProtectedConvergenceExecutor,
     MigrationEpochProtectedApplyExecutor,
     SubprocessProtectedApplyCommandRunner,
 )
@@ -153,6 +154,66 @@ def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.browser", CheckOperation.VERIFY, _published_plan(tmp_path))
+
+
+def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    _attempt(state)
+    plan = _published_plan(tmp_path)
+    runner = Runner(revision="0066", epoch=7)
+    runner.plan_digest = plan.plan_digest
+    applied = MigrationEpochProtectedApplyExecutor(
+        state_root=state,
+        service_uid=os.geteuid(),
+        runner=runner,
+    )("final.protected-apply", CheckOperation.APPLY, plan)
+    assert applied.ready
+    before = tuple(runner.calls)
+
+    result = KubernetesProtectedConvergenceExecutor(
+        service_uid=os.geteuid(),
+        runner=runner,
+    )("final.convergence", CheckOperation.VERIFY, plan)
+
+    assert result.ready
+    assert not result.protected_mutation
+    assert result.observed_epoch == 8
+    convergence_calls = runner.calls[len(before) :]
+    assert "migration-read" in convergence_calls
+    assert "epoch-read" in convergence_calls
+    assert "manifest-diff" in convergence_calls
+    assert all(not call.endswith("-apply") for call in convergence_calls)
+
+
+def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
+    plan = _published_plan(tmp_path)
+    runner = Runner(revision="0066", epoch=9)
+    runner.plan_digest = plan.plan_digest
+    runner.manifest_status = 1
+
+    result = KubernetesProtectedConvergenceExecutor(
+        service_uid=os.geteuid(),
+        runner=runner,
+    )("final.convergence", CheckOperation.VERIFY, plan)
+
+    assert not result.ready
+    assert set(result.blockers) == {
+        "database-migration",
+        "mutation-epoch-claim",
+        "staging-manifests",
+    }
+    assert all(not call.endswith("-apply") for call in runner.calls)
+
+
+def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -> None:
+    executor = KubernetesProtectedConvergenceExecutor(
+        service_uid=os.geteuid(),
+        runner=Runner(revision="0067", epoch=8),
+    )
+    with pytest.raises(ValueError, match="operation is invalid"):
+        executor("final.convergence", CheckOperation.APPLY, _published_plan(tmp_path))
+    with pytest.raises(ValueError, match="operation is invalid"):
+        executor("final.summary", CheckOperation.VERIFY, _published_plan(tmp_path))
 
 
 def test_subprocess_runner_has_fixed_environment_and_redacted_failure(

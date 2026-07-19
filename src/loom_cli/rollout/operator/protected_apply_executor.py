@@ -22,7 +22,12 @@ from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.preflight_contract import CheckOperation
 
 from .final_gate_plan import FinalGatePlan
-from .protected_apply_journal import ComponentTerminal, ProtectedApplyJournal
+from .protected_apply_journal import (
+    ComponentObservation,
+    ComponentState,
+    ComponentTerminal,
+    ProtectedApplyJournal,
+)
 from .protected_epoch_component import (
     KubernetesProtectedEpochComponent,
     requires_legacy_epoch_bootstrap,
@@ -269,6 +274,68 @@ class MigrationEpochProtectedApplyExecutor:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class KubernetesProtectedConvergenceExecutor:
+    """Verify the exact protected component state without repeating apply."""
+
+    service_uid: int
+    runner: ProtectedApplyCommandRunner
+
+    def __post_init__(self) -> None:
+        if self.service_uid < 0:
+            raise ValueError("protected convergence authority is invalid")
+
+    def __call__(
+        self,
+        check_id: str,
+        operation: CheckOperation,
+        plan: FinalGatePlan,
+    ) -> FinalGateResult:
+        if check_id != "final.convergence" or operation is not CheckOperation.VERIFY:
+            raise ValueError("protected convergence operation is invalid")
+        environment = self.runner.environment
+        if environment.get("KUBECONFIG") is None:
+            raise ValueError("protected convergence command environment is invalid")
+        epoch = KubernetesProtectedEpochComponent(
+            runner=self.runner,
+            environment=environment,
+        )
+        observations = {
+            "database-migration": KubernetesProtectedMigrationComponent(
+                runner=self.runner,
+                environment=environment,
+                service_uid=self.service_uid,
+            ).classify(plan),
+            "mutation-epoch-claim": epoch.classify(plan),
+            "staging-manifests": KubernetesProtectedManifestComponent(
+                runner=self.runner,
+                environment=environment,
+                service_uid=self.service_uid,
+                epoch_guard=epoch.classify,
+            ).classify(plan),
+        }
+        expected_epoch = plan.starting_mutation_epoch + 1
+        blockers = {
+            component_id: "protected-component-not-exact"
+            for component_id, observation in sorted(observations.items())
+            if observation.state is not ComponentState.EXACT
+        }
+        if observations["mutation-epoch-claim"].observed_epoch != expected_epoch:
+            blockers["mutation-epoch-claim"] = "protected-epoch-not-exact"
+        if observations["staging-manifests"].observed_epoch != expected_epoch:
+            blockers["staging-manifests"] = "protected-epoch-not-exact"
+        return FinalGateResult(
+            check_id=check_id,
+            operation=operation,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            observed_epoch=max(observation.observed_epoch for observation in observations.values()),
+            evidence_digest=_observation_evidence_digest(observations),
+            protected_mutation=False,
+            blockers=blockers,
+        )
+
+
 def _terminal_evidence_digest(terminals: Mapping[str, ComponentTerminal]) -> str:
     payload = {
         component_id: terminal.to_dict() for component_id, terminal in sorted(terminals.items())
@@ -278,8 +345,25 @@ def _terminal_evidence_digest(terminals: Mapping[str, ComponentTerminal]) -> str
     ).hexdigest()
 
 
+def _observation_evidence_digest(
+    observations: Mapping[str, ComponentObservation],
+) -> str:
+    payload = {
+        component_id: {
+            "evidence_digest": observation.evidence_digest,
+            "observed_epoch": observation.observed_epoch,
+            "state": observation.state.value,
+        }
+        for component_id, observation in sorted(observations.items())
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 __all__ = [
     "PROTECTED_KUBECONFIG_PATH",
+    "KubernetesProtectedConvergenceExecutor",
     "MigrationEpochProtectedApplyExecutor",
     "ProtectedApplyCommandRunner",
     "SubprocessProtectedApplyCommandRunner",

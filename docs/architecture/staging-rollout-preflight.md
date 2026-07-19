@@ -534,6 +534,12 @@ Diff output is discarded so a Secret difference cannot enter logs or evidence.
 The component binds the fresh protected-baseline digest, candidate/tree,
 rendered-manifest digest, namespace, and starting epoch in its immutable intent.
 
+`final.convergence` then reuses those same migration, epoch and manifest
+classifiers in read-only mode. It requires the target schema, the exact
+request-owned single epoch advance and an empty server-side manifest diff. It
+does not call any component apply method, rerender a manifest or rebuild an
+image; drift is returned as bounded per-component blocker evidence.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:
