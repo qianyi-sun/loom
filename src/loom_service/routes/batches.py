@@ -21,13 +21,14 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
 
 if TYPE_CHECKING:
     from loom.family_run.spec import FamilyRunSpec
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 
 from loom.auth import AuthContext
+from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
 from loom.db.schema import (
     Batch,
     Benchmark,
@@ -1102,7 +1103,16 @@ async def _create_batch_record(
     batch_name = explicit_name or generated_identity.name
     batch_description = explicit_description or generated_identity.description
 
+    batch_id = uuid4()
+    batch_created_at = datetime.now(UTC)
+    lifecycle_authority_id = await ensure_batch_lifecycle_authority(
+        s,
+        batch_id=batch_id,
+        team_id=submission_team_id,
+        created_at=batch_created_at,
+    )
     b = Batch(
+        id=batch_id,
         team_id=submission_team_id,
         name=batch_name,
         description=batch_description,
@@ -1131,6 +1141,8 @@ async def _create_batch_record(
         pre_run_cost_estimate_source=budget_estimate.cost_estimate_source,
         pre_run_cost_estimate_confidence=(budget_estimate.cost_estimate_confidence),
         budget_diagnostics=budget_diagnostics,
+        created_at=batch_created_at,
+        lifecycle_authority_id=lifecycle_authority_id,
     )
     s.add(b)
     await s.flush()
@@ -2338,7 +2350,16 @@ async def rerun_failed_batch(
             detail="rerun target tasks are missing or no longer runnable",
         )
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
+    rerun_id = uuid4()
+    rerun_created_at = datetime.now(UTC)
+    rerun_lifecycle_authority_id = await ensure_batch_lifecycle_authority(
+        s,
+        batch_id=rerun_id,
+        team_id=b.team_id,
+        created_at=rerun_created_at,
+    )
     rerun = Batch(
+        id=rerun_id,
         team_id=b.team_id,
         name=f"{b.name} failed-case rerun",
         description=(f"Reruns {len(targets)} transient failed case(s) from batch {b.id}."),
@@ -2365,6 +2386,8 @@ async def rerun_failed_batch(
             },
             *rerun_task_result.benchmark_selection_provenance,
         ],
+        created_at=rerun_created_at,
+        lifecycle_authority_id=rerun_lifecycle_authority_id,
     )
     s.add(rerun)
     await s.commit()

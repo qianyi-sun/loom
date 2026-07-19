@@ -149,4 +149,49 @@ async def ensure_lifecycle_authority(
     return row.id
 
 
-__all__ = ["RuntimeLifecycleScope", "ensure_lifecycle_authority"]
+async def ensure_batch_lifecycle_authority(
+    session: AsyncSession,
+    *,
+    batch_id: UUID,
+    team_id: UUID,
+    created_at: datetime,
+) -> UUID:
+    scope = RuntimeLifecycleScope.from_environ()
+    return await ensure_lifecycle_authority(
+        session,
+        spec=scope.authority_spec(
+            team_id=team_id,
+            data_class=DataClass.RUN,
+            owner_kind=OwnerKind.BATCH,
+            owner_id=str(batch_id),
+            created_at=created_at,
+        ),
+    )
+
+
+async def ensure_trial_lifecycle_authority(
+    session: AsyncSession,
+    *,
+    trial_id: UUID,
+    team_id: UUID,
+    created_at: datetime,
+) -> UUID:
+    scope = RuntimeLifecycleScope.from_environ()
+    return await ensure_lifecycle_authority(
+        session,
+        spec=scope.authority_spec(
+            team_id=team_id,
+            data_class=DataClass.TRIAL,
+            owner_kind=OwnerKind.TRIAL,
+            owner_id=str(trial_id),
+            created_at=created_at,
+        ),
+    )
+
+
+__all__ = [
+    "RuntimeLifecycleScope",
+    "ensure_batch_lifecycle_authority",
+    "ensure_lifecycle_authority",
+    "ensure_trial_lifecycle_authority",
+]

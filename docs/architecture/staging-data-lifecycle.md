@@ -21,6 +21,14 @@ explicit reviewed retention policy. Retried registration reuses one unique
 owner authority only when its team, scope, class, pin and retention facts still
 match; conflicting authority fails the writer transaction.
 
+Every service batch creation path, including failed-case reruns, Run Library
+configuration clones, and artifact-derived runs, allocates its batch identity
+and lifecycle authority in the same database transaction. Control-plane trial
+submission binds the inserted trial to its authority before commit; an
+idempotency conflict returns the already-bound trial without creating another
+authority. A writer may not commit an execution owner with a null authority or
+leave an authority whose owner insert rolled back.
+
 Staging defaults are:
 
 - ephemeral run, trial, event, and artifact data expires after 7 days;
