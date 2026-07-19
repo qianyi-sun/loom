@@ -18,6 +18,7 @@ from loom.data_lifecycle import (
     LifecycleAuthoritySpec,
     OwnerKind,
 )
+from loom.data_lifecycle_capacity_sql import require_staging_capacity_admission
 from loom.db.schema import (
     Batch,
     DataLifecycleAuthority,
@@ -161,8 +162,15 @@ async def ensure_batch_lifecycle_authority(
     batch_id: UUID,
     team_id: UUID,
     created_at: datetime,
+    enforce_admission: bool = True,
 ) -> UUID:
     scope = RuntimeLifecycleScope.from_environ()
+    if scope.environment == "staging" and enforce_admission:
+        await require_staging_capacity_admission(
+            session,
+            namespace=scope.namespace,
+            now=created_at,
+        )
     return await ensure_lifecycle_authority(
         session,
         spec=scope.authority_spec(
@@ -193,6 +201,7 @@ async def bind_existing_batch_lifecycle_authority(
         batch_id=batch.id,
         team_id=batch.team_id,
         created_at=batch.created_at,
+        enforce_admission=False,
     )
     if batch.lifecycle_authority_id is None:
         result = await session.execute(

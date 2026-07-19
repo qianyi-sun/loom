@@ -29,6 +29,7 @@ from loom.admin_secret import (
     AdminSecretVerifier,
     load_optional_admin_secret_verifier,
 )
+from loom.data_lifecycle_capacity import StagingAdmissionError
 from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
@@ -252,6 +253,21 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             await engine.dispose()
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
+
+    @app.exception_handler(StagingAdmissionError)
+    async def _staging_admission_error(
+        _request: Request,
+        exc: StagingAdmissionError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "reason": str(exc),
+                    "retryable": True,
+                }
+            },
+        )
 
     @app.get("/", include_in_schema=False)
     async def _root() -> dict[str, object]:

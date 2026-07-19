@@ -18,7 +18,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
-from loom.data_lifecycle import DataClass, OwnerKind
+from loom.data_lifecycle import (
+    DataClass,
+    OwnerKind,
+    StagingCapacity,
+    staging_capacity_policy_digest,
+)
+from loom.data_lifecycle_capacity import StagingCapacityEvidence
+from loom.data_lifecycle_capacity_sql import SqlAlchemyStagingCapacityStore
 from loom.data_lifecycle_gc import (
     AuthorityInventory,
     GcScope,
@@ -134,6 +141,57 @@ def test_constraints_reject_unbounded_or_cross_environment_authority(
                     )
                 )
     finally:
+        engine.dispose()
+
+
+def test_capacity_store_publishes_only_newer_exact_evidence(
+    postgres_url_at_0065: str,
+) -> None:
+    engine = create_engine(postgres_url_at_0065)
+    newer_capacity = StagingCapacity(12, 34, 56, 78)
+    older_capacity = StagingCapacity(99, 99, 99, 99)
+    newer_at = datetime(2026, 7, 20, 0, 5, tzinfo=UTC)
+    try:
+        store = SqlAlchemyStagingCapacityStore(engine)
+        store.publish(
+            StagingCapacityEvidence(
+                namespace="loom-staging",
+                capacity=newer_capacity,
+                policy_sha256=staging_capacity_policy_digest(),
+                evidence_sha256=newer_capacity.evidence_digest,
+                observed_at=newer_at,
+            )
+        )
+        with pytest.raises(RuntimeError, match="lost freshness authority"):
+            store.publish(
+                StagingCapacityEvidence(
+                    namespace="loom-staging",
+                    capacity=older_capacity,
+                    policy_sha256=staging_capacity_policy_digest(),
+                    evidence_sha256=older_capacity.evidence_digest,
+                    observed_at=newer_at - timedelta(minutes=1),
+                )
+            )
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT namespace,object_count,bytes_used,disk_free_percent,"
+                    "inode_free_percent,evidence_sha256,observed_at "
+                    "FROM staging_lifecycle_capacity WHERE environment='staging'"
+                )
+            ).one()
+        assert tuple(row) == (
+            "loom-staging",
+            12,
+            34,
+            56,
+            78,
+            newer_capacity.evidence_digest,
+            newer_at,
+        )
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM staging_lifecycle_capacity"))
         engine.dispose()
 
 

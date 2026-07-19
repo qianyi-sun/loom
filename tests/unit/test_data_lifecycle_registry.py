@@ -7,7 +7,11 @@ from uuid import uuid4
 import pytest
 
 from loom.data_lifecycle import DataClass, OwnerKind
-from loom.data_lifecycle_registry import RuntimeLifecycleScope, register_lifecycle_object
+from loom.data_lifecycle_registry import (
+    RuntimeLifecycleScope,
+    ensure_batch_lifecycle_authority,
+    register_lifecycle_object,
+)
 
 NOW = datetime(2026, 7, 20, tzinfo=UTC)
 
@@ -105,3 +109,43 @@ async def test_object_hash_must_be_canonical_lowercase_hex() -> None:
         )
 
     session.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_staging_batch_authority_checks_capacity_before_registration(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LOOM_ENV", "staging")
+    monkeypatch.setenv("LOOM_NAMESPACE", "loom-staging")
+    calls: list[str] = []
+    authority_id = uuid4()
+    batch_id = uuid4()
+
+    async def capacity(_session, *, namespace, now) -> None:
+        assert namespace == "loom-staging"
+        assert now == NOW
+        calls.append("capacity")
+
+    async def authority(_session, *, spec):
+        assert spec.owner_id == str(batch_id)
+        calls.append("authority")
+        return authority_id
+
+    monkeypatch.setattr(
+        "loom.data_lifecycle_registry.require_staging_capacity_admission",
+        capacity,
+    )
+    monkeypatch.setattr(
+        "loom.data_lifecycle_registry.ensure_lifecycle_authority",
+        authority,
+    )
+
+    result = await ensure_batch_lifecycle_authority(
+        AsyncMock(),
+        batch_id=batch_id,
+        team_id=uuid4(),
+        created_at=NOW,
+    )
+
+    assert result == authority_id
+    assert calls == ["capacity", "authority"]

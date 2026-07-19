@@ -193,6 +193,42 @@ class StagingMutationEpochEvent(Base):
     )
 
 
+class StagingLifecycleCapacity(Base):
+    """Fresh exact object/filesystem capacity used by staging admission."""
+
+    __tablename__ = "staging_lifecycle_capacity"
+    __table_args__ = (
+        CheckConstraint("environment = 'staging'", name="staging_lifecycle_capacity_env_check"),
+        CheckConstraint(
+            "namespace <> '' AND source = 'exact-object-inventory-v1'",
+            name="staging_lifecycle_capacity_identity_check",
+        ),
+        CheckConstraint(
+            "object_count >= 0 AND bytes_used >= 0",
+            name="staging_lifecycle_capacity_counters_check",
+        ),
+        CheckConstraint(
+            "disk_free_percent BETWEEN 0 AND 100 AND inode_free_percent BETWEEN 0 AND 100",
+            name="staging_lifecycle_capacity_percent_check",
+        ),
+        CheckConstraint(
+            "policy_sha256 ~ '^[0-9a-f]{64}$' AND "
+            "evidence_sha256 ~ '^[0-9a-f]{64}$'",
+            name="staging_lifecycle_capacity_digest_check",
+        ),
+    )
+    environment: Mapped[str] = mapped_column(Text, primary_key=True)
+    namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    object_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    bytes_used: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    disk_free_percent: Mapped[int] = mapped_column(Integer, nullable=False)
+    inode_free_percent: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 class DataLifecycleAuthority(Base):
     """Typed environment/owner/retention authority for execution data."""
 

@@ -51,6 +51,26 @@ free percentage, inode free percentage, the GC trigger decision, and the final
 admission decision together. A missing inventory or policy-digest drift denies
 admission before request publication or backup.
 
+Migration `0067` persists the same exact capacity authority for runtime run
+admission. `scripts/ops/staging_data_lifecycle_capacity.py` enumerates every
+explicitly allowlisted execution bucket, measures the configured staging data
+filesystem, and atomically publishes object/byte/free-space counters with the
+policy and evidence digests. Evidence is valid for five minutes. Every staging
+batch creation path calls the shared lifecycle registry before inserting the
+batch and fails closed on missing, stale, drifted, or hard-high-water evidence;
+lazy binding of an already admitted pre-migration batch does not retroactively
+reject its in-flight children. Non-staging environments retain their pinned,
+non-destructive policy.
+
+```bash
+python scripts/ops/staging_data_lifecycle_capacity.py \
+  --namespace loom-staging \
+  --bucket trajectories \
+  --bucket artifacts \
+  --filesystem-path /data \
+  --output /secure/evidence/capacity-$(date -u +%Y%m%dT%H%M%SZ).json
+```
+
 The object registry stores exact bucket, key, optional version, digest, and
 size. A generic prefix is never sufficient deletion authority. Read-only
 inventory uses one repeatable-read database snapshot and reports the count of
