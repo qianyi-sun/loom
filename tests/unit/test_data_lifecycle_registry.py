@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 
 from loom.data_lifecycle import DataClass, OwnerKind
-from loom.data_lifecycle_registry import RuntimeLifecycleScope
+from loom.data_lifecycle_registry import RuntimeLifecycleScope, register_lifecycle_object
 
 NOW = datetime(2026, 7, 20, tzinfo=UTC)
 
@@ -66,3 +67,41 @@ def test_staging_authority_requires_team() -> None:
             owner_id="trial-1",
             created_at=NOW,
         )
+
+
+@pytest.mark.asyncio
+async def test_unversioned_object_requires_exact_hash() -> None:
+    session = AsyncMock()
+
+    with pytest.raises(ValueError, match="requires a SHA-256"):
+        await register_lifecycle_object(
+            session,
+            authority_id=uuid4(),
+            bucket="artifacts",
+            object_key="team/trial/result.json",
+            version_id=None,
+            content_sha256=None,
+            size_bytes=1,
+            created_at=NOW,
+        )
+
+    session.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_object_hash_must_be_canonical_lowercase_hex() -> None:
+    session = AsyncMock()
+
+    with pytest.raises(ValueError, match="lowercase hexadecimal"):
+        await register_lifecycle_object(
+            session,
+            authority_id=uuid4(),
+            bucket="artifacts",
+            object_key="team/trial/result.json",
+            version_id=None,
+            content_sha256="A" * 64,
+            size_bytes=1,
+            created_at=NOW,
+        )
+
+    session.get.assert_not_awaited()

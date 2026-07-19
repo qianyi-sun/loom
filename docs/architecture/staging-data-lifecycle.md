@@ -57,6 +57,12 @@ inventory uses one repeatable-read database snapshot and reports the count of
 unclassified rows in every execution-history table; any nonzero count is bound
 into the plan digest and blocks apply.
 
+Application-owned delivery exports register both the archive payload and its
+checksum sidecar in the artifact transaction. Unversioned objects require a
+canonical SHA-256; versioned objects bind the exact object version. A retry may
+reuse an existing registration only when authority, scope, version, digest,
+size, creation time, and active state all remain exact.
+
 ## Mutation epoch
 
 Every protected staging mutation increments one database-backed epoch: rollout
