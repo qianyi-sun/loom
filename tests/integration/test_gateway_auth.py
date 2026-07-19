@@ -27,10 +27,11 @@ async def _insert_token(
     team_id: UUID | None = None,
     created_by_user_id: UUID | None = None,
     expires_in_sec: int = 3600,
+    scopes: list[str] | None = None,
 ) -> None:
     h = hashlib.sha256(raw.encode()).digest()
     await session.execute(insert(Token).values(
-        token_hash=h, type=type_, scopes=["submit"], team_id=team_id,
+        token_hash=h, type=type_, scopes=scopes or ["submit"], team_id=team_id,
         created_by_user_id=created_by_user_id,
         issued_at=datetime.now(UTC),
         expires_at=datetime.now(UTC) + timedelta(seconds=expires_in_sec),
@@ -115,6 +116,76 @@ async def test_verify_token_debounces_last_seen_update(
     )
 
     assert second_seen == first_seen
+
+
+async def test_readonly_probe_requires_explicit_safe_path_and_never_touches_usage(
+    db_session: AsyncSession,
+) -> None:
+    team_id = uuid4()
+    await db_session.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+    raw = "loom_readonly_probe"
+    await _insert_token(
+        db_session,
+        raw=raw,
+        type_="readonly_probe",
+        team_id=team_id,
+        scopes=["read:own"],
+    )
+    token_hash = hashlib.sha256(raw.encode()).digest()
+
+    assert await verify_bearer_token(db_session, f"Bearer {raw}") is None
+    ctx = await verify_bearer_token(
+        db_session,
+        f"Bearer {raw}",
+        allow_readonly_probe=True,
+    )
+
+    assert ctx is not None
+    assert ctx.type == "readonly_probe"
+    assert ctx.auth_kind == "readonly_probe"
+    assert ctx.scopes == ["read:own"]
+    assert await db_session.scalar(
+        select(Token.last_seen_at).where(Token.token_hash == token_hash),
+    ) is None
+    assert await db_session.scalar(
+        select(Token.last_used_at).where(Token.token_hash == token_hash),
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("scopes", "created_by_user_id"),
+    ((["read:own", "submit"], None), (["read:own"], UUID(int=1))),
+)
+async def test_readonly_probe_rejects_authority_drift(
+    db_session: AsyncSession,
+    scopes: list[str],
+    created_by_user_id: UUID | None,
+) -> None:
+    team_id = uuid4()
+    await db_session.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+    if created_by_user_id is not None:
+        await db_session.execute(insert(User).values(
+            id=created_by_user_id,
+            username=f"GatewayAuth{created_by_user_id.hex}",
+            username_normalized=f"gateway-auth-{created_by_user_id.hex}",
+            status="active",
+            is_platform_admin=False,
+        ))
+    raw = f"loom_readonly_{uuid4().hex}"
+    await _insert_token(
+        db_session,
+        raw=raw,
+        type_="readonly_probe",
+        team_id=team_id,
+        created_by_user_id=created_by_user_id,
+        scopes=scopes,
+    )
+
+    assert await verify_bearer_token(
+        db_session,
+        f"Bearer {raw}",
+        allow_readonly_probe=True,
+    ) is None
 
 
 async def test_missing_bearer_returns_none(db_session: AsyncSession):

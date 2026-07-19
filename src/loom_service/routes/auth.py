@@ -371,6 +371,8 @@ def _credential_type(ctx: AuthContext) -> str:
         return "service_credential"
     if ctx.type == "team":
         return "legacy_team_token"
+    if ctx.type == "readonly_probe":
+        return "staging_readonly_probe"
     if ctx.type == "admin":
         return "admin_bearer_token"
     if ctx.type == "worker":

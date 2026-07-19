@@ -134,6 +134,12 @@ the server-observed capability set for the dedicated
 `loom-rollout-readonly` principal, not from the fact that a probe happened to
 use GET. Any Kubernetes write verb, wildcard authority, secret/token read, or
 HTTP mutation method blocks admission before a baseline probe can run.
+The application credential is a database-backed `readonly_probe` principal
+with the exact `read:own` scope. The service admits that type only for GET or
+HEAD, never updates token usage timestamps while authenticating it, and all
+other services reject the type by default. A normal team, worker, browser, or
+admin credential cannot satisfy this authority check merely because the
+selected baseline endpoints happen to be reads.
 
 `CandidatePreflightOrchestrator` is the restart boundary between admission and
 rehearsal. The broker executes Tier 0–2 from a runtime factory before it

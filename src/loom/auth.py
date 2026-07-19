@@ -165,6 +165,7 @@ async def verify_bearer_token(
     *,
     signing_key: str | None = None,
     admin_verifier: AdminSecretVerifier | None = None,
+    allow_readonly_probe: bool = False,
 ) -> AuthContext | None:
     """Validate a Bearer token. Returns an AuthContext or None.
 
@@ -215,6 +216,16 @@ async def verify_bearer_token(
         scope.startswith("admin:") for scope in row.scopes
     ):
         return None
+    if row.type == "readonly_probe":
+        if (
+            not allow_readonly_probe
+            or row.team_id is None
+            or list(row.scopes) != ["read:own"]
+            or row.created_by_user_id is not None
+        ):
+            return None
+    elif row.type not in {"team", "worker"}:
+        return None
     if row.revoked_at is not None:
         return None
     if row.expires_at is not None and row.expires_at < datetime.now(UTC):
@@ -235,7 +246,9 @@ async def verify_bearer_token(
     expires_at = row.expires_at
     now = datetime.now(UTC)
     touch_cutoff = now - _TOKEN_TOUCH_DEBOUNCE
-    if row.last_seen_at is None or row.last_seen_at <= touch_cutoff:
+    if row.type != "readonly_probe" and (
+        row.last_seen_at is None or row.last_seen_at <= touch_cutoff
+    ):
         await session.execute(
             update(Token)
             .where(Token.token_hash == token_hash)
@@ -255,4 +268,5 @@ async def verify_bearer_token(
         user_id=user_id,
         role=role,
         expires_at=expires_at,
+        auth_kind="readonly_probe" if token_type == "readonly_probe" else "bearer",
     )

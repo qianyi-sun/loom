@@ -269,6 +269,56 @@ async def test_legacy_team_token_whoami_reports_compatibility_credential(
     assert body["token_prefix"] == token_hash_prefix
 
 
+async def test_readonly_probe_is_get_only_and_does_not_update_usage(
+    svc_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, _raw, team_id = svc_setup
+    raw = f"loom_readonly_{uuid4().hex}"
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    async with app.state.session_factory() as session:
+        await session.execute(insert(Token).values(
+            token_hash=token_hash,
+            name="staging baseline",
+            type="readonly_probe",
+            scopes=["read:own"],
+            team_id=team_id,
+            issued_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ))
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        whoami = await ac.get(
+            "/api/v1/auth/whoami",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        rejected = await ac.post(
+            "/api/v1/tokens",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "forbidden",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 1,
+            },
+        )
+
+    assert whoami.status_code == 200, whoami.text
+    assert whoami.json()["credential_type"] == "staging_readonly_probe"
+    assert whoami.json()["scopes"] == ["read:own"]
+    assert rejected.status_code == 401
+    async with app.state.session_factory() as session:
+        usage = (await session.execute(
+            select(Token.last_seen_at, Token.last_used_at).where(
+                Token.token_hash == token_hash,
+            ),
+        )).one()
+    assert usage == (None, None)
+
+
 async def test_owner_rotates_token_revoking_old_secret(
     auth_setup: tuple[FastAPI, UUID, UUID, UUID, UUID],  # noqa: F811
 ) -> None:
