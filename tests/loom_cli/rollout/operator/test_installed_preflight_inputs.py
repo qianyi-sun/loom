@@ -80,6 +80,7 @@ def test_loader_binds_installed_static_authorities_without_secret_values(tmp_pat
         "catalog",
         "readonly-probe",
         "readonly-kubeconfig",
+        "readonly-database",
         "rehearsal-kubeconfig",
         "server-dry-run-kubeconfig",
     }

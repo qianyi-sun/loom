@@ -162,6 +162,12 @@ accepts only its exact four-digit Alembic revision and binds the one-time
 bootstrap epoch `0` to that revision. Revision 0066 and later must provide the
 exact staging epoch row; revision 0067 and later must also provide exact
 capacity authority. A missing newer table never falls back to legacy mode.
+The root installer creates or reuses one 256-bit credential in a root-owned
+0600 file, converges the exact role through `psql` stdin, and publishes a
+service-owned 0600 copy. The password is never placed in argv, stdout,
+install evidence, or an attestation. Reinstall revokes table and sequence
+authority before granting SELECT back to the fixed allowlist, so privilege
+drift cannot silently accumulate.
 Installed preflight treats the readonly application token, readonly kubeconfig,
 rehearsal kubeconfig, and server-dry-run kubeconfig as distinct private
 credential authorities; all four must pass the same stable-read, owner, mode,

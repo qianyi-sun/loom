@@ -7,6 +7,7 @@ import json
 import os
 import pwd
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -21,6 +22,7 @@ import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.preflight_credential_paths import (
     PREFLIGHT_CREDENTIAL_ROOT,
+    READONLY_DATABASE_CREDENTIAL_PATH,
     READONLY_KUBECONFIG_PATH,
     READONLY_TOKEN_PATH,
     REHEARSAL_KUBECONFIG_PATH,
@@ -29,12 +31,17 @@ from loom_cli.rollout.preflight_kubeconfig_authority import (
     render_token_request_kubeconfig,
     validate_token_request_kubeconfig,
 )
+from loom_cli.rollout.readonly_database_bootstrap import (
+    ReadonlyDatabaseCredential,
+    render_readonly_role_sql,
+)
 
 _ROOT_KUBECONFIG = Path("/root/.kube/config")
 _RUNNER_REPO = Path("/opt/loom-staging-runner/source")
 _READONLY_MANIFEST = _RUNNER_REPO / "deploy/k8s/staging-rollout-readonly.yaml"
 _REHEARSAL_MANIFEST = _RUNNER_REPO / "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
 _APPLICATION_TOKEN_SOURCE = Path("/etc/loom/staging-rollout-readonly-probe-token")
+_DATABASE_CREDENTIAL_SOURCE = Path("/etc/loom/staging-rollout-readonly-db.json")
 _SERVICE_USER = "loom-rollout"
 _TOKEN_DURATION = "6h"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{32,1024}$")
@@ -84,8 +91,10 @@ class CredentialPaths:
     readonly_manifest: Path = _READONLY_MANIFEST
     rehearsal_manifest: Path = _REHEARSAL_MANIFEST
     application_token_source: Path = _APPLICATION_TOKEN_SOURCE
+    database_credential_source: Path = _DATABASE_CREDENTIAL_SOURCE
     credential_root: Path = PREFLIGHT_CREDENTIAL_ROOT
     readonly_kubeconfig: Path = READONLY_KUBECONFIG_PATH
+    readonly_database_credential: Path = READONLY_DATABASE_CREDENTIAL_PATH
     readonly_token: Path = READONLY_TOKEN_PATH
     rehearsal_kubeconfig: Path = REHEARSAL_KUBECONFIG_PATH
 
@@ -113,12 +122,7 @@ class PreflightCredentialInstaller:
                 raise CredentialInstallError("rollout service identity is unavailable") from exc
             self.service_uid = identity.pw_uid
             self.service_gid = identity.pw_gid
-        if (
-            self.service_uid < 1
-            or self.service_gid < 1
-            or self.root_uid < 0
-            or self.root_gid < 0
-        ):
+        if self.service_uid < 1 or self.service_gid < 1 or self.root_uid < 0 or self.root_gid < 0:
             raise CredentialInstallError("rollout service identity is unsafe")
         for field in fields(self.paths):
             path = getattr(self.paths, field.name)
@@ -131,6 +135,8 @@ class PreflightCredentialInstaller:
         source_kubeconfig = self._minified_source_kubeconfig()
         for manifest in (self.paths.readonly_manifest, self.paths.rehearsal_manifest):
             self._apply_authority(manifest)
+        database_credential = self._load_or_create_database_credential()
+        self._converge_database_role(database_credential)
         application_token = self._read_private(
             self.paths.application_token_source,
             expected_uid=self.root_uid,
@@ -144,13 +150,25 @@ class PreflightCredentialInstaller:
             raise CredentialInstallError("readonly application token payload is invalid")
         existing = self.check()
         installed_application_token: bytes | None = None
+        installed_database_credential: ReadonlyDatabaseCredential | None = None
         if existing["ok"]:
             installed_application_token = self._read_private(
                 self.paths.readonly_token,
                 expected_uid=self.service_uid,
                 expected_gid=self.service_gid,
             ).strip()
-        if existing["ok"] and installed_application_token == application_token:
+            installed_database_credential = ReadonlyDatabaseCredential.from_bytes(
+                self._read_private(
+                    self.paths.readonly_database_credential,
+                    expected_uid=self.service_uid,
+                    expected_gid=self.service_gid,
+                )
+            )
+        if (
+            existing["ok"]
+            and installed_application_token == application_token
+            and installed_database_credential == database_credential
+        ):
             return {"ok": True, "changed": [], "authority": existing["authority"]}
         readonly = self._request_kubeconfig(
             source_kubeconfig,
@@ -171,6 +189,10 @@ class PreflightCredentialInstaller:
             str(self.paths.readonly_token): self._atomic_write(
                 self.paths.readonly_token,
                 application_token.rstrip() + b"\n",
+            ),
+            str(self.paths.readonly_database_credential): self._atomic_write(
+                self.paths.readonly_database_credential,
+                database_credential.to_bytes(),
             ),
             str(self.paths.rehearsal_kubeconfig): self._atomic_write(
                 self.paths.rehearsal_kubeconfig,
@@ -234,7 +256,79 @@ class PreflightCredentialInstaller:
                 raise ValueError
         except (CredentialInstallError, UnicodeDecodeError, ValueError):
             failures.append("readonly-application")
+        try:
+            database_credential = ReadonlyDatabaseCredential.from_bytes(
+                self._read_private(
+                    self.paths.readonly_database_credential,
+                    expected_uid=self.service_uid,
+                    expected_gid=self.service_gid,
+                )
+            )
+            authority["readonly-database"] = {
+                "database": database_credential.database,
+                "role": database_credential.role,
+                "schema_version": 1,
+            }
+        except (CredentialInstallError, ValueError):
+            failures.append("readonly-database")
         return {"ok": not failures, "failures": sorted(failures), "authority": authority}
+
+    def _load_or_create_database_credential(self) -> ReadonlyDatabaseCredential:
+        path = self.paths.database_credential_source
+        if path.exists() or path.is_symlink():
+            try:
+                return ReadonlyDatabaseCredential.from_bytes(
+                    self._read_private(
+                        path,
+                        expected_uid=self.root_uid,
+                        expected_gid=self.root_gid,
+                    )
+                )
+            except ValueError as exc:
+                raise CredentialInstallError(
+                    "readonly database credential authority is invalid"
+                ) from exc
+        self._require_root_directory(path.parent)
+        credential = ReadonlyDatabaseCredential(
+            role="loom_rollout_readonly",
+            database="loom",
+            password=secrets.token_hex(32),
+        )
+        self._atomic_write_private(
+            path,
+            credential.to_bytes(),
+            uid=self.root_uid,
+            gid=self.root_gid,
+            parent=path.parent,
+        )
+        return credential
+
+    def _converge_database_role(self, credential: ReadonlyDatabaseCredential) -> None:
+        self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.paths.root_kubeconfig),
+                "--namespace",
+                "loom-staging",
+                "exec",
+                "statefulset/loom-postgres",
+                "--",
+                "psql",
+                "--no-psqlrc",
+                "-AtX",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-U",
+                "loom",
+                "-d",
+                credential.database,
+                "-f",
+                "-",
+            ),
+            input=render_readonly_role_sql(credential),
+            timeout=60,
+        )
 
     def _minified_source_kubeconfig(self) -> bytes:
         self._read_private(
@@ -342,15 +436,46 @@ class PreflightCredentialInstaller:
         except OSError as exc:
             raise CredentialInstallError("preflight credential directory is unavailable") from exc
 
+    def _require_root_directory(self, path: Path) -> None:
+        try:
+            metadata = os.lstat(path)
+        except OSError as exc:
+            raise CredentialInstallError("root credential directory is unavailable") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != self.root_uid
+            or metadata.st_gid != self.root_gid
+            or stat.S_IMODE(metadata.st_mode) not in {0o700, 0o755}
+        ):
+            raise CredentialInstallError("root credential directory is unsafe")
+
     def _atomic_write(self, path: Path, payload: bytes) -> bool:
-        if not payload or len(payload) > 1 << 20 or path.parent != self.paths.credential_root:
+        return self._atomic_write_private(
+            path,
+            payload,
+            uid=self.service_uid,
+            gid=self.service_gid,
+            parent=self.paths.credential_root,
+        )
+
+    def _atomic_write_private(
+        self,
+        path: Path,
+        payload: bytes,
+        *,
+        uid: int,
+        gid: int,
+        parent: Path,
+    ) -> bool:
+        if not payload or len(payload) > 1 << 20 or path.parent != parent:
             raise CredentialInstallError("preflight credential payload is invalid")
         previous: bytes | None = None
         if path.exists() and not path.is_symlink():
             previous = self._read_private(
                 path,
-                expected_uid=self.service_uid,
-                expected_gid=self.service_gid,
+                expected_uid=uid,
+                expected_gid=gid,
             )
         if previous == payload:
             return False
@@ -359,7 +484,7 @@ class PreflightCredentialInstaller:
             descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
             temporary = Path(raw)
             os.fchmod(descriptor, 0o600)
-            os.fchown(descriptor, self.service_uid, self.service_gid)
+            os.fchown(descriptor, uid, gid)
             with os.fdopen(descriptor, "wb", closefd=True) as handle:
                 handle.write(payload)
                 handle.flush()

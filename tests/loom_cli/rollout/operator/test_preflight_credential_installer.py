@@ -107,9 +107,11 @@ def _installer(tmp_path: Path) -> tuple[PreflightCredentialInstaller, Runner]:
         readonly_manifest=tmp_path / "repo/readonly.yaml",
         rehearsal_manifest=tmp_path / "repo/rehearsal.yaml",
         application_token_source=tmp_path / "etc/readonly-token",
+        database_credential_source=tmp_path / "etc/readonly-db.json",
         credential_root=tmp_path / "state/credentials",
         readonly_kubeconfig=tmp_path / "state/credentials/readonly-kubeconfig",
         readonly_token=tmp_path / "state/credentials/readonly-probe-token",
+        readonly_database_credential=tmp_path / "state/credentials/readonly-database.json",
         rehearsal_kubeconfig=tmp_path / "state/credentials/rehearsal-kubeconfig",
     )
     source = _source()
@@ -143,10 +145,18 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     result = installer.install()
 
     assert result["ok"] is True
-    assert len(result["changed"]) == 3
+    assert len(result["changed"]) == 4
     assert installer.check()["ok"] is True
     assert sum("apply" in command for command, _ in runner.calls) == 2
     assert sum("token" in command for command, _ in runner.calls) == 2
+    database_calls = [
+        (command, stdin)
+        for command, stdin in runner.calls
+        if "statefulset/loom-postgres" in command
+    ]
+    assert len(database_calls) == 1
+    assert database_calls[0][1] is not None
+    assert "PASSWORD" in database_calls[0][1]
     assert all(
         "--duration=6h" in command and "--audience=https://kubernetes.default.svc" in command
         for command, _ in runner.calls
@@ -154,12 +164,22 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     )
     rendered = json.dumps(result, sort_keys=True)
     assert "loom_readonly_probe_token_fixture" not in rendered
-    assert all(path.stat().st_mode & 0o777 == 0o600 for path in (
-        installer.paths.readonly_kubeconfig,
-        installer.paths.readonly_token,
-        installer.paths.rehearsal_kubeconfig,
-    ))
+    database_password = json.loads(installer.paths.database_credential_source.read_bytes())[
+        "password"
+    ]
+    assert database_password not in rendered
+    assert all(database_password not in item for command, _ in runner.calls for item in command)
+    assert all(
+        path.stat().st_mode & 0o777 == 0o600
+        for path in (
+            installer.paths.readonly_kubeconfig,
+            installer.paths.readonly_database_credential,
+            installer.paths.readonly_token,
+            installer.paths.rehearsal_kubeconfig,
+        )
+    )
     assert installer.paths.credential_root.stat().st_mode & 0o777 == 0o700
+    assert installer.paths.database_credential_source.stat().st_mode & 0o777 == 0o600
 
 
 def test_install_is_idempotent_only_while_bounded_tokens_are_unchanged(tmp_path: Path) -> None:
@@ -190,5 +210,17 @@ def test_install_requires_root_and_rejects_unsafe_source_mode(tmp_path: Path) ->
 
     installer.euid = 0
     installer.paths.application_token_source.chmod(0o644)
+    with pytest.raises(CredentialInstallError, match="authority is unsafe"):
+        installer.install()
+
+
+def test_install_rejects_corrupt_or_public_database_credential(tmp_path: Path) -> None:
+    installer, _runner = _installer(tmp_path)
+    _private(installer.paths.database_credential_source, b'{"password":"exposed"}\n')
+
+    with pytest.raises(CredentialInstallError, match="database credential authority"):
+        installer.install()
+
+    installer.paths.database_credential_source.chmod(0o644)
     with pytest.raises(CredentialInstallError, match="authority is unsafe"):
         installer.install()

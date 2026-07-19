@@ -12,6 +12,7 @@ from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.install_attestation import VerifiedRunnerInstall, verify_runner_install
 from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
 from loom_cli.rollout.preflight_credential_paths import (
+    READONLY_DATABASE_CREDENTIAL_PATH,
     READONLY_KUBECONFIG_PATH,
     READONLY_TOKEN_PATH,
     REHEARSAL_KUBECONFIG_PATH,
@@ -181,6 +182,10 @@ def _credential_sources(
             CredentialProbeSource(
                 label="readonly-kubeconfig",
                 path=READONLY_KUBECONFIG_PATH,
+            ),
+            CredentialProbeSource(
+                label="readonly-database",
+                path=READONLY_DATABASE_CREDENTIAL_PATH,
             ),
             CredentialProbeSource(
                 label="rehearsal-kubeconfig",

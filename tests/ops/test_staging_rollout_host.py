@@ -375,6 +375,7 @@ class FakeSystem:
         for path in (
             host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-kubeconfig",
             host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-probe-token",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-database.json",
             host.PREFLIGHT_CREDENTIAL_ROOT / "rehearsal-kubeconfig",
         ):
             self.filesystem.atomic_write(path, b"credential-fixture\n", 0o600)
@@ -766,6 +767,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         for path in (
             host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-kubeconfig",
             host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-probe-token",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-database.json",
             host.PREFLIGHT_CREDENTIAL_ROOT / "rehearsal-kubeconfig",
         )
     )
