@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
     CheckContext,
@@ -18,9 +19,13 @@ def _string(value: object, label: str) -> str:
 
 
 def _string_map(value: object, label: str) -> dict[str, str]:
-    if not isinstance(value, Mapping) or not value or not all(
-        isinstance(key, str) and isinstance(item, str) and key and item
-        for key, item in value.items()
+    if (
+        not isinstance(value, Mapping)
+        or not value
+        or not all(
+            isinstance(key, str) and isinstance(item, str) and key and item
+            for key, item in value.items()
+        )
     ):
         raise ValueError(f"preflight binding evidence {label} is missing")
     return dict(value)
@@ -35,6 +40,8 @@ def _integer(value: object, label: str) -> int:
 def derive_attestation_bindings(
     context: CheckContext,
     executions: Sequence[CheckExecution],
+    *,
+    backup_lease: BackupLease | None = None,
 ) -> AttestationBindings:
     """Build one complete binding from passed exact-check evidence and context."""
     if not executions or any(not execution.passed for execution in executions):
@@ -62,9 +69,7 @@ def derive_attestation_bindings(
         try:
             return by_id[check_id].evidence[field]
         except KeyError as exc:
-            raise ValueError(
-                f"preflight binding evidence {check_id}.{field} is missing"
-            ) from exc
+            raise ValueError(f"preflight binding evidence {check_id}.{field} is missing") from exc
 
     def binding(name: str) -> object:
         try:
@@ -98,6 +103,34 @@ def derive_attestation_bindings(
     protected_mutation = evidence("rehearsal.cleanup", "protected-mutation")
     if cleanup is not True or protected_mutation is not False:
         raise ValueError("isolated rehearsal cleanup evidence is incomplete")
+    if backup_lease is None:
+        backup_lease_id = _string(
+            evidence("backup.lease-eligibility", "source-request"),
+            "backup lease source request",
+        )
+        backup_lease_digest = _string(binding("backup.lease.sha256"), "backup lease digest")
+        backup_manifest_sha256 = _string(binding("backup.manifest.sha256"), "backup manifest")
+        backup_component_digest = _string(
+            binding("backup.component-set.sha256"), "backup component set"
+        )
+        db_snapshot_identity = _string(binding("db.snapshot-identity"), "DB snapshot")
+        schema_revision = _string(binding("schema.revision"), "schema revision")
+        object_inventory_root = _string(binding("object.inventory-root"), "object inventory")
+    else:
+        expected = (
+            (backup_lease.environment, binding("environment")),
+            (backup_lease.namespace, binding("namespace")),
+            (backup_lease.mutation_epoch, binding("staging.mutation-epoch")),
+        )
+        if any(actual != declared for actual, declared in expected):
+            raise ValueError("restore-verified backup lease drifts from preflight context")
+        backup_lease_id = backup_lease.lease_id
+        backup_lease_digest = backup_lease.evidence_digest
+        backup_manifest_sha256 = backup_lease.manifest_sha256
+        backup_component_digest = component_set_digest(backup_lease.component_sha256)
+        db_snapshot_identity = backup_lease.db_snapshot_identity
+        schema_revision = backup_lease.schema_revision
+        object_inventory_root = backup_lease.object_inventory_root
 
     return AttestationBindings(
         candidate_sha=candidate_sha,
@@ -114,12 +147,13 @@ def derive_attestation_bindings(
             binding("staging.mutation-epoch"),
             "staging mutation epoch",
         ),
-        backup_lease_id=_string(
-            evidence("backup.lease-eligibility", "source-request"),
-            "backup lease source request",
-        ),
-        db_snapshot_identity=_string(binding("db.snapshot-identity"), "DB snapshot"),
-        schema_revision=_string(binding("schema.revision"), "schema revision"),
+        backup_lease_id=backup_lease_id,
+        backup_lease_digest=backup_lease_digest,
+        backup_manifest_sha256=backup_manifest_sha256,
+        backup_component_set_digest=backup_component_digest,
+        db_snapshot_identity=db_snapshot_identity,
+        schema_revision=schema_revision,
+        object_inventory_root=object_inventory_root,
         migration_plan_digest=_string(
             evidence("migration.plan", "plan-digest"),
             "migration plan",

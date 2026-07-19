@@ -709,8 +709,12 @@ class AttestationBindings:
     runner_config_hash: str
     staging_mutation_epoch: int
     backup_lease_id: str
+    backup_lease_digest: str
+    backup_manifest_sha256: str
+    backup_component_set_digest: str
     db_snapshot_identity: str
     schema_revision: str
+    object_inventory_root: str
     migration_plan_digest: str
     environment: str
     namespace: str
@@ -738,6 +742,10 @@ class AttestationBindings:
         for name, value in (
             ("runner install", self.runner_install_hash),
             ("runner config", self.runner_config_hash),
+            ("backup lease", self.backup_lease_digest),
+            ("backup manifest", self.backup_manifest_sha256),
+            ("backup component set", self.backup_component_set_digest),
+            ("object inventory", self.object_inventory_root),
             ("migration plan", self.migration_plan_digest),
             ("GB10 inventory", self.gb10_inventory_digest),
             ("GB10 mount", self.gb10_mount_digest),
@@ -833,8 +841,12 @@ class AttestationBindings:
             runner_config_hash=require_string("runner_config_hash"),
             staging_mutation_epoch=epoch,
             backup_lease_id=require_string("backup_lease_id"),
+            backup_lease_digest=require_string("backup_lease_digest"),
+            backup_manifest_sha256=require_string("backup_manifest_sha256"),
+            backup_component_set_digest=require_string("backup_component_set_digest"),
             db_snapshot_identity=require_string("db_snapshot_identity"),
             schema_revision=require_string("schema_revision"),
+            object_inventory_root=require_string("object_inventory_root"),
             migration_plan_digest=require_string("migration_plan_digest"),
             environment=require_string("environment"),
             namespace=require_string("namespace"),

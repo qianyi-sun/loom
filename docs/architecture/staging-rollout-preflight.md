@@ -86,6 +86,12 @@ must pass; and the terminal cleanup must be verified. The report digest binds
 all Tier 3 implementation, input, evidence, and journal digests together with
 the critical-checkpoint evidence digest.
 
+The resulting attestation binds the restore-verified lease ID and digest, the
+checkpoint manifest and component-set digests, DB snapshot identity, schema
+revision, and immutable-object inventory root. Pre-backup reuse evidence cannot
+silently substitute for a newly restored lease; the post-rehearsal binding is
+constructed from the published `BackupLease` itself.
+
 ## Tiers
 
 ### Tier 0: admission, under two minutes

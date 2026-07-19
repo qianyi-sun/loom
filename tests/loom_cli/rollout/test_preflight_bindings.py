@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 import pytest
 
+from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -83,8 +84,12 @@ def _context(*, candidate_sha: str = "a" * 40) -> CheckContext:
             "candidate.sha": candidate_sha,
             "runner.config.sha256": "5" * 64,
             "staging.mutation-epoch": 7,
+            "backup.lease.sha256": "6" * 64,
+            "backup.manifest.sha256": "7" * 64,
+            "backup.component-set.sha256": "8" * 64,
             "db.snapshot-identity": "lsn-1",
             "schema.revision": "0066",
+            "object.inventory-root": "9" * 64,
             "environment": "staging",
             "namespace": "loom-staging",
             "route": "https://yylx.world/dev",
@@ -100,6 +105,42 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
     assert bindings.secret_metadata_fingerprints == {"admin": f"sha256:{'d' * 64}"}
     assert bindings.staging_mutation_epoch == 7
     assert bindings.backup_lease_id == "req-known-good"
+    assert bindings.backup_lease_digest == "6" * 64
+    assert bindings.backup_manifest_sha256 == "7" * 64
+    assert bindings.backup_component_set_digest == "8" * 64
+    assert bindings.object_inventory_root == "9" * 64
+
+
+def test_restore_verified_lease_overrides_prebackup_reuse_evidence() -> None:
+    lease = BackupLease(
+        lease_id="lease-restored01",
+        source_request_id="req-restored01",
+        manifest_sha256="a" * 64,
+        component_sha256={"postgres": "b" * 64, "object_inventory": "c" * 64},
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=7,
+        db_snapshot_identity="pgdump-sha256:" + "b" * 64,
+        schema_revision="0067",
+        object_inventory_root="d" * 64,
+        created_at=NOW,
+        restore_verified_at=NOW + timedelta(minutes=1),
+        expires_at=NOW + timedelta(hours=2),
+    )
+
+    bindings = derive_attestation_bindings(
+        _context(),
+        _executions(),
+        backup_lease=lease,
+    )
+
+    assert bindings.backup_lease_id == lease.lease_id
+    assert bindings.backup_lease_digest == lease.evidence_digest
+    assert bindings.backup_manifest_sha256 == lease.manifest_sha256
+    assert bindings.backup_component_set_digest == component_set_digest(lease.component_sha256)
+    assert bindings.db_snapshot_identity == lease.db_snapshot_identity
+    assert bindings.schema_revision == lease.schema_revision
+    assert bindings.object_inventory_root == lease.object_inventory_root
 
 
 def test_rejects_candidate_drift_and_incomplete_cleanup() -> None:
@@ -108,9 +149,7 @@ def test_rejects_candidate_drift_and_incomplete_cleanup() -> None:
     executions = list(_executions())
     executions[-1] = replace(
         executions[-1],
-        evidence=MappingProxyType(
-            {"cleanup-verified": False, "protected-mutation": False}
-        ),
+        evidence=MappingProxyType({"cleanup-verified": False, "protected-mutation": False}),
     )
     with pytest.raises(ValueError, match="cleanup evidence"):
         derive_attestation_bindings(_context(), executions)
