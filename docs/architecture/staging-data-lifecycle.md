@@ -71,6 +71,42 @@ or incomplete object evidence rejects the entire projection and rolls back the
 trajectory-index update; finalization is not the first point at which a broad
 prefix becomes deletion authority.
 
+### Historical classification
+
+Rows created before migration `0066` are never implicitly grandfathered into
+GC. The supported classifier is
+`scripts/ops/staging_data_lifecycle_classify.py`: `inventory` reads all five
+execution tables in one repeatable-read snapshot, groups event/LLM rows under
+their exact trial owner, and hashes every artifact object through the normal
+S3/MinIO credentials. Missing owners, cross-team links, incomplete bucket/key
+metadata, and digest/size/version drift are returned together as blockers.
+There is no prefix fallback.
+
+The inventory digest excludes wall-clock report time, but binds every row
+fingerprint, exact object identity, retention authority, scope, and current
+mutation epoch. `apply` requires the operator to echo that digest and provide a
+request ID. It locks the epoch, proves the complete unclassified row set and
+all source fingerprints are unchanged, installs deterministic authorities,
+binds exact objects and rows, and advances the epoch in one transaction. A
+concurrent row or metadata change rolls the whole operation back. This
+classification step authorizes later inventory; it does not itself delete any
+DB row or object.
+
+```bash
+# Read-only; prints all blockers and the approval digest.
+python scripts/ops/staging_data_lifecycle_classify.py inventory \
+  --namespace loom-staging \
+  --output /secure/evidence/legacy-inventory.json
+
+# Separate, explicit mutation authority after reviewing that exact document.
+python scripts/ops/staging_data_lifecycle_classify.py apply \
+  --namespace loom-staging \
+  --requested-by qianyi \
+  --request-id req-legacy-<reviewed-id> \
+  --approved-inventory-digest <sha256> \
+  --output /secure/evidence/legacy-apply.json
+```
+
 ## Mutation epoch
 
 Every protected staging mutation increments one database-backed epoch: rollout

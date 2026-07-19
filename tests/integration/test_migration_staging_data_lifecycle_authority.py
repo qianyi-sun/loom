@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,7 +13,7 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
@@ -28,6 +30,7 @@ from loom.data_lifecycle_gc import (
 )
 from loom.data_lifecycle_gc_sql import SqlAlchemyGcJournal
 from loom.data_lifecycle_inventory_sql import SqlAlchemyLifecycleInventory
+from loom.data_lifecycle_legacy_sql import SqlAlchemyLegacyClassifier
 from loom.data_lifecycle_registry import RuntimeLifecycleScope, ensure_lifecycle_authority
 from loom.staging_mutation_epoch import (
     MutationEpochAdvance,
@@ -421,6 +424,117 @@ def test_execution_authority_registration_is_transactional_and_idempotent(
                 text("DELETE FROM data_lifecycle_authorities WHERE owner_id=:owner_id"),
                 {"owner_id": owner_id},
             )
+            connection.execute(text("DELETE FROM teams WHERE id=:id"), {"id": team_id})
+        engine.dispose()
+
+
+def test_legacy_artifact_classification_is_digest_approved_and_epoch_bound(
+    postgres_url_at_0065: str,
+) -> None:
+    team_id = uuid4()
+    artifact_id = uuid4()
+    created_at = datetime(2026, 7, 12, 4, tzinfo=UTC)
+    object_body = b"legacy artifact body"
+    object_sha = hashlib.sha256(object_body).hexdigest()
+    engine = create_engine(postgres_url_at_0065)
+
+    class Inspector:
+        def inspect(self, *, bucket, object_key, version_id):
+            assert bucket == "loom-staging-artifacts"
+            assert object_key == f"teams/{team_id}/artifacts/{artifact_id}.json"
+            assert version_id is None
+            return None, object_sha, len(object_body)
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO teams (id,name) VALUES (:id,:name)"),
+                {"id": team_id, "name": f"legacy-{team_id}"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO artifacts "
+                    "(id, artifact_type, name, team_id, content_hash, storage, created_at) "
+                    "VALUES (:id,'trajectory','legacy',:team_id,:content_hash,"
+                    "CAST(:storage AS jsonb),:created_at)"
+                ),
+                {
+                    "id": artifact_id,
+                    "team_id": team_id,
+                    "content_hash": f"sha256:{object_sha}",
+                    "storage": json.dumps(
+                        {
+                            "bucket": "loom-staging-artifacts",
+                            "key": f"teams/{team_id}/artifacts/{artifact_id}.json",
+                            "size_bytes": len(object_body),
+                        }
+                    ),
+                    "created_at": created_at,
+                },
+            )
+        classifier = SqlAlchemyLegacyClassifier(engine, Inspector())
+        scope = GcScope(environment="staging", namespace="loom-staging")
+        plan = classifier.inventory(
+            scope=scope,
+            planned_at=datetime(2026, 7, 20, 4, tzinfo=UTC),
+        )
+        plan.require_applicable()
+        assert [row.row_id for row in plan.rows] == [artifact_id]
+        assert plan.objects[0].content_sha256 == object_sha
+
+        with pytest.raises(RuntimeError, match="digest"):
+            classifier.apply(
+                plan=plan,
+                approved_inventory_digest="0" * 64,
+                request_id="req-legacybad0",
+                applied_at=datetime(2026, 7, 20, 4, 1, tzinfo=UTC),
+            )
+
+        state = classifier.apply(
+            plan=plan,
+            approved_inventory_digest=plan.inventory_digest,
+            request_id="req-legacygood",
+            applied_at=datetime(2026, 7, 20, 4, 2, tzinfo=UTC),
+        )
+        with engine.connect() as connection:
+            artifact_authority = connection.execute(
+                text("SELECT lifecycle_authority_id FROM artifacts WHERE id=:id"),
+                {"id": artifact_id},
+            ).scalar_one()
+            registered = connection.execute(
+                text(
+                    "SELECT authority_id, content_sha256, size_bytes "
+                    "FROM data_lifecycle_objects WHERE authority_id=:id"
+                ),
+                {"id": artifact_authority},
+            ).one()
+        assert state.epoch == plan.mutation_epoch + 1
+        assert tuple(registered) == (artifact_authority, object_sha, len(object_body))
+    finally:
+        with engine.begin() as connection:
+            authority_ids = list(
+                connection.execute(
+                    text(
+                        "SELECT lifecycle_authority_id FROM artifacts "
+                        "WHERE id=:id AND lifecycle_authority_id IS NOT NULL"
+                    ),
+                    {"id": artifact_id},
+                ).scalars()
+            )
+            connection.execute(text("DELETE FROM artifacts WHERE id=:id"), {"id": artifact_id})
+            if authority_ids:
+                connection.execute(
+                    text(
+                        "DELETE FROM data_lifecycle_objects WHERE authority_id IN :ids"
+                    ).bindparams(bindparam("ids", expanding=True)),
+                    {"ids": authority_ids},
+                )
+                connection.execute(
+                    text("DELETE FROM data_lifecycle_authorities WHERE id IN :ids").bindparams(
+                        bindparam("ids", expanding=True)
+                    ),
+                    {"ids": authority_ids},
+                )
             connection.execute(text("DELETE FROM teams WHERE id=:id"), {"id": team_id})
         engine.dispose()
 
