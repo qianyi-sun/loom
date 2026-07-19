@@ -17,6 +17,11 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 from loom.data_lifecycle import LifecycleState, ObjectLifecycleState
+from loom.staging_mutation_epoch import (
+    MutationEpochAdvance,
+    MutationEpochState,
+    ProtectedMutationClass,
+)
 
 
 class LifecycleGcError(RuntimeError):
@@ -184,9 +189,9 @@ class GcJournal(Protocol):
         self,
         *,
         run_id: UUID,
-        expected_epoch: int,
+        mutation: MutationEpochAdvance,
         deletion_token: UUID,
-    ) -> int: ...
+    ) -> MutationEpochState: ...
 
     def fail_apply(self, *, run_id: UUID, reason: str) -> None: ...
 
@@ -370,6 +375,8 @@ def execute_gc(
     journal: GcJournal,
     object_deleter: ExactObjectDeleter,
     dry_run: bool,
+    request_id: str | None = None,
+    completed_at: datetime | None = None,
 ) -> GcExecutionResult:
     """Execute exact object deletion, verification, metadata removal, and epoch bump."""
     plan.require_applicable()
@@ -386,6 +393,17 @@ def execute_gc(
             deleted_bytes=0,
             dry_run=True,
         )
+    if request_id is None or completed_at is None:
+        raise ValueError("GC apply requires request and completion authority")
+    mutation = MutationEpochAdvance(
+        environment=plan.scope.environment,
+        namespace=plan.scope.namespace,
+        expected_epoch=plan.mutation_epoch,
+        mutation_class=ProtectedMutationClass.LIFECYCLE_GC,
+        request_id=request_id,
+        evidence_sha256=plan.inventory_digest,
+        occurred_at=completed_at,
+    )
 
     deletion_token = uuid4()
     run_id = journal.begin_apply(
@@ -416,12 +434,12 @@ def execute_gc(
             authority_ids=plan.authority_ids,
             deletion_token=deletion_token,
         )
-        epoch_after = journal.complete_apply(
+        epoch_state = journal.complete_apply(
             run_id=run_id,
-            expected_epoch=plan.mutation_epoch,
+            mutation=mutation,
             deletion_token=deletion_token,
         )
-        if epoch_after != plan.mutation_epoch + 1:
+        if epoch_state.epoch != plan.mutation_epoch + 1:
             raise LifecycleGcExecutionError("journal completed with a non-monotonic mutation epoch")
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
@@ -434,7 +452,7 @@ def execute_gc(
         run_id=run_id,
         deletion_token=deletion_token,
         mutation_epoch_before=plan.mutation_epoch,
-        mutation_epoch_after=epoch_after,
+        mutation_epoch_after=epoch_state.epoch,
         deleted_objects=plan.object_count,
         deleted_bytes=plan.bytes_total,
         dry_run=False,

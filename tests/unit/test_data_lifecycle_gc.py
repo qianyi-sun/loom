@@ -18,6 +18,7 @@ from loom.data_lifecycle_gc import (
     execute_gc,
     reconcile_object_inventory,
 )
+from loom.staging_mutation_epoch import MutationEpochAdvance, MutationEpochState
 
 NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
 SCOPE = GcScope(environment="staging", namespace="loom-staging")
@@ -214,11 +215,19 @@ class _Journal:
         self,
         *,
         run_id: UUID,
-        expected_epoch: int,
+        mutation: MutationEpochAdvance,
         deletion_token: UUID,
-    ) -> int:
-        self.events.append(("complete", (run_id, expected_epoch, deletion_token)))
-        return self.epoch_after
+    ) -> MutationEpochState:
+        self.events.append(("complete", (run_id, mutation, deletion_token)))
+        return MutationEpochState(
+            environment=mutation.environment,
+            namespace=mutation.namespace,
+            epoch=self.epoch_after,
+            mutation_class=mutation.mutation_class,
+            request_id=mutation.request_id,
+            evidence_sha256=mutation.evidence_sha256,
+            updated_at=mutation.occurred_at,
+        )
 
     def fail_apply(self, *, run_id: UUID, reason: str) -> None:
         self.events.append(("failed", (run_id, reason)))
@@ -261,6 +270,8 @@ def test_apply_orders_delete_verify_metadata_and_epoch() -> None:
         journal=journal,
         object_deleter=_Deleter(),
         dry_run=False,
+        request_id="req-gc0000000",
+        completed_at=NOW,
     )
     assert result.mutation_epoch_after == 8
     assert result.deleted_objects == 1
@@ -283,6 +294,8 @@ def test_apply_seals_failure_before_business_metadata_removal() -> None:
             journal=journal,
             object_deleter=_Deleter(verify=False),
             dry_run=False,
+            request_id="req-gc0000000",
+            completed_at=NOW,
         )
     assert [event[0] for event in journal.events] == ["begin", "deleted", "failed"]
 
@@ -295,4 +308,23 @@ def test_apply_rejects_non_monotonic_epoch_completion() -> None:
             journal=_Journal(epoch_after=9),
             object_deleter=_Deleter(),
             dry_run=False,
+            request_id="req-gc0000000",
+            completed_at=NOW,
         )
+
+
+def test_apply_requires_exact_mutation_authority_before_deletion() -> None:
+    journal = _Journal()
+    deleter = _Deleter()
+
+    with pytest.raises(ValueError, match="completion authority"):
+        execute_gc(
+            plan=_plan(),
+            requested_by="qianyi",
+            journal=journal,
+            object_deleter=deleter,
+            dry_run=False,
+        )
+
+    assert journal.events == []
+    assert deleter.deleted == []
