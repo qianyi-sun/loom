@@ -56,6 +56,13 @@ validate the migration graph, render and verify systemd units, and launch the
 browser runner against its report contract. These artifacts are immutable
 inputs to rehearsal and final rollout; final rollout does not rebuild them.
 
+`migration.plan` loads the exact candidate's Alembic graph without a database
+connection. The checked-in staging policy requires one closed linear chain,
+the declared head, expand/contract before destructive upgrades, revision-owned
+fail-closed downgrade behavior, and rehearsal before protected apply. Its plan
+digest binds every revision source hash and the policy digest; clone rehearsal
+and final apply must consume that same plan rather than rediscovering a head.
+
 ### Tier 2: current staging readonly baseline
 
 Readonly credentials probe health, auth, catalog/task/provider compatibility,

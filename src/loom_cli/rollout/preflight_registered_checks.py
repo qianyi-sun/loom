@@ -35,6 +35,10 @@ from loom_cli.rollout.lifecycle_protocol import (
     lifecycle_protocol_digest,
     run_lifecycle_self_test,
 )
+from loom_cli.rollout.migration_readiness import (
+    DEFAULT_MIGRATION_POLICY,
+    inspect_migration_plan,
+)
 from loom_cli.rollout.operator.backup_lease import (
     BackupLease,
     component_set_digest,
@@ -1322,6 +1326,92 @@ def _empty_gb10_probe(targets: tuple[GB10ProbeTarget, ...]) -> CheckProbe:
     )
 
 
+def build_migration_plan_check(
+    *,
+    alembic_ini: Path,
+    expected_candidate_sha: str,
+    expected_policy_digest: str,
+    policy_path: Path = DEFAULT_MIGRATION_POLICY,
+) -> RegisteredCheck:
+    """Build the Tier 1 exact static migration graph and policy invariant."""
+    for value in (expected_candidate_sha, expected_policy_digest):
+        if len(value) not in {40, 64} or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise ValueError("migration plan binding is invalid")
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != expected_candidate_sha
+            or context.bindings["migration.policy.sha256"] != expected_policy_digest
+        ):
+            return _empty_migration_plan_probe(expected_policy_digest)
+        try:
+            plan = inspect_migration_plan(alembic_ini, policy_path=policy_path)
+        except ValueError:
+            return _empty_migration_plan_probe(expected_policy_digest)
+        return CheckProbe(
+            passed=plan.policy_digest == expected_policy_digest,
+            evidence={
+                "head": plan.head,
+                "base": plan.base,
+                "revision-count": plan.revision_count,
+                "linear": True,
+                "graph-policy": plan.graph_policy,
+                "upgrade-policy": plan.upgrade_policy,
+                "downgrade-policy": plan.downgrade_policy,
+                "policy-digest": plan.policy_digest,
+                "plan-digest": plan.plan_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="migration.plan",
+            failure_code="migration.plan.invalid",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("candidate.identity",),
+            mutation_class=MutationClass.NONE,
+            input_keys=("candidate.sha", "migration.policy.sha256"),
+            evidence_schema=(
+                EvidenceField("head", "string"),
+                EvidenceField("base", "string"),
+                EvidenceField("revision-count", "integer"),
+                EvidenceField("linear", "boolean"),
+                EvidenceField("graph-policy", "string"),
+                EvidenceField("upgrade-policy", "string"),
+                EvidenceField("downgrade-policy", "string"),
+                EvidenceField("policy-digest", "sha256"),
+                EvidenceField("plan-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=3600,
+            remediation="restore the exact single-head migration graph and reviewed staging policy",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_migration_plan_probe(policy_digest: str) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "head": "unavailable",
+            "base": "unavailable",
+            "revision-count": 0,
+            "linear": False,
+            "graph-policy": "unavailable",
+            "upgrade-policy": "unavailable",
+            "downgrade-policy": "unavailable",
+            "policy-digest": policy_digest,
+            "plan-digest": "0" * 64,
+        },
+    )
+
+
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
@@ -1334,6 +1424,7 @@ __all__ = [
     "build_gb10_ssh_topology_check",
     "build_kubernetes_client_check",
     "build_lifecycle_launch_cancel_check",
+    "build_migration_plan_check",
     "build_runner_install_check",
     "build_systemd_user_manager_check",
     "build_tools_runtime_check",

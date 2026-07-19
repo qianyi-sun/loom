@@ -41,6 +41,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_gb10_ssh_topology_check,
     build_kubernetes_client_check,
     build_lifecycle_launch_cancel_check,
+    build_migration_plan_check,
     build_systemd_user_manager_check,
     build_tools_runtime_check,
     credential_source_set_digest,
@@ -1065,4 +1066,65 @@ def test_registered_lifecycle_check_rejects_protocol_binding_drift() -> None:
 
     assert not result.passed
     assert result.evidence["scenario-count"] == 0
+    assert calls == []
+
+
+def test_registered_migration_plan_binds_exact_candidate_graph_and_policy() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    policy = repo_root / "config/staging-migration-policy.json"
+    policy_digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+    check = build_migration_plan_check(
+        alembic_ini=repo_root / "migrations/alembic.ini",
+        expected_candidate_sha="1" * 40,
+        expected_policy_digest=policy_digest,
+        policy_path=policy,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "candidate.sha": "1" * 40,
+            "migration.policy.sha256": policy_digest,
+        }
+    )
+    dag = PreflightDag((_passing_dependency("candidate.identity"), check))
+
+    result = next(
+        item for item in dag.run(context, through_tier=1) if item.check_id == check.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["head"] == "0066"
+    assert result.evidence["revision-count"] == 66
+    assert result.evidence["linear"] is True
+    assert result.evidence["policy-digest"] == policy_digest
+
+
+def test_registered_migration_plan_rejects_candidate_drift_before_graph_read(
+    monkeypatch,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "loom_cli.rollout.preflight_registered_checks.inspect_migration_plan",
+        lambda *_args, **_kwargs: calls.append(object()),
+    )
+    check = build_migration_plan_check(
+        alembic_ini=Path("/missing/alembic.ini"),
+        expected_candidate_sha="1" * 40,
+        expected_policy_digest="a" * 64,
+    )
+    context = CheckContext(
+        {
+            "runner.config.sha256": "a" * 64,
+            "candidate.sha": "2" * 40,
+            "migration.policy.sha256": "a" * 64,
+        }
+    )
+    dag = PreflightDag((_passing_dependency("candidate.identity"), check))
+
+    result = next(
+        item for item in dag.run(context, through_tier=1) if item.check_id == check.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.evidence["plan-digest"] == "0" * 64
     assert calls == []
