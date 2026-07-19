@@ -14,6 +14,7 @@ from pathlib import Path
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.final_gate_readiness import (
     FINAL_CHECK_IDS,
+    PROTECTED_MUTATION_CHECK_IDS,
     FinalGateResult,
 )
 from loom_cli.rollout.operator.backup import VerifiedBackup
@@ -89,8 +90,7 @@ def _verify_artifacts(plan: FinalGatePlan) -> None:
         or publication.rendered_manifest_sha256 != plan.rendered_manifest_sha256
         or str(publication.migration_manifest_path) != plan.migration_manifest_path
         or publication.migration_manifest_sha256 != plan.migration_manifest_sha256
-        or publication.migration_manifest_artifact_sha256
-        != plan.migration_manifest_artifact_sha256
+        or publication.migration_manifest_artifact_sha256 != plan.migration_manifest_artifact_sha256
         or publication.migration_job_name != plan.migration_job_name
         or publication.migration_image_id != plan.migration_image_id
         or publication.migration_plan_sha256 != plan.migration_plan_digest
@@ -165,14 +165,16 @@ def main(
         operation = CheckOperation(args.operation)
         expected = (
             CheckOperation.APPLY
-            if args.check_id == "final.protected-apply"
+            if args.check_id in PROTECTED_MUTATION_CHECK_IDS
             else CheckOperation.VERIFY
         )
         if operation is not expected:
             raise ValueError("final gate helper operation is invalid")
         plan = _load_plan(args.plan, args.plan_sha256)
         result = execute(args.check_id, operation, plan)
-        successful_apply = bool(args.check_id == "final.protected-apply" and not result.blockers)
+        successful_apply = bool(
+            args.check_id in PROTECTED_MUTATION_CHECK_IDS and not result.blockers
+        )
         if (
             result.check_id != args.check_id
             or result.operation is not operation
@@ -186,7 +188,7 @@ def main(
                     or result.observed_epoch != plan.starting_mutation_epoch + 1
                 )
             )
-            or (args.check_id != "final.protected-apply" and result.protected_mutation)
+            or (args.check_id not in PROTECTED_MUTATION_CHECK_IDS and result.protected_mutation)
         ):
             raise ValueError("final gate helper result drifted")
         record = _record(result)

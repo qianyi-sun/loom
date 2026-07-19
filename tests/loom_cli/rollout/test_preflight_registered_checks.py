@@ -14,7 +14,11 @@ import pytest
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_digest
 from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
-from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS, FinalGateResult
+from loom_cli.rollout.final_gate_readiness import (
+    FINAL_CHECK_IDS,
+    PROTECTED_MUTATION_CHECK_IDS,
+    FinalGateResult,
+)
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
@@ -1693,7 +1697,7 @@ def test_registered_rehearsal_runs_exact_isolated_journaled_actions() -> None:
     )
 
 
-def test_registered_final_gates_expose_only_declared_protected_apply() -> None:
+def test_registered_final_gates_expose_only_declared_protected_mutations() -> None:
     def result(check_id: str, operation: CheckOperation) -> FinalGateResult:
         return FinalGateResult(
             check_id=check_id,
@@ -1703,7 +1707,7 @@ def test_registered_final_gates_expose_only_declared_protected_apply() -> None:
             observed_epoch=9 if operation is CheckOperation.APPLY else 8,
             evidence_digest=hashlib.sha256(f"{check_id}:{operation.value}".encode()).hexdigest(),
             protected_mutation=bool(
-                check_id == "final.protected-apply" and operation is CheckOperation.APPLY
+                check_id in PROTECTED_MUTATION_CHECK_IDS and operation is CheckOperation.APPLY
             ),
             blockers={},
         )
@@ -1727,13 +1731,19 @@ def test_registered_final_gates_expose_only_declared_protected_apply() -> None:
     by_id = {check.spec.check_id: check for check in checks}
     assert set(by_id) == set(FINAL_CHECK_IDS)
     assert all(check.spec.stage is StageCapability.FINAL_ONLY for check in checks)
-    assert by_id["final.protected-apply"].spec.mutation_class is MutationClass.PROTECTED_STAGING
+    assert {
+        check_id
+        for check_id, check in by_id.items()
+        if check.spec.mutation_class is MutationClass.PROTECTED_STAGING
+    } == PROTECTED_MUTATION_CHECK_IDS
     assert all(
         check.spec.mutation_class is MutationClass.NONE
         for check_id, check in by_id.items()
-        if check_id != "final.protected-apply"
+        if check_id not in PROTECTED_MUTATION_CHECK_IDS
     )
     probe = by_id["final.protected-apply"].operations[CheckOperation.PROBE](context)
     applied = by_id["final.protected-apply"].operations[CheckOperation.APPLY](context)
     assert probe.passed and probe.evidence["protected-mutation"] is False
     assert applied.passed and applied.evidence["protected-mutation"] is True
+    smoke = by_id["final.smoke"].operations[CheckOperation.APPLY](context)
+    assert smoke.passed and smoke.evidence["protected-mutation"] is True

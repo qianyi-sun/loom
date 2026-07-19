@@ -10,7 +10,11 @@ from types import MappingProxyType
 import pytest
 
 from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
-from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS, FinalGateResult
+from loom_cli.rollout.final_gate_readiness import (
+    FINAL_CHECK_IDS,
+    PROTECTED_MUTATION_CHECK_IDS,
+    FinalGateResult,
+)
 from loom_cli.rollout.operator.final_gate_runner import FinalGateRunner
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import (
@@ -75,7 +79,7 @@ def _actions(calls, attestation_digest: str):
                 observed_epoch=7,
                 evidence_digest="9" * 64,
                 protected_mutation=(
-                    check_id == "final.protected-apply" and operation is CheckOperation.APPLY
+                    check_id in PROTECTED_MUTATION_CHECK_IDS and operation is CheckOperation.APPLY
                 ),
                 blockers={},
             )

@@ -26,6 +26,7 @@ from loom_cli.rollout.credential_authority import (
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
 from loom_cli.rollout.final_gate_readiness import (
+    PROTECTED_MUTATION_CHECK_IDS,
     FinalGateAction,
     FinalGateResult,
     FinalGateSession,
@@ -2550,7 +2551,7 @@ def build_final_gate_checks(
             CheckOperation.PROBE: operation_probe(CheckOperation.PROBE),
             CheckOperation.VERIFY: operation_probe(CheckOperation.VERIFY),
         }
-        if check_id == "final.protected-apply":
+        if check_id in PROTECTED_MUTATION_CHECK_IDS:
             operations[CheckOperation.PLAN] = operation_probe(CheckOperation.PLAN)
             operations[CheckOperation.APPLY] = operation_probe(CheckOperation.APPLY)
         checks.append(
@@ -2563,7 +2564,7 @@ def build_final_gate_checks(
                     dependencies=required,
                     mutation_class=(
                         MutationClass.PROTECTED_STAGING
-                        if check_id == "final.protected-apply"
+                        if check_id in PROTECTED_MUTATION_CHECK_IDS
                         else MutationClass.NONE
                     ),
                     input_keys=tuple(sorted(bindings)),

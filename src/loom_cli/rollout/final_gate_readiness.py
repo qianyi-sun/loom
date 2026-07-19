@@ -1,8 +1,8 @@
 """Single-source final-only rollout gate session.
 
-Final checks keep their protected mutation boundary explicit.  Probe/plan never
-mutate; only the apply operation of ``final.protected-apply`` may report a
-protected staging mutation.
+Final checks keep their protected mutation boundary explicit. Probe/plan never
+mutate; the protected convergence and live smoke apply operations may report a
+protected staging mutation under the same rollout epoch.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ FINAL_CHECK_IDS = (
     "final.browser",
     "final.summary",
 )
+PROTECTED_MUTATION_CHECK_IDS = frozenset({"final.protected-apply", "final.smoke"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +41,7 @@ class FinalGateResult:
     def __post_init__(self) -> None:
         blockers = dict(self.blockers)
         mutation_allowed = bool(
-            self.check_id == "final.protected-apply"
-            and self.operation is CheckOperation.APPLY
+            self.check_id in PROTECTED_MUTATION_CHECK_IDS and self.operation is CheckOperation.APPLY
         )
         if (
             self.check_id not in FINAL_CHECK_IDS
@@ -117,6 +117,7 @@ class FinalGateSession:
 
 __all__ = [
     "FINAL_CHECK_IDS",
+    "PROTECTED_MUTATION_CHECK_IDS",
     "FinalGateAction",
     "FinalGateResult",
     "FinalGateSession",

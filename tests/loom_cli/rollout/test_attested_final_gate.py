@@ -6,7 +6,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from loom_cli.rollout.attested_final_gate import AttestedFinalGateAuthority
-from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS, FinalGateResult
+from loom_cli.rollout.final_gate_readiness import (
+    FINAL_CHECK_IDS,
+    PROTECTED_MUTATION_CHECK_IDS,
+    FinalGateResult,
+)
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
     CheckOperation,
@@ -54,9 +58,7 @@ def _bindings() -> AttestationBindings:
 
 
 def _attestation(*, expires_at: datetime | None = None) -> PreflightAttestation:
-    prefinal = {
-        entry.check_id for entry in load_coverage_manifest().checks if entry.tier < 4
-    }
+    prefinal = {entry.check_id for entry in load_coverage_manifest().checks if entry.tier < 4}
     return PreflightAttestation(
         schema_version=1,
         bindings=_bindings(),
@@ -82,7 +84,7 @@ def _actions(calls: list[tuple[str, CheckOperation]]):
                 observed_epoch=7,
                 evidence_digest=hashlib.sha256(check_id.encode()).hexdigest(),
                 protected_mutation=(
-                    check_id == "final.protected-apply" and operation is CheckOperation.APPLY
+                    check_id in PROTECTED_MUTATION_CHECK_IDS and operation is CheckOperation.APPLY
                 ),
                 blockers={},
             )
@@ -107,7 +109,13 @@ def test_attested_final_gate_applies_once_then_verifies_shared_checks() -> None:
     assert report.passed
     assert calls[0] == ("final.protected-apply", CheckOperation.APPLY)
     assert calls[1:] == [
-        (check_id, CheckOperation.VERIFY) for check_id in FINAL_CHECK_IDS[1:]
+        (
+            check_id,
+            CheckOperation.APPLY
+            if check_id in PROTECTED_MUTATION_CHECK_IDS
+            else CheckOperation.VERIFY,
+        )
+        for check_id in FINAL_CHECK_IDS[1:]
     ]
 
 

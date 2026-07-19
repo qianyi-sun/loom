@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
+from loom_cli.rollout.final_gate_readiness import (
+    FINAL_CHECK_IDS,
+    PROTECTED_MUTATION_CHECK_IDS,
+)
 from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.final_gate_action_source import FinalGateActionSource
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
@@ -158,7 +161,7 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
                     "evidence_digest": "e" * 64,
                     "observed_epoch": 7,
                     "operation": operation,
-                    "protected_mutation": check_id == "final.protected-apply",
+                    "protected_mutation": check_id in PROTECTED_MUTATION_CHECK_IDS,
                     "schema_version": 1,
                 }
             ),

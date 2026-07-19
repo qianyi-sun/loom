@@ -145,3 +145,42 @@ def test_final_gate_helper_requires_one_epoch_advance_for_successful_apply(
         == 2
     )
     assert capsys.readouterr().out == ""
+
+
+def test_final_gate_helper_accepts_live_smoke_inside_claimed_epoch(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    attestation, path, digest = _prepared(tmp_path, monkeypatch)
+
+    def execute(check_id, operation, _plan):
+        return FinalGateResult(
+            check_id=check_id,
+            operation=operation,
+            candidate_sha="a" * 40,
+            attestation_digest=attestation.attestation_digest,
+            observed_epoch=8,
+            evidence_digest="e" * 64,
+            protected_mutation=True,
+            blockers={},
+        )
+
+    assert (
+        helper.main(
+            [
+                "execute",
+                "--check-id",
+                "final.smoke",
+                "--operation",
+                "apply",
+                "--plan",
+                str(path),
+                "--plan-sha256",
+                digest,
+            ],
+            execute=execute,
+        )
+        == 0
+    )
+    assert '"check_id":"final.smoke"' in capsys.readouterr().out

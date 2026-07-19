@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from loom_cli.rollout.final_gate_readiness import (
     FINAL_CHECK_IDS,
+    PROTECTED_MUTATION_CHECK_IDS,
     FinalGateResult,
     FinalGateSession,
 )
@@ -19,7 +20,7 @@ def _result(check_id: str, operation: CheckOperation) -> FinalGateResult:
         observed_epoch=8 if operation is CheckOperation.APPLY else 7,
         evidence_digest="c" * 64,
         protected_mutation=bool(
-            check_id == "final.protected-apply" and operation is CheckOperation.APPLY
+            check_id in PROTECTED_MUTATION_CHECK_IDS and operation is CheckOperation.APPLY
         ),
         blockers={},
     )
@@ -35,10 +36,7 @@ def test_final_gate_session_caches_each_exact_operation() -> None:
 
         return execute
 
-    actions = {
-        check_id: action(check_id)
-        for check_id in FINAL_CHECK_IDS
-    }
+    actions = {check_id: action(check_id) for check_id in FINAL_CHECK_IDS}
     session = FinalGateSession(
         actions,
         candidate_sha="a" * 40,
@@ -51,9 +49,10 @@ def test_final_gate_session_caches_each_exact_operation() -> None:
     assert calls == [("final.protected-apply", CheckOperation.APPLY)]
 
 
-def test_only_protected_apply_may_report_protected_mutation() -> None:
+def test_only_declared_apply_checks_may_report_protected_mutation() -> None:
     result = _result("final.protected-apply", CheckOperation.APPLY)
     assert result.protected_mutation
+    assert _result("final.smoke", CheckOperation.APPLY).protected_mutation
 
     try:
         FinalGateResult(

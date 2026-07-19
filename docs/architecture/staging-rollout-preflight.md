@@ -387,10 +387,12 @@ must agree before the terminal record can be published.
 ### Tier 4: justified final-only checks
 
 Only protected apply, observed live convergence, post-apply attestation drift,
-and bounded final live-route smoke/browser acceptance remain. Earlier tiers do
-not weaken these final gates; they ensure the final gate is not the first
-consumer of a token, host prerequisite, migration, image, task, or browser
-contract.
+and bounded final live-route smoke/browser acceptance remain. Protected apply
+and the live smoke are the only checks classified as protected staging
+mutation: the smoke submits bounded live work, so it cannot be represented as
+a read-only verify operation. Earlier tiers do not weaken these final gates;
+they ensure the final gate is not the first consumer of a token, host
+prerequisite, migration, image, task, or browser contract.
 
 Immediately before the protected chain, the service worker reloads the
 digest-addressed attestation and rebuilds the shared Tier 0 registry from the
@@ -461,7 +463,10 @@ the exact digest-addressed artifact publication, and the restore-verified
 checkpoint named by the backup lease's source request. Candidate, manifest,
 snapshot, epoch, schema, object-inventory or path drift fails before the
 executor is entered. A successful protected apply must report exactly one
-mutation-epoch advance and protected-mutation evidence; every later action is
+mutation-epoch advance and protected-mutation evidence. The later live smoke
+also reports protected-mutation evidence, but executes inside that already
+claimed rollout epoch and must observe the same single epoch advance rather
+than incrementing it again. Convergence, drift, browser and summary remain
 read-only. Until a concrete protected executor is installed, the helper is
 intentionally unavailable and exits without mutation.
 

@@ -12,6 +12,7 @@ from loom_cli.rollout.preflight_contract import (
     CheckContext,
     CheckExecution,
     CheckOperation,
+    MutationClass,
     PreflightAttestation,
     PreflightDag,
 )
@@ -110,7 +111,7 @@ class AttestedFinalGateAuthority:
         operations = {
             check.spec.check_id: (
                 CheckOperation.APPLY
-                if check.spec.check_id == "final.protected-apply"
+                if check.spec.mutation_class is MutationClass.PROTECTED_STAGING
                 else CheckOperation.VERIFY
             )
             for check in self._checks

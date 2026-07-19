@@ -99,6 +99,14 @@ def test_installed_final_gate_runner_rejects_wrong_operation_or_output(tmp_path:
             attestation_digest="b" * 64,
             mutation_epoch=7,
         )
+    with pytest.raises(ValueError, match="operation"):
+        runner(
+            "final.smoke",
+            CheckOperation.VERIFY,
+            candidate_sha="a" * 40,
+            attestation_digest="b" * 64,
+            mutation_epoch=7,
+        )
     with pytest.raises(ValueError, match="evidence drifted"):
         runner(
             "final.browser",

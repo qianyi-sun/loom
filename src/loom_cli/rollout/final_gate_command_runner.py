@@ -11,6 +11,7 @@ from typing import Protocol
 
 from loom_cli.rollout.final_gate_readiness import (
     FINAL_CHECK_IDS,
+    PROTECTED_MUTATION_CHECK_IDS,
     FinalGateResult,
 )
 from loom_cli.rollout.preflight_contract import CheckOperation
@@ -70,7 +71,9 @@ class InstalledFinalGateStepRunner:
         mutation_epoch: int,
     ) -> FinalGateResult:
         if check_id not in FINAL_CHECK_IDS or operation is not (
-            CheckOperation.APPLY if check_id == "final.protected-apply" else CheckOperation.VERIFY
+            CheckOperation.APPLY
+            if check_id in PROTECTED_MUTATION_CHECK_IDS
+            else CheckOperation.VERIFY
         ):
             raise ValueError("installed final gate operation is invalid")
         self._verify_file(self.executable, owner=self.executable_owner_uid, mode=0o755)
