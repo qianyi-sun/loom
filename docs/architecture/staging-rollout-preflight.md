@@ -182,8 +182,11 @@ verb is admitted. Runtime credentials use a bounded TokenRequest and are
 validated by the server-observed review before any Tier 2 call.
 The TokenRequest is rendered into a minified kubeconfig with no inherited
 client certificate or root credential. The shared renderer accepts only the
-exact service-account subject, a non-empty API audience, a lifetime no longer
-than 24 hours, and at least two hours of remaining validity. PostgreSQL
+exact service-account subject, the fixed staging API audience
+`https://kubernetes.default.svc.cluster.local`, a lifetime no longer than 24
+hours, and at least two hours of remaining validity. The credential installer
+rotates a token whose metadata is otherwise fresh but whose audience cannot be
+accepted by the fixed API server. PostgreSQL
 baseline evidence is collected in one `REPEATABLE READ, READ ONLY`
 transaction as `loom_rollout_readonly`; the role is required to be
 non-superuser, `NOINHERIT`, `NOCREATEROLE`, `NOCREATEDB`, `NOREPLICATION` and

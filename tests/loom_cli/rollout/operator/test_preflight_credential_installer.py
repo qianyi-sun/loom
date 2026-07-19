@@ -19,6 +19,7 @@ from loom_cli.rollout.operator.preflight_credential_installer import (
     PreflightCredentialInstaller,
     render_readonly_probe_sql,
 )
+from loom_cli.rollout.preflight_kubeconfig_authority import render_token_request_kubeconfig
 
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 TEAM_ID = UUID("9b1de3bf-9655-489a-813f-e8a7adf81290")
@@ -55,9 +56,15 @@ class Runner:
         return Result()
 
 
-def _token(namespace: str, account: str, *, now: datetime = NOW) -> str:
+def _token(
+    namespace: str,
+    account: str,
+    *,
+    now: datetime = NOW,
+    audience: str = "https://kubernetes.default.svc.cluster.local",
+) -> str:
     claims = {
-        "aud": ["https://kubernetes.default.svc"],
+        "aud": [audience],
         "exp": int((now + timedelta(hours=6)).timestamp()),
         "iat": int(now.timestamp()),
         "sub": f"system:serviceaccount:{namespace}:{account}",
@@ -163,7 +170,8 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     assert any("PASSWORD" in (stdin or "") for _command, stdin in database_calls)
     assert any("readonly_probe" in (stdin or "") for _command, stdin in database_calls)
     assert all(
-        "--duration=6h" in command and "--audience=https://kubernetes.default.svc" in command
+        "--duration=6h" in command
+        and "--audience=https://kubernetes.default.svc.cluster.local" in command
         for command, _ in runner.calls
         if "token" in command
     )
@@ -211,6 +219,53 @@ def test_install_creates_exact_root_probe_authority_without_exposing_token(
     assert str(TEAM_ID) in sql
     assert "competing readonly probe authority exists" in sql
     assert raw.decode() not in json.dumps(result, sort_keys=True)
+
+
+def test_install_rotates_tokens_with_a_non_authoritative_cluster_audience(
+    tmp_path: Path,
+) -> None:
+    installer, _runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    source = _source()
+    for path, namespace, account in (
+        (
+            installer.paths.readonly_kubeconfig,
+            "loom-staging",
+            "loom-rollout-readonly",
+        ),
+        (
+            installer.paths.rehearsal_kubeconfig,
+            "loom-rollout-system",
+            "loom-rollout-rehearsal",
+        ),
+    ):
+        old_token = _token(
+            namespace,
+            account,
+            audience="https://kubernetes.default.svc",
+        )
+        _private(
+            path,
+            render_token_request_kubeconfig(
+                source,
+                old_token,
+                namespace=namespace,
+                service_account=account,
+                now=NOW,
+            ).payload,
+        )
+
+    assert installer.check()["failures"] == ["readonly", "rehearsal"]
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert result["changed"] == sorted(
+        [
+            str(installer.paths.readonly_kubeconfig),
+            str(installer.paths.rehearsal_kubeconfig),
+        ]
+    )
+    assert installer.check()["ok"] is True
 
 
 @pytest.mark.parametrize(

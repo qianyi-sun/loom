@@ -1733,7 +1733,11 @@ evidence.
 
 During installation, the exact candidate applies the checked-in readonly and
 rehearsal RBAC/admission manifests with the root kubeconfig, then obtains
-six-hour TokenRequest credentials for the exact service accounts. It publishes
+six-hour TokenRequest credentials for the exact service accounts and the fixed
+K3s service-account audience
+`https://kubernetes.default.svc.cluster.local`. The installer rejects and
+rotates a still-fresh token carrying any other audience; metadata freshness
+alone cannot admit a token the API server will reject. It publishes
 minified service-owned `0600` kubeconfigs under
 `/var/lib/loom-staging-rollout/credentials`; inherited root client keys are
 discarded. `check` fails once either token has less than two hours remaining,

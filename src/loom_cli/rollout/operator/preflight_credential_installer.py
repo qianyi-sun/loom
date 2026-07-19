@@ -46,6 +46,7 @@ _APPLICATION_TOKEN_SOURCE = Path("/etc/loom/staging-rollout-readonly-probe-token
 _DATABASE_CREDENTIAL_SOURCE = Path("/etc/loom/staging-rollout-readonly-db.json")
 _SERVICE_USER = "loom-rollout"
 _TOKEN_DURATION = "6h"
+_TOKEN_AUDIENCE = "https://kubernetes.default.svc.cluster.local"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{32,1024}$")
 _READONLY_PROBE_NAME = "staging-rollout-readonly-probe"
 _READONLY_PROBE_ACTOR = "deployment:staging-rollout"
@@ -345,6 +346,8 @@ class PreflightCredentialInstaller:
                     service_account=account,
                     now=now,
                 )
+                if evidence.audiences != (_TOKEN_AUDIENCE,):
+                    raise ValueError("preflight TokenRequest audience is invalid")
                 authority[label] = {
                     "audiences": list(evidence.audiences),
                     "expires_at": evidence.expires_at,
@@ -499,7 +502,7 @@ class PreflightCredentialInstaller:
                 "token",
                 service_account,
                 f"--duration={_TOKEN_DURATION}",
-                "--audience=https://kubernetes.default.svc",
+                f"--audience={_TOKEN_AUDIENCE}",
             ),
             timeout=30,
         )
