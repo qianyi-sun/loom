@@ -443,6 +443,18 @@ mutation-epoch advance and protected-mutation evidence; every later action is
 read-only. Until a concrete protected executor is installed, the helper is
 intentionally unavailable and exits without mutation.
 
+Protected apply is further divided into an ordered component journal beneath
+the request attempt. Each component publishes an immutable intent before
+observing or changing live state. The shared classifier must return exactly
+`absent`, `exact`, or `drifted`: only `absent` may call apply, `drifted` stops
+the chain, and terminal evidence is published only after an `exact` readback.
+After a crash, an existing intent is classified before any retry; an exact
+effect is recorded without repetition, an absent effect may be applied, and a
+partial or ambiguous effect fails closed. Reused terminal records are also
+reclassified and must retain the same evidence digest and epoch. The chain is
+serialized by a private attempt-scoped lock and neither the plan nor a
+component implementation/fingerprint may change underneath an intent.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:
