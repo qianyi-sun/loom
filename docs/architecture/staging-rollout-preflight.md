@@ -318,6 +318,15 @@ isolated namespace cannot safely borrow a protected GB10 worker or its Docker
 authority; the final gate consumes the same identity, payload, fanout-failure
 and terminal-result predicates and is not weakened.
 
+The installed `FinalSmokeExecutor` drives those shared predicates through one
+transport whose fixed base URL must equal the attested canonical staging route.
+It reopens the admin token with the same no-follow metadata and redacted-content
+authority, recovers only the exact deterministic request/attempt batch, and
+records bounded response hashes rather than bodies. A recovered exact batch is
+polled instead of resubmitted; fanout incompatibility and non-success terminal
+state remain fail-closed. The executor remains unwired until all protected
+components share the installed final-helper journal.
+
 `browser_report_contract` is likewise the sole sanitized browser-report
 predicate for rehearsal and final acceptance. Both modes require the complete
 schema-v4 check set, exact route, candidate identity, represented user, audit
