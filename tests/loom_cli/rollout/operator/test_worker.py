@@ -219,6 +219,20 @@ def test_worker_refuses_driver_when_final_attestation_admission_fails() -> None:
     assert bundle.store.active is None
 
 
+def test_worker_uses_attested_final_gates_instead_of_legacy_driver() -> None:
+    bundle = worker_fakes()
+
+    def run_final(_envelope: DriverEnvelope) -> int:
+        bundle.order.append("final-gates-run")
+        return 0
+
+    bundle.deps.run_final_gates = run_final
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 0
+    assert "final-gates-run" in bundle.order
+    assert "driver-run" not in bundle.order
+
+
 def test_worker_records_failed_driver_and_clears_active() -> None:
     bundle = worker_fakes(driver_rc=2)
     assert run_attempt(valid_envelope(), bundle.deps) == 1

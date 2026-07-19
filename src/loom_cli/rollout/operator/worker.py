@@ -112,6 +112,7 @@ class WorkerDependencies:
     finalize_backup: Callable[[PreflightRequest, VerifiedBackupJob], DriverEnvelope] | None = None
     read_driver_failure: Callable[[DriverEnvelope], RolloutFailureEvidence | None] | None = None
     final_admission: Callable[[DriverEnvelope], object] | None = None
+    run_final_gates: Callable[[DriverEnvelope], int] | None = None
 
 
 @dataclass(slots=True)
@@ -294,7 +295,11 @@ def run_attempt(
         else:
             try:
                 with signal_controller.driver_window():
-                    driver_rc = dependencies.run_driver(envelope_path, envelope.resume)
+                    driver_rc = (
+                        dependencies.run_final_gates(envelope)
+                        if dependencies.run_final_gates is not None
+                        else dependencies.run_driver(envelope_path, envelope.resume)
+                    )
             except _CancellationSignal:
                 cancelled_by_signal = True
             except BaseException:
