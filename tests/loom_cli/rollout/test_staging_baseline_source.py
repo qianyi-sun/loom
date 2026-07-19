@@ -7,8 +7,11 @@ from typing import Any
 import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
 from loom_cli.rollout.staging_baseline_source import (
     BaselineHttpResponse,
+    CrossVersionStagingBaselineProbeSource,
+    ObjectStoreBaselineEvidence,
     StagingBaselineProbeSource,
     TlsRouteEvidence,
     read_staging_capacity,
@@ -128,9 +131,7 @@ def test_source_reports_all_catalog_and_dependency_blockers(token_path: Path) ->
     probes = source.probes()
 
     assert probes["staging.health"]().blockers == {"service": "health-not-ok"}
-    assert probes["staging.auth"]().blockers == {
-        "principal": "readonly-authority-drift"
-    }
+    assert probes["staging.auth"]().blockers == {"principal": "readonly-authority-drift"}
     assert probes["staging.catalog-task"]().blockers == {
         "agents": "agents-catalog-unavailable",
         "models": "models-catalog-unavailable",
@@ -141,9 +142,7 @@ def test_source_reports_all_catalog_and_dependency_blockers(token_path: Path) ->
         "object-store": "object-store-readiness-failed",
         "capacity": "dependency-capacity-unready",
     }
-    assert probes["staging.network"]().blockers == {
-        "route": "dns-tls-authentication-failed"
-    }
+    assert probes["staging.network"]().blockers == {"route": "dns-tls-authentication-failed"}
 
 
 def test_source_rejects_unsafe_route_or_token_metadata(token_path: Path) -> None:
@@ -173,15 +172,16 @@ def test_mutation_epoch_uses_same_readonly_endpoint(token_path: Path) -> None:
         calls.append((url, token))
         return BaselineHttpResponse(503, "HTTP/2", _body("ready"))
 
-    assert read_staging_mutation_epoch(
-        route=ROUTE,
-        token_path=token_path,
-        service_uid=os.getuid(),
-        http_get=get,
-    ) == 9
-    assert calls == [
-        (f"{ROUTE}/api/v1/health/ready", "loom_readonly_exact")
-    ]
+    assert (
+        read_staging_mutation_epoch(
+            route=ROUTE,
+            token_path=token_path,
+            service_uid=os.getuid(),
+            http_get=get,
+        )
+        == 9
+    )
+    assert calls == [(f"{ROUTE}/api/v1/health/ready", "loom_readonly_exact")]
 
 
 def test_capacity_uses_same_readonly_endpoint(token_path: Path) -> None:
@@ -189,11 +189,63 @@ def test_capacity_uses_same_readonly_endpoint(token_path: Path) -> None:
         route=ROUTE,
         token_path=token_path,
         service_uid=os.getuid(),
-        http_get=lambda _url, _token: BaselineHttpResponse(
-            200, "HTTP/2", _body("ready")
-        ),
+        http_get=lambda _url, _token: BaselineHttpResponse(200, "HTTP/2", _body("ready")),
     )
     assert capacity == StagingCapacity(1, 2, 80, 90)
+
+
+def _database_evidence() -> ReadonlyDatabaseEvidence:
+    return ReadonlyDatabaseEvidence(
+        schema_revision="0065",
+        mutation_epoch=0,
+        epoch_authority="legacy-pre-0066",
+        baseline_counts={
+            "agents": 2,
+            "provider_models": 3,
+            "tasks": 4,
+            "teams": 5,
+            "users": 6,
+        },
+        capacity=None,
+        evidence_sha256="d" * 64,
+    )
+
+
+def test_cross_version_baseline_uses_public_health_database_and_object_health() -> None:
+    source = CrossVersionStagingBaselineProbeSource(
+        route=ROUTE,
+        database=_database_evidence(),
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "e" * 64),
+        public_http_get=lambda url: (
+            BaselineHttpResponse(200, "HTTP/2", {"status": "ok"})
+            if url == f"{ROUTE}/api/v1/health"
+            else (_ for _ in ()).throw(AssertionError(url))
+        ),
+        tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),
+    )
+
+    results = {check_id: probe() for check_id, probe in source.probes().items()}
+
+    assert all(result.ready for result in results.values())
+    assert all(result.observed_mutation_epoch == 0 for result in results.values())
+    assert results["staging.auth"].readonly_principal == "loom-rollout-readonly"
+
+
+def test_cross_version_baseline_aggregates_public_and_object_blockers() -> None:
+    source = CrossVersionStagingBaselineProbeSource(
+        route=ROUTE,
+        database=_database_evidence(),
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(False, "e" * 64),
+        public_http_get=lambda _url: BaselineHttpResponse(503, "HTTP/1.1", {"status": "not-ok"}),
+        tls_probe=lambda _route: (_ for _ in ()).throw(OSError("tls unavailable")),
+    )
+    probes = source.probes()
+
+    assert probes["staging.health"]().blockers == {"service": "health-not-ok"}
+    assert probes["staging.storage-db"]().blockers == {
+        "object-store": "object-store-readiness-failed"
+    }
+    assert probes["staging.network"]().blockers == {"route": "dns-tls-authentication-failed"}
 
 
 def _body_names() -> tuple[str, ...]:

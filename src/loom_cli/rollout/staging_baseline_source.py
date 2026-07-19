@@ -17,6 +17,7 @@ import httpx
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
 from loom_cli.rollout.staging_baseline_readiness import (
     BaselineProbeResult,
     ReadonlyProbe,
@@ -58,16 +59,28 @@ class TlsRouteEvidence:
     port: int
 
     def __post_init__(self) -> None:
-        if (
-            len(self.dns_digest) != 64
-            or len(self.certificate_sha256) != 64
-            or self.port != 443
-        ):
+        if len(self.dns_digest) != 64 or len(self.certificate_sha256) != 64 or self.port != 443:
             raise ValueError("baseline TLS evidence is invalid")
 
 
 HttpGet = Callable[[str, str], BaselineHttpResponse]
 TlsProbe = Callable[[str], TlsRouteEvidence]
+PublicHttpGet = Callable[[str], BaselineHttpResponse]
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectStoreBaselineEvidence:
+    ready: bool
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        if len(self.evidence_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.evidence_sha256
+        ):
+            raise ValueError("object-store baseline evidence is invalid")
+
+
+ObjectStoreProbe = Callable[[], ObjectStoreBaselineEvidence]
 
 
 def _validated_route(route: str) -> tuple[str, str, int]:
@@ -121,15 +134,38 @@ def bounded_http_get(url: str, token: str) -> BaselineHttpResponse:
     )
 
 
+def bounded_public_http_get(url: str) -> BaselineHttpResponse:
+    """GET the fixed public health endpoint without ambient credentials."""
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or not url.endswith("/api/v1/health"):
+        raise ValueError("public baseline HTTP target is invalid")
+    with httpx.Client(
+        timeout=httpx.Timeout(10.0, connect=5.0),
+        follow_redirects=False,
+        trust_env=False,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "loom-staging-readonly-preflight/v1",
+        },
+    ) as client:
+        response = client.get(url)
+    if len(response.content) > _MAX_RESPONSE_BYTES:
+        raise ValueError("baseline HTTP response exceeded size limit")
+    try:
+        body = response.json()
+    except json.JSONDecodeError as exc:
+        raise ValueError("baseline HTTP response is not JSON") from exc
+    if not isinstance(body, dict):
+        raise ValueError("baseline HTTP response body is not an object")
+    return BaselineHttpResponse(response.status_code, response.http_version, body)
+
+
 def probe_tls_route(route: str) -> TlsRouteEvidence:
     """Resolve and authenticate the canonical staging TLS endpoint."""
     _canonical, hostname, port = _validated_route(route)
     addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     normalized = sorted(
-        {
-            f"{family}:{sockaddr[0]}"
-            for family, _socktype, _proto, _canonname, sockaddr in addresses
-        }
+        {f"{family}:{sockaddr[0]}" for family, _socktype, _proto, _canonname, sockaddr in addresses}
     )
     if not normalized:
         raise OSError("staging DNS returned no addresses")
@@ -267,11 +303,7 @@ class StagingBaselineProbeSource:
         tls_probe: TlsProbe = probe_tls_route,
     ) -> None:
         canonical, _hostname, _port = _validated_route(route)
-        if (
-            not token_path.is_absolute()
-            or service_uid < 0
-            or mutation_epoch < 0
-        ):
+        if not token_path.is_absolute() or service_uid < 0 or mutation_epoch < 0:
             raise ValueError("staging baseline source authority is invalid")
         self._route = canonical
         self._token_path = token_path
@@ -432,13 +464,145 @@ class StagingBaselineProbeSource:
         )
 
 
+class CrossVersionStagingBaselineProbeSource:
+    """Tier 2 source that works before and after lifecycle migrations."""
+
+    def __init__(
+        self,
+        *,
+        route: str,
+        database: ReadonlyDatabaseEvidence,
+        object_store_probe: ObjectStoreProbe,
+        public_http_get: PublicHttpGet = bounded_public_http_get,
+        tls_probe: TlsProbe = probe_tls_route,
+    ) -> None:
+        canonical, _hostname, _port = _validated_route(route)
+        self._route = canonical
+        self._database = database
+        self._object_store_probe = object_store_probe
+        self._public_http_get = public_http_get
+        self._tls_probe = tls_probe
+
+    def probes(self) -> Mapping[str, ReadonlyProbe]:
+        return MappingProxyType(
+            {
+                "staging.health": self._health,
+                "staging.auth": self._auth,
+                "staging.catalog-task": self._catalog_task,
+                "staging.storage-db": self._storage_db,
+                "staging.network": self._network,
+            }
+        )
+
+    def _result(
+        self,
+        check_id: str,
+        *,
+        summaries: Mapping[str, object],
+        blockers: Mapping[str, str],
+    ) -> BaselineProbeResult:
+        digest = hashlib.sha256(
+            json.dumps(
+                {"check_id": check_id, "summaries": summaries, "version": "v2"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return BaselineProbeResult(
+            check_id=check_id,
+            environment="staging",
+            namespace="loom-staging",
+            route=self._route,
+            readonly_principal="loom-rollout-readonly",
+            observed_mutation_epoch=self._database.mutation_epoch,
+            resource_digest=digest,
+            blockers=blockers,
+        )
+
+    def _health(self) -> BaselineProbeResult:
+        try:
+            response = self._public_http_get(self._route + _API_PATHS["health"])
+            ready = response.status_code == 200 and response.body.get("status") == "ok"
+            status = response.status_code
+        except (OSError, ValueError, httpx.HTTPError):
+            ready = False
+            status = 0
+        return self._result(
+            "staging.health",
+            summaries={"http": status, "ready": ready},
+            blockers={} if ready else {"service": "health-not-ok"},
+        )
+
+    def _auth(self) -> BaselineProbeResult:
+        return self._result(
+            "staging.auth",
+            summaries={
+                "authority": "postgres-select-only-v1",
+                "database-evidence": self._database.evidence_sha256,
+            },
+            blockers={},
+        )
+
+    def _catalog_task(self) -> BaselineProbeResult:
+        counts = dict(self._database.baseline_counts)
+        return self._result(
+            "staging.catalog-task",
+            summaries=counts,
+            blockers={},
+        )
+
+    def _storage_db(self) -> BaselineProbeResult:
+        try:
+            object_store = self._object_store_probe()
+        except (OSError, RuntimeError, ValueError):
+            object_store = ObjectStoreBaselineEvidence(False, "0" * 64)
+        return self._result(
+            "staging.storage-db",
+            summaries={
+                "database-evidence": self._database.evidence_sha256,
+                "epoch-authority": self._database.epoch_authority,
+                "object-store-evidence": object_store.evidence_sha256,
+                "object-store-ready": object_store.ready,
+                "schema-revision": self._database.schema_revision,
+            },
+            blockers=(
+                {} if object_store.ready else {"object-store": "object-store-readiness-failed"}
+            ),
+        )
+
+    def _network(self) -> BaselineProbeResult:
+        try:
+            evidence = self._tls_probe(self._route)
+        except (OSError, ValueError, ssl.SSLError):
+            return self._result(
+                "staging.network",
+                summaries={"tls": False},
+                blockers={"route": "dns-tls-authentication-failed"},
+            )
+        return self._result(
+            "staging.network",
+            summaries={
+                "certificate_sha256": evidence.certificate_sha256,
+                "dns_digest": evidence.dns_digest,
+                "port": evidence.port,
+                "tls": True,
+            },
+            blockers={},
+        )
+
+
 __all__ = [
     "BaselineHttpResponse",
+    "CrossVersionStagingBaselineProbeSource",
     "HttpGet",
+    "ObjectStoreBaselineEvidence",
+    "ObjectStoreProbe",
+    "PublicHttpGet",
     "StagingBaselineProbeSource",
     "TlsProbe",
     "TlsRouteEvidence",
     "bounded_http_get",
+    "bounded_public_http_get",
     "probe_tls_route",
     "read_staging_capacity",
     "read_staging_mutation_epoch",

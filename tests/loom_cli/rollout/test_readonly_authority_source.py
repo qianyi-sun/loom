@@ -109,6 +109,33 @@ def test_server_observed_readonly_authority_accepts_exact_safe_rules() -> None:
     assert all("--raw" in argv and argv[-2:] == ("-f", "-") for argv, _stdin in calls)
 
 
+def test_server_observed_authority_accepts_select_only_database_digest() -> None:
+    run, _calls = _run_for(_rules())
+
+    evidence = probe_readonly_authority(
+        cast(JsonCommandRunner, run),
+        kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),
+        namespace="loom-staging",
+        database_authority_digest="a" * 64,
+    )
+
+    assert evidence.ready
+    assert evidence.http_methods == ()
+
+
+def test_server_observed_authority_rejects_ambiguous_data_authority() -> None:
+    run, _calls = _run_for(_rules())
+
+    with pytest.raises(ValueError, match="authority is ambiguous"):
+        probe_readonly_authority(
+            cast(JsonCommandRunner, run),
+            kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),
+            namespace="loom-staging",
+            application_observation=_application,
+            database_authority_digest="a" * 64,
+        )
+
+
 @pytest.mark.parametrize(
     "extra",
     (

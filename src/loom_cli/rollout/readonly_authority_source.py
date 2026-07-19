@@ -204,7 +204,8 @@ def probe_readonly_authority(
     *,
     kubeconfig: Path,
     namespace: str,
-    application_observation: ApplicationObservation,
+    application_observation: ApplicationObservation | None = None,
+    database_authority_digest: str | None = None,
 ) -> ReadonlyAuthorityEvidence:
     """Read exact Kubernetes and application authority without protected mutation."""
     if not kubeconfig.is_absolute() or ".." in kubeconfig.parts or namespace != "loom-staging":
@@ -244,11 +245,25 @@ def probe_readonly_authority(
         responses.append(result.stdout.encode())
     subject = _subject_username(responses[0], namespace=namespace)
     verbs, resources, rules_digest = _protected_rules(responses[1])
-    methods, application_digest = _application_identity(application_observation())
+    if (application_observation is None) == (database_authority_digest is None):
+        raise ValueError("readonly data authority is ambiguous")
+    if database_authority_digest is not None:
+        if len(database_authority_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in database_authority_digest
+        ):
+            raise ValueError("readonly database authority digest is invalid")
+        methods: tuple[str, ...] = ()
+        data_authority_digest = database_authority_digest
+        data_authority_kind = "postgres-select-only-v1"
+    else:
+        assert application_observation is not None
+        methods, data_authority_digest = _application_identity(application_observation())
+        data_authority_kind = "application-readonly-v1"
     capability_digest = hashlib.sha256(
         json.dumps(
             {
-                "application": application_digest,
+                "data_authority": data_authority_digest,
+                "data_authority_kind": data_authority_kind,
                 "rules": rules_digest,
                 "subject": subject,
             },
