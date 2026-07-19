@@ -18,6 +18,9 @@ class DependencyReadiness:
 
     postgres_ready: bool
     object_store_ready: bool
+    environment: str
+    namespace: str
+    mutation_epoch: int
     resource_digest: str
     blockers: tuple[str, ...]
 
@@ -30,6 +33,9 @@ class DependencyReadiness:
             "status": "ready" if self.ready else "not-ready",
             "postgres": "ready" if self.postgres_ready else "not-ready",
             "object_store": "ready" if self.object_store_ready else "not-ready",
+            "environment": self.environment,
+            "namespace": self.namespace,
+            "mutation_epoch": self.mutation_epoch,
             "resource_digest": self.resource_digest,
             "blockers": list(self.blockers),
         }
@@ -40,6 +46,8 @@ async def probe_dependencies(
     *,
     minio_client: Any,
     buckets: tuple[str, ...],
+    environment: str,
+    namespace: str,
 ) -> DependencyReadiness:
     """Probe PostgreSQL and exact configured buckets without writing state.
 
@@ -48,8 +56,13 @@ async def probe_dependencies(
     credentials, provider error text, or object names.
     """
     normalized_buckets = tuple(sorted(set(buckets)))
-    if not normalized_buckets or any(
+    if (
+        environment != "staging"
+        or namespace != "loom-staging"
+        or not normalized_buckets
+        or any(
         not bucket or len(bucket) > 63 for bucket in normalized_buckets
+        )
     ):
         raise ValueError("readiness bucket authority is invalid")
 
@@ -62,6 +75,26 @@ async def probe_dependencies(
         blockers.append("postgres-unavailable")
     if not postgres_ready and "postgres-unavailable" not in blockers:
         blockers.append("postgres-unexpected-result")
+
+    mutation_epoch = -1
+    if postgres_ready:
+        try:
+            mutation_epoch = int(
+                (
+                    await session.execute(
+                        text(
+                            "SELECT epoch FROM staging_mutation_epochs "
+                            "WHERE environment = 'staging' "
+                            "AND namespace = 'loom-staging'"
+                        )
+                    )
+                ).scalar_one()
+            )
+            if mutation_epoch < 0:
+                raise ValueError("negative epoch")
+        except Exception:
+            blockers.append("mutation-epoch-unavailable")
+            mutation_epoch = -1
 
     object_store_ready = True
     for bucket in normalized_buckets:
@@ -77,6 +110,9 @@ async def probe_dependencies(
                 "buckets": normalized_buckets,
                 "object_store_ready": object_store_ready,
                 "postgres_ready": postgres_ready,
+                "environment": environment,
+                "namespace": namespace,
+                "mutation_epoch": mutation_epoch,
                 "version": "v1",
             },
             sort_keys=True,
@@ -86,6 +122,9 @@ async def probe_dependencies(
     return DependencyReadiness(
         postgres_ready=postgres_ready,
         object_store_ready=object_store_ready,
+        environment=environment,
+        namespace=namespace,
+        mutation_epoch=mutation_epoch,
         resource_digest=digest,
         blockers=tuple(sorted(blockers)),
     )

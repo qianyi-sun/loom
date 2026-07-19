@@ -6,6 +6,8 @@ endpoint only proves the FastAPI process is alive."""
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Request, Response
 
 from loom_service.dependencies import SessionAndCtx
@@ -36,6 +38,8 @@ async def dependency_readiness(
         session,
         minio_client=request.app.state.minio_client,
         buckets=(settings.artifacts_bucket, settings.trajectories_bucket),
+        environment=os.environ.get("LOOM_ENV", "").strip().lower(),
+        namespace=os.environ.get("LOOM_NAMESPACE", "").strip(),
     )
     if not result.ready:
         response.status_code = 503

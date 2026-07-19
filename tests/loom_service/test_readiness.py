@@ -15,8 +15,13 @@ class _Scalar:
 
 
 class _Session:
-    def __init__(self, *, value: int = 1, error: Exception | None = None) -> None:
-        self.value = value
+    def __init__(
+        self,
+        *,
+        values: tuple[int, ...] = (1, 8),
+        error: Exception | None = None,
+    ) -> None:
+        self.values = list(values)
         self.error = error
         self.statements: list[str] = []
 
@@ -24,7 +29,7 @@ class _Session:
         self.statements.append(str(statement))
         if self.error is not None:
             raise self.error
-        return _Scalar(self.value)
+        return _Scalar(self.values.pop(0))
 
 
 class _Minio:
@@ -47,13 +52,20 @@ def test_dependency_readiness_is_read_only_and_secret_free() -> None:
             session,  # type: ignore[arg-type]
             minio_client=minio,
             buckets=("trajectories", "artifacts", "artifacts"),
+            environment="staging",
+            namespace="loom-staging",
         )
     )
 
     assert result.ready
-    assert session.statements == ["SELECT 1"]
+    assert session.statements == [
+        "SELECT 1",
+        "SELECT epoch FROM staging_mutation_epochs WHERE environment = "
+        "'staging' AND namespace = 'loom-staging'",
+    ]
     assert minio.calls == [("HEAD", "artifacts"), ("HEAD", "trajectories")]
     assert result.to_dict()["blockers"] == []
+    assert result.mutation_epoch == 8
     assert len(result.resource_digest) == 64
 
 
@@ -66,6 +78,8 @@ def test_dependency_readiness_reports_all_components_without_provider_details() 
             session,  # type: ignore[arg-type]
             minio_client=minio,
             buckets=("artifacts", "trajectories"),
+            environment="staging",
+            namespace="loom-staging",
         )
     )
 
@@ -85,6 +99,8 @@ def test_dependency_readiness_rejects_empty_bucket_authority() -> None:
                 _Session(),  # type: ignore[arg-type]
                 minio_client=_Minio(),
                 buckets=(),
+                environment="staging",
+                namespace="loom-staging",
             )
         )
     except ValueError as exc:

@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
-from loom.db.schema import Team, Token
+from loom.db.schema import StagingMutationEpoch, Team, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.test_service_auth_sessions import (
@@ -274,6 +274,8 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, _raw, team_id = svc_setup
+    monkeypatch.setenv("LOOM_ENV", "staging")
+    monkeypatch.setenv("LOOM_NAMESPACE", "loom-staging")
     raw = f"loom_readonly_{uuid4().hex}"
     token_hash = hashlib.sha256(raw.encode()).digest()
     async with app.state.session_factory() as session:
@@ -285,6 +287,12 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
             team_id=team_id,
             issued_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ))
+        await session.execute(insert(StagingMutationEpoch).values(
+            environment="staging",
+            namespace="loom-staging",
+            epoch=9,
+            reason="bootstrap",
         ))
         await session.commit()
 

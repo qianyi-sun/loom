@@ -155,6 +155,48 @@ def probe_tls_route(route: str) -> TlsRouteEvidence:
     )
 
 
+def _read_readonly_token(token_path: Path, *, service_uid: int) -> str:
+    trusted = read_trusted_file(
+        token_path,
+        service_uid=service_uid,
+        private=True,
+        max_bytes=1024,
+        require_nonempty=True,
+    )
+    try:
+        token = trusted.payload.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("readonly token encoding is invalid") from exc
+    if not token or any(character.isspace() for character in token):
+        raise ValueError("readonly token payload is invalid")
+    return token
+
+
+def read_staging_mutation_epoch(
+    *,
+    route: str,
+    token_path: Path,
+    service_uid: int,
+    http_get: HttpGet = bounded_http_get,
+) -> int:
+    """Read the exact staging mutation epoch through the readonly API."""
+    canonical, _hostname, _port = _validated_route(route)
+    response = http_get(
+        canonical + _API_PATHS["ready"],
+        _read_readonly_token(token_path, service_uid=service_uid),
+    )
+    epoch = response.body.get("mutation_epoch")
+    if (
+        response.status_code not in {200, 503}
+        or response.body.get("environment") != "staging"
+        or response.body.get("namespace") != "loom-staging"
+        or type(epoch) is not int
+        or epoch < 0
+    ):
+        raise ValueError("readonly mutation epoch evidence is invalid")
+    return epoch
+
+
 class StagingBaselineProbeSource:
     """Build the five fixed Tier 2 probes from one bounded authority."""
 
@@ -194,20 +236,7 @@ class StagingBaselineProbeSource:
         )
 
     def _token(self) -> str:
-        trusted = read_trusted_file(
-            self._token_path,
-            service_uid=self._service_uid,
-            private=True,
-            max_bytes=1024,
-            require_nonempty=True,
-        )
-        try:
-            token = trusted.payload.decode("ascii").strip()
-        except UnicodeDecodeError as exc:
-            raise ValueError("readonly token encoding is invalid") from exc
-        if not token or any(character.isspace() for character in token):
-            raise ValueError("readonly token payload is invalid")
-        return token
+        return _read_readonly_token(self._token_path, service_uid=self._service_uid)
 
     def _get(self, name: str) -> BaselineHttpResponse:
         return self._http_get(self._route + _API_PATHS[name], self._token())
@@ -293,6 +322,12 @@ class StagingBaselineProbeSource:
         object_store_ready = body.get("object_store") == "ready"
         digest = body.get("resource_digest")
         valid_digest = isinstance(digest, str) and len(digest) == 64
+        observed_epoch = body.get("mutation_epoch")
+        exact_binding = (
+            body.get("environment") == "staging"
+            and body.get("namespace") == "loom-staging"
+            and observed_epoch == self._epoch
+        )
         blockers: dict[str, str] = {}
         if not postgres_ready:
             blockers["postgres"] = "postgres-readiness-failed"
@@ -300,6 +335,8 @@ class StagingBaselineProbeSource:
             blockers["object-store"] = "object-store-readiness-failed"
         if not valid_digest:
             blockers["evidence"] = "dependency-evidence-invalid"
+        if not exact_binding:
+            blockers["epoch"] = "dependency-epoch-drift"
         if response.status_code not in {200, 503}:
             blockers["http"] = "dependency-readiness-unreachable"
         return self._result(
@@ -308,6 +345,7 @@ class StagingBaselineProbeSource:
                 "http": response.status_code,
                 "object_store": object_store_ready,
                 "postgres": postgres_ready,
+                "epoch_bound": exact_binding,
                 "server_digest": digest if valid_digest else "invalid",
             },
             blockers=blockers,
@@ -342,4 +380,5 @@ __all__ = [
     "TlsRouteEvidence",
     "bounded_http_get",
     "probe_tls_route",
+    "read_staging_mutation_epoch",
 ]

@@ -10,6 +10,7 @@ from loom_cli.rollout.staging_baseline_source import (
     BaselineHttpResponse,
     StagingBaselineProbeSource,
     TlsRouteEvidence,
+    read_staging_mutation_epoch,
 )
 
 ROUTE = "https://yylx.world/dev"
@@ -33,6 +34,9 @@ def _body(name: str) -> dict[str, Any]:
             "postgres": "ready",
             "object_store": "ready",
             "resource_digest": "a" * 64,
+            "environment": "staging",
+            "namespace": "loom-staging",
+            "mutation_epoch": 9,
             "blockers": [],
         }
     if name == "tasks":
@@ -91,6 +95,9 @@ def test_source_reports_all_catalog_and_dependency_blockers(token_path: Path) ->
                     "postgres": "not-ready",
                     "object_store": "not-ready",
                     "resource_digest": "d" * 64,
+                    "environment": "staging",
+                    "namespace": "loom-staging",
+                    "mutation_epoch": 9,
                     "blockers": ["redacted"],
                 },
             )
@@ -142,6 +149,24 @@ def test_source_rejects_unsafe_route_or_token_metadata(token_path: Path) -> None
     )
     with pytest.raises(ValueError, match="metadata is unsafe"):
         source.probes()["staging.health"]()
+
+
+def test_mutation_epoch_uses_same_readonly_endpoint(token_path: Path) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def get(url: str, token: str) -> BaselineHttpResponse:
+        calls.append((url, token))
+        return BaselineHttpResponse(503, "HTTP/2", _body("ready"))
+
+    assert read_staging_mutation_epoch(
+        route=ROUTE,
+        token_path=token_path,
+        service_uid=os.getuid(),
+        http_get=get,
+    ) == 9
+    assert calls == [
+        (f"{ROUTE}/api/v1/health/ready", "loom_readonly_exact")
+    ]
 
 
 def _body_names() -> tuple[str, ...]:
