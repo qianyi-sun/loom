@@ -11,6 +11,7 @@ from .backup import BackupCreator, SubprocessBackupCommandRunner, VerifiedBackup
 from .checkpoint_inventory_provider import KubernetesLifecycleInventoryProvider
 from .checkpoint_lease import CriticalCheckpointEvidence, inspect_critical_checkpoint
 from .config import OperatorConfig
+from .deep_preflight_authority import DeepPreflightAuthority
 from .detached_preflight_runner import DetachedPreflightBackupRunner
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
 from .model import PreflightRequest
@@ -29,6 +30,7 @@ def build_installed_detached_preflight_runner(
     service_gid: int,
     store: RequestStore,
     now: Callable[[], datetime],
+    authority: DeepPreflightAuthority | None = None,
 ) -> DetachedPreflightBackupRunner:
     """Build the exact Tier 3 worker callback; no legacy backup-only fallback."""
     if service_uid < 0 or service_gid < 0:
@@ -47,13 +49,16 @@ def build_installed_detached_preflight_runner(
         now=now,
         object_inventory_provider=inventory_source,
     )
-    authority = build_installed_deep_preflight_composition(
-        config,
-        service_uid=service_uid,
-        service_gid=service_gid,
-        store=store,
-        now=now,
-    ).authority()
+    deep_preflight = (
+        authority
+        or build_installed_deep_preflight_composition(
+            config,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            store=store,
+            now=now,
+        ).authority()
+    )
 
     def inspect(
         backup: VerifiedBackup,
@@ -73,7 +78,7 @@ def build_installed_detached_preflight_runner(
         store=store,
         rehearsal_store=store,
         load_assessment=store.read_preflight_assessment,
-        orchestrator=authority.detached_orchestrator(),
+        orchestrator=deep_preflight.detached_orchestrator(),
         inspect_checkpoint=inspect,
         now=now,
         lease_ttl=_RESTORE_VERIFIED_LEASE_TTL,

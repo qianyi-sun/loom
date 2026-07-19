@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from loom_cli.rollout.final_attestation_admission import (
+    FinalAttestationAdmission,
+    validate_final_attestation,
+)
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_orchestrator import CandidatePreflightOrchestrator
@@ -50,6 +54,36 @@ class DeepPreflightAuthority:
         if type(epoch) is not int or epoch < 0:
             raise ValueError("staging mutation epoch authority is invalid")
         return epoch
+
+    def admit_final(
+        self,
+        candidate: CandidateBinding,
+        *,
+        attestation_digest: str,
+        expected_registry_digest: str,
+        expected_coverage_digest: str,
+    ) -> FinalAttestationAdmission:
+        """Reload and recheck exact Tier 0 authority before protected apply."""
+        attestation = self.attestation_store.read(attestation_digest)
+        if (
+            attestation.registry_digest != expected_registry_digest
+            or attestation.coverage_digest != expected_coverage_digest
+        ):
+            raise ValueError("final admission envelope authority drifted")
+        mutation_epoch = self.current_mutation_epoch()
+        sources = self.sources_factory(candidate, mutation_epoch, RuntimePurpose.ADMISSION)
+        if sources.candidate != candidate:
+            raise ValueError("final admission source candidate drifted")
+        runtime = sources.build(mutation_epoch=mutation_epoch)
+        plan = runtime.prebackup_plan(candidate)
+        return validate_final_attestation(
+            attestation=attestation,
+            candidate=candidate,
+            plan=plan,
+            current_mutation_epoch=mutation_epoch,
+            now=self.now(),
+            max_concurrency=self.max_concurrency,
+        )
 
     def _orchestrator(self, purpose: RuntimePurpose) -> CandidatePreflightOrchestrator:
         def runtime_factory(

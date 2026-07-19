@@ -197,6 +197,28 @@ def test_worker_holds_lifecycle_lock_and_runs_only_finalized_envelope() -> None:
     ]
 
 
+def test_worker_refuses_driver_when_final_attestation_admission_fails() -> None:
+    bundle = worker_fakes()
+
+    def reject(_envelope: DriverEnvelope) -> object:
+        bundle.order.append("final-admission")
+        raise ValueError("drifted")
+
+    bundle.deps.final_admission = reject
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    assert bundle.order == [
+        "driver-lock-acquire",
+        "final-admission",
+        "attempt_failed",
+        "active-clear-pending",
+        "driver-lock-release",
+    ]
+    assert bundle.store.events[-1].reason == "preflight.attestation.final-admission@static"
+    assert bundle.store.events[-1].current_step == "00-final-admission"
+    assert bundle.store.active is None
+
+
 def test_worker_records_failed_driver_and_clears_active() -> None:
     bundle = worker_fakes(driver_rc=2)
     assert run_attempt(valid_envelope(), bundle.deps) == 1

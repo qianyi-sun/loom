@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from loom_cli.rollout.operator import deep_preflight_authority as authority_module
 from loom_cli.rollout.operator.deep_preflight_authority import (
     DeepPreflightAuthority,
     RuntimePurpose,
@@ -38,9 +40,7 @@ def _candidate() -> CandidateBinding:
 
 
 def _check(check_id: str, tier: int, dependency: str | None = None) -> RegisteredCheck:
-    stage = (
-        StageCapability.STATIC if tier < 2 else StageCapability.BASELINE_LIVE_READONLY
-    )
+    stage = StageCapability.STATIC if tier < 2 else StageCapability.BASELINE_LIVE_READONLY
     return RegisteredCheck(
         spec=CheckSpec(
             check_id=check_id,
@@ -58,9 +58,7 @@ def _check(check_id: str, tier: int, dependency: str | None = None) -> Registere
         ),
         implementation_version="v1",
         operations={
-            CheckOperation.PROBE: lambda _context: CheckProbe(
-                passed=True, evidence={"ready": True}
-            )
+            CheckOperation.PROBE: lambda _context: CheckProbe(passed=True, evidence={"ready": True})
         },
     )
 
@@ -142,3 +140,58 @@ def test_mutation_epoch_authority_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="mutation epoch"):
         authority.current_mutation_epoch()
+
+
+def test_final_admission_rebuilds_exact_admission_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = _candidate()
+    purposes: list[RuntimePurpose] = []
+    captured: dict[str, object] = {}
+    attestation = SimpleNamespace(registry_digest="1" * 64, coverage_digest="2" * 64)
+
+    class Store:
+        def read(self, digest: str) -> object:
+            captured["digest"] = digest
+            return attestation
+
+    class Runtime:
+        def prebackup_plan(self, found: CandidateBinding) -> object:
+            return SimpleNamespace(candidate=found)
+
+    class Sources:
+        def __init__(self, found: CandidateBinding) -> None:
+            self.candidate = found
+
+        def build(self, *, mutation_epoch: int) -> object:
+            assert mutation_epoch == 7
+            return Runtime()
+
+    def sources(found, epoch, purpose):
+        assert epoch == 7
+        purposes.append(purpose)
+        return Sources(found)
+
+    def validate(**kwargs):
+        captured.update(kwargs)
+        return "admitted"
+
+    monkeypatch.setattr(authority_module, "validate_final_attestation", validate)
+    authority = DeepPreflightAuthority(
+        sources_factory=sources,  # type: ignore[arg-type]
+        attestation_store=Store(),  # type: ignore[arg-type]
+        read_mutation_epoch=lambda: 7,
+        now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+    )
+
+    result = authority.admit_final(
+        candidate,
+        attestation_digest="3" * 64,
+        expected_registry_digest="1" * 64,
+        expected_coverage_digest="2" * 64,
+    )
+
+    assert result == "admitted"
+    assert purposes == [RuntimePurpose.ADMISSION]
+    assert captured["digest"] == "3" * 64
+    assert captured["candidate"] == candidate
+    assert captured["current_mutation_epoch"] == 7
+    assert captured["plan"].candidate == candidate  # type: ignore[union-attr]

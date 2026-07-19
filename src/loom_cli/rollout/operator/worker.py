@@ -29,6 +29,7 @@ from .envelope import fixed_operator_config_path, load_validated_envelope
 from .lifecycle import LifecycleCoordinator
 from .model import (
     ActivePointer,
+    CandidateBinding,
     DriverEnvelope,
     PreflightRequest,
     RequestEvent,
@@ -110,6 +111,7 @@ class WorkerDependencies:
     ) = None
     finalize_backup: Callable[[PreflightRequest, VerifiedBackupJob], DriverEnvelope] | None = None
     read_driver_failure: Callable[[DriverEnvelope], RolloutFailureEvidence | None] | None = None
+    final_admission: Callable[[DriverEnvelope], object] | None = None
 
 
 @dataclass(slots=True)
@@ -259,6 +261,23 @@ def run_attempt(
             pointer.unit_name,
         ):
             raise ValueError("worker attempt does not own the active staging pointer")
+        if dependencies.final_admission is not None:
+            try:
+                dependencies.final_admission(envelope)
+            except Exception:
+                dependencies.store.append_event(
+                    _event(
+                        envelope,
+                        dependencies=dependencies,
+                        event="attempt_failed",
+                        status="failed",
+                        reason="preflight.attestation.final-admission@static",
+                        current_step="00-final-admission",
+                    )
+                )
+                signal_controller.seal_terminal(event_cancelled=False)
+                dependencies.lifecycle.release_active(pointer)
+                return 1
         dependencies.store.set_active(running_pointer)
         dependencies.store.append_event(
             _event(
@@ -566,6 +585,7 @@ def _run(
 
 
 def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> WorkerDependencies:
+    from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
     from .installed_detached_preflight import build_installed_detached_preflight_runner
 
     store = RequestStore(config.state_root)
@@ -584,12 +604,20 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         service_gid = pwd.getpwnam(config.service_user).pw_gid
     except (KeyError, OSError) as exc:
         raise ValueError("worker service account is unavailable") from exc
+    deep_preflight = build_installed_deep_preflight_composition(
+        config,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        store=store,
+        now=clock,
+    ).authority()
     detached_preflight = build_installed_detached_preflight_runner(
         config,
         service_uid=service_uid,
         service_gid=service_gid,
         store=store,
         now=clock,
+        authority=deep_preflight,
     )
 
     def run_driver(envelope_path: Path, resume: bool) -> int:
@@ -604,6 +632,24 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         if resume:
             argv.append("--resume")
         return dispatch(argv)
+
+    def final_admission(envelope: DriverEnvelope) -> object:
+        candidate = CandidateBinding(
+            remote_url=envelope.remote_url,
+            target_ref=envelope.target_ref,
+            resolved_sha=envelope.resolved_sha,
+            image_tag=envelope.image_tag,
+            fetched_at=envelope.fetched_at,
+            source_mode=envelope.source_mode,
+            resolved_tree=envelope.resolved_tree,
+            approved_base_sha=envelope.approved_base_sha,
+        )
+        return deep_preflight.admit_final(
+            candidate,
+            attestation_digest=envelope.preflight_attestation_sha256,
+            expected_registry_digest=envelope.preflight_registry_sha256,
+            expected_coverage_digest=envelope.preflight_coverage_sha256,
+        )
 
     return WorkerDependencies(
         store=store,
@@ -633,6 +679,7 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             verified,
         ),
         read_driver_failure=lambda envelope: _read_driver_failure(config, envelope),
+        final_admission=final_admission,
     )
 
 
