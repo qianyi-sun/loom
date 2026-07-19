@@ -18,8 +18,7 @@ def test_readonly_preflight_rbac_is_namespace_scoped_and_non_mutating() -> None:
 
     assert set(documents) == {"ServiceAccount", "Role", "RoleBinding"}
     assert all(
-        document["metadata"]["namespace"] == "loom-staging"
-        for document in documents.values()
+        document["metadata"]["namespace"] == "loom-staging" for document in documents.values()
     )
     account = documents["ServiceAccount"]
     assert account["metadata"]["name"] == "loom-rollout-readonly"
@@ -27,12 +26,18 @@ def test_readonly_preflight_rbac_is_namespace_scoped_and_non_mutating() -> None:
 
     rules = documents["Role"]["rules"]
     assert rules
-    assert all(set(rule["verbs"]) <= {"get", "list", "watch"} for rule in rules)
-    resources = {
-        resource
-        for rule in rules
-        for resource in rule["resources"]
-    }
+    ordinary = [rule for rule in rules if rule["resources"] != ["pods/portforward"]]
+    transport = [rule for rule in rules if rule["resources"] == ["pods/portforward"]]
+    assert all(set(rule["verbs"]) <= {"get", "list", "watch"} for rule in ordinary)
+    assert transport == [
+        {
+            "apiGroups": [""],
+            "resources": ["pods/portforward"],
+            "resourceNames": ["loom-postgres-0"],
+            "verbs": ["create"],
+        }
+    ]
+    resources = {resource for rule in rules for resource in rule["resources"]}
     assert "*" not in resources
     assert "secrets" not in resources
     assert "serviceaccounts" not in resources

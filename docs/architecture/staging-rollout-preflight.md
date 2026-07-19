@@ -143,8 +143,12 @@ selected baseline endpoints happen to be reads.
 The Kubernetes side is declared in
 `deploy/k8s/staging-rollout-readonly.yaml`: one namespace-scoped service
 account, Role, and RoleBinding, with token automount disabled and only
-`get/list/watch`. No ClusterRole, secret access, token material, wildcard, or
-write verb is admitted. Runtime credentials use a bounded TokenRequest and are
+`get/list/watch` plus `create` on the non-object-mutating
+`pods/portforward` subresource for the exact `loom-postgres-0` pod. The latter
+is only a transport to a separately authenticated SELECT-only PostgreSQL role;
+it cannot create or update a Kubernetes object and cannot connect to another
+pod. No ClusterRole, secret access, token material, wildcard, or other write
+verb is admitted. Runtime credentials use a bounded TokenRequest and are
 validated by the server-observed review before any Tier 2 call.
 The TokenRequest is rendered into a minified kubeconfig with no inherited
 client certificate or root credential. The shared renderer accepts only the

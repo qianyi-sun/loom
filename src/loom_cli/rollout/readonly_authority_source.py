@@ -22,6 +22,8 @@ _SAFE_REVIEW_RESOURCES = frozenset(
         ("authorization.k8s.io", "selfsubjectrulesreviews"),
     }
 )
+_SAFE_TRANSPORT_RESOURCE = ("", "pods/portforward")
+_SAFE_TRANSPORT_NAMES = frozenset({"loom-postgres-0"})
 
 
 class CommandResult(Protocol):
@@ -57,15 +59,12 @@ def _strings(
     if not isinstance(value, list) or (not value and not allow_empty) or len(value) > 512:
         raise ValueError("readonly authority rule is invalid")
     rendered = tuple(value)
-    if (
-        any(
-            not isinstance(item, str)
-            or (not allow_blank_items and _VALUE_RE.fullmatch(item) is None)
-            or (allow_blank_items and item and _VALUE_RE.fullmatch(item) is None)
-            for item in rendered
-        )
-        or len(set(rendered)) != len(rendered)
-    ):
+    if any(
+        not isinstance(item, str)
+        or (not allow_blank_items and _VALUE_RE.fullmatch(item) is None)
+        or (allow_blank_items and item and _VALUE_RE.fullmatch(item) is None)
+        for item in rendered
+    ) or len(set(rendered)) != len(rendered):
         raise ValueError("readonly authority rule is invalid")
     return rendered
 
@@ -74,15 +73,12 @@ def _urls(value: object) -> tuple[str, ...]:
     if not isinstance(value, list) or not value or len(value) > 512:
         raise ValueError("readonly non-resource rule is invalid")
     rendered = tuple(value)
-    if (
-        any(
-            not isinstance(item, str)
-            or _NON_RESOURCE_URL_RE.fullmatch(item) is None
-            or ".." in item.split("/")
-            for item in rendered
-        )
-        or len(set(rendered)) != len(rendered)
-    ):
+    if any(
+        not isinstance(item, str)
+        or _NON_RESOURCE_URL_RE.fullmatch(item) is None
+        or ".." in item.split("/")
+        for item in rendered
+    ) or len(set(rendered)) != len(rendered):
         raise ValueError("readonly non-resource rule is invalid")
     return rendered
 
@@ -133,7 +129,12 @@ def _protected_rules(payload: bytes) -> tuple[tuple[str, ...], tuple[str, ...], 
         resource_names = _strings(raw.get("resourceNames", []), allow_empty=True)
         pairs = {(group, resource) for group in api_groups for resource in resources}
         safe_review = bool(pairs) and pairs <= _SAFE_REVIEW_RESOURCES and set(verbs) <= {"create"}
-        if not safe_review:
+        safe_transport = bool(
+            pairs == {_SAFE_TRANSPORT_RESOURCE}
+            and set(verbs) == {"create"}
+            and set(resource_names) == _SAFE_TRANSPORT_NAMES
+        )
+        if not safe_review and not safe_transport:
             protected_verbs.update(verbs)
             protected_resources.update(resources)
         canonical_rules.append(
@@ -152,9 +153,7 @@ def _protected_rules(payload: bytes) -> tuple[tuple[str, ...], tuple[str, ...], 
         protected_verbs.update(verbs)
         if "*" in urls:
             protected_resources.add("*")
-        canonical_rules.append(
-            {"nonResourceURLs": sorted(urls), "verbs": sorted(verbs)}
-        )
+        canonical_rules.append({"nonResourceURLs": sorted(urls), "verbs": sorted(verbs)})
     digest = hashlib.sha256(
         json.dumps(canonical_rules, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -208,11 +207,7 @@ def probe_readonly_authority(
     application_observation: ApplicationObservation,
 ) -> ReadonlyAuthorityEvidence:
     """Read exact Kubernetes and application authority without protected mutation."""
-    if (
-        not kubeconfig.is_absolute()
-        or ".." in kubeconfig.parts
-        or namespace != "loom-staging"
-    ):
+    if not kubeconfig.is_absolute() or ".." in kubeconfig.parts or namespace != "loom-staging":
         raise ValueError("readonly authority target is invalid")
     review_specs = (
         (

@@ -47,6 +47,12 @@ def _rules(*, extra: dict[str, object] | None = None) -> dict[str, object]:
             "resources": ["selfsubjectreviews"],
             "verbs": ["create"],
         },
+        {
+            "apiGroups": [""],
+            "resources": ["pods/portforward"],
+            "resourceNames": ["loom-postgres-0"],
+            "verbs": ["create"],
+        },
     ]
     if extra is not None:
         resource_rules.append(extra)
@@ -108,6 +114,18 @@ def test_server_observed_readonly_authority_accepts_exact_safe_rules() -> None:
     (
         {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]},
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["create"]},
+        {
+            "apiGroups": [""],
+            "resources": ["pods/portforward"],
+            "resourceNames": ["loom-postgres-1"],
+            "verbs": ["create"],
+        },
+        {
+            "apiGroups": [""],
+            "resources": ["pods/portforward"],
+            "resourceNames": ["loom-postgres-0"],
+            "verbs": ["get", "create"],
+        },
         {"apiGroups": ["*"], "resources": ["*"], "verbs": ["get"]},
     ),
 )

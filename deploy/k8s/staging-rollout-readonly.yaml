@@ -49,6 +49,13 @@ rules:
   - apiGroups: [policy]
     resources: [poddisruptionbudgets]
     verbs: [get, list, watch]
+  # A TokenRequest bearer may open only the exact PostgreSQL pod transport.
+  # Database authorization is independently SELECT-only; this subresource
+  # permission cannot create or update a Kubernetes object.
+  - apiGroups: [""]
+    resources: [pods/portforward]
+    resourceNames: [loom-postgres-0]
+    verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
