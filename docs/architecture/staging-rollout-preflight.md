@@ -140,6 +140,12 @@ HEAD, never updates token usage timestamps while authenticating it, and all
 other services reject the type by default. A normal team, worker, browser, or
 admin credential cannot satisfy this authority check merely because the
 selected baseline endpoints happen to be reads.
+The Kubernetes side is declared in
+`deploy/k8s/staging-rollout-readonly.yaml`: one namespace-scoped service
+account, Role, and RoleBinding, with token automount disabled and only
+`get/list/watch`. No ClusterRole, secret access, token material, wildcard, or
+write verb is admitted. Runtime credentials use a bounded TokenRequest and are
+validated by the server-observed review before any Tier 2 call.
 
 `CandidatePreflightOrchestrator` is the restart boundary between admission and
 rehearsal. The broker executes Tier 0–2 from a runtime factory before it
