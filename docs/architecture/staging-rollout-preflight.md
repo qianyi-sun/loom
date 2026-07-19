@@ -269,6 +269,15 @@ protected checks cannot opt out of ordinary dependency blocking. A failed
 rehearsal therefore still produces cleanup evidence instead of leaking its
 namespace, database clone, object prefix or transient unit.
 
+Each concrete action is wrapped by `JournaledRehearsalBackend`. The
+service-owned mode-0700 root contains one mode-0700 directory per derived
+isolation identity and one immutable mode-0600 no-follow terminal record per
+step. Exact records are reused after a worker restart; a candidate, epoch or
+plan collision fails closed. Runner exceptions become a normalized
+`isolated-action-failed` blocker without persisting diagnostics, and are not
+silently executed again. Concrete resource operations retain their own
+idempotent cleanup ledger below this terminal evidence boundary.
+
 ### Tier 4: justified final-only checks
 
 Only protected apply, observed live convergence, post-apply attestation drift,
