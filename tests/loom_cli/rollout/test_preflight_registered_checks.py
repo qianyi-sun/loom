@@ -20,6 +20,8 @@ from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
     BROWSER_ENTRYPOINT,
     BROWSER_IMAGE,
+    REHEARSAL_POSTGRES_ENTRYPOINT,
+    REHEARSAL_POSTGRES_IMAGE,
     REVISION_LABEL,
     ImageDescriptor,
     image_plan_digest,
@@ -1364,7 +1366,15 @@ def _image_inspect_payload(name: str, revision: str) -> str:
                 "Architecture": "amd64",
                 "Config": {
                     "Labels": {REVISION_LABEL: revision},
-                    "Entrypoint": list(BROWSER_ENTRYPOINT) if name == BROWSER_IMAGE else [],
+                    "Entrypoint": (
+                        list(BROWSER_ENTRYPOINT)
+                        if name == BROWSER_IMAGE
+                        else (
+                            list(REHEARSAL_POSTGRES_ENTRYPOINT)
+                            if name == REHEARSAL_POSTGRES_IMAGE
+                            else []
+                        )
+                    ),
                 },
             }
         ]

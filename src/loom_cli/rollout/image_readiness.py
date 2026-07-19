@@ -23,11 +23,14 @@ ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
 )
 AUXILIARY_ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
     ("loom-staging-admin-browser-smoke", "deploy/Dockerfile.staging-admin-browser-smoke"),
+    ("loom-rehearsal-postgres", "deploy/Dockerfile.rehearsal-postgres"),
 )
 ALL_BUILD_IMAGES = ROLLOUT_IMAGES + AUXILIARY_ROLLOUT_IMAGES
 REVISION_LABEL = "org.opencontainers.image.revision"
 BROWSER_IMAGE = "loom-staging-admin-browser-smoke"
 BROWSER_ENTRYPOINT = ("node", "/opt/loom/web/scripts/staging-admin-browser-smoke.mjs")
+REHEARSAL_POSTGRES_IMAGE = "loom-rehearsal-postgres"
+REHEARSAL_POSTGRES_ENTRYPOINT = ("docker-entrypoint.sh",)
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _IMAGE_TAG_RE = re.compile(r"^staging-[a-z0-9][a-z0-9-]{5,63}$")
@@ -186,6 +189,10 @@ def _contract_matches(name: str, descriptor: ImageDescriptor, resolved_sha: str)
         and descriptor.os == "linux"
         and descriptor.architecture == "amd64"
         and (name != BROWSER_IMAGE or descriptor.entrypoint == BROWSER_ENTRYPOINT)
+        and (
+            name != REHEARSAL_POSTGRES_IMAGE
+            or descriptor.entrypoint == REHEARSAL_POSTGRES_ENTRYPOINT
+        )
     )
 
 
@@ -306,6 +313,8 @@ __all__ = [
     "AUXILIARY_ROLLOUT_IMAGES",
     "BROWSER_ENTRYPOINT",
     "BROWSER_IMAGE",
+    "REHEARSAL_POSTGRES_ENTRYPOINT",
+    "REHEARSAL_POSTGRES_IMAGE",
     "REVISION_LABEL",
     "ROLLOUT_IMAGES",
     "DockerRunner",

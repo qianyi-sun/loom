@@ -11,6 +11,8 @@ from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
     BROWSER_ENTRYPOINT,
     BROWSER_IMAGE,
+    REHEARSAL_POSTGRES_ENTRYPOINT,
+    REHEARSAL_POSTGRES_IMAGE,
     REVISION_LABEL,
     build_exact_images,
     verify_image_contract,
@@ -26,7 +28,15 @@ def _inspect_payload(name: str, revision: str, *, image_id: str | None = None) -
                 "Architecture": "amd64",
                 "Config": {
                     "Labels": {REVISION_LABEL: revision},
-                    "Entrypoint": list(BROWSER_ENTRYPOINT) if name == BROWSER_IMAGE else [],
+                    "Entrypoint": (
+                        list(BROWSER_ENTRYPOINT)
+                        if name == BROWSER_IMAGE
+                        else (
+                            list(REHEARSAL_POSTGRES_ENTRYPOINT)
+                            if name == REHEARSAL_POSTGRES_IMAGE
+                            else []
+                        )
+                    ),
                 },
             }
         ]
@@ -103,6 +113,29 @@ def test_browser_entrypoint_is_part_of_contract() -> None:
         return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
 
     with pytest.raises(ValueError, match="browser-smoke"):
+        verify_image_contract(
+            run,
+            image_tag="staging-aaaaaaaa",
+            resolved_sha=revision,
+            expected_digests=expected,
+        )
+
+
+def test_rehearsal_postgres_entrypoint_is_part_of_contract() -> None:
+    revision = "a" * 40
+    expected = {
+        name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+
+    def run(argv, _cwd):
+        name = argv[-1].split(":", 1)[0]
+        payload = json.loads(_inspect_payload(name, revision, image_id=expected[name]))
+        if name == REHEARSAL_POSTGRES_IMAGE:
+            payload[0]["Config"]["Entrypoint"] = ["/bin/sh"]
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    with pytest.raises(ValueError, match="rehearsal-postgres"):
         verify_image_contract(
             run,
             image_tag="staging-aaaaaaaa",

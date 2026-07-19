@@ -7,6 +7,7 @@ import pytest
 
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
+    ROLLOUT_IMAGES,
     ImageArtifactSet,
     ImageDescriptor,
 )
@@ -86,9 +87,7 @@ def _manifests() -> ManifestArtifact:
         resource_count=1,
         resource_set_digest="d" * 64,
         image_identities={
-            name: digest
-            for name, digest in artifacts.image_digests.items()
-            if name != "loom-staging-admin-browser-smoke"
+            name: artifacts.image_digests[name] for name, _dockerfile in ROLLOUT_IMAGES
         },
         artifact_digest="e" * 64,
     )

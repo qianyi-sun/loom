@@ -8,6 +8,9 @@ import pytest
 
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
+    REHEARSAL_POSTGRES_ENTRYPOINT,
+    REHEARSAL_POSTGRES_IMAGE,
+    ROLLOUT_IMAGES,
     ImageArtifactSet,
     ImageDescriptor,
 )
@@ -27,7 +30,7 @@ def _images() -> ImageArtifactSet:
             architecture="amd64",
             entrypoint=("node", "/opt/loom/web/scripts/staging-admin-browser-smoke.mjs")
             if name == "loom-staging-admin-browser-smoke"
-            else (),
+            else (REHEARSAL_POSTGRES_ENTRYPOINT if name == REHEARSAL_POSTGRES_IMAGE else ()),
         )
         for index, (name, _dockerfile) in enumerate(ALL_BUILD_IMAGES, 1)
     }
@@ -39,7 +42,7 @@ def _images() -> ImageArtifactSet:
 
 
 def _manifests(images: ImageArtifactSet) -> ManifestArtifact:
-    rollout_names = {name for name, _dockerfile in ALL_BUILD_IMAGES if "browser" not in name}
+    rollout_names = {name for name, _dockerfile in ROLLOUT_IMAGES}
     rendered = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: exact\n"
     return ManifestArtifact(
         rendered_yaml=rendered,

@@ -13,7 +13,7 @@ from typing import Protocol
 
 import yaml  # type: ignore[import-untyped]
 
-from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
+from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ROLLOUT_IMAGES
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -113,7 +113,7 @@ def inspect_rendered_manifests(
         or len(encoded) > _MAX_RENDERED_BYTES
         or _IMAGE_TAG_RE.fullmatch(image_tag) is None
         or _DNS_RE.fullmatch(namespace) is None
-        or set(image_digests) != expected_images | {"loom-staging-admin-browser-smoke"}
+        or set(image_digests) != {name for name, _path in ALL_BUILD_IMAGES}
         or any(_IMAGE_ID_RE.fullmatch(value) is None for value in image_digests.values())
     ):
         raise ValueError("rendered manifest binding is invalid")
