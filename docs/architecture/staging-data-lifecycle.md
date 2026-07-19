@@ -63,6 +63,14 @@ canonical SHA-256; versioned objects bind the exact object version. A retry may
 reuse an existing registration only when authority, scope, version, digest,
 size, creation time, and active state all remain exact.
 
+The exact worker result projection carries SHA-256 and byte length for the
+multipart trajectory and generated ATIF object, alongside the already exact
+artifact collector evidence. Control-plane projection atomically creates or
+verifies each artifact authority and exact object row. Missing, noncanonical,
+or incomplete object evidence rejects the entire projection and rolls back the
+trajectory-index update; finalization is not the first point at which a broad
+prefix becomes deletion authority.
+
 ## Mutation epoch
 
 Every protected staging mutation increments one database-backed epoch: rollout

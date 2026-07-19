@@ -100,6 +100,10 @@ class TrialResult(BaseModel):
     reward: dict[str, float] | None = None
     steps: list[StepResult] = []
     trajectory_uri: str | None = None
+    trajectory_sha256: str | None = None
+    trajectory_size_bytes: int | None = None
     atif_uri: str | None = None
+    atif_sha256: str | None = None
+    atif_size_bytes: int | None = None
     atif_schema_version: str | None = None
     artifacts_prefix: str | None = None

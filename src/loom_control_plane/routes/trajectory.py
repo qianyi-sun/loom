@@ -18,6 +18,7 @@ from loom.data_lifecycle_registry import (
     bind_existing_trial_lifecycle_authority,
     ensure_artifact_lifecycle_authority,
     ensure_trial_event_lifecycle_authority,
+    register_lifecycle_object,
 )
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch
 from loom.db.schema import Trial as TrialRow
@@ -72,6 +73,10 @@ UPDATE trials
 _VALID_SHARE_STATUS = frozenset({"pending_scan", "shared", "blocked"})
 
 
+class TrajectoryLifecycleEvidenceError(RuntimeError):
+    pass
+
+
 def _artifact_filename(key: str) -> str:
     name = key.rstrip("/").rsplit("/", 1)[-1]
     return name or "artifact"
@@ -82,6 +87,20 @@ def _content_hash(value: Any, default: str = "pending:legacy-unhashed") -> str:
         text = value.strip()
         return text if ":" in text else f"sha256:{text}"
     return default
+
+
+def _exact_sha256(content_hash: str) -> str:
+    prefix = "sha256:"
+    digest = content_hash.removeprefix(prefix)
+    if not content_hash.startswith(prefix) or len(digest) != 64:
+        raise TrajectoryLifecycleEvidenceError(
+            "artifact object requires an exact SHA-256"
+        )
+    if any(ch not in "0123456789abcdef" for ch in digest):
+        raise TrajectoryLifecycleEvidenceError(
+            "artifact object SHA-256 must be lowercase hexadecimal"
+        )
+    return digest
 
 
 def _share_status(value: Any, default: str = "pending_scan") -> str:
@@ -250,13 +269,16 @@ def _artifact_descriptors_from_index(
             batch,
             artifact_type="trajectory",
             name="Trajectory events",
-            content_hash=_content_hash(index_payload.get("checksum_sha256")),
+            content_hash=_content_hash(
+                index_payload.get("trajectory_sha256")
+                or index_payload.get("checksum_sha256")
+            ),
             storage=_storage_from_s3_uri(
                 index_payload.get("trajectory_uri"),
                 default_bucket="trajectories",
                 default_key=f"{default_prefix}/events.jsonl",
                 media_type="application/x-ndjson",
-                size_bytes=0,
+                size_bytes=index_payload.get("trajectory_size_bytes", 0),
             ),
             share_status=trial_share_status,
             safety_state=trial_safety,
@@ -271,13 +293,13 @@ def _artifact_descriptors_from_index(
             batch,
             artifact_type="atif_projection",
             name="ATIF projection",
-            content_hash="pending:legacy-unhashed",
+            content_hash=_content_hash(index_payload.get("atif_sha256")),
             storage=_storage_from_s3_uri(
                 index_payload.get("atif_uri"),
                 default_bucket="trajectories",
                 default_key=f"{default_prefix}/atif.json",
                 media_type="application/json",
-                size_bytes=0,
+                size_bytes=index_payload.get("atif_size_bytes", 0),
             ),
             share_status=trial_share_status,
             safety_state=trial_safety,
@@ -489,6 +511,32 @@ async def _sync_typed_artifacts_from_index(
                 raise RuntimeError("artifact lifecycle authority conflicts")
             for field, value in descriptor.items():
                 setattr(artifact, field, value)
+        storage = artifact.storage if isinstance(artifact.storage, dict) else {}
+        bucket = storage.get("bucket")
+        object_key = storage.get("key")
+        size_bytes = storage.get("size_bytes")
+        if (
+            not isinstance(bucket, str)
+            or not bucket
+            or not isinstance(object_key, str)
+            or not object_key
+            or not isinstance(size_bytes, int)
+            or isinstance(size_bytes, bool)
+            or size_bytes < 0
+        ):
+            raise TrajectoryLifecycleEvidenceError(
+                "artifact object identity is incomplete"
+            )
+        await register_lifecycle_object(
+            session,
+            authority_id=lifecycle_authority_id,
+            bucket=bucket,
+            object_key=object_key,
+            version_id=None,
+            content_sha256=_exact_sha256(artifact.content_hash),
+            size_bytes=size_bytes,
+            created_at=artifact.created_at,
+        )
         synced.append(artifact)
 
     await session.flush()
@@ -532,11 +580,20 @@ async def patch_trajectory_index(
             "has_result": result_payload is not None,
         })).mappings().one_or_none()
         if row is not None:
-            await _sync_typed_artifacts_from_index(
-                session,
-                trial_id=trial_id,
-                index_payload=index_payload,
-            )
+            try:
+                await _sync_typed_artifacts_from_index(
+                    session,
+                    trial_id=trial_id,
+                    index_payload=index_payload,
+                )
+            except TrajectoryLifecycleEvidenceError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "trajectory_lifecycle_evidence_invalid",
+                        "message": str(exc),
+                    },
+                ) from exc
         await session.commit()
     if row is None:
         raise HTTPException(status_code=409, detail="worker lost claim")
