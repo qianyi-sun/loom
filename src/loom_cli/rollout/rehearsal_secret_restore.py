@@ -9,6 +9,7 @@ import json
 import os
 import re
 import stat
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from types import MappingProxyType
 
 import yaml  # type: ignore[import-untyped]
 
+from loom.admin_secret import AdminSecretConfigError, AdminSecretVerifier
 from loom_cli.cluster_backup_guard import (
     backup_manifest_sha256,
     validate_backup_manifest,
@@ -209,6 +211,23 @@ def _read_secret(
     except (binascii.Error, ValueError) as exc:
         raise ValueError("rehearsal checkpoint Secret data encoding is invalid") from exc
     cloned_data = dict(data)
+    if name == "loom-admin-secret":
+        source_toml = cloned_data.get("secrets.toml")
+        if source_toml is None:
+            raise ValueError("rehearsal admin Secret authority is incomplete")
+        try:
+            secret_record = tomllib.loads(base64.b64decode(source_toml, validate=True).decode())
+        except (binascii.Error, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ValueError("rehearsal admin Secret payload is invalid") from exc
+        admin = secret_record.get("admin")
+        token = admin.get("token") if isinstance(admin, Mapping) else None
+        if not isinstance(token, str):
+            raise ValueError("rehearsal admin Secret payload is incomplete")
+        try:
+            AdminSecretVerifier.from_token(token)
+        except AdminSecretConfigError as exc:
+            raise ValueError("rehearsal admin Secret token contract is invalid") from exc
+        cloned_data["admin-token"] = base64.b64encode(token.encode()).decode()
     if name == "loom-secrets":
         if any(key not in cloned_data for key in _DATABASE_KEYS):
             raise ValueError("rehearsal checkpoint database Secret authority is incomplete")

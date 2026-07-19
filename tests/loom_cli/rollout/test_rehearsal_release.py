@@ -180,6 +180,11 @@ def test_release_artifact_isolates_exact_candidate_subset(tmp_path: Path) -> Non
             ]
         else:
             assert admin_probe_mounts == []
+        rehearsal_env = {item["name"]: item.get("value") for item in pod["containers"][0]["env"]}
+        if name == "loom-web":
+            assert rehearsal_env["LOOM_FRONTEND_REHEARSAL_ID"] == "5" * 24
+        else:
+            assert "LOOM_FRONTEND_REHEARSAL_ID" not in rehearsal_env
         assert name in artifact.deployment_images
     postgres = next(
         resource

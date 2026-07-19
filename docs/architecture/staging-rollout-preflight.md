@@ -284,6 +284,14 @@ requires an exact immediate API readback from the cloned database. A queued
 batch is valid rehearsal evidence, but it is never reported as terminal worker
 success.
 
+The candidate web image accepts a nested route only when
+`LOOM_FRONTEND_REHEARSAL_ID` is present, the environment is exactly `staging`,
+and both frontend route fields equal `/dev/rehearsal/<24-hex-id>`. Normal
+staging and production route acceptance remains unchanged. Secret cloning also
+derives one in-namespace `admin-token` key from the validated singleton admin
+TOML for the browser Job; the raw value stays inside the sensitive apply
+artifact and is never written to the rehearsal plan or evidence.
+
 Tier 3 is therefore the first stage after the request-specific backup worker
 has published a restore-verified lease. The pre-backup assessment alone is
 never launch authority; only the complete Tier 0–3 attestation can be promoted

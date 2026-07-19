@@ -66,6 +66,7 @@ def _run_runtime_config(
     *,
     environment: str,
     route_path: str,
+    rehearsal_id: str = "",
 ) -> tuple[dict[str, object], str]:
     config_path = tmp_path / "loom-frontend-config.json"
     template_path = tmp_path / "index.html.template"
@@ -85,6 +86,7 @@ def _run_runtime_config(
         "LOOM_FRONTEND_ROUTE_PATH": route_path,
         "LOOM_FRONTEND_API_BASE": route_path,
         "LOOM_FRONTEND_PUBLIC_ORIGIN": "https://yylx.world",
+        "LOOM_FRONTEND_REHEARSAL_ID": rehearsal_id,
     }
     subprocess.run(
         ["sh", "deploy/web-runtime-config.sh"],
@@ -96,6 +98,31 @@ def _run_runtime_config(
     return json.loads(config_path.read_text(encoding="utf-8")), index_path.read_text(
         encoding="utf-8",
     )
+
+
+def test_runtime_config_accepts_only_exact_staging_rehearsal_route(tmp_path: Path) -> None:
+    isolation = "a" * 24
+    route = f"/dev/rehearsal/{isolation}"
+    config, html = _run_runtime_config(
+        tmp_path,
+        environment="staging",
+        route_path=route,
+        rehearsal_id=isolation,
+    )
+
+    assert config["routePath"] == route
+    assert config["apiRouteBase"] == f"https://yylx.world{route}/api"
+    assert f'href="{route}/assets/' in html
+    assert f'src="{route}/assets/' in html
+
+
+def test_runtime_config_rejects_unbound_rehearsal_route(tmp_path: Path) -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_runtime_config(
+            tmp_path,
+            environment="staging",
+            route_path="/dev/rehearsal/" + "a" * 24,
+        )
 
 
 def test_validate_config_document_accepts_expected_prod_metadata() -> None:
@@ -306,9 +333,7 @@ def test_validate_canonical_redirect_rejects_non_308_and_dropped_query() -> None
     )
 
     assert "exact route returned HTTP 301; expected 308" in errors
-    assert (
-        "canonical redirect Location must be /dev/?next=%2Fmonitor&x=1" in errors
-    )
+    assert "canonical redirect Location must be /dev/?next=%2Fmonitor&x=1" in errors
 
 
 @pytest.mark.parametrize(
@@ -386,7 +411,7 @@ def test_extract_asset_urls_ignores_near_and_data_attributes() -> None:
         b'<script data-src="/dev/assets/decoy.js"></script>'
         b'<script type="module" src = "/dev/assets/index.js"></script>'
         b'<link rel="stylesheet" href="/dev/assets/index.css">'
-        b'<script src=/dev/assets/unquoted.js></script>'
+        b"<script src=/dev/assets/unquoted.js></script>"
         b'<script src="/dev/assets/index.js.map"></script>'
         b'<script src="/dev/assets/index.jsx"></script>'
     )
@@ -438,10 +463,7 @@ def test_validate_executable_shell_rejects_empty_first_duplicate_asset_value(
         url="https://yylx.world/dev/",
         status=200,
         headers={"content-type": "text/html"},
-        body=(
-            '<link rel="stylesheet" href="/dev/assets/index.css">'
-            f"{duplicate_element}"
-        ).encode(),
+        body=(f'<link rel="stylesheet" href="/dev/assets/index.css">{duplicate_element}').encode(),
     )
     stylesheet = HttpResponse(
         url="https://yylx.world/dev/assets/index.css",
@@ -459,8 +481,7 @@ def test_validate_executable_shell_rejects_empty_first_duplicate_asset_value(
     assert "shell contains unsafe asset reference" in errors
 
 
-def test_extract_asset_urls_rejects_duplicate_rel_when_any_value_is_stylesheet(
-) -> None:
+def test_extract_asset_urls_rejects_duplicate_rel_when_any_value_is_stylesheet() -> None:
     body = (
         b'<link rel="preload" rel="stylesheet" '
         b'href="/dev/assets/ignored.css">'
@@ -617,9 +638,7 @@ def test_validate_executable_shell_rejects_duplicate_asset_content_type(
         assets=[asset],
     )
 
-    assert errors == [
-        f"asset must return exactly one Content-Type header: {asset_url}"
-    ]
+    assert errors == [f"asset must return exactly one Content-Type header: {asset_url}"]
     assert "header-secret" not in json.dumps(errors)
 
 
@@ -653,9 +672,7 @@ def test_validate_executable_shell_rejects_duplicate_shell_content_type(
         assets=[asset],
     )
 
-    assert errors == [
-        "canonical shell must return exactly one Content-Type header"
-    ]
+    assert errors == ["canonical shell must return exactly one Content-Type header"]
     assert "shell-header-secret" not in json.dumps(errors)
 
 
@@ -681,9 +698,7 @@ def test_validate_executable_shell_requires_shell_and_asset_content_type() -> No
     )
 
     assert "canonical shell must return exactly one Content-Type header" in errors
-    assert (
-        f"asset must return exactly one Content-Type header: {asset_url}" in errors
-    )
+    assert f"asset must return exactly one Content-Type header: {asset_url}" in errors
 
 
 def test_validate_executable_shell_requires_every_referenced_asset_response() -> None:
@@ -795,10 +810,7 @@ def test_validate_executable_shell_rejects_html_beyond_parser_limit() -> None:
         url="https://yylx.world/dev/",
         status=200,
         headers={"content-type": "text/html"},
-        body=(
-            b'<script type="module" src="/dev/assets/index.js"></script>'
-            + b" " * (1024 * 1024)
-        ),
+        body=(b'<script type="module" src="/dev/assets/index.js"></script>' + b" " * (1024 * 1024)),
     )
     asset = HttpResponse(
         url=asset_url,
@@ -954,16 +966,13 @@ def test_check_route_fetches_redirect_deep_shells_and_unique_assets() -> None:
     assert all(follow_redirects is False for _, _, follow_redirects in calls)
     evidence = asdict(check)
     assert {item["url"] for item in evidence["responses"]} == set(responses)
-    redirect_evidence = [
-        item for item in evidence["responses"] if item["url"] == redirect_url
-    ]
+    redirect_evidence = [item for item in evidence["responses"] if item["url"] == redirect_url]
     assert {(item["method"], item["status"]) for item in redirect_evidence} == {
         ("HEAD", 308),
         ("GET", 308),
     }
     assert all(
-        set(item) == {"url", "method", "status", "content_type"}
-        for item in evidence["responses"]
+        set(item) == {"url", "method", "status", "content_type"} for item in evidence["responses"]
     )
 
 
@@ -996,9 +1005,7 @@ def test_check_route_rejects_duplicate_config_content_type_without_evidence_leak
     assert check.status == "fail"
     assert "runtime config must return exactly one Content-Type header" in check.errors
     assert "config-header-secret" not in serialized
-    config_evidence = next(
-        response for response in check.responses if response.url == config_url
-    )
+    config_evidence = next(response for response in check.responses if response.url == config_url)
     assert config_evidence.content_type == ""
 
 
@@ -1056,9 +1063,7 @@ def test_check_route_combines_cache_control_and_redacts_secret_content_type() ->
 
 
 def test_check_route_redacts_transport_url_and_html_fallback_body() -> None:
-    signed_final_url = (
-        "https://cdn.example/index.js?X-Amz-Signature=do-not-serialize"
-    )
+    signed_final_url = "https://cdn.example/index.js?X-Amz-Signature=do-not-serialize"
     responses = _mock_dev_route_responses(
         javascript_response_url=signed_final_url,
         javascript_content_type="text/html; charset=utf-8",
@@ -1086,8 +1091,7 @@ def test_check_route_redacts_transport_url_and_html_fallback_body() -> None:
     serialized = json.dumps(asdict(check))
     assert check.status == "fail"
     assert any(
-        "asset returned HTML fallback: "
-        "https://yylx.world/dev/assets/index.js" in error
+        "asset returned HTML fallback: https://yylx.world/dev/assets/index.js" in error
         for error in check.errors
     )
     assert "X-Amz-Signature" not in serialized
@@ -1131,9 +1135,7 @@ def test_check_route_does_not_follow_or_serialize_asset_redirect() -> None:
 
     serialized = json.dumps(asdict(check))
     assert check.status == "fail"
-    assert any(
-        f"asset returned HTTP 302: {asset_url}" in error for error in check.errors
-    )
+    assert any(f"asset returned HTTP 302: {asset_url}" in error for error in check.errors)
     assert all(follow_redirects is False for _, _, follow_redirects in calls)
     assert not any(url == redirect_target for _, url, _ in calls)
     assert redirect_target not in serialized
@@ -1407,12 +1409,8 @@ def test_check_route_ignores_clean_cross_origin_stylesheet_without_fetch() -> No
     assert external_ref not in serialized
 
 
-def test_check_route_rejects_secret_looking_cross_origin_stylesheet_without_leak(
-) -> None:
-    external_ref = (
-        "https://fonts.example/css2?family=Loom&"
-        "X-Amz-Signature=external-secret-value"
-    )
+def test_check_route_rejects_secret_looking_cross_origin_stylesheet_without_leak() -> None:
+    external_ref = "https://fonts.example/css2?family=Loom&X-Amz-Signature=external-secret-value"
     shell_body = (
         b'<link rel="stylesheet" href="/dev/assets/index.css">'
         + f'<link rel="stylesheet" href="{external_ref}">'.encode()
@@ -1451,10 +1449,7 @@ def test_check_route_duplicate_src_uses_browser_first_value_without_leak() -> No
     external_ref = "https://cdn.example/external-secret.js"
     shell_body = (
         b'<link rel="stylesheet" href="/dev/assets/index.css">'
-        + (
-            f'<script src="{external_ref}" '
-            'src="/dev/assets/index.js"></script>'
-        ).encode()
+        + (f'<script src="{external_ref}" src="/dev/assets/index.js"></script>').encode()
     )
     responses = _mock_dev_route_responses(shell_body=shell_body)
     calls: list[str] = []
@@ -1496,8 +1491,7 @@ def test_check_route_duplicate_src_uses_browser_first_value_without_leak() -> No
             "https://yylx.world/dev/assets/duplicate.css",
         ),
         (
-            '<link rel="preload" rel="stylesheet" '
-            'href="https://cdn.example/rel-secret.css">',
+            '<link rel="preload" rel="stylesheet" href="https://cdn.example/rel-secret.css">',
             "rel-secret",
             "https://cdn.example/rel-secret.css",
         ),
@@ -1509,8 +1503,7 @@ def test_check_route_rejects_duplicate_link_security_attributes_without_leak(
     unexpected_fetch: str,
 ) -> None:
     shell_body = (
-        b'<link rel="stylesheet" href="/dev/assets/index.css">'
-        + duplicate_element.encode()
+        b'<link rel="stylesheet" href="/dev/assets/index.css">' + duplicate_element.encode()
     )
     responses = _mock_dev_route_responses(shell_body=shell_body)
     calls: list[str] = []
@@ -1639,9 +1632,7 @@ def test_check_route_bounds_malformed_asset_ref_and_continues(
 
     serialized = json.dumps(asdict(check))
     assert check.status == "fail"
-    assert any(
-        "shell contains malformed asset reference" in error for error in check.errors
-    )
+    assert any("shell contains malformed asset reference" in error for error in check.errors)
     assert stylesheet_url in calls
     assert malformed_ref not in serialized
 
@@ -1675,10 +1666,7 @@ def test_check_route_reports_malformed_asset_reference_without_crashing() -> Non
     )
 
     assert check.status == "fail"
-    assert (
-        "https://yylx.world/dev/: shell contains malformed asset reference"
-        in check.errors
-    )
+    assert "https://yylx.world/dev/: shell contains malformed asset reference" in check.errors
 
 
 @pytest.mark.parametrize(

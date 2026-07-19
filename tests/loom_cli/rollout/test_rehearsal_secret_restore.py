@@ -34,6 +34,12 @@ def _checkpoint(
     secrets.mkdir(mode=0o700)
     for name in ("loom-admin-secret", "loom-secrets", "loom-staging-tls"):
         data = {"key": base64.b64encode((name + "-value").encode()).decode()}
+        if name == "loom-admin-secret":
+            data = {
+                "secrets.toml": base64.b64encode(
+                    ('[admin]\ntoken = "loom_admin_' + "a" * 40 + '"\n').encode()
+                ).decode()
+            }
         if not valid_encoding and name == "loom-admin-secret":
             data["key"] = "not-base64!"
         if name == "loom-secrets" and complete_database_authority:
@@ -128,6 +134,12 @@ def test_secret_artifact_revalidates_checkpoint_and_binds_isolated_database(
     assert decoded["postgres-password"] == "rehearsal-trust-only"
     assert {decoded[key] for key in decoded if key.endswith("-db-url")} == {expected_url}
     assert {decoded[key] for key in decoded if key.endswith("-db-url-pool")} == {expected_url}
+    admin_secret = next(
+        document for document in documents if document["metadata"]["name"] == "loom-admin-secret"
+    )
+    assert base64.b64decode(admin_secret["data"]["admin-token"]).decode() == (
+        "loom_admin_" + "a" * 40
+    )
 
 
 def test_secret_artifact_fails_closed_on_manifest_or_secret_drift(tmp_path: Path) -> None:

@@ -194,7 +194,7 @@ def _isolate_deployment(
         container["env"] = environment
     if not isinstance(environment, list) or any(not isinstance(item, dict) for item in environment):
         raise ValueError("rehearsal deployment environment is invalid")
-    _rewrite_environment(environment, plan=plan)
+    _rewrite_environment(environment, plan=plan, deployment_name=name)
     environment.extend(
         (
             {"name": "HOME", "value": "/tmp"},
@@ -333,7 +333,12 @@ def _isolate_service(
     return value
 
 
-def _rewrite_environment(environment: list[dict[str, object]], *, plan: RehearsalPlan) -> None:
+def _rewrite_environment(
+    environment: list[dict[str, object]],
+    *,
+    plan: RehearsalPlan,
+    deployment_name: str,
+) -> None:
     route_path = "/" + plan.resources.route.split("/", 3)[-1]
     origin = plan.resources.route.split(route_path, 1)[0]
     replacements = {
@@ -355,6 +360,13 @@ def _rewrite_environment(environment: list[dict[str, object]], *, plan: Rehearsa
             item.update({"name": name, "value": replacements[name]})
     if seen & {"HOME", "PYTHONDONTWRITEBYTECODE", "TMPDIR"}:
         raise ValueError("rehearsal deployment scratch environment drifted")
+    if deployment_name == "loom-web":
+        environment.append(
+            {
+                "name": "LOOM_FRONTEND_REHEARSAL_ID",
+                "value": plan.resources.namespace.removeprefix("loom-rehearsal-"),
+            }
+        )
 
 
 def _network_policy(plan: RehearsalPlan) -> dict[str, object]:
