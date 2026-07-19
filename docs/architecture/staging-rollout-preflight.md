@@ -186,7 +186,10 @@ exact service-account subject, the fixed staging API audience
 `https://kubernetes.default.svc.cluster.local`, a lifetime no longer than 24
 hours, and at least two hours of remaining validity. The credential installer
 rotates a token whose metadata is otherwise fresh but whose audience cannot be
-accepted by the fixed API server. PostgreSQL
+accepted by the fixed API server. The PostgreSQL transport uses kubectl's
+explicit loopback `--address=127.0.0.1` option plus a numeric `LOCAL:5432`
+mapping; an address must never be encoded as a third port-mapping field because
+kubectl interprets that field as a named pod port. PostgreSQL
 baseline evidence is collected in one `REPEATABLE READ, READ ONLY`
 transaction as `loom_rollout_readonly`; the role is required to be
 non-superuser, `NOINHERIT`, `NOCREATEROLE`, `NOCREATEDB`, `NOREPLICATION` and

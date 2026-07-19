@@ -179,7 +179,8 @@ def open_readonly_database_query(
         _NAMESPACE,
         "port-forward",
         f"pod/{_POD}",
-        f"127.0.0.1:{port}:{_REMOTE_PORT}",
+        "--address=127.0.0.1",
+        f"{port}:{_REMOTE_PORT}",
         "--pod-running-timeout=15s",
     )
     process = spawn(argv, _CHILD_ENVIRONMENT)
