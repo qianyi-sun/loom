@@ -1504,7 +1504,7 @@ def test_registered_rehearsal_runs_exact_isolated_journaled_actions() -> None:
         isolation_id="rehearsal-abc123",
         candidate_sha="1" * 40,
         mutation_epoch=8,
-        backup_lease_digest="b" * 64,
+        checkpoint_evidence_digest="b" * 64,
         rehearsal_plan_digest="c" * 64,
     )
     dependencies = sorted(
@@ -1517,8 +1517,8 @@ def test_registered_rehearsal_runs_exact_isolated_journaled_actions() -> None:
     )
     context = CheckContext(
         {
-            "backup.lease.sha256": "b" * 64,
             "candidate.sha": "1" * 40,
+            "checkpoint.evidence.sha256": "b" * 64,
             "rehearsal.plan.sha256": "c" * 64,
             "staging.mutation-epoch": 8,
             "runner.config.sha256": "a" * 64,

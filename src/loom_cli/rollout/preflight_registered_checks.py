@@ -1998,10 +1998,10 @@ def build_rehearsal_checks(
     isolation_id: str,
     candidate_sha: str,
     mutation_epoch: int,
-    backup_lease_digest: str,
+    checkpoint_evidence_digest: str,
     rehearsal_plan_digest: str,
 ) -> tuple[RegisteredCheck, ...]:
-    """Build all Tier 3 exact isolated rehearsal actions."""
+    """Build Tier 3 against a checkpoint that has not yet become a lease."""
     session = IsolatedRehearsalSession(
         actions,
         isolation_id=isolation_id,
@@ -2009,14 +2009,14 @@ def build_rehearsal_checks(
         mutation_epoch=mutation_epoch,
     )
     bindings = {
-        "backup.lease.sha256": backup_lease_digest,
         "candidate.sha": candidate_sha,
+        "checkpoint.evidence.sha256": checkpoint_evidence_digest,
         "rehearsal.plan.sha256": rehearsal_plan_digest,
         "staging.mutation-epoch": mutation_epoch,
     }
     dependencies = {
         "rehearsal.namespace": ("manifests.server-schema", "staging.release-baseline"),
-        "rehearsal.db-clone": ("rehearsal.namespace", "backup.lease-eligibility"),
+        "rehearsal.db-clone": ("rehearsal.namespace",),
         "rehearsal.systemd-launch": (
             "rehearsal.namespace",
             "systemd.user-manager",

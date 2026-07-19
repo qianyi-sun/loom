@@ -66,6 +66,11 @@ restore rehearsal, publishes the resulting lease by digest, and only then
 atomically promotes the candidate. Cancellation or restore failure seals the
 candidate without replacing the prior active lease. The full request and
 attempt remain unavailable until this coordinator has completed successfully.
+Tier 3 therefore binds `checkpoint.evidence.sha256`, not a lease digest: asking
+the DB-clone rehearsal to depend on a lease would be circular because the lease
+is intentionally issued only after that rehearsal succeeds. Tier 0 may still
+reuse a previously active eligible lease when its complete identity and epoch
+remain unchanged.
 
 ## Tiers
 
