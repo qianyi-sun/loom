@@ -36,6 +36,11 @@ cluster/schema changes, authorized GC, object rewrites/deletes, and rollback.
 A backup lease binds the exact epoch, PostgreSQL snapshot identity, schema
 revision, environment/namespace, and immutable object-inventory root. Lease
 reuse fails closed unless those values and all component hashes remain exact.
+The typed lease also binds its source request and manifest digest, requires a
+completed restore-verification timestamp, and reports every mismatch together.
+An expired lease, changed epoch, different DB snapshot/schema/inventory, or any
+component/manifest drift makes reuse ineligible; the caller must create a fresh
+candidate payload rather than weakening the comparison.
 
 ## Two-phase garbage collection
 
