@@ -123,7 +123,10 @@ def test_pipeline_publishes_and_reuses_exact_attestation(tmp_path: Path) -> None
         store=PreflightAttestationStore(tmp_path / "state"),
         now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
     )
-    first = pipeline.authorize(context=_context(registry), bindings=_bindings())
+    first = pipeline.authorize(
+        context=_context(registry),
+        binding_factory=lambda _executions: _bindings(),
+    )
     assert first.passed and first.attestation is not None and not first.reused
     second = pipeline.authorize(
         context=_context(registry),

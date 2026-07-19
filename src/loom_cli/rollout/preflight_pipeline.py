@@ -7,7 +7,7 @@ the final rollout verifier.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -107,12 +107,13 @@ class PreflightPipeline:
         self,
         *,
         context: CheckContext,
-        bindings: AttestationBindings,
+        bindings: AttestationBindings | None = None,
+        binding_factory: Callable[[Sequence[CheckExecution]], AttestationBindings] | None = None,
         reusable_attestation_digest: str | None = None,
     ) -> PreflightPipelineResult:
         """Reuse an exact valid attestation or execute every independent check."""
         now = self._clock()
-        if reusable_attestation_digest is not None:
+        if reusable_attestation_digest is not None and bindings is not None:
             reusable = self._read_reusable(
                 reusable_attestation_digest,
                 bindings=bindings,
@@ -148,6 +149,10 @@ class PreflightPipeline:
                 attestation=None,
                 reused=False,
             )
+        if bindings is None:
+            if binding_factory is None:
+                raise ValueError("fresh preflight requires an attestation binding factory")
+            bindings = binding_factory(executions)
         attestation = PreflightAttestation.issue(
             bindings=bindings,
             executions=executions,
