@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -13,11 +14,16 @@ from loom_cli.rollout.image_readiness import (
     ROLLOUT_IMAGES,
     ImageArtifactSet,
     ImageDescriptor,
+    inspect_exact_images,
 )
-from loom_cli.rollout.manifest_readiness import ManifestArtifact
+from loom_cli.rollout.manifest_readiness import ManifestArtifact, inspect_rendered_manifests
 from loom_cli.rollout.preflight_artifact_store import (
     PreflightArtifactStore,
     PreflightArtifactStoreError,
+)
+from loom_cli.rollout.preflight_contract import CheckContext, CheckOperation
+from loom_cli.rollout.preflight_registered_checks import (
+    build_preflight_artifact_publication_check,
 )
 
 
@@ -68,6 +74,71 @@ def _publish(store: PreflightArtifactStore):
         migration_target_revision="0067",
         browser_report_schema_sha256="2" * 64,
     )
+
+
+@dataclass(frozen=True)
+class _Result:
+    returncode: int
+    stdout: str
+
+
+def _docker(argv, _cwd):
+    tag = str(argv[-1])
+    name = tag.split(":", 1)[0]
+    index = next(
+        index
+        for index, (expected, _dockerfile) in enumerate(ALL_BUILD_IMAGES, 1)
+        if expected == name
+    )
+    entrypoint: list[str] = []
+    if name == "loom-staging-admin-browser-smoke":
+        entrypoint = ["node", "/opt/loom/web/scripts/staging-admin-browser-smoke.mjs"]
+    elif name == REHEARSAL_POSTGRES_IMAGE:
+        entrypoint = list(REHEARSAL_POSTGRES_ENTRYPOINT)
+    return _Result(
+        0,
+        json.dumps(
+            [
+                {
+                    "Id": f"sha256:{index:064x}",
+                    "Os": "linux",
+                    "Architecture": "amd64",
+                    "Config": {
+                        "Entrypoint": entrypoint,
+                        "Labels": {"org.opencontainers.image.revision": "a" * 40},
+                    },
+                }
+            ]
+        ),
+    )
+
+
+def _loadable_artifacts():
+    image_tag = "staging-aaaaaaa"
+    images = inspect_exact_images(_docker, image_tag=image_tag, resolved_sha="a" * 40)
+    containers = "\n".join(
+        f"        - name: {name}\n          image: {name}:{image_tag}"
+        for name, _dockerfile in ROLLOUT_IMAGES
+    )
+    rendered = (
+        "apiVersion: apps/v1\n"
+        "kind: Deployment\n"
+        "metadata:\n"
+        "  name: exact\n"
+        "  namespace: loom-staging\n"
+        "spec:\n"
+        "  template:\n"
+        "    spec:\n"
+        "      containers:\n"
+        f"{containers}\n"
+    )
+    manifests = inspect_rendered_manifests(
+        rendered,
+        image_tag=image_tag,
+        namespace="loom-staging",
+        image_digests=images.image_digests,
+    )
+    return image_tag, images, manifests
 
 
 def test_store_publishes_and_reuses_exact_private_artifacts(tmp_path: Path) -> None:
@@ -146,3 +217,102 @@ def test_store_rejects_unbounded_migration_target(tmp_path: Path) -> None:
             migration_target_revision="head",
             browser_report_schema_sha256="2" * 64,
         )
+
+
+def test_store_loads_one_exact_publication_without_rebuild_or_render(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    image_tag, images, manifests = _loadable_artifacts()
+    publication = store.publish(
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        images=images,
+        manifests=manifests,
+        migration_plan_sha256="1" * 64,
+        migration_target_revision="0066",
+        browser_report_schema_sha256="2" * 64,
+    )
+
+    loaded = store.load_exact(
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        image_tag=image_tag,
+        namespace="loom-staging",
+        image_run=_docker,
+    )
+
+    assert loaded.publication == publication
+    assert loaded.images == images
+    assert loaded.manifests == manifests
+
+
+def test_store_rejects_ambiguous_exact_publications(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    image_tag, images, manifests = _loadable_artifacts()
+    for migration_digest in ("1" * 64, "3" * 64):
+        store.publish(
+            candidate_sha="a" * 40,
+            candidate_tree="f" * 40,
+            mutation_epoch=8,
+            images=images,
+            manifests=manifests,
+            migration_plan_sha256=migration_digest,
+            migration_target_revision="0066",
+            browser_report_schema_sha256="2" * 64,
+        )
+
+    with pytest.raises(PreflightArtifactStoreError, match="ambiguous"):
+        store.load_exact(
+            candidate_sha="a" * 40,
+            candidate_tree="f" * 40,
+            mutation_epoch=8,
+            image_tag=image_tag,
+            namespace="loom-staging",
+            image_run=_docker,
+        )
+
+
+def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    image_tag, images, manifests = _loadable_artifacts()
+    check = build_preflight_artifact_publication_check(
+        store=store,
+        image_artifact=lambda: images,
+        manifest_artifact=lambda: manifests,
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        migration_plan_sha256="1" * 64,
+        migration_target_revision="0066",
+        browser_report_schema_sha256="2" * 64,
+    )
+    context = CheckContext(
+        {
+            "browser.report-schema.sha256": "2" * 64,
+            "candidate.sha": "a" * 40,
+            "candidate.tree": "f" * 40,
+            "migration.policy.sha256": "1" * 64,
+            "staging.mutation-epoch": 8,
+        }
+    )
+
+    outcome = check.operations[CheckOperation.PROBE](context)
+
+    assert outcome.passed
+    assert check.spec.tier == 1
+    assert check.spec.dependencies == (
+        "images.contract",
+        "manifests.server-schema",
+        "migration.plan",
+        "browser.runtime",
+    )
+    loaded = store.load_exact(
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        image_tag=image_tag,
+        namespace="loom-staging",
+        image_run=_docker,
+    )
+    assert outcome.evidence["bundle-digest"] == loaded.publication.bundle_digest

@@ -14,8 +14,15 @@ from typing import TypedDict
 from uuid import uuid4
 
 from loom_cli.rollout.credential_authority import read_trusted_file
-from loom_cli.rollout.image_readiness import ImageArtifactSet
-from loom_cli.rollout.manifest_readiness import ManifestArtifact
+from loom_cli.rollout.image_readiness import (
+    DockerRunner,
+    ImageArtifactSet,
+    verify_image_contract,
+)
+from loom_cli.rollout.manifest_readiness import (
+    ManifestArtifact,
+    inspect_rendered_manifests,
+)
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -35,6 +42,7 @@ class _ParsedDescriptor(TypedDict):
     candidate_sha: str
     candidate_tree: str
     image_artifact_sha256: str
+    image_digests: dict[str, str]
     manifest_artifact_sha256: str
     migration_plan_sha256: str
     migration_target_revision: str
@@ -85,6 +93,21 @@ class PreflightArtifactPublication:
             or self.descriptor_path.parent != self.rendered_manifest_path.parent
         ):
             raise ValueError("preflight artifact publication identity is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedPreflightArtifacts:
+    publication: PreflightArtifactPublication
+    images: ImageArtifactSet
+    manifests: ManifestArtifact
+
+    def __post_init__(self) -> None:
+        if (
+            self.publication.image_artifact_sha256 != self.images.artifact_digest
+            or self.publication.manifest_artifact_sha256 != self.manifests.artifact_digest
+            or self.publication.rendered_manifest_sha256 != self.manifests.rendered_sha256
+        ):
+            raise ValueError("loaded preflight artifact identity drifted")
 
 
 class PreflightArtifactStore:
@@ -217,6 +240,97 @@ class PreflightArtifactStore:
             browser_report_schema_sha256=descriptor["browser_report_schema_sha256"],
         )
 
+    def load_exact(
+        self,
+        *,
+        candidate_sha: str,
+        candidate_tree: str,
+        mutation_epoch: int,
+        image_tag: str,
+        namespace: str,
+        image_run: DockerRunner,
+    ) -> LoadedPreflightArtifacts:
+        """Load one exact publication without rebuilding or rerendering outputs."""
+        if (
+            _SHA_RE.fullmatch(candidate_sha) is None
+            or len(candidate_tree) != 40
+            or any(character not in "0123456789abcdef" for character in candidate_tree)
+            or mutation_epoch < 0
+        ):
+            raise PreflightArtifactStoreError("preflight artifact lookup identity is invalid")
+        _require_private_directory(self.state_root, service_uid=self.service_uid)
+        _require_private_directory(self.root, service_uid=self.service_uid)
+        try:
+            entries = tuple(os.scandir(self.root))
+        except OSError as exc:
+            raise PreflightArtifactStoreError("preflight artifact store is unreadable") from exc
+        if len(entries) > 256 or any(
+            not entry.is_dir(follow_symlinks=False) or _SHA256_RE.fullmatch(entry.name) is None
+            for entry in entries
+        ):
+            raise PreflightArtifactStoreError("preflight artifact store is unbounded or unsafe")
+        matches = []
+        for entry in entries:
+            publication = self.read(entry.name)
+            if (
+                publication.candidate_sha == candidate_sha
+                and publication.candidate_tree == candidate_tree
+                and publication.mutation_epoch == mutation_epoch
+            ):
+                matches.append(publication)
+        if len(matches) != 1:
+            raise PreflightArtifactStoreError("exact preflight artifact publication is ambiguous")
+        publication = matches[0]
+        descriptor_read = read_trusted_file(
+            publication.descriptor_path,
+            service_uid=self.service_uid,
+            private=True,
+            max_bytes=_MAX_DESCRIPTOR_BYTES,
+            require_nonempty=True,
+        )
+        rendered_read = read_trusted_file(
+            publication.rendered_manifest_path,
+            service_uid=self.service_uid,
+            private=True,
+            max_bytes=_MAX_MANIFEST_BYTES,
+            require_nonempty=True,
+        )
+        try:
+            raw = json.loads(descriptor_read.payload, object_pairs_hook=_reject_duplicate_keys)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise PreflightArtifactStoreError("preflight artifact descriptor is invalid") from exc
+        if not isinstance(raw, dict):
+            raise PreflightArtifactStoreError("preflight artifact descriptor is invalid")
+        descriptor = _parse_descriptor(raw, bundle_digest=publication.bundle_digest)
+        try:
+            images = verify_image_contract(
+                image_run,
+                image_tag=image_tag,
+                resolved_sha=candidate_sha,
+                expected_digests=descriptor["image_digests"],
+            )
+            rendered = rendered_read.payload.decode("utf-8")
+            manifests = inspect_rendered_manifests(
+                rendered,
+                image_tag=image_tag,
+                namespace=namespace,
+                image_digests=images.image_digests,
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise PreflightArtifactStoreError("preflight artifact reconstruction failed") from exc
+        if (
+            descriptor["image_artifact_sha256"] != images.artifact_digest
+            or descriptor["manifest_artifact_sha256"] != manifests.artifact_digest
+            or descriptor["rendered_manifest_sha256"] != manifests.rendered_sha256
+            or descriptor["resource_set_digest"] != manifests.resource_set_digest
+        ):
+            raise PreflightArtifactStoreError("preflight artifact reconstruction drifted")
+        return LoadedPreflightArtifacts(
+            publication=publication,
+            images=images,
+            manifests=manifests,
+        )
+
     def _ensure_roots(self) -> None:
         _ensure_private_directory(self.state_root, service_uid=self.service_uid, parents=True)
         _ensure_private_directory(self.root, service_uid=self.service_uid)
@@ -315,6 +429,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         candidate_sha=str(value["candidate_sha"]),
         candidate_tree=str(value["candidate_tree"]),
         image_artifact_sha256=str(value["image_artifact_sha256"]),
+        image_digests={str(key): str(item) for key, item in image_digests.items()},
         manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
         migration_plan_sha256=str(value["migration_plan_sha256"]),
         migration_target_revision=str(value["migration_target_revision"]),
@@ -445,6 +560,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 __all__ = [
+    "LoadedPreflightArtifacts",
     "PreflightArtifactPublication",
     "PreflightArtifactStore",
     "PreflightArtifactStoreError",

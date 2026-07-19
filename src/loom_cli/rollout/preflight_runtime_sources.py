@@ -28,11 +28,12 @@ from loom_cli.rollout.lifecycle_protocol import (
     lifecycle_protocol_digest,
     run_lifecycle_self_test,
 )
-from loom_cli.rollout.manifest_readiness import RenderManifest, ServerDryRun
+from loom_cli.rollout.manifest_readiness import ManifestArtifact, RenderManifest, ServerDryRun
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.candidate import GitRunner
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
+from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import RegisteredCheck, SafeValue
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
@@ -50,6 +51,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_lifecycle_launch_cancel_check,
     build_manifest_preflight_checks,
     build_migration_plan_check,
+    build_preflight_artifact_publication_check,
     build_readonly_authority_check,
     build_runner_install_check,
     build_staging_baseline_checks,
@@ -136,6 +138,7 @@ class PreflightRuntimeSources:
     config: OperatorConfig
     candidate: CandidateBinding
     candidate_root: Path
+    artifact_store: PreflightArtifactStore
     service_uid: int
     service_gid: int
     runner_install_digest: str
@@ -199,6 +202,16 @@ class PreflightRuntimeSources:
             image_tag=self.candidate.image_tag,
             resolved_sha=self.candidate.resolved_sha,
         )
+        manifest_artifacts: dict[str, ManifestArtifact] = {}
+
+        def capture_manifest(artifact: ManifestArtifact) -> None:
+            manifest_artifacts["exact"] = artifact
+
+        def exact_manifest() -> ManifestArtifact:
+            try:
+                return manifest_artifacts["exact"]
+            except KeyError as exc:
+                raise ValueError("preflight manifest artifact was not produced") from exc
 
         def groups() -> tuple[
             tuple[RegisteredCheck, ...],
@@ -206,7 +219,12 @@ class PreflightRuntimeSources:
             tuple[RegisteredCheck, ...],
         ]:
             tier0 = self._tier0(mutation_epoch=mutation_epoch)
-            tier1 = self._tier1(image_session=image_session)
+            tier1 = self._tier1(
+                image_session=image_session,
+                capture_manifest=capture_manifest,
+                exact_manifest=exact_manifest,
+                mutation_epoch=mutation_epoch,
+            )
             tier2 = build_staging_baseline_checks(
                 self.baseline_probe_factory(mutation_epoch),
                 environment=self.config.environment,
@@ -306,7 +324,14 @@ class PreflightRuntimeSources:
             ),
         )
 
-    def _tier1(self, *, image_session: ImageBuildSession) -> tuple[RegisteredCheck, ...]:
+    def _tier1(
+        self,
+        *,
+        image_session: ImageBuildSession,
+        capture_manifest: Callable[[ManifestArtifact], None],
+        exact_manifest: Callable[[], ManifestArtifact],
+        mutation_epoch: int,
+    ) -> tuple[RegisteredCheck, ...]:
         image_checks = build_image_preflight_checks(
             self.image_run,
             candidate_root=self.candidate_root,
@@ -322,6 +347,7 @@ class PreflightRuntimeSources:
             namespace=self.config.namespace,
             expected_candidate_sha=self.candidate.resolved_sha,
             expected_config_digest=self.config.config_sha256,
+            artifact_sink=capture_manifest,
         )
         return (
             build_migration_plan_check(
@@ -345,6 +371,17 @@ class PreflightRuntimeSources:
                 expected_candidate_sha=self.candidate.resolved_sha,
                 expected_source_set_digest=credential_source_set_digest(self.credential_sources),
             ),
+            build_preflight_artifact_publication_check(
+                store=self.artifact_store,
+                image_artifact=image_session.verify,
+                manifest_artifact=exact_manifest,
+                candidate_sha=self.candidate.resolved_sha,
+                candidate_tree=self.candidate.resolved_tree or "",
+                mutation_epoch=mutation_epoch,
+                migration_plan_sha256=self.migration_policy_digest,
+                migration_target_revision="0066",
+                browser_report_schema_sha256=browser_report_schema_digest(),
+            ),
         )
 
     def _bindings(self, *, mutation_epoch: int) -> Mapping[str, SafeValue]:
@@ -357,6 +394,7 @@ class PreflightRuntimeSources:
             "browser.report-schema.sha256": browser_report_schema_digest(),
             "candidate.base.sha": self.candidate.approved_base_sha or "none",
             "candidate.sha": self.candidate.resolved_sha,
+            "candidate.tree": self.candidate.resolved_tree or "none",
             "candidate.source-mode": self.candidate.source_mode,
             "capacity.policy.sha256": staging_capacity_policy_digest(),
             "db.snapshot-identity": authority.db_snapshot_identity,

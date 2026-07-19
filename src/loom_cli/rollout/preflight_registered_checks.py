@@ -78,6 +78,7 @@ from loom_cli.rollout.operator.candidate import (
 )
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
+from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
     CheckOperation,
@@ -1742,9 +1743,11 @@ def build_manifest_preflight_checks(
     namespace: str,
     expected_candidate_sha: str,
     expected_config_digest: str,
+    session: ManifestRenderSession | None = None,
+    artifact_sink: Callable[[ManifestArtifact], None] | None = None,
 ) -> tuple[RegisteredCheck, RegisteredCheck]:
     """Build the Tier 1 render-once and server-schema checks."""
-    manifest_session: ManifestRenderSession | None = None
+    manifest_session: ManifestRenderSession | None = session
 
     def get_session() -> ManifestRenderSession:
         nonlocal manifest_session
@@ -1771,6 +1774,8 @@ def build_manifest_preflight_checks(
             artifact = get_session().render()
         except (OSError, RuntimeError, ValueError):
             return _empty_manifest_probe()
+        if artifact_sink is not None:
+            artifact_sink(artifact)
         return _manifest_probe(artifact, server_valid=False)
 
     def probe_server_schema(context: CheckContext) -> CheckProbe:
@@ -1780,6 +1785,8 @@ def build_manifest_preflight_checks(
             artifact = get_session().server_validate()
         except (OSError, RuntimeError, ValueError):
             return _empty_manifest_probe()
+        if artifact_sink is not None:
+            artifact_sink(artifact)
         return _manifest_probe(artifact, server_valid=True)
 
     common_inputs = ("candidate.sha", "runner.config.sha256")
@@ -1828,6 +1835,103 @@ def build_manifest_preflight_checks(
         operations={CheckOperation.PROBE: probe_server_schema},
     )
     return rendered, server_schema
+
+
+def build_preflight_artifact_publication_check(
+    *,
+    store: PreflightArtifactStore,
+    image_artifact: Callable[[], ImageArtifactSet],
+    manifest_artifact: Callable[[], ManifestArtifact],
+    candidate_sha: str,
+    candidate_tree: str,
+    mutation_epoch: int,
+    migration_plan_sha256: str,
+    migration_target_revision: str,
+    browser_report_schema_sha256: str,
+) -> RegisteredCheck:
+    """Publish the exact Tier 1 outputs consumed by the detached worker."""
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != candidate_sha
+            or context.bindings["candidate.tree"] != candidate_tree
+            or context.bindings["staging.mutation-epoch"] != mutation_epoch
+            or context.bindings["migration.policy.sha256"] != migration_plan_sha256
+            or context.bindings["browser.report-schema.sha256"]
+            != browser_report_schema_sha256
+        ):
+            return _empty_artifact_publication_probe()
+        try:
+            publication = store.publish(
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+                mutation_epoch=mutation_epoch,
+                images=image_artifact(),
+                manifests=manifest_artifact(),
+                migration_plan_sha256=migration_plan_sha256,
+                migration_target_revision=migration_target_revision,
+                browser_report_schema_sha256=browser_report_schema_sha256,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return _empty_artifact_publication_probe()
+        return CheckProbe(
+            passed=True,
+            evidence={
+                "bundle-digest": publication.bundle_digest,
+                "image-artifact-digest": publication.image_artifact_sha256,
+                "manifest-artifact-digest": publication.manifest_artifact_sha256,
+                "rendered-manifest-digest": publication.rendered_manifest_sha256,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="artifacts.publish",
+            failure_code="artifacts.publish.failed",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=(
+                "images.contract",
+                "manifests.server-schema",
+                "migration.plan",
+                "browser.runtime",
+            ),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "browser.report-schema.sha256",
+                "candidate.sha",
+                "candidate.tree",
+                "migration.policy.sha256",
+                "staging.mutation-epoch",
+            ),
+            evidence_schema=(
+                EvidenceField("bundle-digest", "sha256"),
+                EvidenceField("image-artifact-digest", "sha256"),
+                EvidenceField("manifest-artifact-digest", "sha256"),
+                EvidenceField("rendered-manifest-digest", "sha256"),
+            ),
+            timeout_seconds=60,
+            freshness_ttl_seconds=3600,
+            remediation=(
+                "restore the private preflight artifact store and publish exact build outputs"
+            ),
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_artifact_publication_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "bundle-digest": "0" * 64,
+            "image-artifact-digest": "0" * 64,
+            "manifest-artifact-digest": "0" * 64,
+            "rendered-manifest-digest": "0" * 64,
+        },
+    )
 
 
 def _manifest_probe(artifact: ManifestArtifact, *, server_valid: bool) -> CheckProbe:
@@ -2416,6 +2520,7 @@ __all__ = [
     "build_lifecycle_launch_cancel_check",
     "build_manifest_preflight_checks",
     "build_migration_plan_check",
+    "build_preflight_artifact_publication_check",
     "build_rehearsal_checks",
     "build_runner_install_check",
     "build_staging_baseline_checks",

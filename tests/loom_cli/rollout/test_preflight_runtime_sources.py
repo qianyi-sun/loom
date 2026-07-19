@@ -7,6 +7,7 @@ from pathlib import Path
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
+from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_registered_checks import CredentialProbeSource
 from loom_cli.rollout.preflight_runtime_sources import (
     BackupAdmissionAuthority,
@@ -64,6 +65,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
         config=config,
         candidate=candidate,
         candidate_root=tmp_path,
+        artifact_store=PreflightArtifactStore(tmp_path / "state", service_uid=501),
         service_uid=501,
         service_gid=20,
         runner_install_digest="1" * 64,
