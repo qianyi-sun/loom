@@ -117,7 +117,13 @@ class RehearsalPlan:
 
     @property
     def plan_digest(self) -> str:
-        payload = {
+        return hashlib.sha256(
+            json.dumps(self.to_record(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def to_record(self) -> dict[str, object]:
+        """Return the strict secret-free plan consumed by the installed helper."""
+        return {
             "browser_report_schema_sha256": self.browser_report_schema_sha256,
             "candidate_sha": self.candidate_sha,
             "candidate_tree": self.candidate_tree,
@@ -139,9 +145,6 @@ class RehearsalPlan:
             "schema_revision": self.schema_revision,
             "schema_version": 1,
         }
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

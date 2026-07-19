@@ -56,6 +56,9 @@ def test_backend_publishes_once_and_reuses_exact_record(tmp_path: Path) -> None:
     assert first == second
     assert first.blockers == {}
     assert calls == ["rehearsal.namespace"]
+    plan_record = next((tmp_path / "journals").rglob("plan.json"))
+    assert plan_record.stat().st_mode & 0o777 == 0o600
+    assert "loom-staging" not in plan_record.read_text()
 
 
 def test_backend_rejects_candidate_drift_against_existing_record(tmp_path: Path) -> None:
@@ -68,7 +71,7 @@ def test_backend_rejects_candidate_drift_against_existing_record(tmp_path: Path)
     )
     backend.execute("rehearsal.namespace", _plan())
 
-    with pytest.raises(ValueError, match="record identity drifted"):
+    with pytest.raises(ValueError, match="publication collided"):
         backend.execute("rehearsal.namespace", _plan(candidate_sha="6" * 40))
 
 
@@ -86,7 +89,11 @@ def test_backend_records_failure_without_secret_diagnostics(tmp_path: Path) -> N
     observation = backend.execute("rehearsal.browser", _plan())
 
     assert observation.blockers == {"route": "candidate-mismatch"}
-    record = next(_root_path for _root_path in (tmp_path / "journals").rglob("*.json"))
+    record = next(
+        _root_path
+        for _root_path in (tmp_path / "journals").rglob("*.json")
+        if _root_path.name != "plan.json"
+    )
     assert "candidate-mismatch" in record.read_text()
     assert "details" not in record.read_text()
 

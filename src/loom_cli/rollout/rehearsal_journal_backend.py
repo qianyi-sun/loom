@@ -133,6 +133,12 @@ class JournaledRehearsalBackend:
         ):
             os.close(directory)
             raise ValueError("rehearsal plan journal directory authority is invalid")
+        _publish_record(
+            directory,
+            "plan.json",
+            plan.to_record(),
+            service_uid=self.service_uid,
+        )
         return directory
 
 

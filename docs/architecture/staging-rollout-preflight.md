@@ -286,6 +286,14 @@ plan collision fails closed. Runner exceptions become a normalized
 silently executed again. Concrete resource operations retain their own
 idempotent cleanup ledger below this terminal evidence boundary.
 
+The journal invokes concrete work only through the installed
+`loom-staging-rollout-rehearsal` helper. Its caller supplies a fixed executable,
+`execute`, one allowlisted check ID, the private immutable plan path and its
+digest; no shell, arbitrary argv, ambient environment or secret value crosses
+the boundary. The helper returns one bounded strict-JSON result on stdout and
+no stderr. Exit status, plan digest, check identity, blockers and cleanup proof
+must agree before the terminal record can be published.
+
 ### Tier 4: justified final-only checks
 
 Only protected apply, observed live convergence, post-apply attestation drift,
