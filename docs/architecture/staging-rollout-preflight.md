@@ -299,6 +299,21 @@ script rejects mixed or partial modes, and only isolated rehearsal may emit the
 complete sanitized report on stdout for capture from a terminal Kubernetes
 Job. Final rollout continues to publish its private report file only.
 
+The browser rehearsal publishes one exact-host Ingress under
+`/dev/rehearsal/<isolation-id>` and rewrites only that prefix to the isolated
+web/API Services. A repository-owned, resource-name-scoped Role may read the
+`ingress-nginx-controller` ClusterIP; the browser Job pins `yylx.world` to that
+single address and a dedicated NetworkPolicy permits only TCP 443 to it. The
+controller may enter the isolated namespace, but no rehearsal principal may
+read or mutate another namespace. The Job uses the exact preflight-built image,
+no service-account token, restricted pod security, a read-only root filesystem,
+bounded memory/CPU/tmpfs and one terminal execution. An init container copies
+the cloned `admin-token` Secret projection into a same-UID mode-0600 no-follow
+file; neither manifest nor evidence contains the token. Exact Job/Pod image IDs,
+Ingress and NetworkPolicy specs, successful init/main termination, every schema
+v4 browser predicate, logout cleanup and rehearsal binding must all read back
+before the check can pass. Namespace deletion remains the only cleanup path.
+
 Tier 3 is therefore the first stage after the request-specific backup worker
 has published a restore-verified lease. The pre-backup assessment alone is
 never launch authority; only the complete Tier 0–3 attestation can be promoted

@@ -17,6 +17,20 @@ from typing import Protocol
 
 from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
+from loom_cli.rollout.rehearsal_browser import (
+    BROWSER_INGRESS_NAME,
+    BROWSER_JOB_NAME,
+    BROWSER_NETWORK_POLICY_NAME,
+    INGRESS_CONTROLLER_NAMESPACE,
+    INGRESS_CONTROLLER_SERVICE,
+    RehearsalBrowserArtifact,
+    build_rehearsal_browser_artifact,
+    ingress_controller_ip,
+    rehearsal_browser_job_complete,
+    rehearsal_browser_pod_complete,
+    rehearsal_browser_report_ready,
+    rehearsal_browser_resource_ready,
+)
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
 from loom_cli.rollout.rehearsal_release import (
@@ -60,6 +74,7 @@ CommandRunner = Callable[[Sequence[str], bytes | None, int], CommandResult]
 StreamCommandRunner = Callable[[Sequence[str], Path, int], CommandResult]
 ReleaseArtifactBuilder = Callable[[RehearsalPlan], RehearsalReleaseArtifact]
 SecretArtifactBuilder = Callable[[RehearsalPlan], RehearsalSecretArtifact]
+BrowserArtifactBuilder = Callable[[RehearsalPlan, str], RehearsalBrowserArtifact]
 
 
 def _command_environment() -> dict[str, str]:
@@ -152,6 +167,10 @@ def _default_secret_artifact(plan: RehearsalPlan) -> RehearsalSecretArtifact:
     )
 
 
+def _default_browser_artifact(plan: RehearsalPlan, ingress_ip: str) -> RehearsalBrowserArtifact:
+    return build_rehearsal_browser_artifact(plan, ingress_ip=ingress_ip)
+
+
 def _open_absolute_regular_no_follow(path: Path) -> int:
     if not path.is_absolute() or ".." in path.parts or path == Path("/"):
         raise OSError("rehearsal stream source path is invalid")
@@ -182,6 +201,7 @@ class IsolatedRehearsalExecutor:
     stream_run: StreamCommandRunner = _default_stream_run
     release_artifacts: ReleaseArtifactBuilder = _default_release_artifact
     secret_artifacts: SecretArtifactBuilder = _default_secret_artifact
+    browser_artifacts: BrowserArtifactBuilder = _default_browser_artifact
     kubeconfig: Path = REHEARSAL_KUBECONFIG
     monotonic: Callable[[], float] = time.monotonic
 
@@ -205,12 +225,179 @@ class IsolatedRehearsalExecutor:
             return self._release(plan)
         if check_id == "rehearsal.api-smoke":
             return self._api_smoke(plan)
+        if check_id == "rehearsal.browser":
+            return self._browser(plan)
         if check_id == "rehearsal.cleanup":
             return self._cleanup(plan)
         return RehearsalStepOutcome(
             passed=False,
             details={"status": "blocked"},
             blockers={"executor": "isolated-action-not-implemented"},
+        )
+
+    def _browser(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
+        controller = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                INGRESS_CONTROLLER_NAMESPACE,
+                "get",
+                "service",
+                INGRESS_CONTROLLER_SERVICE,
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        ingress_ip = ingress_controller_ip(controller) if controller is not None else None
+        if ingress_ip is None:
+            return _blocked("browser", "ingress-controller-readback-failed")
+        try:
+            artifact = self.browser_artifacts(plan, ingress_ip)
+        except (OSError, RuntimeError, ValueError):
+            return _blocked("browser", "artifact-validation-failed")
+        if not self._load_images(plan, ("loom-staging-admin-browser-smoke",)):
+            return _blocked("browser", "image-load-failed")
+        if not self._status_with_payload(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "apply",
+                "--server-side=true",
+                "--field-manager=loom-staging-preflight",
+                "--request-timeout=30s",
+                "-f",
+                "-",
+            ),
+            artifact.payload,
+            timeout=60,
+        ):
+            return _blocked("browser", "manifest-apply-failed")
+        for resource, name, kind in (
+            ("ingress", BROWSER_INGRESS_NAME, "Ingress"),
+            ("networkpolicy", BROWSER_NETWORK_POLICY_NAME, "NetworkPolicy"),
+            ("job", BROWSER_JOB_NAME, "Job"),
+        ):
+            observed = self._command(
+                (
+                    "kubectl",
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "--namespace",
+                    plan.resources.namespace,
+                    "get",
+                    resource,
+                    name,
+                    "--request-timeout=15s",
+                    "-o",
+                    "json",
+                ),
+                None,
+                timeout=20,
+            )
+            if observed is None or not rehearsal_browser_resource_ready(
+                observed,
+                artifact=artifact,
+                plan=plan,
+                kind=kind,
+                name=name,
+            ):
+                return _blocked("browser", f"{resource}-readback-drift")
+        if not self._status(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "wait",
+                "--for=condition=Complete",
+                f"job/{BROWSER_JOB_NAME}",
+                "--timeout=900s",
+            ),
+            timeout=915,
+        ):
+            return _blocked("browser", "job-not-complete")
+        job = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "job",
+                BROWSER_JOB_NAME,
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if job is None or not rehearsal_browser_job_complete(
+            job,
+            artifact=artifact,
+            plan=plan,
+        ):
+            return _blocked("browser", "job-readback-drift")
+        pods = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "get",
+                "pods",
+                f"--selector=job-name={BROWSER_JOB_NAME}",
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        if pods is None or not rehearsal_browser_pod_complete(
+            pods,
+            artifact=artifact,
+            plan=plan,
+        ):
+            return _blocked("browser", "pod-image-readback-drift")
+        report = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "logs",
+                f"job/{BROWSER_JOB_NAME}",
+                "--container=browser",
+                "--request-timeout=30s",
+            ),
+            None,
+            timeout=45,
+        )
+        if report is None or not rehearsal_browser_report_ready(report, plan=plan):
+            return _blocked("browser", "report-validation-failed")
+        return RehearsalStepOutcome(
+            passed=True,
+            details={
+                "browser-report-sha256": hashlib.sha256(
+                    json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "manifest-sha256": artifact.artifact_sha256,
+                "status": "ready",
+            },
+            blockers={},
         )
 
     def _api_smoke(self, plan: RehearsalPlan) -> RehearsalStepOutcome:

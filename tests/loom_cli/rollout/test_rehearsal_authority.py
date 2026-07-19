@@ -21,14 +21,26 @@ def test_checked_in_rehearsal_authority_is_exact_and_bounded() -> None:
     assert "cluster-admin" not in payload
     assert 'resourceNames: ["loom-rollout-rehearsal-observer"]' in payload
     documents = tuple(yaml.safe_load_all(payload))
-    assert documents[-1]["kind"] == "ClusterRoleBinding"
-    assert documents[-1]["subjects"] == [
+    cluster_binding = next(
+        document
+        for document in documents
+        if document["kind"] == "ClusterRoleBinding"
+        and document["metadata"]["name"] == "loom-rollout-rehearsal"
+    )
+    assert cluster_binding["subjects"] == [
         {
             "kind": "ServiceAccount",
             "name": "loom-rollout-rehearsal",
             "namespace": "loom-rollout-system",
         }
     ]
+    ingress_role, ingress_binding = documents[-2:]
+    assert ingress_role["metadata"] == {
+        "name": "loom-rollout-rehearsal-ingress-observer",
+        "namespace": "ingress-nginx",
+    }
+    assert ingress_role["rules"][0]["resourceNames"] == ["ingress-nginx-controller"]
+    assert ingress_binding["roleRef"]["kind"] == "Role"
 
 
 @pytest.mark.parametrize(

@@ -21,9 +21,11 @@ _EXPECTED_KINDS = (
     "ValidatingAdmissionPolicy",
     "ValidatingAdmissionPolicyBinding",
     "ClusterRoleBinding",
+    "Role",
+    "RoleBinding",
 )
 _MUTATING_VERBS = frozenset({"create", "delete", "patch", "update"})
-_EXPECTED_CANONICAL_SHA256 = "7a8a5e78e258e32c515646d1f8abc623d5fcdbb5f6e26f61c5bcebbe45d41a0f"
+_EXPECTED_CANONICAL_SHA256 = "b51ded34c8f29a93c7dcb3d45329ba4904684c1e489bcf5f21d8861c643356c1"
 _MUTATOR_RULES = [
     {
         "apiGroups": [""],
@@ -149,6 +151,8 @@ def rehearsal_authority_digest(
         resource_policy,
         resource_binding,
         binding,
+        ingress_role,
+        ingress_binding,
     ) = documents
     if (
         _name(namespace) != "loom-rollout-system"
@@ -160,6 +164,8 @@ def rehearsal_authority_digest(
         or not _observer_role_is_readonly(observer_role)
         or _name(binding) != "loom-rollout-rehearsal"
         or not _binding_is_exact(binding)
+        or not _ingress_role_is_exact(ingress_role)
+        or not _ingress_binding_is_exact(ingress_binding)
         or not _role_is_bounded(role)
         or not _policy_is_exact(
             namespace_policy,
@@ -213,6 +219,43 @@ def _binding_is_exact(value: Mapping[str, object]) -> bool:
             "name": "loom-rollout-rehearsal",
         }
         and subjects
+        == [
+            {
+                "kind": "ServiceAccount",
+                "name": "loom-rollout-rehearsal",
+                "namespace": "loom-rollout-system",
+            }
+        ]
+    )
+
+
+def _ingress_role_is_exact(value: Mapping[str, object]) -> bool:
+    return bool(
+        _name(value) == "loom-rollout-rehearsal-ingress-observer"
+        and _namespace(value) == "ingress-nginx"
+        and value.get("rules")
+        == [
+            {
+                "apiGroups": [""],
+                "resources": ["services"],
+                "resourceNames": ["ingress-nginx-controller"],
+                "verbs": ["get"],
+            }
+        ]
+    )
+
+
+def _ingress_binding_is_exact(value: Mapping[str, object]) -> bool:
+    return bool(
+        _name(value) == "loom-rollout-rehearsal-ingress-observer"
+        and _namespace(value) == "ingress-nginx"
+        and value.get("roleRef")
+        == {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "Role",
+            "name": "loom-rollout-rehearsal-ingress-observer",
+        }
+        and value.get("subjects")
         == [
             {
                 "kind": "ServiceAccount",

@@ -379,6 +379,10 @@ def _network_policy(plan: RehearsalPlan) -> dict[str, object]:
         "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
         "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
     }
+    ingress_controller = {
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}},
+        "podSelector": {"matchLabels": {"app.kubernetes.io/component": "controller"}},
+    }
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -398,7 +402,7 @@ def _network_policy(plan: RehearsalPlan) -> dict[str, object]:
                     "to": [dns_namespace],
                 },
             ],
-            "ingress": [{"from": [same_namespace]}],
+            "ingress": [{"from": [same_namespace, ingress_controller]}],
             "podSelector": {},
             "policyTypes": ["Ingress", "Egress"],
         },

@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import subprocess
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,11 @@ from loom_cli.rollout.rehearsal_action_source import (
     RehearsalPlan,
     RehearsalResources,
     RehearsalSmokeAuthority,
+)
+from loom_cli.rollout.rehearsal_browser import (
+    BROWSER_JOB_NAME,
+    BROWSER_REPORT_CHECK_IDS,
+    build_rehearsal_browser_artifact,
 )
 from loom_cli.rollout.rehearsal_executor import IsolatedRehearsalExecutor, _default_stream_run
 from loom_cli.rollout.rehearsal_release import RehearsalReleaseArtifact
@@ -901,7 +908,130 @@ def test_stream_runner_rejects_mode_and_read_time_drift(
     assert os.stat(source).st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("check_id", ("rehearsal.browser",))
-def test_unimplemented_rehearsal_steps_remain_fail_closed(check_id: str) -> None:
-    outcome = IsolatedRehearsalExecutor().execute(check_id, _plan())
-    assert outcome.blockers == {"executor": "isolated-action-not-implemented"}
+def test_browser_executes_exact_isolated_job_and_validates_report() -> None:
+    plan = replace(
+        _plan(),
+        resources=RehearsalResources.derive(
+            "rehearsal-" + "5" * 24,
+            route_origin="https://yylx.world/dev",
+        ),
+    )
+    artifact = build_rehearsal_browser_artifact(plan, ingress_ip="10.96.12.34")
+    resources = {
+        (item["kind"], item["metadata"]["name"]): item
+        for item in yaml.safe_load_all(artifact.payload)
+    }
+    completed_job = deepcopy(resources[("Job", BROWSER_JOB_NAME)])
+    completed_job["status"] = {
+        "conditions": [{"status": "True", "type": "Complete"}],
+        "succeeded": 1,
+    }
+    image_status = {
+        "imageID": "docker-pullable://exact@" + artifact.browser_image_digest,
+        "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+    }
+    pods = {
+        "items": [
+            {
+                "metadata": {
+                    "labels": {
+                        "job-name": BROWSER_JOB_NAME,
+                        "loom.openai.dev/plan-sha256": plan.plan_digest,
+                    }
+                },
+                "status": {
+                    "containerStatuses": [{"name": "browser", **image_status}],
+                    "initContainerStatuses": [{"name": "prepare-token", **image_status}],
+                    "phase": "Succeeded",
+                },
+            }
+        ]
+    }
+    report = {
+        "schema_version": 4,
+        "status": "pass",
+        "deployment_identity": {
+            "expected_deployed_sha": plan.candidate_sha,
+            "observed_deployed_sha": plan.candidate_sha,
+            "matched": True,
+        },
+        "route": plan.resources.route,
+        "request_id": "staging-admin-browser-request",
+        "rehearsal_binding": {
+            "plan_sha256": plan.plan_digest,
+            "isolation_id": "5" * 24,
+            "resolved_sha": plan.candidate_sha,
+        },
+        "target": {"username": "qianyi", "user_id": "user-qianyi"},
+        "audit_event_id": "audit-event",
+        "browser": {"name": "chromium", "version": "1.2.3"},
+        "checks": {name: True for name in BROWSER_REPORT_CHECK_IDS},
+        "cleanup": {"logout_status": 204, "auth_me_after_logout_status": 401},
+        "failure_code": None,
+    }
+    calls: list[tuple[tuple[str, ...], bytes | None, int]] = []
+
+    def run(argv, payload, timeout):
+        calls.append((tuple(argv), payload, timeout))
+        if argv[:3] == ("docker", "image", "inspect"):
+            return subprocess.CompletedProcess(argv, 0, artifact.browser_image_digest + "\n", "")
+        if argv[:3] == ("kind", "load", "docker-image") or "apply" in argv or "wait" in argv:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "logs" in argv:
+            return subprocess.CompletedProcess(argv, 0, json.dumps(report), "")
+        if "pods" in argv:
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pods), "")
+        if "service" in argv and "ingress-nginx-controller" in argv:
+            value = {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {
+                    "name": "ingress-nginx-controller",
+                    "namespace": "ingress-nginx",
+                },
+                "spec": {"clusterIP": "10.96.12.34", "type": "ClusterIP"},
+            }
+        elif "ingress" in argv:
+            value = resources[("Ingress", "loom-rehearsal-browser")]
+        elif "networkpolicy" in argv:
+            value = resources[("NetworkPolicy", "loom-rehearsal-browser")]
+        elif "job" in argv:
+            value = (
+                completed_job
+                if len([call for call in calls if "job" in call[0]]) > 1
+                else resources[("Job", BROWSER_JOB_NAME)]
+            )
+        else:
+            raise AssertionError(argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        browser_artifacts=lambda _plan, _ip: artifact,
+    ).execute("rehearsal.browser", plan)
+
+    assert outcome.passed
+    assert outcome.details["status"] == "ready"
+    assert len(outcome.details["browser-report-sha256"]) == 64
+    assert any("--selector=job-name=loom-rehearsal-browser" in call[0] for call in calls)
+
+
+def test_browser_fails_closed_before_mutation_when_ingress_readback_drifts() -> None:
+    plan = replace(
+        _plan(),
+        resources=RehearsalResources.derive(
+            "rehearsal-" + "5" * 24,
+            route_origin="https://yylx.world/dev",
+        ),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, payload, timeout):
+        calls.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.browser", plan)
+
+    assert outcome.blockers == {"browser": "ingress-controller-readback-failed"}
+    assert len(calls) == 1
+    assert "apply" not in calls[0]

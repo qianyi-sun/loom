@@ -194,6 +194,10 @@ def test_release_artifact_isolates_exact_candidate_subset(tmp_path: Path) -> Non
     assert postgres["spec"]["selector"] == {"loom.openai.dev/component": "rehearsal-database"}
     policy = next(resource for resource in resources if resource["kind"] == "NetworkPolicy")
     assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    assert policy["spec"]["ingress"][0]["from"][1] == {
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}},
+        "podSelector": {"matchLabels": {"app.kubernetes.io/component": "controller"}},
+    }
 
 
 def test_release_artifact_accepts_real_staging_render(tmp_path: Path) -> None:
