@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+from .backup_job import BackupJobEnvelope, BackupJobState, validate_job_binding
 from .model import (
     ActivePointer,
     DriverEnvelope,
@@ -363,6 +364,103 @@ class RequestStore:
         if request.request_id != request_id:
             raise RequestStoreError("request.json request_id does not match its directory")
         return request
+
+    def publish_backup_job(self, envelope: BackupJobEnvelope) -> Path:
+        """Publish one immutable detached-backup job under its request."""
+        request = self.read_request(envelope.request_id)
+        if request.status != "pending":
+            raise RequestStoreError("preview request cannot publish a backup job")
+        if (
+            request.candidate.resolved_sha != envelope.candidate_sha
+            or request.candidate.resolved_tree != envelope.candidate_tree
+            or request.preflight_attestation_sha256 != envelope.preflight_attestation_sha256
+        ):
+            raise RequestStoreError("backup job does not match immutable request binding")
+        request_directory = self._require_request_directory(envelope.request_id)
+        backup_directory = request_directory / "backup"
+        _ensure_private_directory(backup_directory, "backup job directory")
+        path = _publish_immutable(backup_directory / "job.json", envelope.to_dict())
+        initial = BackupJobState(
+            job_id=envelope.job_id,
+            request_id=envelope.request_id,
+            updated_at=envelope.created_at,
+        )
+        try:
+            _publish_immutable(backup_directory / "state.json", initial.to_dict())
+        except Exception:
+            # Keep the immutable job. Reconciliation may safely initialize a
+            # missing state file, but the job identity is never reused.
+            raise
+        return path
+
+    def read_backup_job(self, request_id: str) -> BackupJobEnvelope:
+        directory = self._require_backup_job_directory(request_id)
+        try:
+            envelope = BackupJobEnvelope.from_dict(
+                _read_json(directory / "job.json", "backup job envelope")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if envelope.request_id != request_id:
+            raise RequestStoreError("backup job request identity does not match directory")
+        return envelope
+
+    def read_backup_job_state(self, request_id: str) -> BackupJobState:
+        directory = self._require_backup_job_directory(request_id)
+        try:
+            state = BackupJobState.from_dict(
+                _read_json(directory / "state.json", "backup job state")
+            )
+            validate_job_binding(self.read_backup_job(request_id), state)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        return state
+
+    def replace_backup_job_state(
+        self,
+        state: BackupJobState,
+        *,
+        expected_sequence: int,
+    ) -> Path:
+        """Atomically publish a single-writer state transition with CAS."""
+        if expected_sequence < 0 or state.sequence != expected_sequence + 1:
+            raise RequestStoreError("backup job state sequence is not the next generation")
+        directory = self._require_backup_job_directory(state.request_id)
+        lock_path = directory / ".state.lock"
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(lock_path, flags, _PRIVATE_FILE_MODE)
+        except OSError as exc:
+            raise RequestStoreError("could not open backup job state lock") from exc
+        locked = False
+        try:
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise RequestStoreError("backup job state lock is unsafe")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            current = self.read_backup_job_state(state.request_id)
+            if current.sequence != expected_sequence:
+                raise RequestStoreError("backup job state changed concurrently")
+            try:
+                validate_job_binding(self.read_backup_job(state.request_id), state)
+            except ValueError as exc:
+                raise RequestStoreError(str(exc)) from exc
+            return _replace_mutable(directory / "state.json", state.to_dict())
+        except OSError as exc:
+            raise RequestStoreError("backup job state lock failed") from exc
+        finally:
+            if locked:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _require_backup_job_directory(self, request_id: str) -> Path:
+        request_directory = self._require_request_directory(request_id)
+        directory = request_directory / "backup"
+        _validate_private_directory(directory, "backup job directory")
+        return directory
 
     def publish_attempt_envelope(self, envelope: DriverEnvelope) -> Path:
         """Publish the immutable post-backup driver envelope without replacement."""

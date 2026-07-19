@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -24,6 +25,29 @@ def _timestamp(value: datetime, field: str) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field} must be timezone-aware")
     return value.isoformat()
+
+
+def _exact_keys(data: Mapping[str, object], expected: set[str], label: str) -> None:
+    if set(data) != expected:
+        raise ValueError(f"{label} fields do not match schema")
+
+
+def _string(data: Mapping[str, object], key: str) -> str:
+    value = data[key]
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value
+
+
+def _parse_timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be an ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO timestamp") from exc
+    _timestamp(parsed, field)
+    return parsed
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +102,42 @@ class BackupJobEnvelope:
             "request_id": self.request_id,
             "schema_version": 1,
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> BackupJobEnvelope:
+        expected = {
+            "bundle_name",
+            "candidate_sha",
+            "candidate_tree",
+            "created_at",
+            "environment",
+            "job_id",
+            "mutation_epoch",
+            "namespace",
+            "payload_id",
+            "preflight_attestation_sha256",
+            "request_id",
+            "schema_version",
+        }
+        _exact_keys(data, expected, "backup job envelope")
+        if data["schema_version"] != 1 or type(data["mutation_epoch"]) is not int:
+            raise ValueError("backup job envelope version or epoch is invalid")
+        return cls(
+            job_id=_string(data, "job_id"),
+            request_id=_string(data, "request_id"),
+            payload_id=_string(data, "payload_id"),
+            candidate_sha=_string(data, "candidate_sha"),
+            candidate_tree=_string(data, "candidate_tree"),
+            preflight_attestation_sha256=_string(
+                data,
+                "preflight_attestation_sha256",
+            ),
+            mutation_epoch=data["mutation_epoch"],
+            environment=_string(data, "environment"),
+            namespace=_string(data, "namespace"),
+            bundle_name=_string(data, "bundle_name"),
+            created_at=_parse_timestamp(data["created_at"], "created_at"),
+        )
 
     @property
     def evidence_digest(self) -> str:
@@ -138,6 +198,47 @@ class BackupJobState:
                 _timestamp(self.updated_at, "updated_at") if self.updated_at is not None else None
             ),
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> BackupJobState:
+        expected = {
+            "failure_code",
+            "job_id",
+            "lease_digest",
+            "manifest_sha256",
+            "phase",
+            "request_id",
+            "schema_version",
+            "sequence",
+            "updated_at",
+        }
+        _exact_keys(data, expected, "backup job state")
+        if data["schema_version"] != 1 or type(data["sequence"]) is not int:
+            raise ValueError("backup job state version or sequence is invalid")
+        try:
+            phase = LifecyclePhase(_string(data, "phase"))
+        except ValueError as exc:
+            raise ValueError("backup job phase is invalid") from exc
+        return cls(
+            job_id=_string(data, "job_id"),
+            request_id=_string(data, "request_id"),
+            phase=phase,
+            sequence=data["sequence"],
+            updated_at=(
+                _parse_timestamp(data["updated_at"], "updated_at")
+                if data["updated_at"] is not None
+                else None
+            ),
+            manifest_sha256=(
+                _string(data, "manifest_sha256") if data["manifest_sha256"] is not None else None
+            ),
+            lease_digest=(
+                _string(data, "lease_digest") if data["lease_digest"] is not None else None
+            ),
+            failure_code=(
+                _string(data, "failure_code") if data["failure_code"] is not None else None
+            ),
+        )
 
 
 def transition_backup_job(

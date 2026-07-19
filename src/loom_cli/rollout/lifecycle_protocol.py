@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
+
+_REQUEST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 
 
 class LifecyclePhase(StrEnum):
@@ -72,7 +75,7 @@ class LifecycleState:
     sequence: int = 0
 
     def __post_init__(self) -> None:
-        if not self.request_id.startswith("req-") or len(self.request_id) > 68 or self.sequence < 0:
+        if _REQUEST_ID_RE.fullmatch(self.request_id) is None or self.sequence < 0:
             raise ValueError("lifecycle state identity is invalid")
 
 

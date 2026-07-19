@@ -7,12 +7,19 @@ import stat
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
+from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from loom_cli.rollout.lifecycle_protocol import LifecycleAction
+from loom_cli.rollout.operator.backup_job import (
+    BackupJobEnvelope,
+    BackupJobState,
+    transition_backup_job,
+)
 from loom_cli.rollout.operator.config import APPROVED_REMOTE_URL
 from loom_cli.rollout.operator.model import (
     ActivePointer,
@@ -166,6 +173,38 @@ def make_event(
     )
 
 
+def make_backup_job_request() -> RolloutRequest:
+    return replace(
+        make_request(),
+        candidate=CandidateBinding(
+            remote_url=APPROVED_REMOTE_URL,
+            target_ref="origin/dev",
+            resolved_sha=RESOLVED_SHA,
+            image_tag="staging-abcdef1",
+            fetched_at="2026-07-13T20:00:00Z",
+            source_mode="sealed-cumulative",
+            resolved_tree="b" * 40,
+            approved_base_sha="c" * 40,
+        ),
+    )
+
+
+def make_backup_job() -> BackupJobEnvelope:
+    return BackupJobEnvelope(
+        job_id="job-20260713-abcdef12",
+        request_id=REQUEST_ID,
+        payload_id="payload-20260713-abcdef12",
+        candidate_sha=RESOLVED_SHA,
+        candidate_tree="b" * 40,
+        preflight_attestation_sha256="3" * 64,
+        mutation_epoch=4,
+        environment="staging",
+        namespace="loom-staging",
+        bundle_name="20260713T200000Z-stg-20260713-abcdef12",
+        created_at=datetime(2026, 7, 13, 20, tzinfo=UTC),
+    )
+
+
 def test_create_request_is_private_and_no_replace(tmp_path: Path) -> None:
     store = RequestStore(tmp_path)
     request = make_request()
@@ -180,6 +219,50 @@ def test_create_request_is_private_and_no_replace(tmp_path: Path) -> None:
     with pytest.raises(RequestStoreError, match="already exists"):
         store.create_request(request)
     assert store.read_request(REQUEST_ID) == request
+
+
+def test_backup_job_is_immutable_private_and_state_uses_compare_and_swap(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    store.create_request(make_backup_job_request())
+    job = make_backup_job()
+
+    path = store.publish_backup_job(job)
+    state = store.read_backup_job_state(REQUEST_ID)
+    running = transition_backup_job(
+        state,
+        LifecycleAction.START_BACKUP,
+        updated_at=datetime(2026, 7, 13, 20, 1, tzinfo=UTC),
+    )
+    store.replace_backup_job_state(running, expected_sequence=0)
+
+    assert path == tmp_path / "requests" / REQUEST_ID / "backup" / "job.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert store.read_backup_job(REQUEST_ID) == job
+    assert store.read_backup_job_state(REQUEST_ID) == running
+    with pytest.raises(RequestStoreError, match="already exists"):
+        store.publish_backup_job(job)
+    with pytest.raises(RequestStoreError, match="changed concurrently"):
+        store.replace_backup_job_state(running, expected_sequence=0)
+
+
+def test_backup_job_rejects_request_binding_and_cross_job_state(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    store.create_request(make_backup_job_request())
+
+    with pytest.raises(RequestStoreError, match="immutable request"):
+        store.publish_backup_job(replace(make_backup_job(), candidate_tree="d" * 40))
+
+    store.publish_backup_job(make_backup_job())
+    wrong = BackupJobState(
+        job_id="job-other0000",
+        request_id=REQUEST_ID,
+        sequence=1,
+        updated_at=datetime(2026, 7, 13, 20, 1, tzinfo=UTC),
+    )
+    with pytest.raises(RequestStoreError, match="immutable envelope"):
+        store.replace_backup_job_state(wrong, expected_sequence=0)
 
 
 @pytest.mark.parametrize("request_id", ["../escape", "short", "UPPERCASE-ID"])
