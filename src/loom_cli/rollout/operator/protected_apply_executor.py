@@ -1,10 +1,8 @@
-"""Typed composition for the journaled protected migration boundary.
+"""Typed composition for journaled protected apply and convergence.
 
-This module deliberately is not the default installed final-gate executor yet.
-The final gate replaces the historical rollout driver, so enabling a partial
-component chain would incorrectly omit later protected convergence actions.
-The composition remains independently testable until every required protected
-component is represented in the same journal.
+The fixed installed final-gate executor dispatches these complete component
+chains only after attested Tier 0-3 rehearsal.  This module owns no partial or
+ambient fallback to the historical rollout driver.
 """
 
 from __future__ import annotations

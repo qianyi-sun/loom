@@ -12,6 +12,12 @@ legacy broker predicate must map to its earliest possible stage. A newly
 observed rollout failure whose predicate could have run earlier is a preflight
 coverage defect: a regression fixture and an earlier-stage check are required
 before another attempt.
+The same manifest separately enumerates every concrete Tier 4 subpredicate.
+Each one either points to the earlier check that already proves its reusable
+contract or carries a technical final-only justification. The code-level
+`FINAL_PREDICATE_IDS` authority must match that manifest exactly, so a late
+migration, GB10, smoke, browser, drift, convergence, or summary predicate
+cannot remain unclassified while still producing an accepted coverage digest.
 The legacy protected-driver failure map is validated in the reverse direction:
 every mapped step must also appear as a consumer of its declared check. Merely
 naming an existing check ID cannot hide an uncovered late predicate.
@@ -343,8 +349,9 @@ It reopens the admin token with the same no-follow metadata and redacted-content
 authority, recovers only the exact deterministic request/attempt batch, and
 records bounded response hashes rather than bodies. A recovered exact batch is
 polled instead of resubmitted; fanout incompatibility and non-success terminal
-state remain fail-closed. The executor remains unwired until all protected
-components share the installed final-helper journal.
+state remain fail-closed. Rehearsal and final smoke obtain the represented
+identity, task, worker pool, agent, and audit actor from one shared authority
+factory; final smoke is only the canonical protected-route terminal proof.
 
 `browser_report_contract` is likewise the sole sanitized browser-report
 predicate for rehearsal and final acceptance. Both modes require the complete
@@ -365,8 +372,8 @@ root-configured redacted content fingerprint, and writes only into the private
 request-attempt evidence directory. A complete existing report is reusable;
 an existing partial or drifted report is terminal evidence and forbids another
 browser session instead of silently repeating a protected mutation. This
-executor remains unwired until the complete protected component chain is
-represented by the installed final helper.
+executor is dispatched only by the fixed installed final helper after the
+complete protected component chain and post-apply drift check succeed.
 
 The Tier 3 API probe runs from the exact `loom-service` image with a fixed
 module invocation. It reads a dedicated root-owned mode-`0440` regular-file
@@ -524,8 +531,9 @@ mutation-epoch advance and protected-mutation evidence. The later live smoke
 and browser acceptance also report protected-mutation evidence, but execute
 inside that already claimed rollout epoch and must observe the same single
 epoch advance rather than incrementing it again. Convergence, drift and summary
-remain read-only. Until a concrete protected executor is installed, the helper
-is intentionally unavailable and exits without mutation.
+remain read-only. Before dispatch, the installed executor re-verifies the
+root-issued runner install attestation, live fixed asset digests, config hash,
+source identity, and sealed base.
 
 Protected apply is further divided into an ordered component journal beneath
 the request attempt. Each component publishes an immutable intent before
@@ -573,10 +581,10 @@ next epoch before the migration Job; the one-time legacy path migrates first
 and then bootstraps/claims epoch one. Commands are argv-only `kubectl`
 invocations under a fixed non-inheriting kubeconfig environment, with bounded
 input/output and redacted failures. Re-entering the composition reclassifies
-terminal records and cannot repeat either the epoch CAS or the migration. This
-composition remains deliberately disconnected from the installed final helper
-until every other protected driver mutation is also represented as a journaled
-component; a partial chain is not rollout authority.
+terminal records and cannot repeat either the epoch CAS or the migration. The
+installed final helper composes this boundary with the manifest, GB10,
+production-defaults, convergence, smoke, browser, and summary executors; a
+partial action map is not rollout authority.
 
 The next component consumes the exact Tier 1 `rendered.yaml` publication and
 never invokes the renderer or image builder. It first requires the journaled

@@ -25,6 +25,36 @@ FINAL_CHECK_IDS = (
     "final.summary",
 )
 PROTECTED_MUTATION_CHECK_IDS = frozenset({"final.protected-apply", "final.smoke", "final.browser"})
+FINAL_PREDICATE_IDS = MappingProxyType(
+    {
+        "final.protected-apply": (
+            "protected.epoch-claim",
+            "protected.migration-artifact",
+            "protected.manifest-artifact",
+            "protected.production-defaults",
+            "protected.gb10-source",
+            "protected.gb10-service-activation",
+        ),
+        "final.convergence": (
+            "convergence.migration-live",
+            "convergence.manifests-live",
+            "convergence.defaults-live",
+            "convergence.gb10-live",
+        ),
+        "final.drift": ("drift.attestation-live",),
+        "final.smoke": (
+            "smoke.token-authority",
+            "smoke.payload-contract",
+            "smoke.live-terminal",
+        ),
+        "final.browser": (
+            "browser.runtime-report",
+            "browser.rehearsal-binding",
+            "browser.live-route",
+        ),
+        "final.summary": ("summary.evidence-seal",),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +147,7 @@ class FinalGateSession:
 
 __all__ = [
     "FINAL_CHECK_IDS",
+    "FINAL_PREDICATE_IDS",
     "PROTECTED_MUTATION_CHECK_IDS",
     "FinalGateAction",
     "FinalGateResult",

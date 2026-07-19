@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS, FINAL_PREDICATE_IDS
 from loom_cli.rollout.preflight_contract import (
     CheckOperation,
     CheckProbe,
@@ -81,6 +82,28 @@ def test_known_late_failures_are_shifted_before_final_only() -> None:
         "rehearsal.browser",
     ):
         assert entries[check_id].tier < 4
+
+
+def test_every_final_subpredicate_has_one_checked_in_earliest_stage() -> None:
+    manifest = load_coverage_manifest()
+    checks = {entry.check_id: entry for entry in manifest.checks}
+    grouped: dict[str, tuple[str, ...]] = {}
+    for final_check_id in FINAL_CHECK_IDS:
+        grouped[final_check_id] = tuple(
+            entry.predicate_id
+            for entry in manifest.final_predicates
+            if entry.final_check_id == final_check_id
+        )
+
+    assert grouped == dict(FINAL_PREDICATE_IDS)
+    for predicate in manifest.final_predicates:
+        earliest = checks[predicate.earliest_check_id]
+        if predicate.preflight_capable:
+            assert earliest.tier < 4
+            assert predicate.final_only_justification is None
+        else:
+            assert predicate.earliest_check_id == predicate.final_check_id
+            assert predicate.final_only_justification
 
 
 def test_systemd_activation_is_classified_as_isolated_rehearsal() -> None:
