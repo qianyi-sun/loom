@@ -171,3 +171,9 @@ The initial contract and coverage manifest are additive foundations. Existing
 broker predicates remain mapped while adapters are converted to the shared
 implementations. The coverage test prevents an unmapped legacy predicate or
 rollout step during that transition.
+
+Before a DAG may issue an attestation, its registry must exactly match every
+manifest entry through the requested tier: one implementation per check with
+the same failure code, dependencies, stage, mutation class, and final-only
+justification. Missing, duplicate, unexpected, or drifted implementations fail
+closed instead of silently shrinking coverage.

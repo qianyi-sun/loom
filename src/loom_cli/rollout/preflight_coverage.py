@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from loom_cli.rollout.preflight_contract import MutationClass, StageCapability
+from loom_cli.rollout.preflight_contract import (
+    MutationClass,
+    RegisteredCheck,
+    StageCapability,
+)
 
 DEFAULT_COVERAGE_MANIFEST = (
     Path(__file__).resolve().parents[3] / "config/staging-rollout-preflight-coverage.json"
@@ -133,6 +138,38 @@ class CoverageManifest:
     @property
     def legacy_checks(self) -> frozenset[str]:
         return frozenset(name for entry in self.checks for name in entry.legacy_checks)
+
+    def require_exact_registry(
+        self,
+        checks: Sequence[RegisteredCheck],
+        *,
+        through_tier: int,
+    ) -> None:
+        """Fail closed unless every declared check through the tier is implemented once."""
+        if through_tier not in {0, 1, 2, 3, 4}:
+            raise ValueError("coverage registry tier must be in [0, 4]")
+        expected = {entry.check_id: entry for entry in self.checks if entry.tier <= through_tier}
+        registered = {check.spec.check_id: check for check in checks}
+        if len(registered) != len(checks):
+            raise ValueError("preflight registry contains duplicate check ids")
+        if set(registered) != set(expected):
+            missing = sorted(set(expected) - set(registered))
+            unexpected = sorted(set(registered) - set(expected))
+            raise ValueError(
+                "preflight registry does not match coverage manifest: "
+                f"missing={missing} unexpected={unexpected}"
+            )
+        for check_id, entry in expected.items():
+            spec = registered[check_id].spec
+            if (
+                spec.failure_code != entry.failure_code
+                or spec.tier != entry.tier
+                or spec.stage is not entry.stage
+                or spec.dependencies != entry.dependencies
+                or spec.mutation_class is not entry.mutation_class
+                or spec.final_only_justification != entry.final_only_justification
+            ):
+                raise ValueError(f"preflight registry contract drifts from coverage for {check_id}")
 
 
 def load_coverage_manifest(path: Path = DEFAULT_COVERAGE_MANIFEST) -> CoverageManifest:

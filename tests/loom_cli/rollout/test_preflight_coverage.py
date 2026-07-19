@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from pathlib import Path
 
-from loom_cli.rollout.preflight_contract import MutationClass, StageCapability
+import pytest
+
+from loom_cli.rollout.preflight_contract import (
+    CheckOperation,
+    CheckProbe,
+    CheckSpec,
+    EvidenceField,
+    MutationClass,
+    RegisteredCheck,
+    SecretRedactionPolicy,
+    StageCapability,
+)
 from loom_cli.rollout.preflight_coverage import (
     DEFAULT_COVERAGE_MANIFEST,
+    CoverageManifest,
     load_coverage_manifest,
 )
 from loom_cli.rollout.steps import default_step_sequence
@@ -79,3 +92,93 @@ def test_systemd_activation_is_classified_as_isolated_rehearsal() -> None:
     assert activation.stage is StageCapability.ISOLATED_REHEARSAL
     assert activation.mutation_class is MutationClass.ISOLATED
     assert "rehearsal.systemd-launch" in entries["rehearsal.cleanup"].dependencies
+
+
+def _registered_from_manifest(
+    manifest: CoverageManifest,
+    *,
+    through_tier: int,
+) -> tuple[RegisteredCheck, ...]:
+    checks: list[RegisteredCheck] = []
+    for entry in manifest.checks:
+        if entry.tier > through_tier:
+            continue
+        checks.append(
+            RegisteredCheck(
+                spec=CheckSpec(
+                    check_id=entry.check_id,
+                    failure_code=entry.failure_code,
+                    tier=entry.tier,
+                    stage=entry.stage,
+                    dependencies=entry.dependencies,
+                    mutation_class=entry.mutation_class,
+                    input_keys=("runner.config.sha256",),
+                    evidence_schema=(EvidenceField("ready", "boolean"),),
+                    timeout_seconds=5,
+                    freshness_ttl_seconds=60,
+                    remediation=f"restore {entry.check_id}",
+                    secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                    final_only_justification=entry.final_only_justification,
+                ),
+                implementation_version="test-v1",
+                operations={
+                    CheckOperation.PROBE: lambda _context: CheckProbe(
+                        passed=True,
+                        evidence={"ready": True},
+                    )
+                },
+            )
+        )
+    return tuple(checks)
+
+
+def test_coverage_manifest_accepts_one_exact_implementation_per_declared_check() -> None:
+    manifest = load_coverage_manifest()
+    checks = _registered_from_manifest(manifest, through_tier=1)
+
+    manifest.require_exact_registry(checks, through_tier=1)
+
+
+def test_coverage_manifest_rejects_missing_or_unexpected_implementation() -> None:
+    manifest = load_coverage_manifest()
+    checks = _registered_from_manifest(manifest, through_tier=0)
+
+    with pytest.raises(ValueError, match=r"missing=.*backup.lease-eligibility"):
+        manifest.require_exact_registry(checks[:-1], through_tier=0)
+    with pytest.raises(ValueError, match=r"unexpected=.*extra.check"):
+        manifest.require_exact_registry(
+            (
+                *checks,
+                replace(
+                    checks[0],
+                    spec=replace(
+                        checks[0].spec,
+                        check_id="extra.check",
+                        failure_code="extra.check.failed",
+                    ),
+                ),
+            ),
+            through_tier=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["failure_code", "tier", "dependencies"],
+)
+def test_coverage_manifest_rejects_registered_contract_drift(field: str) -> None:
+    manifest = load_coverage_manifest()
+    checks = list(_registered_from_manifest(manifest, through_tier=0))
+    original = checks[0]
+    replacements = {
+        "failure_code": "candidate.identity.wrong",
+        "tier": 1,
+        "dependencies": ("runner.install",),
+    }
+    checks[0] = replace(
+        original,
+        spec=replace(original.spec, **{field: replacements[field]}),
+    )
+
+    with pytest.raises(ValueError, match="contract drifts"):
+        manifest.require_exact_registry(tuple(checks), through_tier=0)
