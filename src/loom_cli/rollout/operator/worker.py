@@ -279,6 +279,20 @@ def run_attempt(
                 signal_controller.seal_terminal(event_cancelled=False)
                 dependencies.lifecycle.release_active(pointer)
                 return 1
+            if dependencies.run_final_gates is None:
+                dependencies.store.append_event(
+                    _event(
+                        envelope,
+                        dependencies=dependencies,
+                        event="attempt_failed",
+                        status="failed",
+                        reason="final.protected-apply.runner-unavailable@final-only",
+                        current_step="00-final-gate-runner",
+                    )
+                )
+                signal_controller.seal_terminal(event_cancelled=False)
+                dependencies.lifecycle.release_active(pointer)
+                return 1
         dependencies.store.set_active(running_pointer)
         dependencies.store.append_event(
             _event(

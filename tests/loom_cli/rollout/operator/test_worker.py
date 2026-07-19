@@ -226,11 +226,23 @@ def test_worker_uses_attested_final_gates_instead_of_legacy_driver() -> None:
         bundle.order.append("final-gates-run")
         return 0
 
+    bundle.deps.final_admission = lambda _envelope: object()
     bundle.deps.run_final_gates = run_final
 
     assert run_attempt(valid_envelope(), bundle.deps) == 0
     assert "final-gates-run" in bundle.order
     assert "driver-run" not in bundle.order
+
+
+def test_attested_worker_never_falls_back_to_legacy_driver() -> None:
+    bundle = worker_fakes()
+    bundle.deps.final_admission = lambda _envelope: object()
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    assert "driver-run" not in bundle.order
+    assert bundle.store.events[-1].reason == ("final.protected-apply.runner-unavailable@final-only")
+    assert bundle.store.events[-1].current_step == "00-final-gate-runner"
+    assert bundle.store.active is None
 
 
 def test_worker_records_failed_driver_and_clears_active() -> None:
