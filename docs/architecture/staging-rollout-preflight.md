@@ -59,6 +59,14 @@ beside (never over) the preliminary record and binds the complete attestation.
 Attempt envelopes and protected launch refuse a directory that contains only
 the preliminary record.
 
+The detached checkpoint coordinator owns the intervening state machine. It
+reserves the sole transient payload, creates the critical checkpoint outside
+the launch lock, publishes manifest-only rotation authority, runs the isolated
+restore rehearsal, publishes the resulting lease by digest, and only then
+atomically promotes the candidate. Cancellation or restore failure seals the
+candidate without replacing the prior active lease. The full request and
+attempt remain unavailable until this coordinator has completed successfully.
+
 ## Tiers
 
 ### Tier 0: admission, under two minutes

@@ -48,7 +48,7 @@ from .config import (
     APPROVED_BACKUP_MAX_OBJECTS,
     OperatorConfig,
 )
-from .model import APPROVED_BACKUP_EVENT_REASONS, RolloutRequest
+from .model import APPROVED_BACKUP_EVENT_REASONS, PreflightRequest, RolloutRequest
 from .rollout_checkpoint import ImmutableObjectInventory
 
 logger = logging.getLogger(__name__)
@@ -2144,7 +2144,11 @@ class BackupCreator:
         )
         self._object_inventory_provider = object_inventory_provider
 
-    def _bundle_root(self, request: RolloutRequest, created_at: datetime) -> Path:
+    def _bundle_root(
+        self,
+        request: PreflightRequest | RolloutRequest,
+        created_at: datetime,
+    ) -> Path:
         return (
             self.config.rollout_root
             / "backups"
@@ -2595,7 +2599,7 @@ class BackupCreator:
 
     def create(
         self,
-        request: RolloutRequest,
+        request: PreflightRequest | RolloutRequest,
         *,
         created_at: datetime | None = None,
     ) -> VerifiedBackup:
