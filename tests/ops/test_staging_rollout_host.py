@@ -799,6 +799,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
 def test_sealed_cumulative_install_records_exact_source_and_checks_candidate(
     tmp_path: Path,
 ) -> None:
+    assert host.MAX_CUMULATIVE_COMMITS == 64
     installer, _system = _installer(tmp_path)
     source = host.SealedSource(
         path=host.REPO_ROOT,

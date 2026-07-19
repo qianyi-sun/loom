@@ -33,12 +33,14 @@ from typing import Any, Protocol
 
 try:
     from scripts.ops.staging_rollout_sealed_source import (
+        MAX_CUMULATIVE_COMMITS,
         SealedSource,
         SealedSourceError,
         validate_sealed_source,
     )
 except ModuleNotFoundError:  # direct execution from scripts/ops
     from staging_rollout_sealed_source import (
+        MAX_CUMULATIVE_COMMITS,
         SealedSource,
         SealedSourceError,
         validate_sealed_source,
@@ -1454,7 +1456,7 @@ class HostSystem:
             expected_parent = fields[0]
         if (
             merge_base != source.base_sha
-            or not 1 <= len(history) <= 32
+            or not 1 <= len(history) <= MAX_CUMULATIVE_COMMITS
             or expected_parent != source.commit_sha
         ):
             raise InstallError("imported sealed source history does not match")
@@ -1602,7 +1604,7 @@ class HostSystem:
                 expected_parent = fields[0]
             if (
                 (observed_tree, observed_base) != (source_tree_sha, source_base_sha)
-                or not 1 <= len(history) <= 32
+                or not 1 <= len(history) <= MAX_CUMULATIVE_COMMITS
                 or expected_parent != source_sha
             ):
                 raise InstallError("installed sealed source identity drifted")
@@ -2023,7 +2025,7 @@ class HostSystem:
         if (
             observed_tree != source_tree_sha
             or merge_base != source_base_sha
-            or not 1 <= len(history) <= 32
+            or not 1 <= len(history) <= MAX_CUMULATIVE_COMMITS
             or expected_parent != expected_sha
         ):
             raise InstallError("candidate sealed source identity does not match")
