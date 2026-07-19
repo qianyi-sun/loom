@@ -385,6 +385,30 @@ not weaken these final gates; they ensure the final gate is not the first
 consumer of a token, host prerequisite, migration, image, task, or browser
 contract.
 
+Immediately before the protected chain, the service worker reloads the
+digest-addressed attestation and rebuilds the shared Tier 0 registry from the
+installed authority. It reruns only drift-sensitive checks and requires exact
+candidate/tree, mutation epoch, runner install/config, credential metadata,
+GB10 inventory/boot IDs, and shared-mount evidence. A missing, expired, or
+drifted value terminates the pending attempt before its active pointer becomes
+`running` and before any final action is called.
+
+Tier 4 itself uses the same registered checks as the coverage manifest. Each
+normalized `CheckExecution` is published once beneath the immutable
+request/attempt directory. The journal is private, no-follow, single-link and
+no-replace. A worker restart may reuse only a passed, unexpired execution with
+the exact input fingerprint, implementation digest, stage and operation. This
+means a published successful `final.protected-apply` is never repeated after a
+worker crash; an incomplete or failed execution cannot be treated as resume
+authority.
+
+An attested worker may not fall back to the historical 18-step driver. Until
+the installed final-action source supplies the complete six-check mapping, the
+attempt fails with `final.protected-apply.runner-unavailable@final-only` and
+clears its pending active pointer. This fail-closed transition prevents a
+partially migrated installation from rebuilding images, rerendering manifests,
+or rediscovering an early predicate after backup.
+
 ## Immutable attestation
 
 A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to:
