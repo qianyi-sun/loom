@@ -103,6 +103,16 @@ mutation epoch before constructing `RehearsalLeaseAttestor`. Repeated
 assessments are independent, while restart continuation comes only from the
 immutable request-store assessment rather than RAM.
 
+`CandidatePreflightRuntime` is the only plan-assembly boundary. It fixes the
+complete Tier 0–2 implementation set and input bindings to one immutable
+candidate before admission. The preliminary plan contains fail-closed Tier 3
+placeholders solely to seal the complete registry identity; the assessment
+never executes them. The checkpoint planner then rebuilds that identical
+registry with the exact isolated actions, checkpoint evidence digest, and
+rehearsal plan digest. Missing input keys, candidate drift, cross-environment
+checkpoint identity, or a registry digest change fail before rehearsal or
+request promotion.
+
 Restore evidence is derived from the immutable rehearsal itself, not from an
 operator assertion. Every Tier 3 action must share one isolation ID, candidate,
 and mutation epoch; every action must report no protected mutation; the DB clone
