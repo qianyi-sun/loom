@@ -146,6 +146,11 @@ def _checks(
             (EvidenceField("mount-digest", "sha256"),),
         ),
         _check(
+            "gb10.candidate-source",
+            {"source-digest": "b" * 64},
+            (EvidenceField("source-digest", "sha256"),),
+        ),
+        _check(
             "gb10.host-readiness",
             {"inventory-digest": "4" * 64, "boot-ids": {"gb10-1": boot_id}},
             (EvidenceField("inventory-digest", "sha256"), EvidenceField("boot-ids", "string-map")),
@@ -276,7 +281,7 @@ def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
         now=NOW,
     )
 
-    assert len(admission.tier0_executions) == 5
+    assert len(admission.tier0_executions) == 6
     assert all(execution.passed for execution in admission.tier0_executions)
     assert len(admission.tier2_executions) == 6
     assert all(execution.passed for execution in admission.tier2_executions)
@@ -341,6 +346,7 @@ def test_post_apply_drift_reuses_exact_admission_without_baseline_replay() -> No
         "candidate.identity",
         "runner.install",
         "credentials.metadata",
+        "gb10.candidate-source",
         "gb10.shared-mount",
         "gb10.host-readiness",
     }

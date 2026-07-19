@@ -34,6 +34,7 @@ from loom_cli.rollout.final_gate_readiness import (
 from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
     GB10SharedMountReadiness,
+    probe_gb10_candidate_source_readonly,
     probe_gb10_fleet_readonly,
     probe_gb10_ssh_topology,
 )
@@ -126,7 +127,10 @@ from loom_cli.rollout.systemd_readiness import CommandRunner, probe_user_manager
 from loom_cli.rollout.systemd_unit_readiness import (
     CommandRunner as SystemdAnalyzeRunner,
 )
-from loom_cli.rollout.systemd_unit_readiness import inspect_systemd_units
+from loom_cli.rollout.systemd_unit_readiness import (
+    inspect_systemd_unit_sources,
+    inspect_systemd_units,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1478,6 +1482,116 @@ def build_gb10_host_readiness_check(
     )
 
 
+def build_gb10_candidate_source_check(
+    run: CommandRunner,
+    *,
+    targets: tuple[GB10ProbeTarget, ...],
+    ssh_config: Path,
+    identity: Path,
+    candidate_root: Path,
+    expected_candidate_sha: str,
+    expected_candidate_tree: str,
+    image_tag: str,
+    max_concurrency: int = 8,
+) -> RegisteredCheck:
+    """Build the Tier 0 exact shared candidate source and unit-byte invariant."""
+    expected_inventory_digest = gb10_target_inventory_digest(targets)
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["candidate.sha"] != expected_candidate_sha
+            or context.bindings["candidate.tree"] != expected_candidate_tree
+            or context.bindings["gb10.inventory-digest"] != expected_inventory_digest
+        ):
+            return _empty_gb10_candidate_source_probe(targets)
+        try:
+            units = inspect_systemd_unit_sources(candidate_root)
+            if not units.ready:
+                return _empty_gb10_candidate_source_probe(targets)
+            evidence = probe_gb10_candidate_source_readonly(
+                run,
+                targets,
+                ssh_config=ssh_config,
+                identity=identity,
+                candidate_sha=expected_candidate_sha,
+                candidate_tree=expected_candidate_tree,
+                image_tag=image_tag,
+                unit_sha256=units.unit_sha256,
+                unit_set_digest=units.unit_set_digest,
+                max_concurrency=max_concurrency,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return _empty_gb10_candidate_source_probe(targets)
+        return CheckProbe(
+            passed=evidence.ready
+            and set(evidence.host_digests) == {target.ssh_target for target in targets},
+            evidence={
+                "host-digests": dict(evidence.host_digests),
+                "failed-hosts": {
+                    host: "gb10.candidate-source.drift" for host in evidence.failed_hosts
+                },
+                "host-count": len(targets),
+                "candidate-sha": evidence.candidate_sha,
+                "candidate-tree": evidence.candidate_tree,
+                "unit-set-digest": evidence.unit_set_digest,
+                "source-digest": evidence.evidence_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="gb10.candidate-source",
+            failure_code="gb10.candidate-source.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("candidate.identity", "gb10.shared-mount"),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "candidate.sha",
+                "candidate.tree",
+                "gb10.inventory-digest",
+                "runner.config.sha256",
+            ),
+            evidence_schema=(
+                EvidenceField("host-digests", "string-map"),
+                EvidenceField("failed-hosts", "string-map"),
+                EvidenceField("host-count", "integer"),
+                EvidenceField("candidate-sha", "string"),
+                EvidenceField("candidate-tree", "string"),
+                EvidenceField("unit-set-digest", "sha256"),
+                EvidenceField("source-digest", "sha256"),
+            ),
+            timeout_seconds=60,
+            freshness_ttl_seconds=120,
+            remediation=(
+                "restore the exact immutable shared candidate checkout and candidate unit bytes"
+            ),
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_gb10_candidate_source_probe(
+    targets: tuple[GB10ProbeTarget, ...],
+) -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "host-digests": {},
+            "failed-hosts": {
+                target.ssh_target: "gb10.candidate-source.drift" for target in targets
+            },
+            "host-count": len(targets),
+            "candidate-sha": "unavailable",
+            "candidate-tree": "unavailable",
+            "unit-set-digest": "0" * 64,
+            "source-digest": "0" * 64,
+        },
+    )
+
+
 def _empty_gb10_probe(targets: tuple[GB10ProbeTarget, ...]) -> CheckProbe:
     return CheckProbe(
         passed=False,
@@ -2715,6 +2829,7 @@ __all__ = [
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
     "build_final_gate_checks",
+    "build_gb10_candidate_source_check",
     "build_gb10_host_readiness_check",
     "build_gb10_shared_mount_check",
     "build_gb10_ssh_topology_check",

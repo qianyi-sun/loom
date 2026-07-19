@@ -23,6 +23,17 @@ from loom_cli.rollout.systemd_readiness import (
 _HOST_RE = re.compile(r"trt-gb10-(?:[1-9]|1[0-5])\Z")
 _SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*[.]service\Z")
 _KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
+_SHARED_WORKER_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_IMAGE_TAG_RE = re.compile(r"^staging-[0-9a-f]{7}$")
+_GB10_RELEASE_UNIT_PATHS = frozenset(
+    {
+        "deploy/worker-pools/gb10/loom-gb10-node-agent.service",
+        "deploy/worker-pools/gb10/loom-gb10-node-agent.timer",
+        "deploy/worker-pools/gb10/loom-gb10-worker.service",
+    }
+)
 DEFAULT_SETTLE_ATTEMPTS = 16
 DEFAULT_SETTLE_INTERVAL_SECONDS = 2.0
 
@@ -140,6 +151,227 @@ class GB10SharedMountReadiness:
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class GB10CandidateSourceReadiness:
+    """Exact immutable shared checkout evidence observed by every GB10 host."""
+
+    host_digests: Mapping[str, str]
+    failed_hosts: tuple[str, ...]
+    candidate_sha: str
+    candidate_tree: str
+    unit_set_digest: str
+
+    def __post_init__(self) -> None:
+        digests = dict(self.host_digests)
+        hosts = (*digests, *self.failed_hosts)
+        if (
+            not hosts
+            or len(set(hosts)) != len(hosts)
+            or any(_HOST_RE.fullmatch(host) is None for host in hosts)
+            or any(_SHA256_RE.fullmatch(digest) is None for digest in digests.values())
+            or _SHA_RE.fullmatch(self.candidate_sha) is None
+            or _SHA_RE.fullmatch(self.candidate_tree) is None
+            or _SHA256_RE.fullmatch(self.unit_set_digest) is None
+        ):
+            raise ValueError("GB10 candidate source evidence is inconsistent")
+        object.__setattr__(self, "host_digests", MappingProxyType(digests))
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.host_digests) and not self.failed_hosts
+
+    @property
+    def evidence_digest(self) -> str:
+        payload = {
+            "candidate_sha": self.candidate_sha,
+            "candidate_tree": self.candidate_tree,
+            "failed": self.failed_hosts,
+            "hosts": dict(self.host_digests),
+            "unit_set_digest": self.unit_set_digest,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
+def _candidate_source_remote_probe(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    image_tag: str,
+    unit_sha256: Mapping[str, str],
+) -> str:
+    """Render one fixed read-only source probe with no caller-controlled paths."""
+    units = dict(unit_sha256)
+    if (
+        _SHA_RE.fullmatch(candidate_sha) is None
+        or _SHA_RE.fullmatch(candidate_tree) is None
+        or _IMAGE_TAG_RE.fullmatch(image_tag) is None
+        or set(units) != _GB10_RELEASE_UNIT_PATHS
+        or any(_SHA256_RE.fullmatch(digest) is None for digest in units.values())
+    ):
+        raise ValueError("GB10 candidate source binding is invalid")
+    repository = _SHARED_WORKER_REPOSITORY_ROOT / f"loom-remote-worker-{image_tag}"
+    return f"""
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import subprocess
+
+repository = pathlib.Path({str(repository)!r})
+candidate_sha = {candidate_sha!r}
+candidate_tree = {candidate_tree!r}
+units = {units!r}
+
+def git(*args):
+    result = subprocess.run(
+        ["git", "-c", f"safe.directory={{repository}}", "-C", str(repository), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={{"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"}},
+    )
+    if result.returncode != 0 or result.stderr or "\x00" in result.stdout:
+        raise SystemExit(1)
+    return result.stdout.strip()
+
+metadata = repository.lstat()
+if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+    raise SystemExit(1)
+if git("rev-parse", "HEAD") != candidate_sha:
+    raise SystemExit(1)
+if git("rev-parse", "HEAD^{{tree}}") != candidate_tree:
+    raise SystemExit(1)
+if git("status", "--porcelain=v1", "--untracked-files=all"):
+    raise SystemExit(1)
+
+observed = {{}}
+for relative, expected in sorted(units.items()):
+    path = repository / relative
+    item = path.lstat()
+    if (
+        not stat.S_ISREG(item.st_mode)
+        or stat.S_ISLNK(item.st_mode)
+        or item.st_nlink != 1
+        or stat.S_IMODE(item.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        first = os.fstat(descriptor)
+        payload = os.read(descriptor, 131073)
+        second = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    digest = hashlib.sha256(payload).hexdigest()
+    if (
+        len(payload) > 131072
+        or first.st_size != len(payload)
+        or (first.st_dev, first.st_ino, first.st_size, first.st_mtime_ns)
+        != (second.st_dev, second.st_ino, second.st_size, second.st_mtime_ns)
+        or digest != expected
+    ):
+        raise SystemExit(1)
+    observed[relative] = digest
+
+print(json.dumps({{
+    "candidate_sha": candidate_sha,
+    "candidate_tree": candidate_tree,
+    "unit_sha256": observed,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+
+
+def candidate_source_remote_command(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    image_tag: str,
+    unit_sha256: Mapping[str, str],
+) -> str:
+    """Return the fixed read-only remote command for one exact candidate source."""
+    return "python3 -c " + shlex.quote(
+        _candidate_source_remote_probe(
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            image_tag=image_tag,
+            unit_sha256=unit_sha256,
+        )
+    )
+
+
+def probe_gb10_candidate_source_readonly(
+    run: CommandRunner,
+    targets: Sequence[GB10ProbeTarget],
+    *,
+    ssh_config: Path,
+    identity: Path,
+    candidate_sha: str,
+    candidate_tree: str,
+    image_tag: str,
+    unit_sha256: Mapping[str, str],
+    unit_set_digest: str,
+    max_concurrency: int = 8,
+) -> GB10CandidateSourceReadiness:
+    """Verify the same exact shared source on the complete fixed GB10 fleet."""
+    if (
+        not targets
+        or len({target.ssh_target for target in targets}) != len(targets)
+        or not 1 <= max_concurrency <= 16
+        or _SHA256_RE.fullmatch(unit_set_digest) is None
+    ):
+        raise ValueError("GB10 candidate source probe bounds are invalid")
+    command = candidate_source_remote_command(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        image_tag=image_tag,
+        unit_sha256=unit_sha256,
+    )
+    expected_payload = {
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "unit_sha256": dict(sorted(unit_sha256.items())),
+    }
+
+    def probe(target: GB10ProbeTarget) -> str | None:
+        try:
+            result = run(
+                (*_ssh_argv(target, ssh_config=ssh_config, identity=identity)[:-1], command)
+            )
+            payload = json.loads(result.stdout)
+        except Exception:
+            return None
+        if result.returncode != 0 or payload != expected_payload:
+            return None
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    outcomes: dict[str, str | None] = {}
+    with ThreadPoolExecutor(
+        max_workers=min(max_concurrency, len(targets)),
+        thread_name_prefix="loom-gb10-candidate-source",
+    ) as executor:
+        futures = {executor.submit(probe, target): target for target in targets}
+        for future in as_completed(futures):
+            target = futures[future]
+            try:
+                outcomes[target.ssh_target] = future.result()
+            except Exception:
+                outcomes[target.ssh_target] = None
+    return GB10CandidateSourceReadiness(
+        host_digests={host: digest for host, digest in outcomes.items() if digest is not None},
+        failed_hosts=tuple(sorted(host for host, digest in outcomes.items() if digest is None)),
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        unit_set_digest=unit_set_digest,
+    )
 
 
 def _remote_probe_source(service: str) -> str:
@@ -400,10 +632,13 @@ def probe_gb10_fleet_readonly(
 __all__ = [
     "DEFAULT_SETTLE_ATTEMPTS",
     "DEFAULT_SETTLE_INTERVAL_SECONDS",
+    "GB10CandidateSourceReadiness",
     "GB10FleetReadiness",
     "GB10ProbeTarget",
     "GB10SharedMountReadiness",
     "GB10SshTopology",
+    "candidate_source_remote_command",
+    "probe_gb10_candidate_source_readonly",
     "probe_gb10_fleet_readonly",
     "probe_gb10_ssh_topology",
     "remote_probe_command",

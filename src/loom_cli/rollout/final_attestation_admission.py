@@ -33,6 +33,7 @@ _DRIFT_EVIDENCE_CHECKS = frozenset(
         "runner.install",
         "credentials.metadata",
         "gb10.shared-mount",
+        "gb10.candidate-source",
         "gb10.host-readiness",
     }
 )
@@ -158,6 +159,7 @@ def validate_final_attestation(
         evidence("runner.install", "attestation-digest") == bindings.runner_install_hash,
         normalized_secret_metadata == dict(bindings.secret_metadata_fingerprints),
         evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
+        evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
         evidence("gb10.host-readiness", "inventory-digest") == bindings.gb10_inventory_digest,
         string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
     )
@@ -275,6 +277,7 @@ def validate_post_apply_attestation_drift(
         evidence("runner.install", "attestation-digest") == bindings.runner_install_hash,
         normalized_secret_metadata == dict(bindings.secret_metadata_fingerprints),
         evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
+        evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
         evidence("gb10.host-readiness", "inventory-digest") == bindings.gb10_inventory_digest,
         string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
     )

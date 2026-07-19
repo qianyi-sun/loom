@@ -7,6 +7,8 @@ from pathlib import Path
 
 from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
+    candidate_source_remote_command,
+    probe_gb10_candidate_source_readonly,
     probe_gb10_fleet_readonly,
     probe_gb10_ssh_topology,
     remote_probe_command,
@@ -16,6 +18,14 @@ BOOT_IDS = {
     "trt-gb10-1": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
     "trt-gb10-2": "11111111-2222-4333-8444-555555555555",
 }
+UNIT_DIGESTS = {
+    "deploy/worker-pools/gb10/loom-gb10-node-agent.service": "1" * 64,
+    "deploy/worker-pools/gb10/loom-gb10-node-agent.timer": "2" * 64,
+    "deploy/worker-pools/gb10/loom-gb10-worker.service": "3" * 64,
+}
+UNIT_SET_DIGEST = "4" * 64
+CANDIDATE_SHA = "a" * 40
+CANDIDATE_TREE = "b" * 40
 
 
 def _payload(host: str, *, timer_state: str = "waiting") -> str:
@@ -55,6 +65,99 @@ def test_remote_probe_command_is_fixed_and_readonly() -> None:
     assert " enable " not in command
     assert " disable " not in command
     assert "--user" in command
+
+
+def test_candidate_source_remote_command_is_fixed_readonly_and_exact() -> None:
+    command = candidate_source_remote_command(
+        candidate_sha=CANDIDATE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        image_tag="staging-aaaaaaa",
+        unit_sha256=UNIT_DIGESTS,
+    )
+
+    assert command.startswith("python3 -c ")
+    assert "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/" in command
+    assert CANDIDATE_SHA in command
+    assert CANDIDATE_TREE in command
+    assert "checkout" not in command
+    assert "fetch" not in command
+    assert "systemctl" not in command
+    assert 'getattr(os, "O_NOFOLLOW", 0)' in command
+
+
+def test_candidate_source_probe_collects_all_exact_hosts() -> None:
+    targets = tuple(GB10ProbeTarget(host, "loom-gb10-node-agent.service") for host in BOOT_IDS)
+    payload = json.dumps(
+        {
+            "candidate_sha": CANDIDATE_SHA,
+            "candidate_tree": CANDIDATE_TREE,
+            "unit_sha256": UNIT_DIGESTS,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, payload, "")
+
+    result = probe_gb10_candidate_source_readonly(
+        run,
+        targets,
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        candidate_sha=CANDIDATE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        image_tag="staging-aaaaaaa",
+        unit_sha256=UNIT_DIGESTS,
+        unit_set_digest=UNIT_SET_DIGEST,
+        max_concurrency=2,
+    )
+
+    assert result.ready
+    assert result.failed_hosts == ()
+    assert set(result.host_digests) == set(BOOT_IDS)
+    assert result.candidate_sha == CANDIDATE_SHA
+    assert result.candidate_tree == CANDIDATE_TREE
+    assert result.unit_set_digest == UNIT_SET_DIGEST
+    assert len(result.evidence_digest) == 64
+
+
+def test_candidate_source_probe_reports_complete_host_failures() -> None:
+    targets = tuple(GB10ProbeTarget(host, "loom-gb10-node-agent.service") for host in BOOT_IDS)
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        host = argv[-2]
+        if host == "trt-gb10-1":
+            return subprocess.CompletedProcess(argv, 255, "", "unavailable")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "candidate_sha": CANDIDATE_SHA,
+                    "candidate_tree": "c" * 40,
+                    "unit_sha256": UNIT_DIGESTS,
+                }
+            ),
+            "",
+        )
+
+    result = probe_gb10_candidate_source_readonly(
+        run,
+        targets,
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        candidate_sha=CANDIDATE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        image_tag="staging-aaaaaaa",
+        unit_sha256=UNIT_DIGESTS,
+        unit_set_digest=UNIT_SET_DIGEST,
+        max_concurrency=2,
+    )
+
+    assert not result.ready
+    assert result.failed_hosts == tuple(sorted(BOOT_IDS))
+    assert result.host_digests == {}
 
 
 def test_fleet_probe_collects_all_hosts_and_settles_transient_timer() -> None:

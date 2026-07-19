@@ -82,6 +82,28 @@ def _has_exact_line(payload: bytes, line: bytes) -> bool:
     return line in payload.splitlines()
 
 
+def inspect_systemd_unit_sources(root: Path) -> SystemdUnitEvidence:
+    """Read and hash the exact safe candidate unit bytes without invoking tools."""
+    hashes: dict[str, str] = {}
+    failures: dict[str, str] = {}
+    for relative in UNIT_PATHS:
+        try:
+            payload = _read_exact_unit(root, relative)
+        except (OSError, RuntimeError, ValueError):
+            failures[relative] = "source-authority"
+            continue
+        hashes[relative] = hashlib.sha256(payload).hexdigest()
+    evidence_payload = {"failed": failures, "units": hashes}
+    return SystemdUnitEvidence(
+        ready=not failures and len(hashes) == len(UNIT_PATHS),
+        unit_sha256=hashes,
+        failed_units=failures,
+        unit_set_digest=hashlib.sha256(
+            json.dumps(evidence_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+
+
 def inspect_systemd_units(root: Path, *, run: CommandRunner) -> SystemdUnitEvidence:
     """Verify fixed unit files without installing, enabling, or starting them."""
     hashes: dict[str, str] = {}
@@ -146,5 +168,6 @@ __all__ = [
     "UNIT_PATHS",
     "CommandRunner",
     "SystemdUnitEvidence",
+    "inspect_systemd_unit_sources",
     "inspect_systemd_units",
 ]

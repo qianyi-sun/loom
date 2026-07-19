@@ -61,6 +61,7 @@ def _executions() -> tuple[CheckExecution, ...]:
         _execution("migration.manifest", {"artifact-digest": "0" * 64}),
         _execution("systemd.render", {"unit-set-digest": "1" * 64}),
         _execution("gb10.shared-mount", {"mount-digest": "2" * 64}),
+        _execution("gb10.candidate-source", {"source-digest": "1" * 64}),
         _execution(
             "gb10.host-readiness",
             {"inventory-digest": "3" * 64, "boot-ids": {"gb10-1": "boot-1"}},

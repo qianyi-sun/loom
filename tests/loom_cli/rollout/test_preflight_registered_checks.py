@@ -19,7 +19,11 @@ from loom_cli.rollout.final_gate_readiness import (
     PROTECTED_MUTATION_CHECK_IDS,
     FinalGateResult,
 )
-from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
+from loom_cli.rollout.gb10_readiness import (
+    GB10CandidateSourceReadiness,
+    GB10ProbeTarget,
+    GB10SharedMountReadiness,
+)
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
     BROWSER_ENTRYPOINT,
@@ -56,6 +60,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_credentials_metadata_check,
     build_docker_runtime_check,
     build_final_gate_checks,
+    build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
     build_gb10_shared_mount_check,
     build_gb10_ssh_topology_check,
@@ -1358,6 +1363,68 @@ def test_registered_systemd_render_rejects_candidate_drift_without_verifier() ->
     assert not result.passed
     assert result.evidence["unit-count"] == 0
     assert calls == []
+
+
+def test_registered_gb10_candidate_source_binds_exact_shared_checkout(monkeypatch) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    observed: list[dict[str, object]] = []
+
+    def source_probe(*_args, **kwargs):
+        observed.append(kwargs)
+        return GB10CandidateSourceReadiness(
+            host_digests={"trt-gb10-1": "4" * 64},
+            failed_hosts=(),
+            candidate_sha="1" * 40,
+            candidate_tree="2" * 40,
+            unit_set_digest=str(kwargs["unit_set_digest"]),
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.preflight_registered_checks.probe_gb10_candidate_source_readonly",
+        source_probe,
+    )
+    check = build_gb10_candidate_source_check(
+        lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+        targets=(target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        candidate_root=repo_root,
+        expected_candidate_sha="1" * 40,
+        expected_candidate_tree="2" * 40,
+        image_tag="staging-1111111",
+    )
+    context = CheckContext(
+        {
+            "candidate.sha": "1" * 40,
+            "candidate.tree": "2" * 40,
+            "gb10.inventory-digest": gb10_target_inventory_digest((target,)),
+            "runner.config.sha256": "3" * 64,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("candidate.identity"),
+            _passing_dependency("gb10.ssh-topology"),
+            _passing_dependency("gb10.shared-mount"),
+            check,
+        )
+    )
+
+    result = next(
+        item for item in dag.run(context, through_tier=0) if item.check_id == check.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["candidate-sha"] == "1" * 40
+    assert result.evidence["candidate-tree"] == "2" * 40
+    assert result.evidence["host-count"] == 1
+    assert len(observed) == 1
+    assert set(observed[0]["unit_sha256"]) == {
+        "deploy/worker-pools/gb10/loom-gb10-node-agent.service",
+        "deploy/worker-pools/gb10/loom-gb10-node-agent.timer",
+        "deploy/worker-pools/gb10/loom-gb10-worker.service",
+    }
 
 
 def _image_inspect_payload(name: str, revision: str) -> str:

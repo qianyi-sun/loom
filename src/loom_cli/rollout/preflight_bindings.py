@@ -59,6 +59,7 @@ def derive_attestation_bindings(
         "migration.plan",
         "systemd.render",
         "gb10.shared-mount",
+        "gb10.candidate-source",
         "gb10.host-readiness",
         "browser.runtime",
         "rehearsal.cleanup",
@@ -176,8 +177,8 @@ def derive_attestation_bindings(
             "GB10 mount",
         ),
         gb10_unit_digest=_string(
-            evidence("systemd.render", "unit-set-digest"),
-            "GB10 unit set",
+            evidence("gb10.candidate-source", "source-digest"),
+            "GB10 candidate source",
         ),
         browser_image_digest=browser_image,
         browser_report_schema=_string(
