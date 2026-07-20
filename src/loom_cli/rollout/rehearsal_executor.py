@@ -1630,15 +1630,22 @@ def _database_pod_matches(
     expected_containers = expected_spec["containers"]
     if not isinstance(expected_containers, list):  # pragma: no cover - local manifest contract
         return False
-    observed_containers = [
-        {
+    observed_containers = []
+    for container in expected_containers:
+        if not isinstance(container, dict):
+            continue
+        observed = {
             **container,
             "terminationMessagePath": "/dev/termination-log",
             "terminationMessagePolicy": "File",
         }
-        for container in expected_containers
-        if isinstance(container, dict)
-    ]
+        readiness_probe = container.get("readinessProbe")
+        if isinstance(readiness_probe, dict):
+            observed["readinessProbe"] = {
+                **readiness_probe,
+                "successThreshold": 1,
+            }
+        observed_containers.append(observed)
     if not (
         metadata.get("name") == expected_metadata["name"]
         and metadata.get("namespace") == expected_metadata["namespace"]

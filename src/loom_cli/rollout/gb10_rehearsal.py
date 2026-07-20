@@ -417,8 +417,7 @@ finally:
             if mode == "cleanup":
                 properties = observed
             stopped = run(["systemctl", "--user", "stop", unit], 30)
-            reset = run(["systemctl", "--user", "reset-failed", unit], 30)
-            if stopped.returncode != 0 or reset.returncode != 0:
+            if stopped.returncode != 0 and load_state() != "not-found":
                 reason = reason or "cleanup-command-failed"
     cleanup_verified = load_state() == "not-found"
     if not cleanup_verified:

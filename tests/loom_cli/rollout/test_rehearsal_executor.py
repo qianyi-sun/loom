@@ -292,6 +292,8 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
             for container in pod["spec"]["containers"]:
                 container["terminationMessagePath"] = "/dev/termination-log"
                 container["terminationMessagePolicy"] = "File"
+                if "readinessProbe" in container:
+                    container["readinessProbe"]["successThreshold"] = 1
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
         if "wait" in argv:
             return subprocess.CompletedProcess(argv, 0, "ready\n", "")
@@ -374,6 +376,8 @@ def test_database_rejects_unclassified_server_default_drift() -> None:
             for container in pod["spec"]["containers"]:
                 container["terminationMessagePath"] = "/dev/termination-log"
                 container["terminationMessagePolicy"] = "File"
+                if "readinessProbe" in container:
+                    container["readinessProbe"]["successThreshold"] = 1
             pod["spec"]["containers"][0]["unexpectedDefault"] = True
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
         raise AssertionError("drifted apply response must stop before restore")

@@ -129,6 +129,15 @@ def test_remote_activation_uses_exit_status_and_exact_readback_not_warning_text(
     compile(source, "<gb10-rehearsal>", "exec")
 
 
+def test_remote_cleanup_accepts_only_verified_absence_after_stop() -> None:
+    source = _remote_source(_contract(), mode="cleanup")
+
+    assert 'stopped.returncode != 0 and load_state() != "not-found"' in source
+    assert "reset-failed" not in source
+    assert 'cleanup_verified = load_state() == "not-found"' in source
+    compile(source, "<gb10-rehearsal-cleanup>", "exec")
+
+
 def test_execute_aggregates_independent_host_blockers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
