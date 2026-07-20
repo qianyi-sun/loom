@@ -98,6 +98,117 @@ class LegacyBackupInventoryRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class LegacyBackupOpaqueEvidenceRecord:
+    """Exact top-level evidence that retention must preserve untouched."""
+
+    name: str
+    kind: str
+    device: int
+    inode: int
+    owner_uid: int
+    owner_gid: int
+    mode: int
+    link_count: int
+    size_bytes: int
+    modified_ns: int
+    changed_ns: int
+    sha256: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            not self.name
+            or self.name == "latest"
+            or "/" in self.name
+            or self.name != self.name.strip()
+            or self.kind not in {"directory", "file"}
+            or self.device < 0
+            or self.inode <= 0
+            or self.owner_uid < 0
+            or self.owner_gid < 0
+            or not 0 <= self.mode <= 0o7777
+            or self.link_count <= 0
+            or self.size_bytes < 0
+            or self.modified_ns < 0
+            or self.changed_ns < 0
+            or (self.kind == "directory") != (self.sha256 is None)
+            or (
+                self.sha256 is not None
+                and (
+                    len(self.sha256) != 64
+                    or any(character not in "0123456789abcdef" for character in self.sha256)
+                )
+            )
+        ):
+            raise ValueError("legacy backup opaque evidence record is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "changed_ns": self.changed_ns,
+            "device": self.device,
+            "inode": self.inode,
+            "kind": self.kind,
+            "link_count": self.link_count,
+            "mode": self.mode,
+            "modified_ns": self.modified_ns,
+            "name": self.name,
+            "owner_gid": self.owner_gid,
+            "owner_uid": self.owner_uid,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> LegacyBackupOpaqueEvidenceRecord:
+        expected = {
+            "changed_ns",
+            "device",
+            "inode",
+            "kind",
+            "link_count",
+            "mode",
+            "modified_ns",
+            "name",
+            "owner_gid",
+            "owner_uid",
+            "sha256",
+            "size_bytes",
+        }
+        integer_fields = (
+            "changed_ns",
+            "device",
+            "inode",
+            "link_count",
+            "mode",
+            "modified_ns",
+            "owner_gid",
+            "owner_uid",
+            "size_bytes",
+        )
+        if (
+            set(data) != expected
+            or not isinstance(data["name"], str)
+            or not isinstance(data["kind"], str)
+            or not all(type(data[field]) is int for field in integer_fields)
+            or (data["sha256"] is not None and not isinstance(data["sha256"], str))
+        ):
+            raise ValueError("legacy backup opaque evidence record schema is invalid")
+        return cls(
+            name=data["name"],
+            kind=data["kind"],
+            device=cast(int, data["device"]),
+            inode=cast(int, data["inode"]),
+            owner_uid=cast(int, data["owner_uid"]),
+            owner_gid=cast(int, data["owner_gid"]),
+            mode=cast(int, data["mode"]),
+            link_count=cast(int, data["link_count"]),
+            size_bytes=cast(int, data["size_bytes"]),
+            modified_ns=cast(int, data["modified_ns"]),
+            changed_ns=cast(int, data["changed_ns"]),
+            sha256=data["sha256"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class LegacyBackupRetentionPlan:
     """Immutable inventory authorizing only exact complete superseded roots."""
 
@@ -106,7 +217,7 @@ class LegacyBackupRetentionPlan:
     latest_bundle: str
     candidates: tuple[LegacyBackupInventoryRecord, ...]
     protected: tuple[LegacyBackupInventoryRecord, ...]
-    incomplete_bundles: tuple[str, ...]
+    opaque_evidence: tuple[LegacyBackupOpaqueEvidenceRecord, ...]
     environment: str = "staging"
     namespace: str = "loom-staging"
 
@@ -130,8 +241,11 @@ class LegacyBackupRetentionPlan:
             raise ValueError("legacy backup retention plan has duplicate bundle authority")
         if self.latest_bundle not in names:
             raise ValueError("legacy backup retention plan does not preserve latest")
-        if tuple(sorted(self.incomplete_bundles)) != self.incomplete_bundles:
-            raise ValueError("incomplete legacy backup roots must be sorted")
+        opaque_names = tuple(record.name for record in self.opaque_evidence)
+        if tuple(sorted(opaque_names)) != opaque_names or len(set(opaque_names)) != len(
+            opaque_names
+        ):
+            raise ValueError("opaque legacy backup evidence must be unique and sorted")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -139,11 +253,11 @@ class LegacyBackupRetentionPlan:
             "backups_inode": self.backups_inode,
             "candidates": [record.to_dict() for record in self.candidates],
             "environment": self.environment,
-            "incomplete_bundles": list(self.incomplete_bundles),
             "latest_bundle": self.latest_bundle,
             "namespace": self.namespace,
+            "opaque_evidence": [record.to_dict() for record in self.opaque_evidence],
             "protected": [record.to_dict() for record in self.protected],
-            "schema_version": 2,
+            "schema_version": 3,
         }
 
     @classmethod
@@ -153,15 +267,15 @@ class LegacyBackupRetentionPlan:
             "backups_inode",
             "candidates",
             "environment",
-            "incomplete_bundles",
             "latest_bundle",
             "namespace",
+            "opaque_evidence",
             "protected",
             "schema_version",
         }
         if (
             set(data) != expected
-            or data["schema_version"] != 2
+            or data["schema_version"] != 3
             or type(data["backups_device"]) is not int
             or type(data["backups_inode"]) is not int
             or not isinstance(data["latest_bundle"], str)
@@ -169,10 +283,10 @@ class LegacyBackupRetentionPlan:
             or not isinstance(data["namespace"], str)
             or not isinstance(data["candidates"], list)
             or not isinstance(data["protected"], list)
-            or not isinstance(data["incomplete_bundles"], list)
+            or not isinstance(data["opaque_evidence"], list)
             or not all(isinstance(item, dict) for item in data["candidates"])
             or not all(isinstance(item, dict) for item in data["protected"])
-            or not all(isinstance(item, str) for item in data["incomplete_bundles"])
+            or not all(isinstance(item, dict) for item in data["opaque_evidence"])
         ):
             raise ValueError("legacy backup retention plan schema is invalid")
         return cls(
@@ -185,7 +299,9 @@ class LegacyBackupRetentionPlan:
             protected=tuple(
                 LegacyBackupInventoryRecord.from_dict(item) for item in data["protected"]
             ),
-            incomplete_bundles=tuple(data["incomplete_bundles"]),
+            opaque_evidence=tuple(
+                LegacyBackupOpaqueEvidenceRecord.from_dict(item) for item in data["opaque_evidence"]
+            ),
             environment=data["environment"],
             namespace=data["namespace"],
         )
@@ -204,6 +320,63 @@ class LegacyBackupRetention:
     config: OperatorConfig
     service_uid: int
     store: RequestStore
+
+    def _opaque_record(
+        self,
+        *,
+        backups_fd: int,
+        name: str,
+        expected_metadata: os.stat_result,
+    ) -> LegacyBackupOpaqueEvidenceRecord:
+        if not name or name == "latest" or "/" in name:
+            raise LegacyBackupRetentionError("legacy backup evidence name is invalid")
+        if stat.S_ISDIR(expected_metadata.st_mode):
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            kind = "directory"
+        elif stat.S_ISREG(expected_metadata.st_mode) and expected_metadata.st_nlink == 1:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            kind = "file"
+        else:
+            raise LegacyBackupRetentionError("legacy backup evidence entry is unsafe")
+        try:
+            descriptor = os.open(name, flags, dir_fd=backups_fd)
+        except OSError as exc:
+            raise LegacyBackupRetentionError(
+                "legacy backup evidence could not be opened safely"
+            ) from exc
+        try:
+            opened = os.fstat(descriptor)
+            if _identity(opened) != _identity(expected_metadata):
+                raise LegacyBackupRetentionError("legacy backup evidence changed during inventory")
+            sha256 = None
+            if kind == "file":
+                payload = _read_bounded(descriptor, maximum_bytes=1024 * 1024)
+                if _identity(os.fstat(descriptor)) != _identity(opened):
+                    raise LegacyBackupRetentionError(
+                        "legacy backup evidence changed during inventory"
+                    )
+                sha256 = hashlib.sha256(payload).hexdigest()
+        finally:
+            os.close(descriptor)
+        return LegacyBackupOpaqueEvidenceRecord(
+            name=name,
+            kind=kind,
+            device=opened.st_dev,
+            inode=opened.st_ino,
+            owner_uid=opened.st_uid,
+            owner_gid=opened.st_gid,
+            mode=stat.S_IMODE(opened.st_mode),
+            link_count=opened.st_nlink,
+            size_bytes=opened.st_size,
+            modified_ns=opened.st_mtime_ns,
+            changed_ns=opened.st_ctime_ns,
+            sha256=sha256,
+        )
 
     def _record(
         self,
@@ -396,7 +569,7 @@ class LegacyBackupRetention:
             protected_names = {latest_bundle, *additionally_protected}
             candidates: list[LegacyBackupInventoryRecord] = []
             protected: list[LegacyBackupInventoryRecord] = []
-            incomplete: list[str] = []
+            opaque: list[LegacyBackupOpaqueEvidenceRecord] = []
             observed_names: set[str] = set()
             with os.scandir(backups_fd) as entries:
                 for entry in entries:
@@ -404,21 +577,27 @@ class LegacyBackupRetention:
                         continue
                     observed_names.add(entry.name)
                     entry_metadata = entry.stat(follow_symlinks=False)
-                    if (
-                        not stat.S_ISDIR(entry_metadata.st_mode)
-                        or entry_metadata.st_uid != self.service_uid
-                        or stat.S_IMODE(entry_metadata.st_mode) != 0o700
+                    if _BUNDLE_RE.fullmatch(entry.name) is None or not stat.S_ISDIR(
+                        entry_metadata.st_mode
                     ):
-                        raise LegacyBackupRetentionError(
-                            "legacy backup root contains an unsafe entry"
+                        opaque.append(
+                            self._opaque_record(
+                                backups_fd=backups_fd,
+                                name=entry.name,
+                                expected_metadata=entry_metadata,
+                            )
                         )
-                    if _BUNDLE_RE.fullmatch(entry.name) is None:
-                        incomplete.append(entry.name)
                         continue
                     try:
                         probe_fd = os.open(entry.name, directory_flags, dir_fd=backups_fd)
                     except FileNotFoundError:
-                        incomplete.append(entry.name)
+                        opaque.append(
+                            self._opaque_record(
+                                backups_fd=backups_fd,
+                                name=entry.name,
+                                expected_metadata=entry_metadata,
+                            )
+                        )
                         continue
                     try:
                         manifest_metadata = os.stat(
@@ -427,13 +606,26 @@ class LegacyBackupRetention:
                             follow_symlinks=False,
                         )
                     except FileNotFoundError:
-                        incomplete.append(entry.name)
+                        opaque.append(
+                            self._opaque_record(
+                                backups_fd=backups_fd,
+                                name=entry.name,
+                                expected_metadata=entry_metadata,
+                            )
+                        )
                         continue
                     finally:
                         os.close(probe_fd)
                     if not stat.S_ISREG(manifest_metadata.st_mode):
                         raise LegacyBackupRetentionError(
                             "legacy backup manifest metadata is unsafe"
+                        )
+                    if (
+                        entry_metadata.st_uid != self.service_uid
+                        or stat.S_IMODE(entry_metadata.st_mode) != 0o700
+                    ):
+                        raise LegacyBackupRetentionError(
+                            "manifest-backed legacy backup root metadata is unsafe"
                         )
                     record = self._record(
                         backups_fd=backups_fd,
@@ -459,7 +651,7 @@ class LegacyBackupRetention:
             protected=tuple(
                 sorted(protected, key=lambda record: record.retirement.bundle_name or "")
             ),
-            incomplete_bundles=tuple(sorted(incomplete)),
+            opaque_evidence=tuple(sorted(opaque, key=lambda record: record.name)),
             namespace=self.config.namespace,
         )
 
@@ -485,7 +677,7 @@ class LegacyBackupRetention:
             or current.backups_inode != plan.backups_inode
             or current.latest_bundle != plan.latest_bundle
             or current.protected != plan.protected
-            or current.incomplete_bundles != plan.incomplete_bundles
+            or current.opaque_evidence != plan.opaque_evidence
         ):
             raise LegacyBackupRetentionError("legacy backup protected inventory drifted")
         planned = {record.retirement.payload_id: record for record in plan.candidates}
@@ -520,6 +712,7 @@ class LegacyBackupRetention:
 
 __all__ = [
     "LegacyBackupInventoryRecord",
+    "LegacyBackupOpaqueEvidenceRecord",
     "LegacyBackupRetention",
     "LegacyBackupRetentionError",
     "LegacyBackupRetentionPlan",

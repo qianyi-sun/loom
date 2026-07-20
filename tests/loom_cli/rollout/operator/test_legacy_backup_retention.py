@@ -77,7 +77,7 @@ def test_inventory_and_digest_approved_apply_preserve_latest_and_incomplete(
     assert plan.candidates[0].payload_file_count == 3
     assert plan.candidates[0].payload_size_bytes == 51
     assert plan.candidates[0].component_names == ("k8s_secrets", "minio", "postgres")
-    assert plan.incomplete_bundles == (incomplete.name,)
+    assert tuple(record.name for record in plan.opaque_evidence) == (incomplete.name,)
     assert not old.exists()
     assert latest.is_dir()
     assert incomplete.is_dir()
@@ -111,8 +111,41 @@ def test_inventory_fails_closed_on_unsafe_unknown_entry(tmp_path: Path) -> None:
     unsafe = old.parent / "unknown-symlink"
     unsafe.symlink_to(old.name)
 
-    with pytest.raises(LegacyBackupRetentionError, match="unsafe entry"):
+    with pytest.raises(LegacyBackupRetentionError, match="evidence entry is unsafe"):
         retention.inventory()
+
+
+def test_inventory_preserves_noncanonical_evidence_files_and_directories(
+    tmp_path: Path,
+) -> None:
+    retention, _old, _latest, incomplete = _root(tmp_path)
+    backups = incomplete.parent
+    log = backups / "backup-refresh-20260710T184534Z.log"
+    log.write_bytes(b"historical evidence\n")
+    log.chmod(0o670)
+    evidence = backups / "route-cutover-20260706T210056Z"
+    evidence.mkdir(mode=0o770)
+
+    plan = retention.inventory()
+    records = {record.name: record for record in plan.opaque_evidence}
+
+    assert set(records) == {incomplete.name, log.name, evidence.name}
+    assert records[log.name].kind == "file"
+    assert records[log.name].sha256 is not None
+    assert records[evidence.name].kind == "directory"
+    assert records[evidence.name].sha256 is None
+
+
+def test_apply_rejects_opaque_evidence_drift(tmp_path: Path) -> None:
+    retention, _old, _latest, _incomplete = _root(tmp_path)
+    log = retention.config.rollout_root / "backups" / "backup-refresh.log"
+    log.write_bytes(b"before\n")
+    log.chmod(0o600)
+    plan = retention.inventory()
+    log.write_bytes(b"after\n")
+
+    with pytest.raises(LegacyBackupRetentionError, match="protected inventory drifted"):
+        retention.apply(plan, approved_inventory_digest=plan.evidence_digest)
 
 
 @pytest.mark.parametrize(

@@ -414,7 +414,11 @@ Payload roots created before the rotation record are converged with
 `scripts/ops/staging_rollout_backup_retention.py`, never with `rm` or a prefix
 glob. `inventory` binds the backup filesystem identity, exact `latest` target,
 every complete timestamped root and manifest digest, plus every incomplete or
-noncanonical directory that must remain untouched. A complete root is eligible
+noncanonical file or directory that must remain untouched. Those opaque evidence
+entries are bound by exact type, device/inode, owner/group, mode, link count,
+size and timestamps; regular evidence files additionally carry a bounded
+content digest. Symlinks, special files and linked regular evidence fail closed.
+A complete root is eligible
 only when its private single-link manifest parses under the known schema,
 matches `staging` and the configured namespace, carries the exact verified
 component set, and keeps every recorded component path lexically inside that
