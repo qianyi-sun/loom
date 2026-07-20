@@ -250,7 +250,7 @@ def git(*args):
             "PATH": "/usr/bin:/bin",
         }},
     )
-    if result.returncode != 0 or result.stderr or "\x00" in result.stdout:
+    if result.returncode != 0 or result.stderr or "\\x00" in result.stdout:
         raise SystemExit(1)
     return result.stdout.strip()
 
