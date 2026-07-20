@@ -58,6 +58,8 @@ class Runner:
             namespace = command[command.index("--namespace") + 1]
             return Result(stdout=_token(namespace, account) + "\n")
         if "pod/loom-minio-0" in command:
+            if input is not None and "--stdin" not in command:
+                return Result(returncode=1, stderr="stdin was not forwarded")
             script = command[-1]
             if "admin user info" in script:
                 return Result(
@@ -231,6 +233,12 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     assert installer.paths.minio_credential_source.stat().st_mode & 0o777 == 0o600
     assert any("admin policy create" in command[-1] for command, _ in runner.calls)
     assert any("admin user info" in command[-1] for command, _ in runner.calls)
+    minio_calls = [
+        (command, stdin) for command, stdin in runner.calls if "pod/loom-minio-0" in command
+    ]
+    assert minio_calls
+    assert all("--stdin" in command for command, _stdin in minio_calls)
+    assert any(stdin is not None for _command, stdin in minio_calls)
     minio_secret = json.loads(installer.paths.minio_credential_source.read_bytes())["secret_key"]
     assert minio_secret not in rendered
     assert all(minio_secret not in item for command, _ in runner.calls for item in command)

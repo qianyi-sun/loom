@@ -318,6 +318,11 @@ allows only bucket location/versioning and list/version-list operations for the
 two execution buckets, while the TokenRequest permits port-forward only to the
 exact MinIO and PostgreSQL pods. Credentials and object keys never enter DAG
 evidence.
+The root installer converges that list-only identity through the exact MinIO
+pod and must invoke `kubectl exec --stdin`: the generated access and secret are
+delivered only on stdin, never argv, environment, logs, or evidence. A missing
+stdin-forwarding flag fails before policy publication and is a preflight
+coverage defect, not a retryable rollout failure.
 
 Lease eligibility is an admission decision, not a requirement that a reusable
 lease already exist. An exact, fresh, restore-verified active lease selects

@@ -525,6 +525,7 @@ class PreflightCredentialInstaller:
             "--namespace",
             "loom-staging",
             "exec",
+            "--stdin",
             "pod/loom-minio-0",
             "--",
             "/bin/sh",
