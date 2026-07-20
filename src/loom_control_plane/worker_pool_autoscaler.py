@@ -1022,7 +1022,7 @@ def _slurm_config_from_policy(
         ),
         exclusive=_optional_bool(actor_config.get("exclusive"), default=True),
         slurm_account=str(actor_config.get("slurm_account") or ""),
-        slurm_qos=str(actor_config.get("slurm_qos") or actor_config.get("qos_normal") or ""),
+        slurm_qos=str(actor_config.get("qos_normal") or actor_config.get("slurm_qos") or ""),
         slurm_reservation=str(actor_config.get("slurm_reservation") or ""),
         sinfo_path=str(actor_config.get("sinfo_path") or "sinfo"),
         resource_aware=resource_aware,
@@ -1241,18 +1241,15 @@ async def _apply_slurm_scale_up(
         )
     actor_config = dict(row.actuator_config or {})
     active_plus_pending = decision.actual_slots + decision.pending_slots
-    selected_qos = select_slurm_qos(
-        active_plus_pending=active_plus_pending,
-        min_slots=row.min_slots,
-        qos_boost=str(actor_config.get("qos_boost") or ""),
-        qos_normal=str(actor_config.get("slurm_qos") or actor_config.get("qos_normal") or ""),
-    )
-    if selected_qos != config.slurm_qos:
-        config = replace(config, slurm_qos=selected_qos)
-    # Stateful budget clamp: submissions must never push the pool's committed
-    # slot sum past ``max_slots``. ``slurm_submission_config_for_node`` has
-    # already applied any resource-aware ``safe_slots``, so the effective
-    # per-worker concurrency clamped here is the safe cap, not the raw request.
+    qos_boost_value = str(actor_config.get("qos_boost") or "")
+    # Contract: qos_normal is primary; legacy slurm_qos is only the fallback.
+    qos_normal_value = str(actor_config.get("qos_normal") or actor_config.get("slurm_qos") or "")
+    # Stateful budget clamp + PER-SUBMISSION QoS. Submissions must never push the
+    # pool's committed slot sum past ``max_slots``. QoS is chosen per submission
+    # from the committed slot sum at the moment each job enters the pool, so a
+    # reconcile that starts below ``min_slots`` and crosses it mid-loop gives the
+    # boost QoS only to the jobs submitted while still below the floor.
+    committed_slots = active_plus_pending
     remaining_budget = row.max_slots - active_plus_pending
     actuator_error: str | None = None
     for node in slurm_decision.submit_nodes:
@@ -1267,6 +1264,12 @@ async def _apply_slurm_scale_up(
         per_worker = min(effective_concurrency, remaining_budget)
         if per_worker <= 0:
             break
+        submission_qos = select_slurm_qos(
+            active_plus_pending=committed_slots,
+            min_slots=row.min_slots,
+            qos_boost=qos_boost_value,
+            qos_normal=qos_normal_value,
+        )
         if per_worker < effective_concurrency:
             # Scale CPU/memory proportionally from the effective pre-clamp
             # request, NOT from the independent per-slot defaults: a
@@ -1289,7 +1292,10 @@ async def _apply_slurm_scale_up(
                     ),
                 ),
             )
+        if submission_qos != node_config.slurm_qos:
+            node_config = replace(node_config, slurm_qos=submission_qos)
         remaining_budget -= per_worker
+        committed_slots += per_worker
         try:
             job_id = await runner.submit_worker(node=node, config=node_config)
             await record_slurm_worker_job(
