@@ -1,8 +1,8 @@
 """Exact one-time adoption plan for recognized staging manifest field owners.
 
 The normal protected apply contract never forces conflicts.  This module owns
-the narrower maintenance exception needed to migrate four recognized legacy
-resources to that manager without changing their live specification.  It
+the narrower maintenance exception needed to migrate rendered resources from
+recognized legacy managers without changing their live specification.  It
 projects only fields already present in the live object and copies their live
 values, so a force-conflicts dry-run must prove a semantic no-op before any
 managed-field adoption can be authorized.
@@ -37,20 +37,17 @@ _ALLOWED_MANAGERS = frozenset(
         "kube-controller-manager",
         "kubectl-client-side-apply",
         "kubectl-patch",
+        "kubectl-rollout",
         "loom-lifecycle-bootstrap",
+        "nginx-ingress-controller",
     }
 )
-OWNERSHIP_TARGETS = (
-    "batch/v1|CronJob|loom-staging|loom-staging-data-lifecycle",
+NETWORK_POLICY_CONVERGENCE_TARGETS = (
     "networking.k8s.io/v1|NetworkPolicy|loom-staging|loom-minio",
     "networking.k8s.io/v1|NetworkPolicy|loom-staging|loom-postgres",
     "networking.k8s.io/v1|NetworkPolicy|loom-staging|loom-staging-data-lifecycle",
 )
-_TARGETS = frozenset(
-    {
-        *OWNERSHIP_TARGETS,
-    }
-)
+_CONTROLLER_ONLY_MANAGERS = frozenset({"kube-controller-manager", "nginx-ingress-controller"})
 
 
 class ManifestOwnershipAdoptionError(RuntimeError):
@@ -62,7 +59,7 @@ class AdoptionResource:
     identity: str
     uid: str
     resource_version: str
-    generation: int
+    generation: int | None
     live_sha256: str
     managed_fields_sha256: str
     desired_sha256: str
@@ -79,10 +76,12 @@ class AdoptionResource:
         if (
             not isinstance(desired, dict)
             or not isinstance(overlay, dict)
-            or self.identity not in _TARGETS
             or not self.uid
             or not self.resource_version.isdigit()
-            or self.generation < 1
+            or (
+                self.generation is not None
+                and (type(self.generation) is not int or self.generation < 1)
+            )
             or any(
                 _SHA256_RE.fullmatch(value) is None
                 for value in (
@@ -131,7 +130,9 @@ class ManifestOwnershipAdoptionPlan:
             or _SHA_RE.fullmatch(self.candidate_tree) is None
             or _SHA256_RE.fullmatch(self.rendered_manifest_sha256) is None
             or self.mutation_epoch < 0
-            or tuple(item.identity for item in self.resources) != tuple(sorted(_TARGETS))
+            or not 1 <= len(self.resources) <= 512
+            or tuple(item.identity for item in self.resources)
+            != tuple(sorted({item.identity for item in self.resources}))
             or _SHA256_RE.fullmatch(self.plan_sha256) is None
             or self.plan_sha256 != _plan_digest(self)
         ):
@@ -151,7 +152,7 @@ def build_manifest_ownership_adoption_plan(
     candidate_tree: str,
     mutation_epoch: int,
 ) -> ManifestOwnershipAdoptionPlan:
-    """Build one exact semantic-no-op adoption plan for the fixed resources."""
+    """Build one exact semantic-no-op adoption plan for existing rendered resources."""
     if (
         _SHA_RE.fullmatch(candidate_sha) is None
         or _SHA_RE.fullmatch(candidate_tree) is None
@@ -160,11 +161,11 @@ def build_manifest_ownership_adoption_plan(
         raise ManifestOwnershipAdoptionError("ownership adoption identity is invalid")
     desired = _documents_by_identity(artifact.rendered_yaml, namespace="loom-staging")
     live = _resources_by_identity(live_resources, namespace="loom-staging")
-    if not _TARGETS <= set(desired) or set(live) != _TARGETS:
+    if not live or not set(live) <= set(desired):
         raise ManifestOwnershipAdoptionError("ownership adoption resource set is incomplete")
 
     resources: list[AdoptionResource] = []
-    for identity in sorted(_TARGETS):
+    for identity in sorted(live):
         desired_resource = desired[identity]
         live_resource = live[identity]
         metadata = _mapping(live_resource.get("metadata"), label="live metadata")
@@ -177,8 +178,7 @@ def build_manifest_ownership_adoption_plan(
             or not uid
             or not isinstance(resource_version, str)
             or not resource_version.isdigit()
-            or type(generation) is not int
-            or generation < 1
+            or (generation is not None and (type(generation) is not int or generation < 1))
             or not isinstance(managed_fields, list)
             or not managed_fields
         ):
@@ -226,7 +226,8 @@ def verify_ownership_adoption_dry_run(
     """Prove the force-conflicts adoption changes no protected live spec."""
     live = _resources_by_identity(live_resources, namespace="loom-staging")
     dry_run = _resources_by_identity(dry_run_resources, namespace="loom-staging")
-    if set(live) != _TARGETS or set(dry_run) != _TARGETS:
+    targets = {resource.identity for resource in plan.resources}
+    if set(live) != targets or set(dry_run) != targets:
         raise ManifestOwnershipAdoptionError("ownership dry-run resource set drifted")
     for resource in plan.resources:
         observed = live[resource.identity]
@@ -247,7 +248,7 @@ def verify_ownership_adoption_dry_run(
         {
             "dry_run": {
                 identity: ownership_semantic_state(dry_run[identity])
-                for identity in sorted(_TARGETS)
+                for identity in sorted(targets)
             },
             "plan_sha256": plan.plan_sha256,
             "version": "v1",
@@ -303,21 +304,31 @@ def _build_overlay(
         raise ManifestOwnershipAdoptionError("live ownership precondition is incomplete")
     metadata: dict[str, object] = {
         "name": name,
-        "namespace": namespace,
         "resourceVersion": live_resource_version,
         "uid": live_uid,
     }
+    if namespace:
+        metadata["namespace"] = namespace
     for key in ("labels", "annotations"):
         if key in desired_metadata and key in live_metadata:
             projected = _project(desired_metadata[key], live_metadata[key])
             if projected is not _MISSING:
                 metadata[key] = projected
-    desired_spec = _mapping(desired.get("spec"), label="desired spec")
-    live_spec = _mapping(live.get("spec"), label="live spec")
-    projected_spec = _project(desired_spec, live_spec)
-    if not isinstance(projected_spec, dict) or not projected_spec:
+    projected_body: dict[str, object] = {}
+    for key in sorted(desired):
+        if key in {"apiVersion", "kind", "metadata", "status"} or key not in live:
+            continue
+        projected = _project(desired[key], live[key])
+        if projected is not _MISSING:
+            projected_body[key] = projected
+    if not projected_body:
         raise ManifestOwnershipAdoptionError("ownership adoption overlay is empty")
     if kind == "NetworkPolicy":
+        desired_spec = _mapping(desired.get("spec"), label="desired spec")
+        live_spec = _mapping(live.get("spec"), label="live spec")
+        projected_spec = projected_body.get("spec")
+        if not isinstance(projected_spec, dict):
+            raise ManifestOwnershipAdoptionError("ownership adoption overlay is empty")
         for field in ("egress", "ingress"):
             if (
                 desired_spec.get(field) == []
@@ -329,7 +340,7 @@ def _build_overlay(
         "apiVersion": api_version,
         "kind": kind,
         "metadata": metadata,
-        "spec": projected_spec,
+        **projected_body,
     }
     if desired.get("apiVersion") != api_version or desired.get("kind") != kind:
         raise ManifestOwnershipAdoptionError("desired ownership identity drifted")
@@ -419,8 +430,14 @@ def _validate_managed_fields(fields: list[object]) -> None:
         ):
             raise ManifestOwnershipAdoptionError("managed-field authority is unrecognized")
         managers.add(manager)
-    if not managers - {"kube-controller-manager"}:
+    if not managers - _CONTROLLER_ONLY_MANAGERS:
         raise ManifestOwnershipAdoptionError("recognized managed-field authority is absent")
+
+
+def ownership_manifest_identities(rendered_yaml: str, *, namespace: str) -> tuple[str, ...]:
+    """Return exact sorted rendered identities for maintenance live reads."""
+
+    return tuple(sorted(_documents_by_identity(rendered_yaml, namespace=namespace)))
 
 
 def _documents_by_identity(rendered_yaml: str, *, namespace: str) -> dict[str, dict[str, object]]:
@@ -448,7 +465,13 @@ def _resources_by_identity(
         api_version = resource.get("apiVersion")
         kind = resource.get("kind")
         name = metadata.get("name")
-        resource_namespace = metadata.get("namespace", namespace)
+        declared_namespace = metadata.get("namespace")
+        if declared_namespace is None:
+            resource_namespace: str | None = ""
+        elif declared_namespace == namespace:
+            resource_namespace = namespace
+        else:
+            resource_namespace = None
         if (
             not isinstance(api_version, str)
             or not api_version
@@ -456,10 +479,10 @@ def _resources_by_identity(
             or not kind
             or not isinstance(name, str)
             or _DNS_RE.fullmatch(name) is None
-            or resource_namespace != namespace
+            or resource_namespace is None
         ):
             raise ManifestOwnershipAdoptionError("ownership resource identity is invalid")
-        identity = f"{api_version}|{kind}|{namespace}|{name}"
+        identity = f"{api_version}|{kind}|{resource_namespace}|{name}"
         if identity in indexed:
             raise ManifestOwnershipAdoptionError("ownership resource identity is duplicated")
         indexed[identity] = resource
@@ -472,7 +495,7 @@ def _resource_identity(resource: Mapping[str, object]) -> str:
         return ""
     return (
         f"{resource.get('apiVersion')}|{resource.get('kind')}|"
-        f"{metadata.get('namespace')}|{metadata.get('name')}"
+        f"{metadata.get('namespace') or ''}|{metadata.get('name')}"
     )
 
 
@@ -491,7 +514,10 @@ def _canonical_live(resource: Mapping[str, object]) -> dict[str, object]:
 def ownership_semantic_state(resource: Mapping[str, object]) -> dict[str, object]:
     """Return the single canonical semantic state for ownership convergence."""
     metadata = _mapping(resource.get("metadata"), label="semantic metadata")
-    spec = copy.deepcopy(resource.get("spec"))
+    body = copy.deepcopy(dict(resource))
+    for key in ("apiVersion", "kind", "metadata", "status"):
+        body.pop(key, None)
+    spec = body.get("spec")
     if resource.get("kind") == "NetworkPolicy" and isinstance(spec, dict):
         policy_types = spec.get("policyTypes")
         if isinstance(policy_types, list):
@@ -508,7 +534,7 @@ def ownership_semantic_state(resource: Mapping[str, object]) -> dict[str, object
             "name": metadata.get("name"),
             "namespace": metadata.get("namespace"),
         },
-        "spec": spec,
+        "body": body,
     }
 
 
@@ -553,12 +579,13 @@ def _hash_json(value: object) -> str:
 
 
 __all__ = [
-    "OWNERSHIP_TARGETS",
+    "NETWORK_POLICY_CONVERGENCE_TARGETS",
     "AdoptionResource",
     "ManifestOwnershipAdoptionError",
     "ManifestOwnershipAdoptionPlan",
     "build_manifest_ownership_adoption_plan",
     "ownership_adoption_argv",
+    "ownership_manifest_identities",
     "ownership_semantic_state",
     "verify_ownership_adoption_dry_run",
 ]

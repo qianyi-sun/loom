@@ -14,6 +14,7 @@ from typing import Protocol, cast
 import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.manifest_ownership_adoption import (
+    NETWORK_POLICY_CONVERGENCE_TARGETS,
     ManifestOwnershipAdoptionError,
     ManifestOwnershipAdoptionPlan,
     build_manifest_ownership_adoption_plan,
@@ -311,7 +312,9 @@ class ManifestOwnershipOperator:
 
 def _network_policy_yaml(plan: ManifestOwnershipAdoptionPlan) -> str:
     documents = [
-        dict(item.desired) for item in plan.resources if "|NetworkPolicy|" in item.identity
+        dict(item.desired)
+        for item in plan.resources
+        if item.identity in NETWORK_POLICY_CONVERGENCE_TARGETS
     ]
     if len(documents) != 3:
         raise ManifestOwnershipAdoptionError("network policy convergence set is invalid")
@@ -326,7 +329,7 @@ def _verify_post_apply_live(
     observed = {_identity(item): ownership_semantic_state(item) for item in live_resources}
     expected: dict[str, dict[str, object]] = {}
     for resource in inventory.plan.resources:
-        if "|NetworkPolicy|" in resource.identity:
+        if resource.identity in NETWORK_POLICY_CONVERGENCE_TARGETS:
             expected[resource.identity] = ownership_semantic_state(resource.desired)
         else:
             source = next(
@@ -359,7 +362,10 @@ def _identity(resource: Mapping[str, object]) -> str:
     metadata = resource.get("metadata")
     if not isinstance(metadata, dict):
         raise ManifestOwnershipAdoptionError("ownership operation identity is invalid")
-    return f"{resource.get('apiVersion')}|{resource.get('kind')}|{metadata.get('namespace')}|{metadata.get('name')}"
+    return (
+        f"{resource.get('apiVersion')}|{resource.get('kind')}|"
+        f"{metadata.get('namespace') or ''}|{metadata.get('name')}"
+    )
 
 
 def _hash_json(value: object) -> str:

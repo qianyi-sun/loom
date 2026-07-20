@@ -11,8 +11,8 @@ from typing import cast
 import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.manifest_ownership_adoption import (
-    OWNERSHIP_TARGETS,
     ownership_adoption_argv,
+    ownership_manifest_identities,
 )
 from loom_cli.rollout.manifest_ownership_journal import ManifestOwnershipJournal
 from loom_cli.rollout.manifest_ownership_operator import ManifestOwnershipOperator
@@ -97,30 +97,33 @@ class InstalledManifestOwnershipService:
 
         def load_live() -> tuple[Resource, ...]:
             resources: list[Resource] = []
-            for identity in OWNERSHIP_TARGETS:
+            for identity in ownership_manifest_identities(
+                artifacts.manifests.rendered_yaml,
+                namespace=self.config.namespace,
+            ):
                 _api_version, kind, namespace, name = identity.split("|", 3)
-                if namespace != self.config.namespace:
+                if namespace not in {"", self.config.namespace}:
                     raise ValueError("ownership maintenance target namespace drifted")
-                resources.append(
-                    _decode_resource(
-                        runner.capture_stdout(
-                            [
-                                "kubectl",
-                                "--kubeconfig",
-                                str(self.config.kubeconfig_path),
-                                "--namespace",
-                                self.config.namespace,
-                                "get",
-                                f"{kind.lower()}/{name}",
-                                "--show-managed-fields=true",
-                                "--output=json",
-                                "--request-timeout=60s",
-                            ],
-                            env=environment,
-                            timeout_seconds=60,
-                        )
+                argv = ["kubectl", "--kubeconfig", str(self.config.kubeconfig_path)]
+                if namespace:
+                    argv.extend(("--namespace", namespace))
+                argv.extend(
+                    (
+                        "get",
+                        f"{kind.lower()}/{name}",
+                        "--ignore-not-found=true",
+                        "--show-managed-fields=true",
+                        "--output=json",
+                        "--request-timeout=60s",
                     )
                 )
+                payload = runner.capture_stdout(
+                    argv,
+                    env=environment,
+                    timeout_seconds=60,
+                )
+                if payload.strip():
+                    resources.append(_decode_resource(payload))
             return tuple(resources)
 
         def action(payload: str, *, force: bool, dry_run: bool) -> tuple[Resource, ...]:

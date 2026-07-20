@@ -49,6 +49,12 @@ def _desired() -> list[dict[str, object]]:
                 "loom-staging-data-lifecycle",
             )
         ],
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "loom-settings", "namespace": "loom-staging"},
+            "data": {"mode": "candidate"},
+        },
     ]
 
 
@@ -57,7 +63,7 @@ def _artifact() -> ManifestArtifact:
     return ManifestArtifact(
         rendered_yaml=rendered,
         rendered_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
-        resource_count=4,
+        resource_count=5,
         resource_set_digest="3" * 64,
         image_identities={"loom-control-plane": "sha256:" + "4" * 64},
         artifact_digest="5" * 64,
@@ -91,10 +97,15 @@ def _live() -> list[dict[str, object]]:
     cron = live[0]["spec"]
     assert isinstance(cron, dict)
     cron["suspend"] = True
-    for item in live[1:]:
+    for item in live:
+        if item["kind"] != "NetworkPolicy":
+            continue
         spec = item["spec"]
         assert isinstance(spec, dict)
         spec.pop("ingress")
+    config_data = live[-1]["data"]
+    assert isinstance(config_data, dict)
+    config_data["mode"] = "live"
     return live
 
 
@@ -137,7 +148,7 @@ class _Harness:
 
     def force_dry_run(self, payload: str):
         self.calls.append("force-dry-run")
-        assert len(tuple(yaml.safe_load_all(payload))) == 4
+        assert len(tuple(yaml.safe_load_all(payload))) == 5
         return copy.deepcopy(self.live)
 
     def force_apply(self, payload: str):
@@ -217,7 +228,7 @@ def test_inventory_is_immutable_and_apply_is_journaled() -> None:
     assert isinstance(cron, dict)
     assert cron["suspend"] is True
     assert "no-force-apply:3" in harness.calls
-    assert "no-force-dry-run:4" in harness.calls
+    assert "no-force-dry-run:5" in harness.calls
 
 
 def test_inventory_digest_drift_blocks_before_epoch_or_mutation() -> None:

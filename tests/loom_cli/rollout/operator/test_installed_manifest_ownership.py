@@ -93,6 +93,12 @@ def _desired() -> list[dict[str, object]]:
                 "loom-staging-data-lifecycle",
             )
         ],
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {"name": "loom-staging-data"},
+            "spec": {"capacity": {"storage": "20Gi"}},
+        },
     ]
 
 
@@ -105,7 +111,6 @@ def _live() -> list[dict[str, object]]:
             {
                 "uid": f"uid-{index}",
                 "resourceVersion": str(index),
-                "generation": index,
                 "managedFields": [
                     {
                         "manager": "loom-lifecycle-bootstrap",
@@ -115,10 +120,12 @@ def _live() -> list[dict[str, object]]:
                 ],
             }
         )
+        if resource["kind"] != "PersistentVolume":
+            metadata["generation"] = index
     cron = resources[0]["spec"]
     assert isinstance(cron, dict)
     cron["suspend"] = True
-    for policy in resources[1:]:
+    for policy in resources[1:4]:
         spec = policy["spec"]
         assert isinstance(spec, dict)
         spec.pop("ingress")
@@ -130,7 +137,7 @@ def _artifact() -> ManifestArtifact:
     return ManifestArtifact(
         rendered_yaml=rendered,
         rendered_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
-        resource_count=4,
+        resource_count=5,
         resource_set_digest="d" * 64,
         image_identities={"loom-control-plane": "sha256:" + "e" * 64},
         artifact_digest="f" * 64,

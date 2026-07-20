@@ -255,6 +255,76 @@ def test_plan_accepts_exact_partially_adopted_state_for_new_request() -> None:
     assert len(plan.resources) == 4
 
 
+def test_plan_covers_namespaced_and_cluster_scoped_rendered_resources() -> None:
+    desired = _desired()
+    desired.extend(
+        (
+            {
+                "apiVersion": "v1",
+                "kind": "PersistentVolume",
+                "metadata": {"name": "loom-staging-data"},
+                "spec": {"capacity": {"storage": "20Gi"}},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "loom-settings", "namespace": "loom-staging"},
+                "data": {"mode": "candidate"},
+            },
+        )
+    )
+    rendered = yaml.safe_dump_all(desired, sort_keys=True)
+    artifact = ManifestArtifact(
+        rendered_yaml=rendered,
+        rendered_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
+        resource_count=6,
+        resource_set_digest="3" * 64,
+        image_identities={"loom-control-plane": "sha256:" + "4" * 64},
+        artifact_digest="5" * 64,
+    )
+    live = _live()
+    for index, resource in enumerate(copy.deepcopy(desired[-2:]), start=10):
+        metadata = resource["metadata"]
+        assert isinstance(metadata, dict)
+        metadata.update(
+            {
+                "uid": f"uid-{index}",
+                "resourceVersion": str(100 + index),
+                "managedFields": _managed_fields("kubectl-client-side-apply"),
+            }
+        )
+        live.append(resource)
+    config_data = live[-1]["data"]
+    assert isinstance(config_data, dict)
+    config_data["mode"] = "live"
+
+    plan = build_manifest_ownership_adoption_plan(
+        artifact=artifact,
+        live_resources=live,
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        mutation_epoch=4,
+    )
+
+    assert len(plan.resources) == 6
+    by_identity = {item.identity: item for item in plan.resources}
+    pv = by_identity["v1|PersistentVolume||loom-staging-data"]
+    assert pv.generation is None
+    assert "namespace" not in pv.overlay["metadata"]  # type: ignore[operator]
+    config = by_identity["v1|ConfigMap|loom-staging|loom-settings"]
+    assert config.overlay["data"] == {"mode": "live"}
+    assert (
+        len(
+            verify_ownership_adoption_dry_run(
+                plan,
+                live_resources=live,
+                dry_run_resources=copy.deepcopy(live),
+            )
+        )
+        == 64
+    )
+
+
 def test_plan_rejects_controller_only_managed_state() -> None:
     live = _live()
     live[1]["metadata"]["managedFields"] = _managed_fields("kube-controller-manager")  # type: ignore[index]

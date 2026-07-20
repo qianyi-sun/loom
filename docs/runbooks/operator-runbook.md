@@ -1495,9 +1495,12 @@ ordinary `start` fail closed while the bounded maintenance subcommand remains
 available. A normal host `check` reports `maintenance-marker` until the window
 is explicitly closed.
 
-Review its candidate/tree, epoch, four UID/resourceVersion/generation records,
-live/managed-fields/desired/overlay digests, and `inventory_sha256`. Only then
-use a new bounded maintenance request ID and repeat that exact digest:
+Review its candidate/tree, epoch, complete existing rendered-resource set,
+UID/resourceVersion and optional generation records, live/managed-fields/
+desired/overlay digests, and `inventory_sha256`. Cluster-scoped resources use
+an empty namespace identity; not-yet-created candidate resources are excluded
+from adoption and remain owned by the normal protected apply. Only then use a
+new bounded maintenance request ID and repeat that exact digest:
 
 ```bash
 loom-staging-rollout manifest-ownership apply \
@@ -1544,12 +1547,14 @@ is also excluded from that semantic comparison because it is client-side
 bookkeeping and server dry-run may omit it. Every other annotation remains
 protected and must match.
 
-If a request claims the epoch and adopts only part of the four-resource set
+If a request claims the epoch and adopts only part of the rendered resource set
 before failing, preserve that request and use a new request only after a new
-inventory. The inventory accepts each target when it is still held by a
-recognized legacy manager or is already held by `loom-staging-rollout`, which
-allows exact partial-state convergence. Unknown managers and controller-only
-ownership remain fail-closed.
+inventory. The inventory accepts each existing rendered target when it is
+still held by a recognized legacy manager or is already held by
+`loom-staging-rollout`, which allows exact partial-state convergence. The same
+plan covers spec-bearing resources and top-level authorities such as ConfigMap
+`data`; its force dry-run must prove a semantic no-op for every target before
+mutation. Unknown managers and controller-only ownership remain fail-closed.
 
 After the exact post-readback and final no-force dry-run succeed, close the
 window through the same installed source; the command refuses if any rollout
