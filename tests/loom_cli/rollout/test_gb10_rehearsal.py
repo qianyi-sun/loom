@@ -12,6 +12,7 @@ from loom_cli.rollout.gb10_readiness import ACTIVE_GB10_HOSTS
 from loom_cli.rollout.gb10_rehearsal import (
     FixedGB10RehearsalTransport,
     GB10RehearsalAuthority,
+    _remote_source,
 )
 from loom_cli.rollout.systemd_readiness import RehearsalSystemdActivation
 
@@ -115,6 +116,17 @@ def test_execute_uses_only_fixed_ssh_and_isolated_unit_on_all_hosts(
     assert "loom-gb10-node-agent" not in commands
     assert "loom-staging-rollout.service" not in commands
     assert "sudo" not in commands
+
+
+def test_remote_activation_uses_exit_status_and_exact_readback_not_warning_text() -> None:
+    """User systemd may warn while successfully creating the exact unit."""
+
+    source = _remote_source(_contract(), mode="execute")
+
+    assert "if result.returncode != 0:" in source
+    assert "if result.returncode != 0 or result.stderr:" not in source
+    assert "properties = show() or {}" in source
+    compile(source, "<gb10-rehearsal>", "exec")
 
 
 def test_execute_aggregates_independent_host_blockers(

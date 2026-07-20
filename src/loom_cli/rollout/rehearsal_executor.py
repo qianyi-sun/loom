@@ -1620,7 +1620,6 @@ def _database_pod_matches(
     expected_labels = expected_metadata["labels"]
     exact_spec_fields = (
         "automountServiceAccountToken",
-        "containers",
         "enableServiceLinks",
         "restartPolicy",
         "securityContext",
@@ -1628,6 +1627,18 @@ def _database_pod_matches(
         "terminationGracePeriodSeconds",
         "volumes",
     )
+    expected_containers = expected_spec["containers"]
+    if not isinstance(expected_containers, list):  # pragma: no cover - local manifest contract
+        return False
+    observed_containers = [
+        {
+            **container,
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+        }
+        for container in expected_containers
+        if isinstance(container, dict)
+    ]
     if not (
         metadata.get("name") == expected_metadata["name"]
         and metadata.get("namespace") == expected_metadata["namespace"]
@@ -1637,6 +1648,8 @@ def _database_pod_matches(
         and isinstance(expected_labels, dict)
         and all(annotations.get(key) == item for key, item in expected_annotations.items())
         and all(labels.get(key) == item for key, item in expected_labels.items())
+        and len(observed_containers) == len(expected_containers)
+        and spec.get("containers") == observed_containers
         and all(spec.get(key) == expected_spec[key] for key in exact_spec_fields)
     ):
         return False

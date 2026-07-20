@@ -289,6 +289,9 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
             return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
         if payload is not None:
             pod = json.loads(payload)
+            for container in pod["spec"]["containers"]:
+                container["terminationMessagePath"] = "/dev/termination-log"
+                container["terminationMessagePolicy"] = "File"
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
         if "wait" in argv:
             return subprocess.CompletedProcess(argv, 0, "ready\n", "")
@@ -343,6 +346,9 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     assert streams[0][2] == 1800
     manifest_call = next(call for call in calls if call[1] is not None)
     manifest = json.loads(manifest_call[1] or b"{}")
+    for container in manifest["spec"]["containers"]:
+        env_names = [item["name"] for item in container.get("env", [])]
+        assert len(env_names) == len(set(env_names))
     assert manifest["spec"]["automountServiceAccountToken"] is False
     assert manifest["spec"]["containers"][0]["imagePullPolicy"] == "Never"
     assert manifest["spec"]["containers"][0]["securityContext"] == {
@@ -352,6 +358,28 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     }
     assert manifest["spec"]["containers"][1]["image"] == ("loom-control-plane:" + plan.image_tag)
     assert manifest["spec"]["containers"][1]["command"] == ["/bin/sleep", "infinity"]
+
+
+def test_database_rejects_unclassified_server_default_drift() -> None:
+    plan = _plan()
+
+    def run(argv, payload, _timeout):
+        if tuple(argv[:3]) == ("docker", "image", "inspect"):
+            name = argv[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if tuple(argv[:3]) == ("kind", "load", "docker-image"):
+            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+        if payload is not None:
+            pod = json.loads(payload)
+            for container in pod["spec"]["containers"]:
+                container["terminationMessagePath"] = "/dev/termination-log"
+                container["terminationMessagePolicy"] = "File"
+            pod["spec"]["containers"][0]["unexpectedDefault"] = True
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        raise AssertionError("drifted apply response must stop before restore")
+
+    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.db-clone", plan)
+    assert outcome.blockers == {"database": "pod-apply-failed"}
 
 
 def test_plan_rejects_missing_exact_image_before_executor() -> None:

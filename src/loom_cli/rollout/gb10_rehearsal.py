@@ -401,7 +401,7 @@ try:
         started = time.monotonic()
         result = run({start_argv!r}, 30)
         latency_ms = max(0, round((time.monotonic() - started) * 1000))
-        if result.returncode != 0 or result.stderr:
+        if result.returncode != 0:
             reason = "activation-failed"
         else:
             properties = show() or {{}}

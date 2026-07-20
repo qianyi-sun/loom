@@ -484,6 +484,13 @@ evidence digest, removes the unit immediately on every remote host, and records
 that cleanup in the rehearsal journal. Any inaccessible or identity-drifted
 unit blocks the rehearsal; protected node-agent services and timers are never
 activated by this check.
+Successful transient activation is determined by the command exit status and
+the exact post-start unit properties, not by the mere presence of bounded
+systemd warning text. This preserves fail-closed identity and cleanup checks
+without misclassifying a non-root firewall warning after the unit has actually
+started and converged. Kubernetes rehearsal manifests likewise match the exact
+declared pod fields plus the fixed API-server termination-message defaults;
+unknown defaulting or desired-state drift still fails before restore.
 
 `RehearsalActionSource` is the sole plan and resource-name authority for these
 actions. Its identity factory and action factory consume the same checkpoint,
