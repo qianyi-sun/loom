@@ -139,6 +139,14 @@ concurrent row or metadata change rolls the whole operation back. This
 classification step authorizes later inventory; it does not itself delete any
 DB row or object.
 
+An explicitly authorized one-time staging reset may additionally provide
+`--expire-created-before <timezone-aware timestamp>`. The cutoff is included in
+the inventory digest and authority metadata; only unpinned legacy owners
+created before that exact instant receive an expiry no later than the cutoff.
+Without this argument the normal seven-day TTL is unchanged. Classification
+still performs no deletion, and durable benchmark/catalog/bootstrap/system
+authorities remain pinned regardless of the cutoff.
+
 The installed preflight database role has SELECT authority over these five
 execution-history tables in addition to the small control-plane baseline. It
 still has no TEMP, schema CREATE, write, sequence, secret, token, or provider

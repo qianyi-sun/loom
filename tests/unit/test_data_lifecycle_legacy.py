@@ -183,6 +183,7 @@ def test_verified_absent_object_is_digest_bound_and_applicable() -> None:
     assert first.absent_objects == (_absent_object(),)
     document = classification_plan_document(first)
     assert document["objects"] == []
+    assert document["expire_created_before"] is None
     assert document["absent_objects"] == [
         {
             "row_table": "artifacts",
@@ -193,6 +194,43 @@ def test_verified_absent_object_is_digest_bound_and_applicable() -> None:
             "created_at": NOW.isoformat(),
         }
     ]
+
+
+def test_explicit_legacy_cutoff_is_digest_bound_without_changing_default_ttl() -> None:
+    cutoff = NOW + timedelta(hours=1)
+    default_plan = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        planned_at=NOW,
+        rows=[_artifact()],
+        objects=[_object()],
+    )
+    purge_plan = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        planned_at=NOW,
+        rows=[_artifact()],
+        objects=[_object()],
+        expire_created_before=cutoff,
+    )
+
+    assert default_plan.authorities[0].expires_at == NOW + timedelta(days=7)
+    assert purge_plan.authorities[0].expires_at == cutoff
+    assert purge_plan.expire_created_before == cutoff
+    assert purge_plan.inventory_digest != default_plan.inventory_digest
+    assert classification_plan_document(purge_plan)["expire_created_before"] == cutoff.isoformat()
+
+
+def test_legacy_cutoff_requires_timezone_authority() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_legacy_classification_plan(
+            scope=SCOPE,
+            mutation_epoch=7,
+            planned_at=NOW,
+            rows=[_artifact()],
+            objects=[_object()],
+            expire_created_before=datetime(2026, 7, 20),
+        )
 
 
 def test_pinned_legacy_object_is_registered_without_gc_expiry() -> None:

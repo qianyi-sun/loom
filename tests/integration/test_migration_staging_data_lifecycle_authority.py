@@ -691,6 +691,7 @@ def test_legacy_absent_object_is_bound_as_explicit_authority_evidence(
         assert authority.pinned is False
         assert authority.metadata == {
             "classification": "legacy-staging-v1",
+            "expire_created_before": None,
             "inventory_digest": plan.inventory_digest,
             "object_state": "verified_absent",
         }

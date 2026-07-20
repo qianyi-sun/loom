@@ -147,6 +147,7 @@ class LegacyClassificationPlan:
     scope: GcScope
     mutation_epoch: int
     planned_at: datetime
+    expire_created_before: datetime | None
     authorities: tuple[LegacyAuthority, ...]
     rows: tuple[LegacyRow, ...]
     objects: tuple[LegacyObject, ...]
@@ -181,6 +182,7 @@ def _payload(
     scope: GcScope,
     mutation_epoch: int,
     planned_at: datetime,
+    expire_created_before: datetime | None,
     authorities: tuple[LegacyAuthority, ...],
     rows: tuple[LegacyRow, ...],
     objects: tuple[LegacyObject, ...],
@@ -193,6 +195,9 @@ def _payload(
         "namespace": scope.namespace,
         "mutation_epoch": mutation_epoch,
         "planned_at": planned_at.isoformat(),
+        "expire_created_before": (
+            expire_created_before.isoformat() if expire_created_before else None
+        ),
         "authorities": [
             {
                 "id": str(item.id),
@@ -256,6 +261,7 @@ def build_legacy_classification_plan(
     rows: Iterable[LegacyRow],
     objects: Iterable[LegacyObject],
     absent_objects: Iterable[LegacyAbsentObject] = (),
+    expire_created_before: datetime | None = None,
     additional_blockers: Iterable[str] = (),
 ) -> LegacyClassificationPlan:
     """Bind complete legacy evidence to one deterministic, reviewable digest."""
@@ -263,6 +269,10 @@ def build_legacy_classification_plan(
         raise ValueError("mutation_epoch must be non-negative")
     if planned_at.tzinfo is None or planned_at.utcoffset() is None:
         raise ValueError("planned_at must be timezone-aware")
+    if expire_created_before is not None and (
+        expire_created_before.tzinfo is None or expire_created_before.utcoffset() is None
+    ):
+        raise ValueError("legacy expiry cutoff must be timezone-aware")
 
     blockers = [value for value in additional_blockers if value]
     row_map: dict[tuple[str, UUID], LegacyRow] = {}
@@ -286,6 +296,14 @@ def build_legacy_classification_plan(
             blockers.append(f"legacy authority facts conflict for {row.owner_kind}/{row.owner_id}")
         else:
             created_at = min(existing.created_at, row.created_at) if existing else row.created_at
+            default_expiry = created_at + STAGING_EPHEMERAL_TTL
+            expires_at = None
+            if not row.pinned:
+                expires_at = (
+                    min(default_expiry, expire_created_before)
+                    if expire_created_before is not None and created_at < expire_created_before
+                    else default_expiry
+                )
             authority_specs[authority_id] = LegacyAuthority(
                 id=authority_id,
                 team_id=row.team_id,
@@ -293,7 +311,7 @@ def build_legacy_classification_plan(
                 owner_kind=row.owner_kind,
                 owner_id=row.owner_id,
                 created_at=created_at,
-                expires_at=None if row.pinned else created_at + STAGING_EPHEMERAL_TTL,
+                expires_at=expires_at,
                 pinned=row.pinned,
             )
         if row.table == "artifacts":
@@ -355,6 +373,7 @@ def build_legacy_classification_plan(
         scope=scope,
         mutation_epoch=mutation_epoch,
         planned_at=planned_at,
+        expire_created_before=expire_created_before,
         authorities=stable_authorities,
         rows=stable_rows,
         objects=stable_objects,
@@ -369,6 +388,7 @@ def build_legacy_classification_plan(
         scope=scope,
         mutation_epoch=mutation_epoch,
         planned_at=planned_at,
+        expire_created_before=expire_created_before,
         authorities=stable_authorities,
         rows=stable_rows,
         objects=stable_objects,
@@ -384,6 +404,7 @@ def classification_plan_document(plan: LegacyClassificationPlan) -> Mapping[str,
         scope=plan.scope,
         mutation_epoch=plan.mutation_epoch,
         planned_at=plan.planned_at,
+        expire_created_before=plan.expire_created_before,
         authorities=plan.authorities,
         rows=plan.rows,
         objects=plan.objects,

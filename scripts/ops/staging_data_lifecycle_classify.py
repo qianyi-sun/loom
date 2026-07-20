@@ -20,6 +20,13 @@ from loom.storage_credentials import build_s3_client
 from loom_control_plane.config import ControlPlaneSettings
 
 
+def _aware_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise argparse.ArgumentTypeError("legacy expiry cutoff must include a timezone")
+    return parsed
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("action", choices=("inventory", "apply"))
@@ -30,6 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifacts-bucket", required=True)
     parser.add_argument("--trajectories-bucket", required=True)
     parser.add_argument("--inspection-workers", type=int, default=32)
+    parser.add_argument("--expire-created-before", type=_aware_datetime)
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -86,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         plan = classifier.inventory(
             scope=GcScope(environment="staging", namespace=args.namespace),
             planned_at=now,
+            expire_created_before=args.expire_created_before,
         )
         document = dict(classification_plan_document(plan))
         document["action"] = args.action

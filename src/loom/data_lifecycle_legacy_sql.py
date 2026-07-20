@@ -454,13 +454,17 @@ def _apply_staged_plan(connection: Connection, plan: LegacyClassificationPlan) -
             "SELECT id,:environment,:namespace,team_id,data_class,owner_kind,owner_id,"
             "created_at,expires_at,pinned,'active',"
             "jsonb_build_object('classification','legacy-staging-v1',"
-            "'inventory_digest',CAST(:digest AS text),'object_state',object_state) "
+            "'inventory_digest',CAST(:digest AS text),'object_state',object_state,"
+            "'expire_created_before',CAST(:expire_created_before AS text)) "
             "FROM legacy_authority_plan ON CONFLICT DO NOTHING"
         ),
         {
             "environment": plan.scope.environment,
             "namespace": plan.scope.namespace,
             "digest": plan.inventory_digest,
+            "expire_created_before": (
+                plan.expire_created_before.isoformat() if plan.expire_created_before else None
+            ),
         },
     )
     exact_authorities = connection.execute(
@@ -473,12 +477,16 @@ def _apply_staged_plan(connection: Connection, plan: LegacyClassificationPlan) -
             "AND a.created_at=p.created_at AND a.expires_at IS NOT DISTINCT FROM p.expires_at "
             "AND a.pinned=p.pinned AND a.state='active' "
             "AND a.metadata=jsonb_build_object('classification','legacy-staging-v1',"
-            "'inventory_digest',CAST(:digest AS text),'object_state',p.object_state)"
+            "'inventory_digest',CAST(:digest AS text),'object_state',p.object_state,"
+            "'expire_created_before',CAST(:expire_created_before AS text))"
         ),
         {
             "environment": plan.scope.environment,
             "namespace": plan.scope.namespace,
             "digest": plan.inventory_digest,
+            "expire_created_before": (
+                plan.expire_created_before.isoformat() if plan.expire_created_before else None
+            ),
         },
     ).scalar_one()
     if exact_authorities != len(plan.authorities):
@@ -559,6 +567,7 @@ class SqlAlchemyLegacyClassifier:
         *,
         scope: GcScope,
         planned_at: datetime,
+        expire_created_before: datetime | None = None,
     ) -> LegacyClassificationPlan:
         blockers: list[str] = []
         objects: list[LegacyObject] = []
@@ -594,6 +603,7 @@ class SqlAlchemyLegacyClassifier:
             rows=rows,
             objects=objects,
             absent_objects=absent_objects,
+            expire_created_before=expire_created_before,
             additional_blockers=blockers,
         )
 
