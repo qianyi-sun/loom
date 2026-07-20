@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
@@ -19,7 +21,11 @@ from loom.data_lifecycle_legacy import (
     classification_plan_document,
 )
 from loom.data_lifecycle_legacy_s3 import S3LegacyObjectInspector
-from loom.data_lifecycle_legacy_sql import _artifact_object, _legacy_artifact_authority
+from loom.data_lifecycle_legacy_sql import (
+    _artifact_object,
+    _inspect_artifacts,
+    _legacy_artifact_authority,
+)
 
 NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
 SCOPE = GcScope(environment="staging", namespace="loom-staging")
@@ -361,7 +367,6 @@ def test_legacy_missing_object_is_explicit_absence_evidence() -> None:
         storage={"bucket": "artifacts", "key": "run/missing.json", "size_bytes": 0},
         content_hash="pending:legacy-unhashed",
     )
-
     observed = _artifact_object(
         _artifact(),
         source,
@@ -377,6 +382,71 @@ def test_legacy_missing_object_is_explicit_absence_evidence() -> None:
         version_id=None,
         created_at=NOW,
     )
+
+
+def test_legacy_inspection_is_bounded_parallel_and_collects_all_blockers() -> None:
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    class Inspector:
+        def inspect(self, *, object_key: str, **_kwargs: object):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.01)
+            with lock:
+                active -= 1
+            if object_key.endswith("missing.json"):
+                return None
+            if object_key.endswith("denied.json"):
+                raise LegacyClassificationError("legacy object authority denied")
+            return None, "f" * 64, 8192
+
+    artifacts: list[tuple[LegacyRow, SimpleNamespace]] = []
+    for number, suffix in enumerate(("one", "two", "missing", "denied"), start=10):
+        row_id = UUID(int=number)
+        artifacts.append(
+            (
+                LegacyRow(
+                    table="artifacts",
+                    row_id=row_id,
+                    team_id=TEAM_ID,
+                    data_class=DataClass.ARTIFACT,
+                    owner_kind=OwnerKind.ARTIFACT,
+                    owner_id=str(row_id),
+                    created_at=NOW,
+                    source_fingerprint=f"{number:x}" * 64,
+                ),
+                SimpleNamespace(
+                    storage={
+                        "bucket": "artifacts",
+                        "key": f"run/{suffix}.json",
+                        "size_bytes": 0,
+                    },
+                    content_hash="pending:legacy-unhashed",
+                ),
+            )
+        )
+
+    objects, absent, blockers = _inspect_artifacts(
+        artifacts,
+        Inspector(),
+        bucket_aliases={"artifacts": "loom-staging-artifacts"},
+        workers=2,
+    )
+
+    assert peak == 2
+    assert len(objects) == 2
+    assert [item.object_key for item in absent] == ["run/missing.json"]
+    assert blockers == ["legacy object authority denied"]
+
+
+@pytest.mark.parametrize("workers", (0, 65))
+def test_legacy_inspection_rejects_unbounded_worker_counts(workers: int) -> None:
+    with pytest.raises(ValueError, match="workers"):
+        _inspect_artifacts([], SimpleNamespace(), bucket_aliases={}, workers=workers)
 
 
 def test_legacy_bucket_alias_authority_rejects_unnormalized_values() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -285,6 +286,59 @@ def _artifact_object(
     )
 
 
+def _inspect_artifacts(
+    artifacts: Iterable[tuple[LegacyRow, Any]],
+    inspector: LegacyObjectInspector,
+    *,
+    bucket_aliases: Mapping[str, str],
+    workers: int,
+) -> tuple[list[LegacyObject], list[LegacyAbsentObject], list[str]]:
+    """Inspect a bounded number of exact objects concurrently and report every blocker."""
+    if not 1 <= workers <= 64:
+        raise ValueError("legacy inspection workers must be in [1, 64]")
+    iterator = iter(artifacts)
+    objects: list[LegacyObject] = []
+    absent_objects: list[LegacyAbsentObject] = []
+    blockers: list[str] = []
+
+    def inspect(item: tuple[LegacyRow, Any]) -> LegacyObject | LegacyAbsentObject:
+        row, source = item
+        return _artifact_object(
+            row,
+            source,
+            inspector,
+            bucket_aliases=bucket_aliases,
+        )
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="legacy-object") as pool:
+        pending: dict[Future[LegacyObject | LegacyAbsentObject], None] = {}
+
+        def fill() -> None:
+            while len(pending) < workers * 2:
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    return
+                pending[pool.submit(inspect, item)] = None
+
+        fill()
+        while pending:
+            completed, _remaining = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                del pending[future]
+                try:
+                    observation = future.result()
+                except LegacyClassificationError as exc:
+                    blockers.append(str(exc))
+                else:
+                    if isinstance(observation, LegacyAbsentObject):
+                        absent_objects.append(observation)
+                    else:
+                        objects.append(observation)
+            fill()
+    return objects, absent_objects, blockers
+
+
 class SqlAlchemyLegacyClassifier:
     """Inventory and apply exact legacy classification without prefix authority."""
 
@@ -294,6 +348,7 @@ class SqlAlchemyLegacyClassifier:
         inspector: LegacyObjectInspector,
         *,
         bucket_aliases: Mapping[str, str] | None = None,
+        inspection_workers: int = 1,
     ) -> None:
         self._engine = engine
         self._inspector = inspector
@@ -303,6 +358,9 @@ class SqlAlchemyLegacyClassifier:
             for key, value in self._bucket_aliases.items()
         ):
             raise ValueError("legacy bucket alias authority is invalid")
+        if not 1 <= inspection_workers <= 64:
+            raise ValueError("legacy inspection workers must be in [1, 64]")
+        self._inspection_workers = inspection_workers
 
     def inventory(
         self,
@@ -330,20 +388,13 @@ class SqlAlchemyLegacyClassifier:
                     )
                 rows, artifacts, row_blockers = _load_rows(connection)
                 blockers.extend(row_blockers)
-        for row, source in artifacts:
-            try:
-                observation = _artifact_object(
-                    row,
-                    source,
-                    self._inspector,
-                    bucket_aliases=self._bucket_aliases,
-                )
-                if isinstance(observation, LegacyAbsentObject):
-                    absent_objects.append(observation)
-                else:
-                    objects.append(observation)
-            except LegacyClassificationError as exc:
-                blockers.append(str(exc))
+        objects, absent_objects, object_blockers = _inspect_artifacts(
+            artifacts,
+            self._inspector,
+            bucket_aliases=self._bucket_aliases,
+            workers=self._inspection_workers,
+        )
+        blockers.extend(object_blockers)
         return build_legacy_classification_plan(
             scope=scope,
             mutation_epoch=int(epoch),

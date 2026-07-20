@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-id")
     parser.add_argument("--artifacts-bucket", required=True)
     parser.add_argument("--trajectories-bucket", required=True)
+    parser.add_argument("--inspection-workers", type=int, default=32)
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -80,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
                 "artifacts": args.artifacts_bucket,
                 "trajectories": args.trajectories_bucket,
             },
+            inspection_workers=args.inspection_workers,
         )
         plan = classifier.inventory(
             scope=GcScope(environment="staging", namespace=args.namespace),

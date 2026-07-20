@@ -110,10 +110,14 @@ Rows created before migration `0066` are never implicitly grandfathered into
 GC. The supported classifier is
 `scripts/ops/staging_data_lifecycle_classify.py`: `inventory` reads all five
 execution tables in one repeatable-read snapshot, groups event/LLM rows under
-their exact trial owner, and hashes every artifact object through the normal
-S3/MinIO credentials. Missing owners, cross-team links, incomplete bucket/key
-metadata, and digest/size/version drift are returned together as blockers.
-There is no prefix fallback.
+their exact trial owner, and hashes every present artifact object through the
+normal S3/MinIO credentials. Exact not-found responses become digest-bound
+`verified_absent` evidence; authorization, transport, size, version, or digest
+errors remain blockers. Inspection uses a bounded worker pool (32 by default,
+never more than 64) and returns all failures together without unbounded future
+submission. Missing owners, cross-team links, incomplete bucket/key metadata,
+and digest/size/version drift are returned together as blockers. There is no
+prefix fallback.
 
 Legacy benchmark, catalog, bootstrap, and system artifacts follow the same
 exact-object inspection path, but the classifier registers only those durable
