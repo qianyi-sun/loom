@@ -743,7 +743,7 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     [
         ("production.cluster.toml", "/prod"),
         ("development.cluster.toml", "/dev"),
-        ("staging.cluster.toml", "/dev"),
+        ("staging.cluster.toml", "/staging"),
     ],
 )
 def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
@@ -1409,7 +1409,11 @@ def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:
     of the schema default. See #383 rationale."""
     envs_dir = _REPO_ROOT / "deploy" / "environments"
     expected = {
-        "development.cluster.toml": True,
+        # Shared dev runs trial execution on external Slurm (#857/#873), same
+        # as staging/prod, so its in-cluster loom-worker Deployment is disabled.
+        # Per-developer LOCAL dev uses deploy/local/local.example.cluster.toml,
+        # which can opt into k8s_worker for offline / no-Slurm use.
+        "development.cluster.toml": False,
         "staging.cluster.toml": False,
         "production.cluster.toml": False,
     }

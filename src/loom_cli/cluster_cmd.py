@@ -1804,9 +1804,9 @@ def _normalise_frontend_path(raw: str, field_name: str) -> str:
     if value in {"", "/"}:
         return ""
     if not value.startswith("/"):
-        raise ValueError(f"{field_name} must be empty, /, /prod, or /dev")
-    if value not in {"/prod", "/dev"}:
-        raise ValueError(f"{field_name} must be empty, /, /prod, or /dev")
+        raise ValueError(f"{field_name} must be empty, /, /prod, /staging, or /dev")
+    if value not in {"/prod", "/staging", "/dev"}:
+        raise ValueError(f"{field_name} must be empty, /, /prod, /staging, or /dev")
     return value
 
 
@@ -1839,7 +1839,7 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
         raise ValueError("non-production frontend_environment must not use /prod")
     if environment == "production" and "beta" in label.lower():
         raise ValueError("production frontend_environment_label must not contain beta")
-    if route_path in {"/prod", "/dev"} and config.ingress_host != "yylx.world":
+    if route_path in {"/prod", "/staging", "/dev"} and config.ingress_host != "yylx.world":
         raise ValueError(
             f"frontend_route_path={route_path!r} must use ingress_host='yylx.world'",
         )
