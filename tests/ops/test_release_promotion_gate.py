@@ -95,8 +95,8 @@ def _prod_staging_isolation_evidence() -> dict[str, Any]:
                 "environment_label": "Production",
             },
             "staging": {
-                "route": "https://yylx.world/dev",
-                "api_base": "https://yylx.world/dev/api",
+                "route": "https://yylx.world/staging",
+                "api_base": "https://yylx.world/staging/api",
                 "environment_label": "Staging",
             },
         },
@@ -112,7 +112,7 @@ def _prod_staging_isolation_evidence() -> dict[str, Any]:
             },
             "staging": {
                 "environment": "staging",
-                "api_url": "https://yylx.world/dev/api",
+                "api_url": "https://yylx.world/staging/api",
                 "image": "ghcr.io/qianyi-sun/loom-worker:staging-abc1234",
                 "image_digest": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "6" * 64,
                 "source_commit": "abcdef0123456789abcdef0123456789abcdef01",
@@ -163,9 +163,9 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/issues/486#issuecomment-route-gate",
             "production_route": "https://yylx.world/prod",
-            "development_route": "https://yylx.world/dev",
+            "staging_route": "https://yylx.world/staging",
             "production_api_base": "https://yylx.world/prod/api",
-            "development_api_base": "https://yylx.world/dev/api",
+            "staging_api_base": "https://yylx.world/staging/api",
         },
         "secret_redaction": {
             "status": "pass",
@@ -272,7 +272,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "candidate_sha": _candidate_sha(),
         "image_tag": "release-0123456789ab",
         "prod_tag": "v1.0.0",
-        "staging_url": "https://yylx.world/dev",
+        "staging_url": "https://yylx.world/staging",
         "image_digests": _image_digests(),
         "checks": checks,
     }
