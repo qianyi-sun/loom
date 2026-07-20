@@ -6,7 +6,7 @@ import copy
 import hashlib
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -529,7 +529,7 @@ def rehearsal_pods_ready(
     *,
     artifact: RehearsalReleaseArtifact,
     deployment_name: str,
-    runtime_image_digest: str | None = None,
+    runtime_image_digests: Sequence[str] | None = None,
 ) -> bool:
     expected = _artifact_resource(artifact, kind="Deployment", name=deployment_name)
     expected_container = _deployment_container(expected)
@@ -571,10 +571,11 @@ def rehearsal_pods_ready(
         re.search(r"sha256:[0-9a-f]{64}\Z", image_id) if isinstance(image_id, str) else None
     )
     image_digest = image_match.group(0) if image_match is not None else None
+    expected_digests = runtime_image_digests or (artifact.deployment_images[deployment_name],)
     return bool(
         container_statuses[0].get("name") == expected_container["name"]
         and container_statuses[0].get("ready") is True
-        and image_digest == (runtime_image_digest or artifact.deployment_images[deployment_name])
+        and image_digest in expected_digests
     )
 
 

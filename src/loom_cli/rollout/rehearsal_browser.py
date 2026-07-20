@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import yaml  # type: ignore[import-untyped]
@@ -157,7 +157,7 @@ def rehearsal_browser_pod_complete(
     *,
     artifact: RehearsalBrowserArtifact,
     plan: RehearsalPlan,
-    runtime_image_digest: str | None = None,
+    runtime_image_digests: Sequence[str] | None = None,
 ) -> bool:
     items = observed.get("items")
     if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], Mapping):
@@ -183,9 +183,9 @@ def rehearsal_browser_pod_complete(
         or not isinstance(init_containers[0], Mapping)
     ):
         return False
-    expected_digest = runtime_image_digest or artifact.browser_image_digest
-    return _terminated_success(containers[0], expected_digest) and _terminated_success(
-        init_containers[0], expected_digest
+    expected_digests = runtime_image_digests or (artifact.browser_image_digest,)
+    return _terminated_success(containers[0], expected_digests) and _terminated_success(
+        init_containers[0], expected_digests
     )
 
 
@@ -442,13 +442,13 @@ def _plan_digest(value: Mapping[str, object]) -> str | None:
     return digest if isinstance(digest, str) else None
 
 
-def _terminated_success(value: Mapping[str, object], expected_digest: str) -> bool:
+def _terminated_success(value: Mapping[str, object], expected_digests: Sequence[str]) -> bool:
     state = value.get("state")
     terminated = state.get("terminated") if isinstance(state, Mapping) else None
     image_id = value.get("imageID")
     return bool(
         isinstance(image_id, str)
-        and image_id.endswith(expected_digest)
+        and any(image_id.endswith(digest) for digest in expected_digests)
         and isinstance(terminated, Mapping)
         and terminated.get("exitCode") == 0
         and terminated.get("reason") == "Completed"

@@ -84,7 +84,7 @@ StreamCommandRunner = Callable[[Sequence[str], Path, int], CommandResult]
 ReleaseArtifactBuilder = Callable[[RehearsalPlan], RehearsalReleaseArtifact]
 SecretArtifactBuilder = Callable[[RehearsalPlan], RehearsalSecretArtifact]
 BrowserArtifactBuilder = Callable[[RehearsalPlan, str], RehearsalBrowserArtifact]
-RuntimeImageResolver = Callable[[RehearsalPlan, Sequence[str]], Mapping[str, str] | None]
+RuntimeImageResolver = Callable[[RehearsalPlan, Sequence[str]], Mapping[str, Sequence[str]] | None]
 
 
 class GB10RehearsalTransport(Protocol):
@@ -396,7 +396,7 @@ class IsolatedRehearsalExecutor:
             pods,
             artifact=artifact,
             plan=plan,
-            runtime_image_digest=runtime_images["loom-staging-admin-browser-smoke"],
+            runtime_image_digests=runtime_images["loom-staging-admin-browser-smoke"],
         ):
             return _blocked("browser", "pod-image-readback-drift")
         report = self._command(
@@ -592,7 +592,7 @@ class IsolatedRehearsalExecutor:
             pods,
             release=release,
             plan=plan,
-            runtime_image_digest=runtime_images["loom-service"],
+            runtime_image_digests=runtime_images["loom-service"],
         )
 
     def _namespace(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
@@ -1020,7 +1020,7 @@ class IsolatedRehearsalExecutor:
                 pods,
                 artifact=release,
                 deployment_name=name,
-                runtime_image_digest=runtime_images[name],
+                runtime_image_digests=runtime_images[name],
             ):
                 return _blocked("release", "pod-image-readback-drift")
         for name in ("loom-control-plane", "loom-postgres", "loom-service", "loom-web"):
@@ -1116,7 +1116,7 @@ class IsolatedRehearsalExecutor:
         self,
         plan: RehearsalPlan,
         names: Sequence[str],
-    ) -> dict[str, str] | None:
+    ) -> dict[str, tuple[str, ...]] | None:
         if self.runtime_image_resolver is not None:
             resolved = self.runtime_image_resolver(plan, names)
             values = {} if resolved is None else dict(resolved)
@@ -1124,20 +1124,33 @@ class IsolatedRehearsalExecutor:
                 len(set(names)) != len(names)
                 or set(values) != set(names)
                 or any(
-                    re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in values.values()
+                    isinstance(value, str)
+                    or not isinstance(value, Sequence)
+                    or not 1 <= len(value) <= 2
+                    or len(set(value)) != len(value)
+                    or any(
+                        not isinstance(digest, str)
+                        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+                        for digest in value
+                    )
+                    for value in values.values()
                 )
             ):
                 return None
-            return values
-        result: dict[str, str] = {}
+            return {name: tuple(values[name]) for name in names}
+        result: dict[str, tuple[str, ...]] = {}
         for name in names:
-            image_id = self._kind_runtime_image_id(plan, name)
-            if image_id is None:
+            image_ids = self._kind_runtime_image_ids(plan, name)
+            if image_ids is None:
                 return None
-            result[name] = image_id
+            result[name] = image_ids
         return result
 
-    def _kind_runtime_image_id(self, plan: RehearsalPlan, name: str) -> str | None:
+    def _kind_runtime_image_ids(
+        self,
+        plan: RehearsalPlan,
+        name: str,
+    ) -> tuple[str, ...] | None:
         expected = plan.image_digests.get(name)
         if expected is None:
             return None
@@ -1167,6 +1180,7 @@ class IsolatedRehearsalExecutor:
             return None
         media_type = descriptor.get("mediaType")
         manifest = descriptor
+        manifest_digest = expected
         if media_type == "application/vnd.oci.image.index.v1+json":
             manifests = descriptor.get("manifests")
             matches = (
@@ -1182,9 +1196,13 @@ class IsolatedRehearsalExecutor:
             )
             if len(matches) != 1:
                 return None
-            manifest_digest = matches[0].get("digest")
-            if not isinstance(manifest_digest, str):
+            selected_digest = matches[0].get("digest")
+            if (
+                not isinstance(selected_digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", selected_digest) is None
+            ):
                 return None
+            manifest_digest = selected_digest
             resolved_manifest = self._containerd_content(node, manifest_digest)
             if resolved_manifest is None:
                 return None
@@ -1214,11 +1232,19 @@ class IsolatedRehearsalExecutor:
         image_spec = info.get("imageSpec") if isinstance(info, dict) else None
         image_config = image_spec.get("config") if isinstance(image_spec, dict) else None
         labels = image_config.get("Labels") if isinstance(image_config, dict) else None
+        repo_digests = status.get("repoDigests") if isinstance(status, dict) else None
         if not (
             isinstance(status, dict)
             and status.get("id") == config_digest
             and isinstance(status.get("repoTags"), list)
             and reference in status["repoTags"]
+            and isinstance(repo_digests, list)
+            and all(
+                isinstance(repo_digest, str)
+                and repo_digest.count("@") == 1
+                and repo_digest.rsplit("@", 1)[1] == manifest_digest
+                for repo_digest in repo_digests
+            )
             and isinstance(image_spec, dict)
             and image_spec.get("architecture") == "amd64"
             and image_spec.get("os") == "linux"
@@ -1226,7 +1252,7 @@ class IsolatedRehearsalExecutor:
             and labels.get("org.opencontainers.image.revision") == plan.candidate_sha
         ):
             return None
-        return config_digest
+        return tuple(dict.fromkeys((config_digest, manifest_digest)))
 
     def _containerd_content(self, node: str, digest: str) -> dict[str, object] | None:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
@@ -1765,7 +1791,7 @@ def _database_pod_matches(
     plan: RehearsalPlan,
     *,
     require_ready: bool,
-    runtime_image_digests: Mapping[str, str],
+    runtime_image_digests: Mapping[str, Sequence[str]],
 ) -> bool:
     expected = _database_pod_manifest(plan)
     metadata = value.get("metadata")
@@ -1856,15 +1882,16 @@ def _database_pod_matches(
 
 def _runtime_container_ready(
     status: dict[str, object],
-    expected_digests: Mapping[str, str | None],
+    expected_digests: Mapping[str, Sequence[str] | None],
 ) -> bool:
     name = status.get("name")
     image_id = status.get("imageID")
     expected = expected_digests.get(name) if isinstance(name, str) else None
     return bool(
         isinstance(image_id, str)
-        and isinstance(expected, str)
-        and image_id.endswith(expected)
+        and isinstance(expected, Sequence)
+        and not isinstance(expected, str)
+        and any(image_id.endswith(digest) for digest in expected)
         and status.get("ready") is True
     )
 
@@ -1970,13 +1997,13 @@ def _exact_service_pod_name(
     *,
     release: RehearsalReleaseArtifact,
     plan: RehearsalPlan,
-    runtime_image_digest: str,
+    runtime_image_digests: Sequence[str],
 ) -> str | None:
     if value is None or not rehearsal_pods_ready(
         value,
         artifact=release,
         deployment_name="loom-service",
-        runtime_image_digest=runtime_image_digest,
+        runtime_image_digests=runtime_image_digests,
     ):
         return None
     items = value.get("items")

@@ -96,8 +96,8 @@ def _plan() -> RehearsalPlan:
     )
 
 
-def _runtime_images(plan: RehearsalPlan, names: Sequence[str]) -> dict[str, str]:
-    return {name: plan.image_digests[name] for name in names}
+def _runtime_images(plan: RehearsalPlan, names: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    return {name: (plan.image_digests[name],) for name in names}
 
 
 def _release_artifact(plan: RehearsalPlan) -> RehearsalReleaseArtifact:
@@ -278,6 +278,14 @@ def test_namespace_returns_normalized_blockers_without_command_output() -> None:
 
 def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     plan = _plan()
+    postgres_config = "sha256:" + "a" * 64
+    postgres_manifest = "sha256:" + "b" * 64
+    control_plane_config = "sha256:" + "c" * 64
+    control_plane_manifest = "sha256:" + "d" * 64
+    runtime_images = {
+        "loom-rehearsal-postgres": (postgres_config, postgres_manifest),
+        "loom-control-plane": (control_plane_config, control_plane_manifest),
+    }
     calls: list[tuple[tuple[str, ...], bytes | None, int]] = []
     streams: list[tuple[tuple[str, ...], Path, int]] = []
     pod: dict[str, object] = {}
@@ -310,12 +318,12 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
                     "conditions": [{"type": "Ready", "status": "True"}],
                     "containerStatuses": [
                         {
-                            "imageID": "docker://" + plan.image_digests["loom-rehearsal-postgres"],
+                            "imageID": "docker.io/library/import-2026-07-20@" + postgres_manifest,
                             "name": "postgres",
                             "ready": True,
                         },
                         {
-                            "imageID": "docker://" + plan.image_digests["loom-control-plane"],
+                            "imageID": "sha256:" + control_plane_config.removeprefix("sha256:"),
                             "name": "migration",
                             "ready": True,
                         },
@@ -341,7 +349,7 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     outcome = IsolatedRehearsalExecutor(
         run=run,
         stream_run=stream,
-        runtime_image_resolver=_runtime_images,
+        runtime_image_resolver=lambda _plan, names: {name: runtime_images[name] for name in names},
     ).execute("rehearsal.db-clone", plan)
 
     assert outcome.passed
@@ -456,7 +464,11 @@ def test_runtime_image_binding_resolves_exact_index_platform_config() -> None:
         elif "crictl" in command:
             value = json.dumps(
                 {
-                    "status": {"id": config_digest, "repoTags": [reference]},
+                    "status": {
+                        "id": config_digest,
+                        "repoTags": [reference],
+                        "repoDigests": [f"docker.io/library/import@{manifest_digest}"],
+                    },
                     "info": {
                         "imageSpec": {
                             "architecture": "amd64",
@@ -474,7 +486,19 @@ def test_runtime_image_binding_resolves_exact_index_platform_config() -> None:
 
     resolved = IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,))
 
-    assert resolved == {name: config_digest}
+    assert resolved == {name: (config_digest, manifest_digest)}
+
+    def repo_digest_drift(argv, payload, timeout):
+        result = run(argv, payload, timeout)
+        if "crictl" not in tuple(argv):
+            return result
+        value = json.loads(result.stdout)
+        value["status"]["repoDigests"] = ["docker.io/library/import@sha256:" + "f" * 64]
+        return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+
+    assert (
+        IsolatedRehearsalExecutor(run=repo_digest_drift)._runtime_image_ids(plan, (name,)) is None
+    )
 
 
 def test_runtime_image_binding_rejects_kind_tag_drift() -> None:
