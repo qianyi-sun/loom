@@ -17,6 +17,20 @@ an idempotent no-op. This explicit maintenance bootstrap is also the earliest
 preflight predicate for cleanup; lifecycle tooling never relies on the rollout
 final-apply path to create its authority implicitly.
 
+The one-time deployed-`0065` maintenance bridge is
+`scripts/ops/staging_data_lifecycle_prepare.py`. Its read-only `inventory`
+binds the exact cumulative source SHA/tree/base, migration-policy digest,
+the shared preflight migration-plan digest, canonical Alembic head, current
+schema and absence of partial lifecycle
+structures. A separately authorized `apply` must echo that digest. It rechecks
+under one PostgreSQL advisory lock, runs only the canonical Alembic chain, and
+then calls the same digest-approved epoch bootstrap used above. The transition
+is fixed to `staging/loom-staging`; an earlier legacy revision, an ahead or
+branched migration graph, a partial schema, source drift, another preparer or
+any inventory drift fails closed. A crash never silently resumes: the operator
+must inventory and approve the newly observed exact revision before another
+apply. No classification or deletion occurs in this step.
+
 ## Authority
 
 Every newly tracked run, trial, event, artifact, and object-store key must bind

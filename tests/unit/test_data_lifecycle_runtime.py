@@ -156,6 +156,7 @@ def test_all_lifecycle_entry_points_share_one_runtime_contract() -> None:
         _ROOT / "scripts/ops/staging_data_lifecycle_capacity.py",
         _ROOT / "scripts/ops/staging_data_lifecycle_classify.py",
         _ROOT / "scripts/ops/staging_data_lifecycle_gc.py",
+        _ROOT / "scripts/ops/staging_data_lifecycle_prepare.py",
     ]
 
     for path in paths:
