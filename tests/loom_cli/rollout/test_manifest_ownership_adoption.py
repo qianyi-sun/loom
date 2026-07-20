@@ -196,16 +196,31 @@ def test_plan_adopts_only_legacy_owned_api_normalized_empty_policy_fields() -> N
     assert overlays["loom-staging-data-lifecycle"]["spec"]["ingress"] == []
     assert "ingress" not in overlays["loom-minio"]["spec"]
     assert "ingress" not in overlays["loom-postgres"]["spec"]
+    dry_run = copy.deepcopy(live)
+    dry_run_spec = dry_run[-1]["spec"]
+    assert isinstance(dry_run_spec, dict)
+    dry_run_spec["ingress"] = []
     assert (
         len(
             verify_ownership_adoption_dry_run(
                 plan,
                 live_resources=live,
-                dry_run_resources=copy.deepcopy(live),
+                dry_run_resources=dry_run,
             )
         )
         == 64
     )
+
+    changed = copy.deepcopy(dry_run)
+    changed_spec = changed[-1]["spec"]
+    assert isinstance(changed_spec, dict)
+    changed_spec["ingress"] = [{"from": [{"podSelector": {}}]}]
+    with pytest.raises(ManifestOwnershipAdoptionError, match="change live state"):
+        verify_ownership_adoption_dry_run(
+            plan,
+            live_resources=live,
+            dry_run_resources=changed,
+        )
 
 
 def test_plan_rejects_unknown_manager_target_and_prestate_drift() -> None:

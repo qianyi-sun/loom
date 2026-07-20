@@ -486,6 +486,14 @@ def _canonical_live(resource: Mapping[str, object]) -> dict[str, object]:
 
 def _semantic_state(resource: Mapping[str, object]) -> dict[str, object]:
     metadata = _mapping(resource.get("metadata"), label="semantic metadata")
+    spec = copy.deepcopy(resource.get("spec"))
+    if resource.get("kind") == "NetworkPolicy" and isinstance(spec, dict):
+        policy_types = spec.get("policyTypes")
+        if isinstance(policy_types, list):
+            if "Ingress" in policy_types:
+                spec.setdefault("ingress", [])
+            if "Egress" in policy_types:
+                spec.setdefault("egress", [])
     return {
         "apiVersion": resource.get("apiVersion"),
         "kind": resource.get("kind"),
@@ -495,7 +503,7 @@ def _semantic_state(resource: Mapping[str, object]) -> dict[str, object]:
             "name": metadata.get("name"),
             "namespace": metadata.get("namespace"),
         },
-        "spec": copy.deepcopy(resource.get("spec")),
+        "spec": spec,
     }
 
 

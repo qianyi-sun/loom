@@ -1527,6 +1527,9 @@ that field. The adoption overlay includes such an empty field only when the
 exact desired value is `[]` and a recognized legacy manager still owns the
 matching managed-field path. Non-empty or unowned fields remain excluded, and
 the server dry-run must still prove the overlay is a semantic no-op.
+For that proof only, a missing NetworkPolicy rule list is equivalent to `[]`
+when the matching `policyTypes` entry is explicit; a non-empty rule change is
+never normalized away.
 
 If a request claims the epoch and adopts only part of the four-resource set
 before failing, preserve that request and use a new request only after a new
