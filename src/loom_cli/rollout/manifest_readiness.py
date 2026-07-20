@@ -173,6 +173,7 @@ def inspect_rendered_manifests(
         if identity in identities:
             raise ValueError("rendered manifest contains duplicate resource identity")
         identities.append(identity)
+        _validate_nonroot_identities(resource)
         for image in _container_images(resource):
             name = image.rsplit("/", 1)[-1].split(":", 1)[0]
             if name in all_rollout_images and name not in expected_images:
@@ -205,6 +206,53 @@ def inspect_rendered_manifests(
         image_identities=bound_images,
         artifact_digest=artifact_digest,
     )
+
+
+def _validate_nonroot_identities(resource: Mapping[str, object]) -> None:
+    """Reject workloads whose non-root promise depends on ambient image metadata."""
+    for pod_spec in _pod_specs(resource):
+        pod_security = pod_spec.get("securityContext")
+        pod_security = pod_security if isinstance(pod_security, dict) else {}
+        for container_key in ("containers", "initContainers", "ephemeralContainers"):
+            containers = pod_spec.get(container_key)
+            if not isinstance(containers, list):
+                continue
+            for container in containers:
+                if not isinstance(container, dict):
+                    continue
+                container_security = container.get("securityContext")
+                container_security = (
+                    container_security if isinstance(container_security, dict) else {}
+                )
+                run_as_non_root = container_security.get(
+                    "runAsNonRoot", pod_security.get("runAsNonRoot")
+                )
+                if run_as_non_root is not True:
+                    continue
+                run_as_user = container_security.get("runAsUser", pod_security.get("runAsUser"))
+                if type(run_as_user) is not int or run_as_user <= 0:
+                    raise ValueError("rendered manifest non-root identity is ambiguous")
+
+
+def _pod_specs(resource: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    kind = resource.get("kind")
+    spec = resource.get("spec")
+    if not isinstance(kind, str) or not isinstance(spec, dict):
+        return ()
+    pod_spec: object
+    if kind == "Pod":
+        pod_spec = spec
+    elif kind in {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job"}:
+        template = spec.get("template")
+        pod_spec = template.get("spec") if isinstance(template, dict) else None
+    elif kind == "CronJob":
+        job_template = spec.get("jobTemplate")
+        job_spec = job_template.get("spec") if isinstance(job_template, dict) else None
+        template = job_spec.get("template") if isinstance(job_spec, dict) else None
+        pod_spec = template.get("spec") if isinstance(template, dict) else None
+    else:
+        return ()
+    return (pod_spec,) if isinstance(pod_spec, dict) else ()
 
 
 def _container_images(value: object) -> tuple[str, ...]:

@@ -21,6 +21,7 @@ def test_historical_blockers_are_checked_in_and_earliest_stage_classified() -> N
         "release-baseline-drift",
         "candidate-api-smoke-binding",
         "candidate-browser-binding",
+        "workload-nonroot-identity-ambiguity",
     }
 
 

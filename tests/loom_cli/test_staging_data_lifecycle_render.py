@@ -44,6 +44,12 @@ def test_staging_lifecycle_cronjob_is_staging_only_and_least_authority() -> None
     assert spec["jobTemplate"]["spec"]["backoffLimit"] == 0
     pod = spec["jobTemplate"]["spec"]["template"]["spec"]
     assert pod["automountServiceAccountToken"] is False
+    assert pod["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+        "runAsGroup": 65532,
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
     container = pod["containers"][0]
     assert container["image"] == "loom-control-plane:staging-exact"
     assert container["command"] == [

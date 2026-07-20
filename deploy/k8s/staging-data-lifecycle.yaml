@@ -23,6 +23,8 @@ spec:
           restartPolicy: Never
           securityContext:
             runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: lifecycle

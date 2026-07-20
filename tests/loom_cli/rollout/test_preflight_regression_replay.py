@@ -12,6 +12,7 @@ from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_dig
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
+    ROLLOUT_IMAGES,
     ImageArtifactSet,
     ImageDescriptor,
 )
@@ -26,6 +27,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
+    build_manifest_preflight_checks,
     build_rehearsal_checks,
     build_staging_baseline_checks,
     build_systemd_user_manager_check,
@@ -124,6 +126,40 @@ def _rehearsal_result(check_id: str) -> RehearsalResult:
     )
 
 
+def _ambiguous_nonroot_manifest() -> str:
+    containers = "\n".join(
+        f"        - name: {name}\n          image: {name}:staging-aaaaaaa"
+        for name, _dockerfile in ROLLOUT_IMAGES
+    )
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exact-candidate
+  namespace: loom-staging
+spec:
+  template:
+    spec:
+      containers:
+{containers}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lifecycle
+  namespace: loom-staging
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsNonRoot: true
+          containers:
+            - name: lifecycle
+              image: external.example/maintenance:exact
+"""
+
+
 def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
     repo_root = Path(__file__).resolve().parents[3]
     config_digest = "7" * 64
@@ -189,6 +225,15 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
         service_gid=1001,
         expected_candidate_sha=_CANDIDATE,
         expected_source_set_digest="8" * 64,
+    )
+    manifest_render, _manifest_schema = build_manifest_preflight_checks(
+        _ambiguous_nonroot_manifest,
+        lambda payload: subprocess.CompletedProcess([], 0, payload, ""),
+        _images,
+        image_tag="staging-aaaaaaa",
+        namespace="loom-staging",
+        expected_candidate_sha=_CANDIDATE,
+        expected_config_digest=config_digest,
     )
 
     probes = {
@@ -307,13 +352,23 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
             rehearsal_checks["rehearsal.browser"],
             rehearsal_context,
         ),
+        RegressionReplayCase(
+            "workload-nonroot-identity-ambiguity",
+            manifest_render,
+            CheckContext(
+                {
+                    "candidate.sha": _CANDIDATE,
+                    "runner.config.sha256": config_digest,
+                }
+            ),
+        ),
     )
 
 
 def test_all_historical_blockers_replay_through_production_checks(tmp_path: Path) -> None:
     evidence = replay_regression_manifest(_cases(tmp_path))
 
-    assert len(evidence.implementation_digests) == 8
+    assert len(evidence.implementation_digests) == 9
     assert set(evidence.implementation_digests) == set(evidence.evidence_hashes)
 
 

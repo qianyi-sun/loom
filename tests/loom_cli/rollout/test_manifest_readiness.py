@@ -120,6 +120,71 @@ def test_manifest_render_rejects_unexpected_profile_image() -> None:
         )
 
 
+def test_manifest_render_rejects_ambiguous_nonroot_cronjob_identity() -> None:
+    rendered = (
+        _rendered()
+        + """---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lifecycle
+  namespace: loom-staging
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsNonRoot: true
+          containers:
+            - name: lifecycle
+              image: external.example/maintenance:exact
+"""
+    )
+
+    with pytest.raises(ValueError, match="non-root identity is ambiguous"):
+        inspect_rendered_manifests(
+            rendered,
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+        )
+
+
+def test_manifest_render_accepts_explicit_container_nonroot_identity() -> None:
+    rendered = (
+        _rendered()
+        + """---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lifecycle
+  namespace: loom-staging
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsNonRoot: true
+          containers:
+            - name: lifecycle
+              image: external.example/maintenance:exact
+              securityContext:
+                runAsUser: 65532
+"""
+    )
+
+    artifact = inspect_rendered_manifests(
+        rendered,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    assert artifact.resource_count == 2
+
+
 def test_manifest_session_renders_once_and_server_validates_same_bytes() -> None:
     render_calls: list[object] = []
     server_inputs: list[str] = []

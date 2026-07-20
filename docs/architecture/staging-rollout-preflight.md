@@ -143,6 +143,15 @@ enabled image-name set is stored in the private artifact descriptor and is
 revalidated when the detached worker reloads it, so an intentionally disabled
 workload cannot be confused with an accidentally missing manifest.
 
+The same Tier 1 render check validates workload identity before any Kubernetes
+apply. A Pod, controller, Job, or CronJob that sets effective
+`runAsNonRoot: true` must also set an explicit positive numeric `runAsUser` at
+pod or container scope. Depending on an image's ambient user metadata is a
+`manifests.render.failed` blocker, because otherwise a root-default image can
+survive static rendering and fail only at protected container creation. This
+predicate is shared by preflight artifact publication and the final consumer;
+the final path does not carry a second, weaker copy.
+
 Tier 1 also normalizes the environment profile's rate-card sync and hosted
 provider pricing defaults into one canonical, secret-free
 `ProductionDefaultsArtifact`. Provider ordering, optional sync inputs,

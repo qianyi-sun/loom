@@ -349,8 +349,12 @@ same exact bucket inventory, then uses the `auto` action: no eligible owners is
 a journal-free no-op; any classification/reconciliation blocker makes the job
 fail and alert; otherwise the ordinary epoch-bound two-phase executor performs
 the deletion. The pod has no service-account token, uses a read-only root
-filesystem, drops every Linux capability, and receives only its dedicated
-lifecycle database and object-store credentials. A namespace-scoped
+filesystem, drops every Linux capability, and declares the fixed unprivileged
+UID/GID `65532:65532` instead of depending on image-default user metadata. The
+shared Tier 1 rendered-manifest check rejects any effective `runAsNonRoot`
+workload without an explicit positive numeric UID before Kubernetes apply. The
+pod receives only its dedicated lifecycle database and object-store
+credentials. A namespace-scoped
 NetworkPolicy limits egress to the selected Postgres and MinIO pods. The
 capacity PVC mounts are read-only and all configured data filesystems must be
 measured; missing or duplicate filesystem authority fails closed. Development
