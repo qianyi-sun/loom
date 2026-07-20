@@ -1514,6 +1514,13 @@ post-readback drift stops the request. Never invoke `kubectl --force-conflicts`
 directly, reuse a maintenance request ID, or unsuspend the CronJob as part of
 ownership adoption.
 
+The ownership path and the final rollout share one checked-in mutation-epoch
+CAS renderer. It accepts only bounded request IDs, hexadecimal evidence
+digests, non-negative integer epochs, and an explicit bootstrap boolean; the
+validated literals are rendered into one newline-free SQL argument. Do not
+replace this contract with `psql -v` substitution for `-c` statements or with
+operator-provided SQL.
+
 After the exact post-readback and final no-force dry-run succeed, close the
 window through the same installed source; the command refuses if any rollout
 pointer or unit is active:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,18 +25,23 @@ class Runner:
         assert env == {"KUBECONFIG": "/exact"}
         assert timeout_seconds == 30.0
         if any("WITH bootstrapped AS" in item for item in argv):
-            raw_variables = {argv[index + 1] for index, value in enumerate(argv) if value == "-v"}
-            variables = {
-                key: value for key, value in (item.split("=", 1) for item in raw_variables)
-            }
-            assert variables["request_id"] == "req-alpha"
+            sql = next(item for item in argv if "WITH bootstrapped AS" in item)
+            request_id = re.search(r"request_id = '([^']+)'", sql)
+            evidence = re.search(r"evidence_sha256 = '([0-9a-f]+)'", sql)
+            epoch = re.search(r"AND epoch = ([0-9]+)::bigint", sql)
+            assert request_id is not None
+            assert evidence is not None
+            assert epoch is not None
+            assert request_id.group(1) == "req-alpha"
+            assert ":'" not in sql
+            assert "-v" not in argv
             self.record = {
                 "environment": "staging",
                 "namespace": "loom-staging",
-                "epoch": int(variables["expected_epoch"]) + 1,
+                "epoch": int(epoch.group(1)) + 1,
                 "mutation_class": "rollout_apply",
-                "request_id": variables["request_id"],
-                "evidence_sha256": variables["evidence_sha256"],
+                "request_id": request_id.group(1),
+                "evidence_sha256": evidence.group(1),
             }
         return b"" if self.record is None else json.dumps(self.record).encode()
 

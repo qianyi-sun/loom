@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -45,14 +46,16 @@ class Runner:
             return b'{"rate_cards":[]}'
         if "WITH bootstrapped AS" in command:
             self.calls.append("epoch-apply")
-            variables = {
-                argv[index + 1].split("=", 1)[0]: argv[index + 1].split("=", 1)[1]
-                for index, value in enumerate(argv)
-                if value == "-v"
-            }
-            assert variables["expected_epoch"] == str(self.epoch or 0)
-            self.epoch = int(variables["expected_epoch"]) + 1
-            return json.dumps(self._epoch_record(variables)).encode()
+            sql = next(item for item in argv if "WITH bootstrapped AS" in item)
+            expected_epoch = re.search(r"AND epoch = ([0-9]+)::bigint", sql)
+            evidence = re.search(r"evidence_sha256 = '([0-9a-f]+)'", sql)
+            assert expected_epoch is not None
+            assert evidence is not None
+            assert expected_epoch.group(1) == str(self.epoch or 0)
+            assert ":'" not in sql
+            assert "-v" not in argv
+            self.epoch = int(expected_epoch.group(1)) + 1
+            return json.dumps(self._epoch_record(evidence.group(1))).encode()
         if "FROM staging_mutation_epochs" in command:
             self.calls.append("epoch-read")
             return b"" if self.epoch is None else json.dumps(self._epoch_record()).encode()
@@ -78,7 +81,7 @@ class Runner:
         self.calls.append("manifest-diff")
         return self.manifest_status
 
-    def _epoch_record(self, variables=None):
+    def _epoch_record(self, evidence_sha256: str | None = None):
         exact = self.epoch in {1, 8}
         return {
             "environment": "staging",
@@ -86,8 +89,8 @@ class Runner:
             "epoch": self.epoch,
             "mutation_class": "rollout_apply" if exact else "lifecycle_gc",
             "request_id": "req-alpha" if exact else "req-prior0001",
-            "evidence_sha256": variables["evidence_sha256"]
-            if variables
+            "evidence_sha256": evidence_sha256
+            if evidence_sha256 is not None
             else (self.plan_digest if exact else "f" * 64),
         }
 

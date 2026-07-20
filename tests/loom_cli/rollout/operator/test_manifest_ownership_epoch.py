@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 
@@ -28,27 +29,21 @@ class _Runner:
     ) -> bytes:
         command = tuple(argv)
         self.calls.append((command, dict(env), timeout_seconds))
-        request_id = next(
-            item.removeprefix("request_id=") for item in command if item.startswith("request_id=")
-        )
-        evidence = next(
-            item.removeprefix("evidence_sha256=")
-            for item in command
-            if item.startswith("evidence_sha256=")
-        )
-        epoch = next(
-            int(item.removeprefix("expected_epoch="))
-            for item in command
-            if item.startswith("expected_epoch=")
-        )
+        sql = next(item for item in command if "UPDATE staging_mutation_epochs" in item)
+        request_id = re.search(r"request_id = '([^']+)'", sql)
+        evidence = re.search(r"evidence_sha256 = '([0-9a-f]+)'", sql)
+        epoch = re.search(r"AND epoch = ([0-9]+)::bigint", sql)
+        assert request_id is not None
+        assert evidence is not None
+        assert epoch is not None
         return json.dumps(
             {
                 "environment": "staging",
                 "namespace": "loom-staging",
-                "epoch": epoch if self.stale else epoch + 1,
+                "epoch": int(epoch.group(1)) if self.stale else int(epoch.group(1)) + 1,
                 "mutation_class": "rollout_apply",
-                "request_id": request_id,
-                "evidence_sha256": evidence,
+                "request_id": request_id.group(1),
+                "evidence_sha256": evidence.group(1),
             }
         ).encode()
 
@@ -61,6 +56,8 @@ def test_exact_epoch_claim_uses_cas_and_records_event() -> None:
     assert all("\n" not in item for item in command)
     sql = next(item for item in command if "UPDATE staging_mutation_epochs" in item)
     assert "INSERT INTO staging_mutation_epoch_events" in sql
+    assert ":'" not in sql
+    assert "-v" not in command
     assert environment == {"KUBECONFIG": "/k"}
     assert timeout == 30.0
 
@@ -71,6 +68,8 @@ def test_epoch_claim_rejects_stale_or_unbounded_identity() -> None:
         claimer(2, "req-manifest-ownership-12345678", "a" * 64)
     with pytest.raises(ValueError, match="authority"):
         claimer(-1, "req-manifest-ownership-12345678", "a" * 64)
+    with pytest.raises(ValueError, match="authority"):
+        claimer(2, "req-rollout-12345678", "a" * 64)
 
 
 def test_epoch_claim_passes_the_real_protected_argv_validator(
