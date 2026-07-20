@@ -34,7 +34,7 @@ ingress_tls_secret_name = "loom-local-tls"
 frontend_environment = "development"
 frontend_environment_label = "Local dev"
 frontend_route_path = "/"
-frontend_api_base_path = "/api"
+frontend_api_base_path = "/"
 
 # Local buckets in your standalone MinIO. Any name works as long as it is
 # unique within your local MinIO instance.
