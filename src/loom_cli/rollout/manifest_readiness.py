@@ -65,6 +65,7 @@ class ManifestRenderSession:
         render: RenderManifest,
         server_dry_run: ServerDryRun,
         *,
+        field_ownership_dry_run: ServerDryRun | None = None,
         image_tag: str,
         namespace: str,
         image_digests: Mapping[str, str],
@@ -73,6 +74,9 @@ class ManifestRenderSession:
     ) -> None:
         self._render = render
         self._server_dry_run = server_dry_run
+        self._field_ownership_dry_run = (
+            server_dry_run if field_ownership_dry_run is None else field_ownership_dry_run
+        )
         self._image_tag = image_tag
         self._namespace = namespace
         self._image_digests = dict(image_digests)
@@ -112,6 +116,16 @@ class ManifestRenderSession:
             result = self._server_dry_run(artifact.rendered_yaml)
             if result.returncode != 0:
                 raise ValueError("rendered manifests failed server-side dry-run")
+            return artifact
+
+    def field_ownership_validate(self) -> ManifestArtifact:
+        with self._lock:
+            artifact = self._artifact
+            if artifact is None:
+                raise ValueError("manifest was not rendered by this preflight session")
+            result = self._field_ownership_dry_run(artifact.rendered_yaml)
+            if result.returncode != 0:
+                raise ValueError("rendered manifests failed field-ownership dry-run")
             return artifact
 
 

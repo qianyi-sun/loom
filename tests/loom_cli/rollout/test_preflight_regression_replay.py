@@ -338,7 +338,7 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
         expected_candidate_sha=_CANDIDATE,
         expected_source_set_digest="8" * 64,
     )
-    manifest_render, _manifest_schema = build_manifest_preflight_checks(
+    manifest_render, _manifest_schema, _manifest_ownership = build_manifest_preflight_checks(
         _ambiguous_nonroot_manifest,
         lambda payload: subprocess.CompletedProcess([], 0, payload, ""),
         _images,
@@ -347,28 +347,30 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
         expected_candidate_sha=_CANDIDATE,
         expected_config_digest=config_digest,
     )
-    network_policy_render, _network_policy_schema = build_manifest_preflight_checks(
-        _denied_network_policy_manifest,
-        lambda payload: subprocess.CompletedProcess([], 0, payload, ""),
-        _images,
-        image_tag="staging-aaaaaaa",
-        namespace="loom-staging",
-        expected_candidate_sha=_CANDIDATE,
-        expected_config_digest=config_digest,
+    network_policy_render, _network_policy_schema, _network_policy_ownership = (
+        build_manifest_preflight_checks(
+            _denied_network_policy_manifest,
+            lambda payload: subprocess.CompletedProcess([], 0, payload, ""),
+            _images,
+            image_tag="staging-aaaaaaa",
+            namespace="loom-staging",
+            expected_candidate_sha=_CANDIDATE,
+            expected_config_digest=config_digest,
+        )
     )
-    field_manager_render, field_manager_schema = build_manifest_preflight_checks(
-        _valid_manifest_for_server_apply,
-        lambda _payload: subprocess.CompletedProcess(
-            [],
-            1,
-            "",
-            'conflict with "kubectl-client-side-apply": .spec.template',
-        ),
-        _images,
-        image_tag="staging-aaaaaaa",
-        namespace="loom-staging",
-        expected_candidate_sha=_CANDIDATE,
-        expected_config_digest=config_digest,
+    field_manager_render, _field_manager_schema, field_manager_ownership = (
+        build_manifest_preflight_checks(
+            _valid_manifest_for_server_apply,
+            lambda _payload: subprocess.CompletedProcess([], 0, "", ""),
+            _images,
+            field_ownership_dry_run=lambda _payload: subprocess.CompletedProcess(
+                [], 1, "", 'conflict with "kubectl-client-side-apply": .spec.template'
+            ),
+            image_tag="staging-aaaaaaa",
+            namespace="loom-staging",
+            expected_candidate_sha=_CANDIDATE,
+            expected_config_digest=config_digest,
+        )
     )
     _image_build, image_contract = build_image_preflight_checks(
         _nonroot_contract_runner,
@@ -539,7 +541,7 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
         ),
         RegressionReplayCase(
             "legacy-kubernetes-field-manager-conflict",
-            field_manager_schema,
+            field_manager_ownership,
             manifest_context,
         ),
     )

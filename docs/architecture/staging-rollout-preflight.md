@@ -398,6 +398,15 @@ validate the migration graph, render and verify systemd units, and launch the
 browser runner against its report contract. These artifacts are immutable
 inputs to rehearsal and final rollout; final rollout does not rebuild them.
 
+Manifest readiness is two independent checks backed by one apply contract.
+`manifests.server-schema` uses strict server-side dry-run with conflict forcing
+only inside that mutation-free request, so an existing field manager cannot
+hide API schema or defaulting failures. `manifests.field-ownership` uses the
+exact fixed-manager, no-force server-side apply contract consumed by final
+protected convergence. Ownership can therefore block protected apply without
+blocking immutable artifact publication or isolated rehearsal, and
+`--force-conflicts` cannot leak into the final apply command.
+
 `migration.plan` loads the exact candidate's Alembic graph without a database
 connection. The checked-in staging policy requires one closed linear chain,
 the declared head, expand/contract before destructive upgrades, revision-owned
@@ -416,7 +425,10 @@ rerender it after checkpoint creation.
 Readonly credentials probe health, auth, catalog/task/provider compatibility,
 MinIO, PostgreSQL, ingress/TLS/DNS, worker capacity, and candidate-independent
 release-gate predicates. An existing infrastructure failure is reported before
-any protected mutation.
+any protected mutation. The five independent baseline probes depend only on
+their minimum readonly credential/tool authorities; a health failure does not
+prevent auth, storage/database, network, or catalog/task evidence from being
+collected in the same bounded DAG run.
 
 ### Tier 3: isolated exact-candidate rehearsal
 

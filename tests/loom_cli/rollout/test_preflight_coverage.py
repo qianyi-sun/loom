@@ -72,6 +72,7 @@ def test_known_late_failures_are_shifted_before_final_only() -> None:
     for check_id in (
         "credentials.metadata",
         "readonly.authority",
+        "manifests.field-ownership",
         "browser.runtime",
         "gb10.host-readiness",
         "capacity.high-water",

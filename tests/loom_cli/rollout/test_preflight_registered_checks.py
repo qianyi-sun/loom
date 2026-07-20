@@ -1623,7 +1623,7 @@ def test_registered_manifest_checks_render_once_then_server_validate() -> None:
     image_artifact = SimpleNamespace(image_digests=digests)
     render_calls: list[object] = []
     server_payloads: list[str] = []
-    rendered, server_schema = build_manifest_preflight_checks(
+    rendered, server_schema, field_ownership = build_manifest_preflight_checks(
         lambda: render_calls.append(object()) or _rendered_image_manifest(),
         lambda payload: (
             server_payloads.append(payload) or subprocess.CompletedProcess([], 0, "", "")
@@ -1647,6 +1647,7 @@ def test_registered_manifest_checks_render_once_then_server_validate() -> None:
             _passing_dependency("kubernetes.client"),
             rendered,
             server_schema,
+            field_ownership,
         )
     )
 
@@ -1656,8 +1657,10 @@ def test_registered_manifest_checks_render_once_then_server_validate() -> None:
     assert by_id["manifests.render"].evidence["server-valid"] is False
     assert by_id["manifests.server-schema"].passed
     assert by_id["manifests.server-schema"].evidence["server-valid"] is True
+    assert by_id["manifests.field-ownership"].passed
+    assert by_id["manifests.field-ownership"].evidence["ownership-ready"] is True
     assert len(render_calls) == 1
-    assert server_payloads == [_rendered_image_manifest()]
+    assert server_payloads == [_rendered_image_manifest(), _rendered_image_manifest()]
 
 
 def test_registered_browser_runtime_binds_exact_image_token_and_schema(tmp_path: Path) -> None:

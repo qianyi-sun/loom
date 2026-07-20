@@ -223,6 +223,7 @@ def build_installed_deep_preflight_composition(
         image_run=commands.image,
         render_manifest_factory=manifest_factory,
         manifest_image_names=manifest_image_names,
+        server_schema_dry_run=commands.manifest_schema_dry_run,
         server_dry_run=commands.manifest_server_dry_run,
         browser_run=commands.simple,
         baseline_probe_factory=readonly.baseline_probes,

@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Protocol
 
 from .config import OperatorConfig
-from .manifest_apply_contract import server_side_apply_argv
+from .manifest_apply_contract import (
+    server_side_apply_argv,
+    server_side_schema_validation_argv,
+)
 from .readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 
 
@@ -115,6 +118,18 @@ class InstalledPreflightCommands:
                 self.config.namespace,
                 kubeconfig=self.config.kubeconfig_path,
                 dry_run=True,
+            ),
+            input=rendered,
+            timeout=120,
+        )
+
+    def manifest_schema_dry_run(self, rendered: str) -> CommandResult:
+        if not rendered or len(rendered.encode("utf-8")) > 16 * 1024 * 1024:
+            raise ValueError("preflight manifest payload is invalid")
+        return self._execute(
+            server_side_schema_validation_argv(
+                self.config.namespace,
+                kubeconfig=self.config.kubeconfig_path,
             ),
             input=rendered,
             timeout=120,

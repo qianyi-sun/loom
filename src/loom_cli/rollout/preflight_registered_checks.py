@@ -84,6 +84,7 @@ from loom_cli.rollout.operator.candidate import (
     verify_bound_candidate,
 )
 from loom_cli.rollout.operator.config import OperatorConfig
+from loom_cli.rollout.operator.manifest_apply_contract import MANIFEST_APPLY_CONTRACT_DIGEST
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
@@ -1971,6 +1972,7 @@ def build_manifest_preflight_checks(
     server_dry_run: ServerDryRun,
     image_artifact: Callable[[], ImageArtifactSet],
     *,
+    field_ownership_dry_run: ServerDryRun | None = None,
     image_tag: str,
     namespace: str,
     expected_candidate_sha: str,
@@ -1978,8 +1980,8 @@ def build_manifest_preflight_checks(
     expected_image_names: frozenset[str] | None = None,
     session: ManifestRenderSession | None = None,
     artifact_sink: Callable[[ManifestArtifact], None] | None = None,
-) -> tuple[RegisteredCheck, RegisteredCheck]:
-    """Build the Tier 1 render-once and server-schema checks."""
+) -> tuple[RegisteredCheck, RegisteredCheck, RegisteredCheck]:
+    """Build independent Tier 1 render, schema and field-owner checks."""
     manifest_session: ManifestRenderSession | None = session
 
     def get_session() -> ManifestRenderSession:
@@ -1988,6 +1990,7 @@ def build_manifest_preflight_checks(
             manifest_session = ManifestRenderSession(
                 render,
                 server_dry_run,
+                field_ownership_dry_run=field_ownership_dry_run,
                 image_tag=image_tag,
                 namespace=namespace,
                 image_digests=image_artifact().image_digests,
@@ -2022,6 +2025,22 @@ def build_manifest_preflight_checks(
         if artifact_sink is not None:
             artifact_sink(artifact)
         return _manifest_probe(artifact, server_valid=True)
+
+    def probe_field_ownership(context: CheckContext) -> CheckProbe:
+        if not bindings_match(context):
+            return _empty_manifest_ownership_probe()
+        try:
+            artifact = get_session().field_ownership_validate()
+        except (OSError, RuntimeError, ValueError):
+            return _empty_manifest_ownership_probe()
+        return CheckProbe(
+            passed=True,
+            evidence={
+                "rendered-sha256": artifact.rendered_sha256,
+                "ownership-ready": True,
+                "apply-contract-digest": MANIFEST_APPLY_CONTRACT_DIGEST,
+            },
+        )
 
     common_inputs = ("candidate.sha", "runner.config.sha256")
     common_evidence = (
@@ -2062,16 +2081,49 @@ def build_manifest_preflight_checks(
             evidence_schema=common_evidence,
             timeout_seconds=120,
             freshness_ttl_seconds=300,
+            remediation=("restore API-valid exact rendered resources before another rollout"),
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v3",
+        operations={CheckOperation.PROBE: probe_server_schema},
+    )
+    field_ownership = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="manifests.field-ownership",
+            failure_code="manifests.field-ownership.conflict",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=("manifests.render", "kubernetes.client"),
+            mutation_class=MutationClass.NONE,
+            input_keys=common_inputs,
+            evidence_schema=(
+                EvidenceField("rendered-sha256", "sha256"),
+                EvidenceField("ownership-ready", "boolean"),
+                EvidenceField("apply-contract-digest", "sha256"),
+            ),
+            timeout_seconds=120,
+            freshness_ttl_seconds=300,
             remediation=(
-                "restore schema-valid resources and converge legacy field ownership through "
-                "the reviewed protected manager before another rollout"
+                "converge recognized legacy field ownership through the reviewed protected "
+                "manager before another rollout"
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v2",
-        operations={CheckOperation.PROBE: probe_server_schema},
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe_field_ownership},
     )
-    return rendered, server_schema
+    return rendered, server_schema, field_ownership
+
+
+def _empty_manifest_ownership_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "rendered-sha256": "0" * 64,
+            "ownership-ready": False,
+            "apply-contract-digest": MANIFEST_APPLY_CONTRACT_DIGEST,
+        },
+    )
 
 
 def build_preflight_artifact_publication_check(
@@ -2402,10 +2454,10 @@ def build_staging_baseline_checks(
 
     dependencies = {
         "staging.health": ("kubernetes.client", "readonly.authority"),
-        "staging.auth": ("staging.health", "credentials.metadata"),
-        "staging.catalog-task": ("staging.auth",),
-        "staging.storage-db": ("staging.health",),
-        "staging.network": ("staging.health",),
+        "staging.auth": ("readonly.authority", "credentials.metadata"),
+        "staging.catalog-task": ("readonly.authority", "credentials.metadata"),
+        "staging.storage-db": ("readonly.authority",),
+        "staging.network": ("readonly.authority",),
     }
     failure_codes = {
         "staging.health": "staging.health.failed",
@@ -2471,6 +2523,8 @@ def build_staging_baseline_checks(
                 tier=2,
                 stage=StageCapability.BASELINE_LIVE_READONLY,
                 dependencies=(
+                    "staging.health",
+                    "staging.auth",
                     "staging.catalog-task",
                     "staging.storage-db",
                     "staging.network",
@@ -2690,7 +2744,7 @@ def build_final_gate_checks(
         "staging.mutation-epoch": mutation_epoch,
     }
     dependencies = {
-        "final.protected-apply": ("rehearsal.cleanup",),
+        "final.protected-apply": ("rehearsal.cleanup", "manifests.field-ownership"),
         "final.convergence": ("final.protected-apply",),
         "final.drift": ("final.convergence",),
         "final.smoke": ("final.drift", "rehearsal.api-smoke"),

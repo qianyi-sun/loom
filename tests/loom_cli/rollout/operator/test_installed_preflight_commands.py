@@ -9,6 +9,7 @@ from loom_cli.rollout.operator.installed_preflight_commands import InstalledPref
 from loom_cli.rollout.operator.manifest_apply_contract import (
     MANIFEST_FIELD_MANAGER,
     server_side_apply_argv,
+    server_side_schema_validation_argv,
 )
 from loom_cli.rollout.operator.readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
@@ -37,6 +38,7 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
     commands.git(["git", "status", "--porcelain=v1"])
     commands.readonly_json(("kubectl", "create", "--raw", "/review"), b'{"kind":"x"}')
     commands.manifest_server_dry_run("apiVersion: v1\nkind: ConfigMap\n")
+    commands.manifest_schema_dry_run("apiVersion: v1\nkind: ConfigMap\n")
     commands.final_gate_helper(
         ("/usr/local/libexec/loom-staging-rollout-final-gate", "execute"),
         {
@@ -72,7 +74,15 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
     assert "--force-conflicts" not in calls[2]["argv"]
     assert calls[2]["input"] == "apiVersion: v1\nkind: ConfigMap\n"
     assert calls[2]["timeout"] == 120
-    assert calls[3]["timeout"] == 3600
+    assert calls[3]["argv"] == server_side_schema_validation_argv(
+        config.namespace,
+        kubeconfig=config.kubeconfig_path,
+    )
+    assert "--force-conflicts" in calls[3]["argv"]
+    assert "--dry-run=server" in calls[3]["argv"]
+    assert calls[3]["input"] == "apiVersion: v1\nkind: ConfigMap\n"
+    assert calls[3]["timeout"] == 120
+    assert calls[4]["timeout"] == 3600
 
 
 def test_image_and_rehearsal_adapters_reject_authority_drift(tmp_path: Path) -> None:

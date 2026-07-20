@@ -203,6 +203,7 @@ class PreflightRuntimeSources:
     image_run: ImageDockerRunner
     render_manifest: RenderManifest
     manifest_image_names: frozenset[str]
+    server_schema_dry_run: ServerDryRun
     server_dry_run: ServerDryRun
     browser_run: BrowserCommandRunner
     browser_token_path: Path
@@ -255,7 +256,8 @@ class PreflightRuntimeSources:
             production_defaults_artifacts["exact"] = self.loaded_artifacts.production_defaults
             manifest_session = ManifestRenderSession(
                 self.render_manifest,
-                self.server_dry_run,
+                self.server_schema_dry_run,
+                field_ownership_dry_run=self.server_dry_run,
                 image_tag=self.candidate.image_tag,
                 namespace=self.config.namespace,
                 image_digests=self.loaded_artifacts.images.image_digests,
@@ -458,8 +460,9 @@ class PreflightRuntimeSources:
         )
         manifest_checks = build_manifest_preflight_checks(
             self.render_manifest,
-            self.server_dry_run,
+            self.server_schema_dry_run,
             image_session.verify,
+            field_ownership_dry_run=self.server_dry_run,
             image_tag=self.candidate.image_tag,
             namespace=self.config.namespace,
             expected_candidate_sha=self.candidate.resolved_sha,

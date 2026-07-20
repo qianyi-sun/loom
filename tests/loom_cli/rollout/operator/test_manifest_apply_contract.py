@@ -9,6 +9,7 @@ from loom_cli.rollout.operator.manifest_apply_contract import (
     MANIFEST_FIELD_MANAGER,
     server_side_apply_argv,
     server_side_diff_argv,
+    server_side_schema_validation_argv,
 )
 
 
@@ -51,3 +52,18 @@ def test_diff_and_input_validation_preserve_no_force_boundary() -> None:
         server_side_apply_argv("../loom-staging")
     with pytest.raises(ValueError, match="kubeconfig"):
         server_side_apply_argv("loom-staging", kubeconfig=Path("relative/config"))
+
+
+def test_schema_validation_force_is_confined_to_mutation_free_server_dry_run() -> None:
+    schema = server_side_schema_validation_argv(
+        "loom-staging",
+        kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
+    )
+    final = server_side_apply_argv("loom-staging")
+
+    assert "--dry-run=server" in schema
+    assert "--force-conflicts" in schema
+    assert "--validate=strict" in schema
+    assert f"--field-manager={MANIFEST_FIELD_MANAGER}" in schema
+    assert "--force-conflicts" not in final
+    assert "--dry-run=server" not in final

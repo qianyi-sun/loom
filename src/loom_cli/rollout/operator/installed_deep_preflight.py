@@ -70,6 +70,7 @@ class InstalledDeepPreflightComposition:
     image_run: ImageDockerRunner
     render_manifest_factory: ManifestFactory
     manifest_image_names: frozenset[str]
+    server_schema_dry_run: ServerDryRun
     server_dry_run: ServerDryRun
     browser_run: BrowserCommandRunner
     baseline_probe_factory: Callable[[int], Mapping[str, ReadonlyProbe]]
@@ -151,6 +152,7 @@ class InstalledDeepPreflightComposition:
             image_run=self.image_run,
             render_manifest=self.render_manifest_factory(candidate),
             manifest_image_names=self.manifest_image_names,
+            server_schema_dry_run=self.server_schema_dry_run,
             server_dry_run=self.server_dry_run,
             browser_run=self.browser_run,
             browser_token_path=self.inputs.browser_token_path,

@@ -24,7 +24,15 @@ MANIFEST_APPLY_CONTRACT_DIGEST = hashlib.sha256(
                 "request_timeout": MANIFEST_REQUEST_TIMEOUT,
                 "server_side": True,
             },
-            "version": "v1",
+            "schema_validation": {
+                "dry_run": "server",
+                "field_manager": MANIFEST_FIELD_MANAGER,
+                "force_conflicts": True,
+                "request_timeout": MANIFEST_REQUEST_TIMEOUT,
+                "server_side": True,
+                "validate": "strict",
+            },
+            "version": "v2",
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -83,6 +91,22 @@ def server_side_diff_argv(namespace: str) -> tuple[str, ...]:
     )
 
 
+def server_side_schema_validation_argv(
+    namespace: str,
+    *,
+    kubeconfig: Path | None = None,
+) -> tuple[str, ...]:
+    """Return a mutation-free schema validation command.
+
+    ``--force-conflicts`` is deliberately confined to a server dry-run.  It
+    separates API/schema validation from the independent no-force field-owner
+    predicate without creating or changing any Kubernetes object.
+    """
+    argv = list(server_side_apply_argv(namespace, kubeconfig=kubeconfig, dry_run=True))
+    argv.insert(argv.index("--validate=strict"), "--force-conflicts")
+    return tuple(argv)
+
+
 def _validate_namespace(namespace: str) -> None:
     if not namespace or "\x00" in namespace or namespace.startswith("-") or "/" in namespace:
         raise ValueError("manifest namespace is invalid")
@@ -94,4 +118,5 @@ __all__ = [
     "MANIFEST_REQUEST_TIMEOUT",
     "server_side_apply_argv",
     "server_side_diff_argv",
+    "server_side_schema_validation_argv",
 ]

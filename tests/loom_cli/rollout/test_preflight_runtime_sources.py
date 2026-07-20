@@ -124,6 +124,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
         image_run=command,
         render_manifest=lambda: "",
         manifest_image_names=frozenset(name for name, _path in ROLLOUT_IMAGES),
+        server_schema_dry_run=lambda _rendered: _result(),
         server_dry_run=lambda _rendered: _result(),
         browser_run=command,
         browser_token_path=token,
