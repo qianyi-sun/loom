@@ -20,6 +20,7 @@ from loom.data_lifecycle_legacy import (
     LegacyRow,
     build_legacy_classification_plan,
     classification_plan_document,
+    classification_plan_summary,
 )
 from loom.data_lifecycle_legacy_s3 import S3LegacyObjectInspector
 from loom.data_lifecycle_legacy_sql import (
@@ -251,6 +252,32 @@ def test_pinned_legacy_object_is_registered_without_gc_expiry() -> None:
     document = classification_plan_document(plan)
     assert document["authorities"][0]["pinned"] is True  # type: ignore[index]
     assert document["authorities"][0]["expires_at"] is None  # type: ignore[index]
+
+
+def test_operator_summary_is_bounded_but_binds_complete_plan() -> None:
+    event_rows = [
+        _trial_event(row_id=UUID(int=index + 10), created_at=NOW - timedelta(seconds=index))
+        for index in range(1000)
+    ]
+    plan = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        planned_at=NOW,
+        rows=[*event_rows, _artifact()],
+        objects=[_object()],
+    )
+
+    summary = classification_plan_summary(plan)
+
+    assert summary["schema_version"] == 2
+    assert summary["inventory_digest"] == plan.inventory_digest
+    assert summary["row_count"] == 1001
+    assert summary["row_table_counts"] == {"artifacts": 1, "trial_events": 1000}
+    assert summary["authority_count"] == 2
+    assert summary["present_object_count"] == 1
+    assert summary["present_object_bytes"] == 17
+    assert "rows" not in summary
+    assert "objects" not in summary
 
 
 @pytest.mark.parametrize("artifact_type", ("benchmark", "catalog", "bootstrap", "system"))

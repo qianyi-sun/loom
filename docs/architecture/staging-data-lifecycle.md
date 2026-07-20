@@ -131,13 +131,17 @@ exact identity cannot be proven still fails closed.
 
 The inventory digest excludes wall-clock report time, but binds every row
 fingerprint, exact object identity, retention authority, scope, and current
-mutation epoch. `apply` requires the operator to echo that digest and provide a
-request ID. It locks the epoch, proves the complete unclassified row set and
-all source fingerprints are unchanged, installs deterministic authorities,
-binds exact objects and rows, and advances the epoch in one transaction. A
-concurrent row or metadata change rolls the whole operation back. This
-classification step authorizes later inventory; it does not itself delete any
-DB row or object.
+mutation epoch. Operator output is a schema-v2 summary whose size is bounded
+with respect to the successful row/object inventory: it contains that digest,
+per-table/per-class counts, present-object bytes, exact-absence counts, and all
+blockers, but does not duplicate a million-row applicable plan into stdout or a
+second giant JSON file. `apply` rebuilds the complete live plan and requires
+the operator to echo that digest and provide a request ID. It locks the epoch,
+proves the complete unclassified row set and all source fingerprints are
+unchanged, installs deterministic authorities, binds exact objects and rows,
+and advances the epoch in one transaction. A concurrent row or metadata change
+rolls the whole operation back. This classification step authorizes later
+inventory; it does not itself delete any DB row or object.
 
 An explicitly authorized one-time staging reset may additionally provide
 `--expire-created-before <timezone-aware timestamp>`. The cutoff is included in

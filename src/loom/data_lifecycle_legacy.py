@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -414,6 +415,42 @@ def classification_plan_document(plan: LegacyClassificationPlan) -> Mapping[str,
     return {**payload, "inventory_digest": plan.inventory_digest}
 
 
+def classification_plan_summary(plan: LegacyClassificationPlan) -> Mapping[str, object]:
+    """Return row/object-payload-bounded evidence for an exact digest-bound plan.
+
+    The canonical inventory digest continues to bind every row fingerprint and
+    exact object identity.  This summary intentionally does not duplicate that
+    potentially million-row authority into stdout or a second evidence file.
+    All classification blockers remain visible together. ``apply`` rebuilds
+    the complete live plan and requires the same digest.
+    """
+    row_counts = Counter(item.table for item in plan.rows)
+    class_counts = Counter(item.data_class.value for item in plan.authorities)
+    pinned = sum(1 for item in plan.authorities if item.pinned)
+    return {
+        "schema_version": 2,
+        "evidence_kind": "digest-bound-legacy-classification-summary",
+        "environment": plan.scope.environment,
+        "namespace": plan.scope.namespace,
+        "mutation_epoch": plan.mutation_epoch,
+        "planned_at": plan.planned_at.isoformat(),
+        "expire_created_before": (
+            plan.expire_created_before.isoformat() if plan.expire_created_before else None
+        ),
+        "inventory_digest": plan.inventory_digest,
+        "authority_count": len(plan.authorities),
+        "ephemeral_authority_count": len(plan.authorities) - pinned,
+        "pinned_authority_count": pinned,
+        "authority_class_counts": dict(sorted(class_counts.items())),
+        "row_count": len(plan.rows),
+        "row_table_counts": dict(sorted(row_counts.items())),
+        "present_object_count": len(plan.objects),
+        "present_object_bytes": sum(item.size_bytes for item in plan.objects),
+        "verified_absent_object_count": len(plan.absent_objects),
+        "blockers": list(plan.blockers),
+    }
+
+
 __all__ = [
     "LegacyAbsentObject",
     "LegacyAuthority",
@@ -423,4 +460,5 @@ __all__ = [
     "LegacyRow",
     "build_legacy_classification_plan",
     "classification_plan_document",
+    "classification_plan_summary",
 ]

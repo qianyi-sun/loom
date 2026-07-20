@@ -13,7 +13,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 
 from loom.data_lifecycle_gc import GcScope
-from loom.data_lifecycle_legacy import classification_plan_document
+from loom.data_lifecycle_legacy import classification_plan_summary
 from loom.data_lifecycle_legacy_s3 import S3LegacyObjectInspector
 from loom.data_lifecycle_legacy_sql import SqlAlchemyLegacyClassifier
 from loom.storage_credentials import build_s3_client
@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             planned_at=now,
             expire_created_before=args.expire_created_before,
         )
-        document = dict(classification_plan_document(plan))
+        document = dict(classification_plan_summary(plan))
         document["action"] = args.action
         document["applicable"] = not plan.blockers and bool(plan.rows)
         if args.action == "apply":
