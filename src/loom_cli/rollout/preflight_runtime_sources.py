@@ -93,6 +93,11 @@ from loom_cli.rollout.systemd_unit_readiness import (
 
 _SHA256_ZERO = "0" * 64
 GB10_PREFLIGHT_FLEET_CONCURRENCY = 4
+# Every candidate-source probe walks the same NFS-backed Git checkout.  Running
+# those full-tree reads concurrently amplifies one backend rather than adding
+# independent work; keep this resource class serialized while other GB10
+# readiness checks retain their bounded fleet pool.
+GB10_CANDIDATE_SOURCE_CONCURRENCY = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,7 +420,7 @@ class PreflightRuntimeSources:
                 expected_candidate_sha=self.candidate.resolved_sha,
                 expected_candidate_tree=self.candidate.resolved_tree or "",
                 image_tag=self.candidate.image_tag,
-                max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
+                max_concurrency=GB10_CANDIDATE_SOURCE_CONCURRENCY,
             ),
             build_gb10_host_readiness_check(
                 self.gb10_run,
@@ -574,6 +579,7 @@ class PreflightRuntimeSources:
 
 
 __all__ = [
+    "GB10_CANDIDATE_SOURCE_CONCURRENCY",
     "GB10_PREFLIGHT_FLEET_CONCURRENCY",
     "BackupAdmissionAuthority",
     "PreflightRuntimeSources",

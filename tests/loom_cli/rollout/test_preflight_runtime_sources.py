@@ -14,6 +14,7 @@ from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBindin
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_registered_checks import CredentialProbeSource
 from loom_cli.rollout.preflight_runtime_sources import (
+    GB10_CANDIDATE_SOURCE_CONCURRENCY,
     GB10_PREFLIGHT_FLEET_CONCURRENCY,
     BackupAdmissionAuthority,
     PreflightRuntimeSources,
@@ -57,10 +58,11 @@ def test_fresh_authority_is_explicit_and_does_not_claim_a_lease() -> None:
 
 
 def test_nested_gb10_checks_share_a_bounded_fleet_budget() -> None:
-    # Mount and host readiness may run in the same DAG wave; candidate-source
-    # can overlap a settling host probe in the next wave. Keeping each nested
-    # fleet pool at four bounds total concurrent SSH work to eight.
+    # Mount and host readiness may run in the same DAG wave. Candidate-source
+    # walks one shared NFS Git tree, so it is a separately serialized resource
+    # class rather than another fleet-wide fan-out.
     assert GB10_PREFLIGHT_FLEET_CONCURRENCY == 4
+    assert GB10_CANDIDATE_SOURCE_CONCURRENCY == 1
 
 
 def test_unavailable_authority_builds_a_fail_closed_registered_check() -> None:
@@ -201,7 +203,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(
     assert plan.context.bindings["staging.mutation-epoch"] == 9
     assert plan.context.bindings["backup.source-request"] == "fresh-checkpoint"
     assert gb10_concurrency == {
-        "build_gb10_candidate_source_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,
+        "build_gb10_candidate_source_check": GB10_CANDIDATE_SOURCE_CONCURRENCY,
         "build_gb10_host_readiness_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,
         "build_gb10_ssh_topology_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,
     }

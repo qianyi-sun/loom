@@ -1568,14 +1568,14 @@ def build_gb10_candidate_source_check(
                 EvidenceField("unit-set-digest", "sha256"),
                 EvidenceField("source-digest", "sha256"),
             ),
-            timeout_seconds=60,
+            timeout_seconds=180,
             freshness_ttl_seconds=120,
             remediation=(
                 "restore the exact immutable shared candidate checkout and candidate unit bytes"
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 

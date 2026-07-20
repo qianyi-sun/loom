@@ -238,7 +238,7 @@ def git(*args):
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
         env={{
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
