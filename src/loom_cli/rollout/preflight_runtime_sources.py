@@ -144,6 +144,28 @@ class BackupAdmissionAuthority:
             },
         )
 
+    @classmethod
+    def unavailable(cls, *, schema_revision: str) -> BackupAdmissionAuthority:
+        """Keep unreadable authority inside its registered fail-closed check."""
+
+        def unavailable_source() -> BackupLease | None:
+            raise RuntimeError("backup admission authority is unavailable")
+
+        return cls(
+            lease_source=unavailable_source,
+            expected_lease_digest=_SHA256_ZERO,
+            source_request_id="unavailable-authority",
+            db_snapshot_identity="unavailable-authority",
+            schema_revision=schema_revision,
+            object_inventory_root=_SHA256_ZERO,
+            manifest_sha256=_SHA256_ZERO,
+            component_sha256={
+                "k8s_secrets": _SHA256_ZERO,
+                "object_inventory": _SHA256_ZERO,
+                "postgres": _SHA256_ZERO,
+            },
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PreflightRuntimeSources:

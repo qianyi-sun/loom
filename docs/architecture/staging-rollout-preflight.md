@@ -335,6 +335,10 @@ baseline rows, runtime capacity authority, and immutable-object inventory. A
 missing migration-`0067` capacity row therefore remains a blocking Tier 2
 failure, but it cannot prevent the DAG from reporting independent Tier 0–2
 blockers or mask the fresh `capacity.high-water` observation.
+The backup admission adapter follows the same rule: if its strict immutable
+inventory cannot be read, it supplies only an all-zero unavailable binding and
+the registered `backup.lease-eligibility` check fails closed. It never treats
+an unreadable inventory as an absent lease or a fresh-checkpoint authorization.
 The root installer converges that list-only identity through the exact MinIO
 pod and must invoke `kubectl exec --stdin`: the generated access and secret are
 delivered only on stdin, never argv, environment, logs, or evidence. A missing

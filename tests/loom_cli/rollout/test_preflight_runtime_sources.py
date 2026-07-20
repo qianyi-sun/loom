@@ -52,6 +52,19 @@ def test_fresh_authority_is_explicit_and_does_not_claim_a_lease() -> None:
     }
 
 
+def test_unavailable_authority_builds_a_fail_closed_registered_check() -> None:
+    authority = BackupAdmissionAuthority.unavailable(schema_revision="0067")
+
+    assert authority.source_request_id == "unavailable-authority"
+    assert authority.object_inventory_root == "0" * 64
+    try:
+        authority.lease_source()
+    except RuntimeError as exc:
+        assert str(exc) == "backup admission authority is unavailable"
+    else:  # pragma: no cover - fail-closed assertion
+        raise AssertionError("unavailable backup authority returned a lease")
+
+
 def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: Path) -> None:
     config = _config(tmp_path)
     candidate = _candidate()

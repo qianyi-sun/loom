@@ -928,7 +928,7 @@ def build_backup_lease_eligibility_check(
                 manifest_sha256=manifest_sha256,
                 component_sha256=component_sha256,
             )
-        except (OSError, ValueError):
+        except (OSError, RuntimeError, ValueError):
             return _empty_backup_lease_probe(
                 source_request_id=source_request_id,
                 manifest_sha256=manifest_sha256,

@@ -1193,6 +1193,46 @@ def test_registered_backup_lease_rejects_unreadable_authority() -> None:
     assert result.evidence["blockers"] == {"lease-unavailable": "blocked"}
 
 
+def test_registered_backup_lease_rejects_runtime_authority_failure() -> None:
+    now = datetime(2026, 7, 19, 18, tzinfo=UTC)
+    expected = _backup_lease(now)
+
+    def unreadable() -> BackupLease | None:
+        raise RuntimeError("authority unavailable")
+
+    check = build_backup_lease_eligibility_check(
+        unreadable,
+        now=lambda: now,
+        expected_lease_digest=expected.evidence_digest,
+        source_request_id=expected.source_request_id,
+        environment=expected.environment,
+        namespace=expected.namespace,
+        mutation_epoch=expected.mutation_epoch,
+        db_snapshot_identity=expected.db_snapshot_identity,
+        schema_revision=expected.schema_revision,
+        object_inventory_root=expected.object_inventory_root,
+        manifest_sha256=expected.manifest_sha256,
+        component_sha256=expected.component_sha256,
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("kubernetes.client"),
+            check,
+        )
+    )
+
+    result = next(
+        item
+        for item in dag.run(_backup_lease_context(expected))
+        if item.check_id == check.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.evidence["blockers"] == {"lease-unavailable": "blocked"}
+
+
 def test_registered_backup_lease_rejects_context_drift_without_reading_lease() -> None:
     now = datetime(2026, 7, 19, 18, tzinfo=UTC)
     lease = _backup_lease(now)

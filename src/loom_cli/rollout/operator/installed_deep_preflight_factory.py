@@ -99,12 +99,20 @@ def build_installed_deep_preflight_composition(
     attestation_store = PreflightAttestationStore(config.state_root)
 
     def backup_authority(mutation_epoch: int) -> BackupAdmissionAuthority:
-        return build_installed_backup_authority(
-            store,
-            inventory_source,
-            mutation_epoch=mutation_epoch,
-            now=now(),
-        )
+        try:
+            return build_installed_backup_authority(
+                store,
+                inventory_source,
+                mutation_epoch=mutation_epoch,
+                now=now(),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            epoch = mutation_epoch_evidence()
+            if epoch.mutation_epoch != mutation_epoch:
+                raise ValueError("backup authority mutation epoch drifted") from exc
+            return BackupAdmissionAuthority.unavailable(
+                schema_revision=epoch.schema_revision,
+            )
 
     manifest_image_names = frozenset(
         name
