@@ -10,6 +10,7 @@ from loom_cli.rollout import readonly_database_authority
 from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReference
 from loom_cli.rollout.readonly_database_authority import (
     probe_readonly_database,
+    probe_readonly_database_baseline,
     probe_readonly_mutation_epoch,
 )
 
@@ -185,6 +186,30 @@ def test_current_database_rejects_unclassified_immutable_inventory() -> None:
 
     with pytest.raises(ValueError, match="immutable inventory is invalid"):
         probe_readonly_database(query)
+
+
+def test_checkpoint_inventory_drift_does_not_mask_database_baseline() -> None:
+    query = Query(
+        revision="0067",
+        inventory=(
+            {
+                "authoritative_source": "",
+                "bucket": "loom-staging-artifacts",
+                "content_sha256": "a" * 64,
+                "data_class": "catalog",
+                "object_key": "catalog/unversioned.json",
+                "size_bytes": 42,
+                "version_id": "",
+            },
+        ),
+    )
+
+    evidence = probe_readonly_database_baseline(query)
+
+    assert evidence.mutation_epoch == 9
+    assert evidence.baseline_counts["tasks"] == 5
+    assert evidence.immutable_objects == ()
+    assert all("FROM data_lifecycle_objects" not in sql for sql in query.calls)
 
 
 @pytest.mark.parametrize(

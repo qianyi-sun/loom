@@ -266,8 +266,14 @@ install evidence, or an attestation. Reinstall revokes table and sequence
 authority before granting SELECT back to the fixed allowlist, so privilege
 drift cannot silently accumulate.
 The concurrent DAG shares one process-local, single-flight database snapshot
-for Tier 2 baseline, capability evidence, mutation-epoch binding, and critical
-checkpoint inventory. Tier 0 capacity separately shares one fresh,
+for Tier 2 baseline and mutation-epoch binding. Critical checkpoint inventory
+uses a separate single-flight `REPEATABLE READ, READ ONLY` snapshot and remains
+strict: invalid version, digest or authoritative-source metadata blocks backup
+lease eligibility without masking independent health, authentication, catalog,
+storage or network evidence. Large valid inventories are read in deterministic
+1024-row pages without relaxing the per-query row bound, and the staging
+admission object limit is also the fail-closed inventory ceiling. Tier 0
+capacity separately shares one fresh,
 single-flight list-only MinIO/filesystem snapshot, so pre-0067 staging remains
 measurable without weakening database schema authority. Its live inventory may
 use up to 60 seconds inside the overall sub-two-minute Tier 0 budget; a measured

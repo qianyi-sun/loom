@@ -24,6 +24,7 @@ from loom_cli.rollout.readonly_database_authority import (
     ReadonlyDatabaseEvidence,
     ReadonlyMutationEpochEvidence,
     probe_readonly_database,
+    probe_readonly_database_baseline,
     probe_readonly_mutation_epoch,
 )
 from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredential
@@ -229,6 +230,19 @@ def probe_installed_readonly_database(
         return probe_readonly_database(query)
 
 
+def probe_installed_readonly_database_baseline(
+    *,
+    service_uid: int,
+    query_context: Callable[..., AbstractContextManager[DatabaseQuery]] = (
+        open_readonly_database_query
+    ),
+) -> ReadonlyDatabaseEvidence:
+    """Return baseline evidence without letting checkpoint drift mask Tier 2."""
+
+    with query_context(service_uid=service_uid) as query:
+        return probe_readonly_database_baseline(query)
+
+
 def probe_installed_readonly_mutation_epoch(
     *,
     service_uid: int,
@@ -308,5 +322,6 @@ __all__ = [
     "WaitReady",
     "open_readonly_database_query",
     "probe_installed_readonly_database",
+    "probe_installed_readonly_database_baseline",
     "probe_installed_readonly_mutation_epoch",
 ]

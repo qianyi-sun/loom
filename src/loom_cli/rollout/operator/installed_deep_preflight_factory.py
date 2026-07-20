@@ -48,6 +48,7 @@ from .readonly_capacity_client import (
 from .readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
     InstalledReadonlyMutationEpochSource,
+    probe_installed_readonly_database_baseline,
 )
 from .readonly_preflight_authority import JsonRunner, ReadonlyPreflightAuthority
 from .staging_smoke_authority import staging_smoke_authority
@@ -70,6 +71,10 @@ def build_installed_deep_preflight_composition(
     inputs = InstalledPreflightInputs.load(config, service_uid=service_uid)
     database_evidence = InstalledReadonlyDatabaseEvidenceSource(
         service_uid=service_uid,
+        probe=probe_installed_readonly_database_baseline,
+    )
+    checkpoint_database_evidence = InstalledReadonlyDatabaseEvidenceSource(
+        service_uid=service_uid,
     )
     mutation_epoch_evidence = InstalledReadonlyMutationEpochSource(
         service_uid=service_uid,
@@ -85,7 +90,7 @@ def build_installed_deep_preflight_composition(
     )
     inventory_source = ReadonlyLifecycleInventoryProvider(
         config,
-        evidence_source=database_evidence,
+        evidence_source=checkpoint_database_evidence,
     )
     readonly = ReadonlyPreflightAuthority(
         config,

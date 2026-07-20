@@ -303,7 +303,11 @@ def probe_readonly_mutation_epoch(query: DatabaseQuery) -> ReadonlyMutationEpoch
     )
 
 
-def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
+def _probe_readonly_database(
+    query: DatabaseQuery,
+    *,
+    include_immutable_inventory: bool,
+) -> ReadonlyDatabaseEvidence:
     """Probe current staging without assuming migrations 0066/0067 already exist.
 
     ``query`` must execute every statement in the same PostgreSQL
@@ -381,7 +385,7 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
                 raise ValueError("readonly database capacity evidence is invalid")
 
     immutable_objects: tuple[ImmutableObjectReference, ...] = ()
-    if revision_number >= _EPOCH_FIRST_REVISION:
+    if include_immutable_inventory and revision_number >= _EPOCH_FIRST_REVISION:
         inventory_rows = _immutable_inventory_rows(query)
         try:
             immutable_objects = tuple(
@@ -417,10 +421,23 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
     )
 
 
+def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
+    """Return complete database and immutable checkpoint evidence."""
+
+    return _probe_readonly_database(query, include_immutable_inventory=True)
+
+
+def probe_readonly_database_baseline(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
+    """Return independent Tier 2 baseline evidence without checkpoint authority."""
+
+    return _probe_readonly_database(query, include_immutable_inventory=False)
+
+
 __all__ = [
     "DatabaseQuery",
     "ReadonlyDatabaseEvidence",
     "ReadonlyMutationEpochEvidence",
     "probe_readonly_database",
+    "probe_readonly_database_baseline",
     "probe_readonly_mutation_epoch",
 ]
