@@ -62,6 +62,8 @@ class AutoscalerPolicyConfig:
     last_scale_up_at: datetime | None = None
     last_scale_down_at: datetime | None = None
     actuator_config: dict[str, Any] | None = None
+    qos_boost: str = ""
+    qos_normal: str = ""
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,26 @@ class SlurmScaleUpActuatorResult:
     error: str | None = None
     blocked_reason: str | None = None
     blocked_details: dict[str, Any] | None = None
+
+
+def select_slurm_qos(
+    *,
+    active_plus_pending: int,
+    min_slots: int,
+    qos_boost: str,
+    qos_normal: str,
+) -> str:
+    """Pick the Slurm QoS for a scale-up submission.
+
+    When the pool's DB-sourced ``active_plus_pending`` slot sum is below
+    ``min_slots`` the pool is under its warm floor and submissions use the
+    higher-priority ``qos_boost``; at or above the floor they use
+    ``qos_normal``. ``qos_boost`` is only honoured when configured; otherwise
+    ``qos_normal`` (which may itself be empty) is always returned.
+    """
+    if qos_boost and active_plus_pending < min_slots:
+        return qos_boost
+    return qos_normal
 
 
 def _cooldown_active(
@@ -550,6 +572,8 @@ def _policy_to_config(row: WorkerPoolAutoscalerPolicy) -> AutoscalerPolicyConfig
         last_scale_up_at=row.last_scale_up_at,
         last_scale_down_at=row.last_scale_down_at,
         actuator_config=dict(row.actuator_config or {}),
+        qos_boost=str((row.actuator_config or {}).get("qos_boost") or ""),
+        qos_normal=str((row.actuator_config or {}).get("qos_normal") or ""),
     )
 
 
@@ -997,6 +1021,9 @@ def _slurm_config_from_policy(
             actor_config.get("command_timeout_seconds") or 20.0,
         ),
         exclusive=_optional_bool(actor_config.get("exclusive"), default=True),
+        slurm_account=str(actor_config.get("slurm_account") or ""),
+        slurm_qos=str(actor_config.get("slurm_qos") or actor_config.get("qos_normal") or ""),
+        slurm_reservation=str(actor_config.get("slurm_reservation") or ""),
         sinfo_path=str(actor_config.get("sinfo_path") or "sinfo"),
         resource_aware=resource_aware,
         cpu_per_slot=int(actor_config.get("cpu_per_slot") or 2),
@@ -1212,13 +1239,42 @@ async def _apply_slurm_scale_up(
                 node_resources=node_resources,
             ),
         )
+    actor_config = dict(row.actuator_config or {})
+    active_plus_pending = decision.actual_slots + decision.pending_slots
+    selected_qos = select_slurm_qos(
+        active_plus_pending=active_plus_pending,
+        min_slots=row.min_slots,
+        qos_boost=str(actor_config.get("qos_boost") or ""),
+        qos_normal=str(actor_config.get("slurm_qos") or actor_config.get("qos_normal") or ""),
+    )
+    if selected_qos != config.slurm_qos:
+        config = replace(config, slurm_qos=selected_qos)
+    # Stateful budget clamp: submissions must never push the pool's committed
+    # slot sum past ``max_slots``. ``slurm_submission_config_for_node`` has
+    # already applied any resource-aware ``safe_slots``, so the effective
+    # per-worker concurrency clamped here is the safe cap, not the raw request.
+    remaining_budget = row.max_slots - active_plus_pending
     actuator_error: str | None = None
     for node in slurm_decision.submit_nodes:
+        if remaining_budget <= 0:
+            break
         node_config = slurm_submission_config_for_node(
             config,
             slurm_decision,
             node=node,
         )
+        effective_concurrency = node_config.requested_concurrency
+        per_worker = min(effective_concurrency, remaining_budget)
+        if per_worker <= 0:
+            break
+        if per_worker < effective_concurrency:
+            node_config = replace(
+                node_config,
+                requested_concurrency=per_worker,
+                requested_cpus=max(1, per_worker * config.cpu_per_slot),
+                requested_memory_mib=max(1, per_worker * config.memory_mib_per_slot),
+            )
+        remaining_budget -= per_worker
         try:
             job_id = await runner.submit_worker(node=node, config=node_config)
             await record_slurm_worker_job(
