@@ -383,6 +383,15 @@ candidate-bound one-shot maintenance Job. That action publishes only the fresh
 capacity row and returns `gc: null`; it cannot inventory, mark, delete or resume
 GC. The CronJob always declares `--action auto`, so adding the narrower action
 does not silently change scheduled retention semantics.
+Operators first run `loom-staging-rollout lifecycle-capacity inventory`, review
+the exact plan digest, then use `lifecycle-capacity apply
+--approved-plan-sha256 <digest>` only while the root-owned maintenance freeze is
+active. The broker claims the plan under the short launch lock, releases that
+lock before image loading or Job execution, and refuses duplicate claims. The
+Job clones the exact Tier 1 rendered CronJob contract, changes only its action
+to `capacity`, binds the candidate/tree/image/artifact digests, and publishes a
+private result only after Kubernetes completion, fresh database readback, an
+unchanged mutation epoch, and confirmation that no rollout became active.
 
 ## Rollout checkpoint versus disaster recovery
 

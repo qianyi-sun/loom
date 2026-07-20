@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any, Never, TextIO, cast
 from uuid import uuid4
 
+from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.evidence import new_rollout_id
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction
+from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
 from .backup import (
@@ -35,7 +37,9 @@ from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
+from .installed_lifecycle_capacity import InstalledLifecycleCapacityService
 from .installed_manifest_ownership import InstalledManifestOwnershipService
+from .installed_preflight_commands import InstalledPreflightCommands
 from .lifecycle import LifecycleBusyError, LifecycleCoordinator, LifecycleError
 from .model import (
     CallerIdentity,
@@ -50,7 +54,10 @@ from .model import (
 )
 from .policy import PolicyError, caller_from_sudo, sanitized_child_environment
 from .preflight import PreflightReport, catalog_secret_values, collect_preflight
-from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
+from .readonly_database_client import (
+    InstalledReadonlyDatabaseEvidenceSource,
+    probe_installed_readonly_database_baseline,
+)
 from .redaction import known_secrets_from_sources, redact_rollout_text
 from .store import RequestStore, RequestStoreError
 from .systemd import (
@@ -121,6 +128,12 @@ def _parser() -> argparse.ArgumentParser:
     ownership_apply = ownership_commands.add_parser("apply")
     ownership_apply.add_argument("--request-id", required=True)
     ownership_apply.add_argument("--approved-inventory-sha256", required=True)
+
+    capacity = commands.add_parser("lifecycle-capacity")
+    capacity_commands = capacity.add_subparsers(dest="capacity_action", required=True)
+    capacity_commands.add_parser("inventory")
+    capacity_apply = capacity_commands.add_parser("apply")
+    capacity_apply.add_argument("--approved-plan-sha256", required=True)
     return parser
 
 
@@ -148,6 +161,7 @@ class BrokerDependencies:
     new_backup_job_id: Callable[[], str] | None = None
     new_payload_id: Callable[[], str] | None = None
     manifest_ownership: Any | None = None
+    lifecycle_capacity: Any | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -394,6 +408,42 @@ def _manifest_ownership(
             )
         else:
             return 2
+    _write_json(dependencies.stdout, result)
+    return 0
+
+
+def _lifecycle_capacity(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    action: str,
+    approved_plan_sha256: str | None,
+) -> int:
+    if caller.username != "qianyi":
+        return _safe_error(
+            dependencies,
+            "lifecycle capacity maintenance requires coordinator authority",
+        )
+    if (
+        dependencies.config.source_mode != "sealed-cumulative"
+        or dependencies.lifecycle_capacity is None
+    ):
+        return _safe_error(
+            dependencies,
+            "lifecycle capacity maintenance is not configured",
+        )
+    if action == "inventory" and approved_plan_sha256 is None:
+        plan = dependencies.lifecycle_capacity.inventory()
+        _write_json(dependencies.stdout, plan.to_dict())
+        return 0
+    if action != "apply" or approved_plan_sha256 is None:
+        return 2
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_maintenance_idle()
+        plan = dependencies.lifecycle_capacity.prepare_apply(
+            approved_plan_digest=approved_plan_sha256,
+        )
+    result = dependencies.lifecycle_capacity.execute_claimed(plan)
     _write_json(dependencies.stdout, result)
     return 0
 
@@ -1378,6 +1428,55 @@ def _default_dependencies() -> BrokerDependencies:
         service_uid=service_uid,
         read_mutation_epoch=deep_preflight.current_mutation_epoch,
     )
+    preflight_commands = InstalledPreflightCommands(config, child_environment)
+
+    def bind_exact_candidate() -> CandidateBinding:
+        return bind_configured_candidate(config, run=run, now=clock)
+
+    def load_capacity_artifacts(
+        candidate: CandidateBinding,
+        mutation_epoch: int,
+    ) -> Any:
+        if candidate.resolved_tree is None:
+            raise ValueError("sealed capacity candidate tree is unavailable")
+        return PreflightArtifactStore(config.state_root, service_uid=service_uid).load_exact(
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=candidate.resolved_tree,
+            mutation_epoch=mutation_epoch,
+            image_tag=candidate.image_tag,
+            namespace=config.namespace,
+            image_run=preflight_commands.image,
+        )
+
+    lifecycle_capacity = (
+        InstalledLifecycleCapacityService(
+            config=config,
+            service_uid=service_uid,
+            store=store,
+            bind_candidate=bind_exact_candidate,
+            read_mutation_epoch=deep_preflight.current_mutation_epoch,
+            load_artifacts=load_capacity_artifacts,
+            commands=preflight_commands,
+            read_database=lambda: probe_installed_readonly_database_baseline(
+                service_uid=service_uid,
+            ),
+            now=clock,
+            expected_buckets=(
+                (
+                    cluster_config := load_cluster_config(config.cluster_config_path)
+                ).trajectories_bucket,
+                cluster_config.artifacts_bucket,
+            ),
+            expected_filesystem_paths=tuple(
+                f"/var/lib/loom-minio-capacity/{index}"
+                for index in range(
+                    int(cluster_config.to_render_context()["topology"]["minio_replicas"])
+                )
+            ),
+        )
+        if config.source_mode == "sealed-cumulative"
+        else None
+    )
     return BrokerDependencies(
         config=config,
         authenticate=lambda: caller_from_sudo(
@@ -1387,11 +1486,7 @@ def _default_dependencies() -> BrokerDependencies:
             groups=_groups,
         ),
         preflight=lambda: collect_preflight(config, service_uid=service_uid),
-        bind_candidate=lambda: bind_configured_candidate(
-            config,
-            run=run,
-            now=clock,
-        ),
+        bind_candidate=bind_exact_candidate,
         backup=BackupCreator(
             config,
             service_uid=service_uid,
@@ -1413,6 +1508,7 @@ def _default_dependencies() -> BrokerDependencies:
         assess_preflight=deep_preflight.assess,
         read_mutation_epoch=deep_preflight.current_mutation_epoch,
         manifest_ownership=manifest_ownership,
+        lifecycle_capacity=lifecycle_capacity,
     )
 
 
@@ -1467,6 +1563,13 @@ def _main(
                     "approved_inventory_sha256",
                     None,
                 ),
+            )
+        if args.command == "lifecycle-capacity":
+            return _lifecycle_capacity(
+                deps,
+                caller,
+                action=args.capacity_action,
+                approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
             )
         return 2
     except (ValueError, PolicyError):

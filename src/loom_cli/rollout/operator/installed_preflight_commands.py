@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -15,6 +16,8 @@ from .manifest_apply_contract import (
     server_side_schema_validation_argv,
 )
 from .readonly_preflight_authority import READONLY_KUBECONFIG_PATH
+
+_DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 
 
 class CommandResult(Protocol):
@@ -121,6 +124,38 @@ class InstalledPreflightCommands:
             ),
             input=rendered,
             timeout=120,
+        )
+
+    def manifest_server_apply(self, rendered: str) -> CommandResult:
+        """Apply one caller-validated exact manifest through the shared contract."""
+        if not rendered or len(rendered.encode("utf-8")) > 16 * 1024 * 1024:
+            raise ValueError("protected manifest payload is invalid")
+        return self._execute(
+            server_side_apply_argv(
+                self.config.namespace,
+                kubeconfig=self.config.kubeconfig_path,
+                output_json=True,
+            ),
+            input=rendered,
+            timeout=120,
+        )
+
+    def lifecycle_capacity_wait(self, job_name: str) -> CommandResult:
+        if _DNS_RE.fullmatch(job_name) is None:
+            raise ValueError("lifecycle capacity Job name is invalid")
+        return self._execute(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.config.kubeconfig_path),
+                "--namespace",
+                self.config.namespace,
+                "wait",
+                "--for=condition=complete",
+                f"job/{job_name}",
+                "--timeout=1200s",
+            ),
+            timeout=1260,
         )
 
     def manifest_schema_dry_run(self, rendered: str) -> CommandResult:

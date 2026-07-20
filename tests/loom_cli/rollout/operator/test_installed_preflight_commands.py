@@ -39,6 +39,8 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
     commands.readonly_json(("kubectl", "create", "--raw", "/review"), b'{"kind":"x"}')
     commands.manifest_server_dry_run("apiVersion: v1\nkind: ConfigMap\n")
     commands.manifest_schema_dry_run("apiVersion: v1\nkind: ConfigMap\n")
+    commands.manifest_server_apply("apiVersion: v1\nkind: ConfigMap\n")
+    commands.lifecycle_capacity_wait("loom-staging-capacity-aaaaaaaa-bbbbbbbb")
     commands.final_gate_helper(
         ("/usr/local/libexec/loom-staging-rollout-final-gate", "execute"),
         {
@@ -82,7 +84,22 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
     assert "--dry-run=server" in calls[3]["argv"]
     assert calls[3]["input"] == "apiVersion: v1\nkind: ConfigMap\n"
     assert calls[3]["timeout"] == 120
-    assert calls[4]["timeout"] == 3600
+    assert calls[4]["argv"] == server_side_apply_argv(
+        config.namespace,
+        kubeconfig=config.kubeconfig_path,
+        output_json=True,
+    )
+    assert "--dry-run=server" not in calls[4]["argv"]
+    assert calls[4]["input"] == "apiVersion: v1\nkind: ConfigMap\n"
+    assert calls[4]["timeout"] == 120
+    assert calls[5]["argv"][-4:] == (
+        "wait",
+        "--for=condition=complete",
+        "job/loom-staging-capacity-aaaaaaaa-bbbbbbbb",
+        "--timeout=1200s",
+    )
+    assert calls[5]["timeout"] == 1260
+    assert calls[6]["timeout"] == 3600
 
 
 def test_image_and_rehearsal_adapters_reject_authority_drift(tmp_path: Path) -> None:
@@ -101,3 +118,5 @@ def test_image_and_rehearsal_adapters_reject_authority_drift(tmp_path: Path) -> 
         commands.rehearsal_helper(("helper",), {"PATH": "/usr/bin"}, 10)
     with pytest.raises(ValueError, match="command environment is invalid"):
         InstalledPreflightCommands(config, {**_environment(), "TOKEN": "forbidden"})
+    with pytest.raises(ValueError, match="Job name"):
+        commands.lifecycle_capacity_wait("../unsafe")

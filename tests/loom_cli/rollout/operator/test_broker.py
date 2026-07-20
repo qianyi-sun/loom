@@ -503,6 +503,91 @@ def test_manifest_ownership_rejects_non_coordinator_before_candidate_read(
     assert deps.order == []
 
 
+class _LifecycleCapacity:
+    def __init__(self, lifecycle: FakeLifecycle) -> None:
+        self.lifecycle = lifecycle
+        self.calls: list[tuple[str, object]] = []
+        self.plan = SimpleNamespace(
+            plan_digest="e" * 64,
+            to_dict=lambda: {"plan_digest": "e" * 64, "schema_version": 1},
+        )
+
+    def inventory(self):  # type: ignore[no-untyped-def]
+        self.calls.append(("inventory", self.lifecycle.guard_depth))
+        return self.plan
+
+    def prepare_apply(self, *, approved_plan_digest: str):  # type: ignore[no-untyped-def]
+        self.calls.append(("prepare", self.lifecycle.guard_depth))
+        assert approved_plan_digest == "e" * 64
+        return self.plan
+
+    def execute_claimed(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("execute", self.lifecycle.guard_depth))
+        assert plan is self.plan
+        return {"evidence_sha256": "f" * 64, "schema_version": 1}
+
+
+def test_lifecycle_capacity_uses_digest_approval_and_releases_launch_lock(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    service = _LifecycleCapacity(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("qianyi", 2001),
+        config=sealed_config,
+        lifecycle_capacity=service,
+    )
+
+    assert broker_main(["lifecycle-capacity", "inventory"], dependencies=dependencies) == 0
+    assert service.calls == [("inventory", 0)]
+
+    assert (
+        broker_main(
+            [
+                "lifecycle-capacity",
+                "apply",
+                "--approved-plan-sha256",
+                "e" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 1
+    )
+    assert service.calls == [("inventory", 0)]
+
+    deps.lifecycle.maintenance = True
+    assert (
+        broker_main(
+            [
+                "lifecycle-capacity",
+                "apply",
+                "--approved-plan-sha256",
+                "e" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    assert service.calls[-2:] == [("prepare", 1), ("execute", 0)]
+
+
+def test_lifecycle_capacity_rejects_non_coordinator(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    service = _LifecycleCapacity(deps.lifecycle)
+    dependencies = replace(deps.dependencies, lifecycle_capacity=service)
+
+    assert broker_main(["lifecycle-capacity", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+
 @pytest.mark.parametrize("reason", ["", "   ", "x" * 501])
 def test_cancel_reason_is_nonempty_and_bounded(tmp_path: Path, reason: str) -> None:
     deps = fakes(tmp_path)
