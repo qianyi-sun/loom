@@ -117,3 +117,65 @@ def test_ensure_child_rejects_existing_metadata_without_mutation(tmp_path: Path)
         assert stat.S_IMODE(target.stat().st_mode) == 0o700
     finally:
         os.close(parent.fd)
+
+
+def _svc_identity(name: str, *_a: object, **_k: object) -> helper.Identity:
+    # service: uid 2001, primary group 2001 (loom-rollout), NOT in sharedwork(2007)
+    # consumer: uid 2005, in sharedwork(2007)
+    if name == helper.SERVICE_USER:
+        return helper.Identity(name, 2001, 2001, (2001,))
+    return helper.Identity(name, 2005, 2005, (2005, 2007))
+
+
+def test_service_owned_rejects_invalid_relative_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    for bad in ((), ("..",), ("candidates", ""), ("candidates", "a/b")):
+        with pytest.raises(helper.AuthorityError, match="service path is invalid"):
+            helper.converge_service_owned(Path("/shared_work/loom"), bad, ensure=False)
+
+
+def test_service_owned_requires_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 1000)
+    with pytest.raises(helper.AuthorityError, match="requires root"):
+        helper.converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+
+
+def test_service_owned_rejects_bad_group_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(helper, "_identity", _svc_identity)
+    monkeypatch.setattr(
+        helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=2007)
+    )
+    # consumer NOT in sharedwork -> invalid
+    monkeypatch.setattr(
+        helper,
+        "_identity",
+        lambda name, *a, **k: helper.Identity(name, 2001, 2001, (2001,))
+        if name == helper.SERVICE_USER
+        else helper.Identity(name, 2005, 2005, (2005,)),
+    )
+    with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
+        helper.converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+
+
+def test_service_owned_rejects_service_in_shared_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=2007)
+    )
+    # service IS in sharedwork(2007) -> invalid (must not be)
+    monkeypatch.setattr(
+        helper,
+        "_identity",
+        lambda name, *a, **k: helper.Identity(name, 2001, 2001, (2001, 2007))
+        if name == helper.SERVICE_USER
+        else helper.Identity(name, 2005, 2005, (2005, 2007)),
+    )
+    with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
+        helper.converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)

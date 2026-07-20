@@ -29,6 +29,12 @@ SHARED_GROUP = "sharedwork"
 CONSUMER_PARENT = Path("/shared_work/qianyi")
 AUTHORITY_ROOT = CONSUMER_PARENT / ".loom-staging-rollout"
 REPOSITORY_ROOT = AUTHORITY_ROOT / "worker-repos"
+
+# Service-owned candidate tree (#874): the rollout service owns the root and
+# every level below it; the shared group (workers) gets read+traverse only.
+# The root itself (e.g. /shared_work/loom) is operator-provisioned; this helper
+# validates it is service-owned and ensures the candidate chain beneath it.
+SERVICE_DIR_MODE = 0o2750
 _DIRECTORY_FLAGS = (
     os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
@@ -356,12 +362,130 @@ def converge(*, ensure: bool) -> dict[str, object]:
         os.close(parent.fd)
 
 
+def converge_service_owned(
+    root: Path,
+    relative_chain: tuple[str, ...],
+    *,
+    ensure: bool,
+) -> dict[str, object]:
+    """Converge a service-owned candidate tree under an operator-provisioned root.
+
+    Unlike converge() (which validates a *consumer*-owned parent), the root here
+    is owned by the rollout service and so is every level beneath it. Workers
+    (the shared group) get read+traverse only, never write -- that is the
+    immutability guarantee for published candidates (#874,
+    /shared_work/loom/candidates/<env>/...). The root is provisioned once by an
+    operator; this helper validates it is service-owned and ensures the chain.
+    """
+    if os.geteuid() != 0:
+        raise AuthorityError("shared repository helper requires root")
+    if not relative_chain or any(
+        part in ("", ".", "..") or "/" in part for part in relative_chain
+    ):
+        raise AuthorityError("shared repository service path is invalid")
+    service = _identity(SERVICE_USER, SERVICE_GROUP)
+    consumer = _identity(CONSUMER_USER)
+    try:
+        shared_gid = grp.getgrnam(SHARED_GROUP).gr_gid
+    except KeyError as exc:
+        raise AuthorityError("shared repository identity is unavailable") from exc
+    if shared_gid not in consumer.groups or shared_gid in service.groups:
+        raise AuthorityError("shared repository group membership is invalid")
+
+    opened: list[BoundDirectory] = []
+    created: list[str] = []
+    try:
+        root_dir = _open_absolute(root)
+        opened.append(root_dir)
+        # Root is operator-provisioned and must already be service-owned.
+        root_metadata = _validate_directory(
+            root_dir, uid=service.uid, gid=shared_gid, mode=SERVICE_DIR_MODE,
+        )
+        current = root_dir
+        for name in relative_chain:
+            if ensure:
+                child, was_created = _ensure_child(
+                    current, name, uid=service.uid, gid=shared_gid, mode=SERVICE_DIR_MODE,
+                )
+                if was_created:
+                    created.append(name)
+            else:
+                child = _open_child(current, name)
+            _validate_directory(child, uid=service.uid, gid=shared_gid, mode=SERVICE_DIR_MODE)
+            opened.append(child)
+            current = child
+        repository = current
+        repository_metadata = repository.assert_stable()
+        # Service owns the whole tree (writes root + repo); the shared group
+        # (workers) may read+traverse but never write -- immutability.
+        service_ok = _probe_identity(
+            service,
+            (
+                (root_dir.fd, os.W_OK | os.X_OK, True),
+                (repository.fd, os.W_OK | os.X_OK, True),
+            ),
+        )
+        consumer_ok = _probe_identity(
+            consumer,
+            (
+                (root_dir.fd, os.R_OK | os.X_OK, True),
+                (root_dir.fd, os.W_OK, False),
+                (repository.fd, os.R_OK | os.X_OK, True),
+                (repository.fd, os.W_OK, False),
+            ),
+        )
+        if not service_ok or not consumer_ok:
+            raise AuthorityError("shared repository capability contract is invalid")
+        return {
+            "schema_version": 1,
+            "model": "service-owned",
+            "root": str(root),
+            "repository": str(repository.path),
+            "relative_chain": list(relative_chain),
+            "service_user": SERVICE_USER,
+            "service_uid": service.uid,
+            "consumer_user": CONSUMER_USER,
+            "consumer_uid": consumer.uid,
+            "shared_group": SHARED_GROUP,
+            "shared_gid": shared_gid,
+            "root_mode": "2750",
+            "repository_mode": "2750",
+            "root_device": root_metadata.st_dev,
+            "root_inode": root_metadata.st_ino,
+            "repository_device": repository_metadata.st_dev,
+            "repository_inode": repository_metadata.st_ino,
+            "service_capability": "root-writable;repository-writable-searchable",
+            "consumer_capability": "root-readable;repository-readable-searchable-not-writable",
+            "created": created,
+        }
+    finally:
+        for directory in reversed(opened):
+            os.close(directory.fd)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "ensure"))
+    parser.add_argument("command", choices=("check", "ensure", "service-check", "service-ensure"))
+    parser.add_argument("--root", type=Path, help="Service-owned root (service-* commands).")
+    parser.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        help="Relative chain component under --root (repeatable; service-* commands).",
+    )
     args = parser.parse_args(argv)
     try:
-        report = converge(ensure=args.command == "ensure")
+        if args.command in ("service-check", "service-ensure"):
+            if args.root is None or not args.path:
+                print("error: service commands require --root and --path", file=sys.stderr)
+                return 2
+            report = converge_service_owned(
+                args.root,
+                tuple(args.path),
+                ensure=args.command == "service-ensure",
+            )
+        else:
+            report = converge(ensure=args.command == "ensure")
     except FileNotFoundError:
         print("error: shared repository authority is not installed", file=sys.stderr)
         return 2
