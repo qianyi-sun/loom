@@ -1272,16 +1272,19 @@ async def _apply_slurm_scale_up(
             # request, NOT from the independent per-slot defaults: a
             # 10-slot/115000 MiB worker clamped to 4 slots must request
             # 46000 MiB (115000 * 4 / 10), not 4 * memory_mib_per_slot.
+            # Use ceil, never round: round() is banker's rounding, so e.g.
+            # 5 CPU / 2 slots clamped to 1 would give round(2.5)=2 -- below the
+            # proportional requirement. ceil(2.5)=3 never under-requests.
             node_config = replace(
                 node_config,
                 requested_concurrency=per_worker,
                 requested_cpus=max(
                     1,
-                    round(node_config.requested_cpus * per_worker / effective_concurrency),
+                    math.ceil(node_config.requested_cpus * per_worker / effective_concurrency),
                 ),
                 requested_memory_mib=max(
                     1,
-                    round(
+                    math.ceil(
                         node_config.requested_memory_mib * per_worker / effective_concurrency
                     ),
                 ),

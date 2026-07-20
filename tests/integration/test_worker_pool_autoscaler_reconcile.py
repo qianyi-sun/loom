@@ -327,6 +327,71 @@ async def test_reconcile_clamps_scale_up_slots_to_max_slots(
         await engine.dispose()
 
 
+async def test_reconcile_clamp_uses_ceiling_not_bankers_rounding(
+    postgres_url: str,
+) -> None:
+    # Odd ratio: 5 CPU / 2 slots clamped to 1 slot must ceil(2.5)=3, never
+    # round(2.5)=2 (banker's rounding would under-request Slurm resources).
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Team).values(id=team_id, name="team-ceil"))
+            await s.execute(insert(Task).values(id="task-ceil", checksum="0" * 64, config={}))
+            await s.execute(insert(Trial).values(
+                id=uuid4(),
+                team_id=team_id,
+                task_id="task-ceil",
+                config={},
+                requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
+                state="queued",
+                idempotency_key="clamp-ceil-0",
+            ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=1,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "allowed_nodes": ["oldlab-1"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 5,
+                    "requested_memory_mib": 5000,
+                    "requested_concurrency": 2,
+                    "cpu_per_slot": 2,
+                    "memory_mib_per_slot": 8192,
+                    "max_jobs": 1,
+                    "pending_job_cap": 1,
+                    "time_limit": "7-00:00:00",
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(s, now=now, slurm_runner=runner)
+            await s.commit()
+
+        assert results[0].action == "scale_up"
+        assert runner.submitted_configs[0].requested_concurrency == 1
+        assert runner.submitted_configs[0].requested_cpus == 3  # ceil(5 * 1 / 2), not round()==2
+        assert runner.submitted_configs[0].requested_memory_mib == 2500  # ceil(5000 * 1 / 2)
+    finally:
+        await engine.dispose()
+
+
 async def test_reconcile_clamps_resource_aware_scale_up_to_max_slots(
     postgres_url: str,
 ) -> None:
