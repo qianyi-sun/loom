@@ -37,6 +37,19 @@ from loom.staging_mutation_epoch import (
 )
 from loom.staging_mutation_epoch_sql import SqlAlchemyMutationEpochStore
 
+_CLASSIFICATION_SOURCE_TABLES = (
+    "artifacts",
+    "batch_family_state",
+    "batches",
+    "llm_calls",
+    "task_sets",
+    "trial_events",
+    "trials",
+)
+_LOCK_CLASSIFICATION_SOURCES_SQL = (
+    "LOCK TABLE " + ",".join(_CLASSIFICATION_SOURCE_TABLES) + " IN SHARE ROW EXCLUSIVE MODE"
+)
+
 
 class LegacyObjectInspector(Protocol):
     """Read and hash one exact object without mutating its store."""
@@ -799,6 +812,11 @@ class SqlAlchemyLegacyClassifier:
             raise ValueError("legacy apply time must be timezone-aware")
 
         with self._engine.begin() as connection:
+            # Prevent an execution writer or supplemental-authority publisher
+            # from entering after the fresh digest-approved inventory but
+            # before all row bindings commit.  The fixed alphabetical order is
+            # shared by every classifier invocation and avoids lock inversion.
+            connection.execute(text(_LOCK_CLASSIFICATION_SOURCES_SQL))
             epoch = connection.execute(
                 text(
                     "SELECT epoch FROM staging_mutation_epochs "

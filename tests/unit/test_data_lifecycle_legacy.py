@@ -26,10 +26,12 @@ from loom.data_lifecycle_legacy import (
 )
 from loom.data_lifecycle_legacy_s3 import S3LegacyObjectInspector
 from loom.data_lifecycle_legacy_sql import (
+    SqlAlchemyLegacyClassifier,
     _artifact_object,
     _inspect_artifacts,
     _legacy_artifact_authority,
 )
+from loom.staging_mutation_epoch import MutationEpochState, ProtectedMutationClass
 
 NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
 SCOPE = GcScope(environment="staging", namespace="loom-staging")
@@ -63,6 +65,80 @@ def _artifact() -> LegacyRow:
         created_at=NOW,
         source_fingerprint="b" * 64,
     )
+
+
+def test_apply_locks_every_classification_source_before_epoch_and_row_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _trial_event()
+    plan = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=4,
+        planned_at=NOW,
+        rows=(row,),
+        objects=(),
+    )
+    calls: list[str] = []
+
+    class Result:
+        def scalar_one_or_none(self) -> int:
+            return 4
+
+    class Connection:
+        def in_transaction(self) -> bool:
+            return True
+
+        def execute(self, statement: object, parameters: object = None) -> Result:
+            del parameters
+            calls.append(str(statement))
+            return Result()
+
+    connection = Connection()
+
+    class Transaction:
+        def __enter__(self) -> Connection:
+            return connection
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class Engine:
+        def begin(self) -> Transaction:
+            return Transaction()
+
+    monkeypatch.setattr(
+        "loom.data_lifecycle_legacy_sql._load_rows",
+        lambda _connection: ([row], [], []),
+    )
+    monkeypatch.setattr("loom.data_lifecycle_legacy_sql._stage_plan", lambda *_args: None)
+    monkeypatch.setattr("loom.data_lifecycle_legacy_sql._apply_staged_plan", lambda *_args: None)
+    monkeypatch.setattr(
+        "loom.data_lifecycle_legacy_sql.advance_mutation_epoch",
+        lambda *_args, **_kwargs: MutationEpochState(
+            environment="staging",
+            namespace="loom-staging",
+            epoch=5,
+            mutation_class=ProtectedMutationClass.OBJECT_REWRITE,
+            request_id="req-legacy-lock",
+            evidence_sha256=plan.inventory_digest,
+            updated_at=NOW,
+        ),
+    )
+    classifier = SqlAlchemyLegacyClassifier(Engine(), inspector=object())  # type: ignore[arg-type]
+
+    state = classifier.apply(
+        plan=plan,
+        approved_inventory_digest=plan.inventory_digest,
+        request_id="req-legacy-lock",
+        applied_at=NOW,
+    )
+
+    assert state.epoch == 5
+    assert calls[0] == (
+        "LOCK TABLE artifacts,batch_family_state,batches,llm_calls,task_sets,"
+        "trial_events,trials IN SHARE ROW EXCLUSIVE MODE"
+    )
+    assert "SELECT epoch FROM staging_mutation_epochs" in calls[1]
 
 
 def _pinned_benchmark() -> LegacyRow:
