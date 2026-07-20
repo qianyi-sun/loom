@@ -13,6 +13,7 @@ from loom.data_lifecycle import StagingCapacity
 from loom_cli.rollout.operator.readonly_capacity_client import (
     InstalledReadonlyCapacitySource,
     open_readonly_minio_client,
+    probe_installed_readonly_object_store_health,
     probe_installed_staging_capacity,
 )
 from loom_cli.rollout.readonly_minio_bootstrap import (
@@ -154,6 +155,23 @@ def test_probe_counts_exact_execution_buckets_and_host_capacity(tmp_path: Path) 
     assert capacity.bytes_used == 60
     assert 0 <= capacity.disk_free_percent <= 100
     assert 0 <= capacity.inode_free_percent <= 100
+
+
+def test_object_store_health_uses_only_fixed_list_authority() -> None:
+    client = S3()
+
+    @contextmanager
+    def context(*, service_uid: int) -> Iterator[S3]:
+        assert service_uid == os.getuid()
+        yield client
+
+    evidence = probe_installed_readonly_object_store_health(
+        service_uid=os.getuid(),
+        client_context=context,
+    )
+
+    assert evidence.ready
+    assert len(evidence.evidence_sha256) == 64
 
 
 def test_source_is_single_flight_under_concurrent_dag(tmp_path: Path) -> None:

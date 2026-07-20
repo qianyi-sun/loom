@@ -22,7 +22,6 @@ from loom_cli.rollout.preflight_artifact_store import (
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_runtime import RehearsalActionFactory, RehearsalIdentityFactory
 from loom_cli.rollout.preflight_runtime_sources import BackupAdmissionAuthority
-from loom_cli.rollout.readonly_authority_source import probe_readonly_object_store_health
 from loom_cli.rollout.rehearsal_action_source import RehearsalActionSource
 from loom_cli.rollout.rehearsal_command_runner import InstalledRehearsalStepRunner
 from loom_cli.rollout.rehearsal_journal_backend import JournaledRehearsalBackend
@@ -39,7 +38,10 @@ from .installed_preflight_inputs import InstalledPreflightInputs
 from .model import CandidateBinding
 from .policy import sanitized_child_environment
 from .preflight import probe_gb10_shared_mount_readonly
-from .readonly_capacity_client import InstalledReadonlyCapacitySource
+from .readonly_capacity_client import (
+    InstalledReadonlyCapacitySource,
+    probe_installed_readonly_object_store_health,
+)
 from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
 from .readonly_preflight_authority import JsonRunner, ReadonlyPreflightAuthority
 from .staging_smoke_authority import staging_smoke_authority
@@ -82,10 +84,8 @@ def build_installed_deep_preflight_composition(
         kubernetes_run=cast(JsonRunner, commands.readonly_json),
         database_evidence=database_evidence,
         capacity_source=capacity_source,
-        object_store_probe=lambda: probe_readonly_object_store_health(
-            cast(JsonRunner, commands.readonly_json),
-            kubeconfig=readonly.kubeconfig_path,
-            namespace=config.namespace,
+        object_store_probe=lambda: probe_installed_readonly_object_store_health(
+            service_uid=service_uid,
         ),
     )
     artifact_store = PreflightArtifactStore(config.state_root, service_uid=service_uid)

@@ -23,6 +23,7 @@ from loom_cli.rollout.preflight_contract import (
     CheckContext,
     CheckExecution,
     CheckOperation,
+    EvidenceValue,
     PreflightAttestation,
 )
 from loom_cli.rollout.preflight_registry import PreflightRegistry
@@ -35,6 +36,7 @@ class PreflightBlocker:
     outcome: str
     blocked_by: tuple[str, ...]
     remediation: str
+    evidence: Mapping[str, EvidenceValue]
     evidence_hash: str
 
     @classmethod
@@ -47,6 +49,7 @@ class PreflightBlocker:
             outcome=execution.outcome.value,
             blocked_by=execution.blocked_by,
             remediation=execution.remediation or "restore the declared preflight invariant",
+            evidence=dict(execution.evidence),
             evidence_hash=execution.evidence_hash,
         )
 
@@ -54,6 +57,7 @@ class PreflightBlocker:
         return {
             "blocked_by": list(self.blocked_by),
             "check_id": self.check_id,
+            "evidence": dict(self.evidence),
             "evidence_hash": self.evidence_hash,
             "failure_code": self.failure_code,
             "outcome": self.outcome,

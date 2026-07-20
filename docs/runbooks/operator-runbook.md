@@ -1700,6 +1700,10 @@ grants outside the owner, verifies that only the rollout service obtains the
 declared read grant, and fails if inode metadata or the ACL changes during the
 read. Preflight evidence contains only owner/group/mode plus metadata, ACL, and
 bounded content fingerprints; paths and credential values are never emitted.
+The admin-token fingerprint is computed from the same stripped token bytes as
+the installer and final browser/smoke consumers, so a conventional trailing
+newline does not create a false authority drift while any actual token-byte
+change still fails closed.
 The data contract includes
 the declared rollout, Postgres, MinIO, backup, and pre-existing
 `environment-state` subdirectories. Each receives access/default `rwx`; the
@@ -1762,8 +1766,10 @@ writes and deletes are absent. The readonly TokenRequest may port-forward only
 to `loom-minio-0` and `loom-postgres-0`. `check` independently compares the
 server-side policy document and user binding, and Tier 0 then proves it by
 enumerating the exact buckets and measuring `/data/loom-staging/minio` as
-`loom-rollout`. Do not replace this with the application MinIO secret or a
-privileged `kubectl exec` inventory.
+`loom-rollout`. Tier 2 proves MinIO reachability with a bounded versioning read
+through the same fixed localhost transport; it does not require Kubernetes
+`services/proxy` authority. Do not replace either probe with the application
+MinIO secret, a broader proxy grant, or a privileged `kubectl exec` inventory.
 
 ```bash
 INSTALLER_CHECKOUT=/root/loom-staging-installer

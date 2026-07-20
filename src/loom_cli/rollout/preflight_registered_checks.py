@@ -429,7 +429,12 @@ def build_credentials_metadata_check(
                     allow_qianyi_owner=allow_qianyi_owner,
                     require_nonempty=True,
                 )
-                fingerprint = safe_content_fingerprint(trusted.payload)
+                fingerprint_payload = (
+                    trusted.payload.strip()
+                    if source.expected_content_fingerprint is not None
+                    else trusted.payload
+                )
+                fingerprint = safe_content_fingerprint(fingerprint_payload)
                 if (
                     source.expected_content_fingerprint is not None
                     and fingerprint != source.expected_content_fingerprint
@@ -824,7 +829,7 @@ def build_capacity_high_water_check(
                 EvidenceField("policy-digest", "sha256"),
                 EvidenceField("capacity-digest", "sha256"),
             ),
-            timeout_seconds=30,
+            timeout_seconds=60,
             freshness_ttl_seconds=60,
             remediation="run supported staging GC or restore object, byte, disk, and inode headroom",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,

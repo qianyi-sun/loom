@@ -44,8 +44,11 @@ fingerprints, owner/mode/ACL facts, and safe read-stability results.
 The DAG executes dependency-ready checks with bounded concurrency. A failed
 dependency blocks only its consumers; unrelated checks continue, so one report
 contains all independent blockers. Every result records the implementation
-digest, input fingerprint, evidence hash, discovered stage, start/finish time,
-and expiry.
+digest, input fingerprint, schema-validated redacted evidence, evidence hash,
+discovered stage, start/finish time, and expiry. The public blocker report
+includes that same typed evidence rather than only its digest; it therefore
+remains actionable without exposing a credential value or unbounded child
+output.
 
 Execution has an explicit pre-backup boundary. Tiers 0–2 first produce one
 digest-addressed `PreflightAssessment`; no preliminary request or backup job may
@@ -183,12 +186,13 @@ The Kubernetes side is declared in
 `deploy/k8s/staging-rollout-readonly.yaml`: one namespace-scoped service
 account, Role, and RoleBinding, with token automount disabled and only
 `get/list/watch` plus `create` on the non-object-mutating
-`pods/portforward` subresource for the exact `loom-postgres-0` pod. The latter
-is only a transport to a separately authenticated SELECT-only PostgreSQL role;
-it cannot create or update a Kubernetes object and cannot connect to another
-pod. A second exact `get` rule permits only the `services/proxy` health path
-for `loom-minio`; it cannot list buckets or read objects. No ClusterRole,
-secret access, token material, wildcard, or other write
+`pods/portforward` subresource for the exact `loom-postgres-0` and
+`loom-minio-0` pods. Those are transports to a separately authenticated
+SELECT-only PostgreSQL role and a fixed list-only MinIO identity; they cannot
+create or update a Kubernetes object and cannot connect to another pod. MinIO
+readiness uses a bounded bucket-versioning read through that exact localhost
+transport. It does not require `services/proxy`, object reads, or a privileged
+Kubernetes credential. No ClusterRole, secret access, token material, wildcard, or other write
 verb is admitted. Runtime credentials use a bounded TokenRequest and are
 validated by the server-observed review before any Tier 2 call.
 The TokenRequest is rendered into a minified kubeconfig with no inherited
@@ -226,7 +230,10 @@ The concurrent DAG shares one process-local, single-flight database snapshot
 for Tier 2 baseline, capability evidence, mutation-epoch binding, and critical
 checkpoint inventory. Tier 0 capacity separately shares one fresh,
 single-flight list-only MinIO/filesystem snapshot, so pre-0067 staging remains
-measurable without weakening database schema authority. The critical checkpoint's
+measurable without weakening database schema authority. Its live inventory may
+use up to 60 seconds inside the overall sub-two-minute Tier 0 budget; a measured
+31-second high-water inventory must return its exact object/byte/disk/inode
+evidence instead of being misclassified as a timeout. The critical checkpoint's
 pinned benchmark/catalog/system inventory is derived from that same snapshot,
 never from a privileged `kubectl exec`. A pre-0066 snapshot binds an explicitly
 empty legacy inventory because typed object authority does not exist yet;

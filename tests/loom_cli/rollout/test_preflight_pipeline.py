@@ -265,3 +265,21 @@ def test_assessment_record_round_trips_and_rejects_evidence_tampering(tmp_path: 
     evidence["result"] = "tampered"
     with pytest.raises(ValueError, match="evidence hash"):
         PreflightAssessment.from_record(record)
+
+
+def test_blocker_report_includes_only_schema_validated_evidence(tmp_path: Path) -> None:
+    registry = _registry(failed_check="candidate.identity")
+    assessment = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    ).assess(context=_context(registry))
+
+    blocker = next(
+        item for item in assessment.blockers if item.check_id == "candidate.identity"
+    ).to_dict()
+    execution = next(
+        item for item in assessment.executions if item.check_id == "candidate.identity"
+    )
+    assert blocker["evidence"] == dict(execution.evidence)
+    assert blocker["evidence_hash"] == execution.evidence_hash

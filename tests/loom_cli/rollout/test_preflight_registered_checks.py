@@ -281,6 +281,7 @@ def test_registered_tools_runtime_reports_every_blocker_without_diagnostics() ->
         executable_lookup=executable_lookup,
         importer=importer,
     )
+    assert check.spec.timeout_seconds == 30
     context = CheckContext(
         {
             "runner.config.sha256": "a" * 64,
@@ -457,6 +458,7 @@ def test_registered_capacity_high_water_reports_all_bound_metrics() -> None:
         inode_free_percent=22,
     )
     check = build_capacity_high_water_check(lambda: capacity)
+    assert check.spec.timeout_seconds == 60
     context = CheckContext(
         {
             "capacity.policy.sha256": staging_capacity_policy_digest(),
@@ -594,7 +596,7 @@ def _credential_sources(tmp_path: Path) -> tuple[CredentialProbeSource, ...]:
                 label=label,
                 path=path,
                 expected_content_fingerprint=(
-                    safe_content_fingerprint(payload) if label == "admin" else None
+                    safe_content_fingerprint(payload.strip()) if label == "admin" else None
                 ),
             )
         )
@@ -644,6 +646,29 @@ def test_registered_credentials_check_attests_metadata_without_secret_values(
     assert "private-value" not in rendered
     assert "CATALOG_PASSWORD" not in rendered
     assert str(tmp_path) not in rendered
+
+
+def test_registered_credentials_check_normalizes_expected_token_line_ending(
+    tmp_path: Path,
+) -> None:
+    sources = _credential_sources(tmp_path)
+    check = build_credentials_metadata_check(
+        sources=sources,
+        service_uid=os.getuid(),
+    )
+
+    result = next(
+        item
+        for item in PreflightDag((_passing_dependency("runner.install"), check)).run(
+            _credential_context(sources)
+        )
+        if item.check_id == check.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["content-fingerprints"]["admin"] == safe_content_fingerprint(
+        b"admin-private-value"
+    )
 
 
 def test_registered_credentials_check_reports_all_unsafe_sources(

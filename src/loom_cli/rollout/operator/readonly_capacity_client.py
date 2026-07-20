@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import socket
 import subprocess
 import time
@@ -27,6 +29,7 @@ from loom_cli.rollout.readonly_minio_bootstrap import (
     READONLY_MINIO_BUCKETS,
     ReadonlyMinioCredential,
 )
+from loom_cli.rollout.staging_baseline_source import ObjectStoreBaselineEvidence
 
 _NAMESPACE = "loom-staging"
 _POD = "loom-minio-0"
@@ -53,6 +56,8 @@ class TunnelProcess(Protocol):
 
 
 class S3Client(Protocol):
+    def get_bucket_versioning(self, **kwargs: str) -> Mapping[str, object]: ...
+
     def close(self) -> None: ...
 
 
@@ -219,6 +224,40 @@ def probe_installed_staging_capacity(
     return evidence.capacity
 
 
+def probe_installed_readonly_object_store_health(
+    *,
+    service_uid: int,
+    buckets: Sequence[str] = READONLY_MINIO_BUCKETS,
+    client_context: Callable[..., Any] = open_readonly_minio_client,
+) -> ObjectStoreBaselineEvidence:
+    """Prove exact bucket reachability through the fixed list-only authority."""
+    exact_buckets = tuple(buckets)
+    if exact_buckets != READONLY_MINIO_BUCKETS:
+        raise ValueError("readonly object-store bucket authority drifted")
+    statuses: dict[str, str] = {}
+    with client_context(service_uid=service_uid) as client:
+        for bucket in exact_buckets:
+            response = client.get_bucket_versioning(Bucket=bucket)
+            if not isinstance(response, Mapping):
+                raise ValueError("readonly object-store response is invalid")
+            status = response.get("Status", "unversioned")
+            if status not in {"unversioned", "Enabled", "Suspended"}:
+                raise ValueError("readonly object-store versioning state is invalid")
+            statuses[bucket] = str(status)
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "buckets": statuses,
+                "namespace": _NAMESPACE,
+                "version": "v1",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return ObjectStoreBaselineEvidence(True, digest)
+
+
 class InstalledReadonlyCapacitySource:
     """Single-flight fresh capacity snapshot shared by the concurrent DAG."""
 
@@ -266,5 +305,6 @@ __all__ = [
     "TunnelProcess",
     "WaitReady",
     "open_readonly_minio_client",
+    "probe_installed_readonly_object_store_health",
     "probe_installed_staging_capacity",
 ]
