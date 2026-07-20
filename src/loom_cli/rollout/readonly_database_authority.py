@@ -431,7 +431,12 @@ def _probe_readonly_database(
     if include_immutable_inventory and revision_number >= _EPOCH_FIRST_REVISION:
         inventory_rows = _immutable_inventory_rows(query)
         try:
-            immutable_objects = tuple(_immutable_reference(row) for row in inventory_rows)
+            immutable_objects = tuple(
+                sorted(
+                    (_immutable_reference(row) for row in inventory_rows),
+                    key=lambda item: item.identity,
+                )
+            )
         except (TypeError, ValueError) as exc:
             raise ValueError("readonly database immutable inventory is invalid") from exc
         identities = [item.identity for item in immutable_objects]

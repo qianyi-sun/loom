@@ -152,6 +152,37 @@ def test_current_database_binds_unversioned_legacy_pinned_inventory() -> None:
     )
 
 
+def test_current_database_sorts_after_legacy_version_normalization() -> None:
+    def row(content_sha256: str, authority_id: str) -> dict[str, object]:
+        return {
+            "authoritative_source": None,
+            "authority_id": authority_id,
+            "bucket": "loom-staging-artifacts",
+            "content_sha256": content_sha256,
+            "data_class": "catalog",
+            "object_key": "catalog/exact.json",
+            "owner_id": f"catalog:{authority_id}",
+            "owner_kind": "system",
+            "size_bytes": 42,
+            "version_id": None,
+        }
+
+    query = Query(
+        revision="0066",
+        inventory=(
+            row("b" * 64, "22222222-2222-4222-8222-222222222222"),
+            row("a" * 64, "11111111-1111-4111-8111-111111111111"),
+        ),
+    )
+
+    evidence = probe_readonly_database(query)
+
+    assert [item.version_id for item in evidence.immutable_objects] == [
+        "content-sha256:" + "a" * 64,
+        "content-sha256:" + "b" * 64,
+    ]
+
+
 def test_current_database_rejects_unversioned_inventory_without_exact_digest() -> None:
     row = {
         "authoritative_source": None,
