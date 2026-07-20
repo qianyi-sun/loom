@@ -112,6 +112,7 @@ class LegacyBackupOpaqueEvidenceRecord:
     size_bytes: int
     modified_ns: int
     changed_ns: int
+    content_observation: str
     sha256: str | None
 
     def __post_init__(self) -> None:
@@ -130,7 +131,9 @@ class LegacyBackupOpaqueEvidenceRecord:
             or self.size_bytes < 0
             or self.modified_ns < 0
             or self.changed_ns < 0
-            or (self.kind == "directory") != (self.sha256 is None)
+            or self.content_observation not in {"metadata-only", "sha256"}
+            or (self.content_observation == "sha256") != (self.sha256 is not None)
+            or (self.kind == "directory" and self.content_observation != "metadata-only")
             or (
                 self.sha256 is not None
                 and (
@@ -144,6 +147,7 @@ class LegacyBackupOpaqueEvidenceRecord:
     def to_dict(self) -> dict[str, object]:
         return {
             "changed_ns": self.changed_ns,
+            "content_observation": self.content_observation,
             "device": self.device,
             "inode": self.inode,
             "kind": self.kind,
@@ -161,6 +165,7 @@ class LegacyBackupOpaqueEvidenceRecord:
     def from_dict(cls, data: dict[str, object]) -> LegacyBackupOpaqueEvidenceRecord:
         expected = {
             "changed_ns",
+            "content_observation",
             "device",
             "inode",
             "kind",
@@ -188,6 +193,7 @@ class LegacyBackupOpaqueEvidenceRecord:
             set(data) != expected
             or not isinstance(data["name"], str)
             or not isinstance(data["kind"], str)
+            or not isinstance(data["content_observation"], str)
             or not all(type(data[field]) is int for field in integer_fields)
             or (data["sha256"] is not None and not isinstance(data["sha256"], str))
         ):
@@ -204,6 +210,7 @@ class LegacyBackupOpaqueEvidenceRecord:
             size_bytes=cast(int, data["size_bytes"]),
             modified_ns=cast(int, data["modified_ns"]),
             changed_ns=cast(int, data["changed_ns"]),
+            content_observation=data["content_observation"],
             sha256=data["sha256"],
         )
 
@@ -331,38 +338,47 @@ class LegacyBackupRetention:
         if not name or name == "latest" or "/" in name:
             raise LegacyBackupRetentionError("legacy backup evidence name is invalid")
         if stat.S_ISDIR(expected_metadata.st_mode):
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
             kind = "directory"
         elif stat.S_ISREG(expected_metadata.st_mode) and expected_metadata.st_nlink == 1:
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             kind = "file"
         else:
             raise LegacyBackupRetentionError("legacy backup evidence entry is unsafe")
-        try:
-            descriptor = os.open(name, flags, dir_fd=backups_fd)
-        except OSError as exc:
-            raise LegacyBackupRetentionError(
-                "legacy backup evidence could not be opened safely"
-            ) from exc
-        try:
-            opened = os.fstat(descriptor)
-            if _identity(opened) != _identity(expected_metadata):
-                raise LegacyBackupRetentionError("legacy backup evidence changed during inventory")
-            sha256 = None
-            if kind == "file":
-                payload = _read_bounded(descriptor, maximum_bytes=1024 * 1024)
-                if _identity(os.fstat(descriptor)) != _identity(opened):
-                    raise LegacyBackupRetentionError(
-                        "legacy backup evidence changed during inventory"
-                    )
-                sha256 = hashlib.sha256(payload).hexdigest()
-        finally:
-            os.close(descriptor)
+
+        opened = os.stat(name, dir_fd=backups_fd, follow_symlinks=False)
+        if _identity(opened) != _identity(expected_metadata):
+            raise LegacyBackupRetentionError("legacy backup evidence changed during inventory")
+        sha256 = None
+        content_observation = "metadata-only"
+        if kind == "file":
+            try:
+                descriptor = os.open(name, flags, dir_fd=backups_fd)
+            except PermissionError:
+                descriptor = None
+            except OSError as exc:
+                raise LegacyBackupRetentionError(
+                    "legacy backup evidence could not be opened safely"
+                ) from exc
+            if descriptor is not None:
+                try:
+                    opened = os.fstat(descriptor)
+                    if _identity(opened) != _identity(expected_metadata):
+                        raise LegacyBackupRetentionError(
+                            "legacy backup evidence changed during inventory"
+                        )
+                    payload = _read_bounded(descriptor, maximum_bytes=1024 * 1024)
+                    if _identity(os.fstat(descriptor)) != _identity(opened):
+                        raise LegacyBackupRetentionError(
+                            "legacy backup evidence changed during inventory"
+                        )
+                    sha256 = hashlib.sha256(payload).hexdigest()
+                    content_observation = "sha256"
+                finally:
+                    os.close(descriptor)
+        if _identity(os.stat(name, dir_fd=backups_fd, follow_symlinks=False)) != _identity(
+            expected_metadata
+        ):
+            raise LegacyBackupRetentionError("legacy backup evidence changed during inventory")
         return LegacyBackupOpaqueEvidenceRecord(
             name=name,
             kind=kind,
@@ -375,6 +391,7 @@ class LegacyBackupRetention:
             size_bytes=opened.st_size,
             modified_ns=opened.st_mtime_ns,
             changed_ns=opened.st_ctime_ns,
+            content_observation=content_observation,
             sha256=sha256,
         )
 

@@ -416,8 +416,10 @@ glob. `inventory` binds the backup filesystem identity, exact `latest` target,
 every complete timestamped root and manifest digest, plus every incomplete or
 noncanonical file or directory that must remain untouched. Those opaque evidence
 entries are bound by exact type, device/inode, owner/group, mode, link count,
-size and timestamps; regular evidence files additionally carry a bounded
-content digest. Symlinks, special files and linked regular evidence fail closed.
+size and timestamps; service-readable regular evidence files additionally carry
+a bounded content digest. An unreadable historical evidence file remains
+metadata-bound rather than widening the rollout service's read authority.
+Symlinks, special files and linked regular evidence fail closed.
 A complete root is eligible
 only when its private single-link manifest parses under the known schema,
 matches `staging` and the configured namespace, carries the exact verified

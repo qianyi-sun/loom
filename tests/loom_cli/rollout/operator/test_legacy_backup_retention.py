@@ -131,9 +131,29 @@ def test_inventory_preserves_noncanonical_evidence_files_and_directories(
 
     assert set(records) == {incomplete.name, log.name, evidence.name}
     assert records[log.name].kind == "file"
+    assert records[log.name].content_observation == "sha256"
     assert records[log.name].sha256 is not None
     assert records[evidence.name].kind == "directory"
+    assert records[evidence.name].content_observation == "metadata-only"
     assert records[evidence.name].sha256 is None
+
+
+def test_inventory_preserves_unreadable_evidence_by_stable_metadata(tmp_path: Path) -> None:
+    retention, _old, _latest, incomplete = _root(tmp_path)
+    evidence = incomplete.parent / ".chown-test"
+    evidence.write_bytes(b"unreadable historical evidence")
+    evidence.chmod(0o000)
+
+    try:
+        record = next(
+            item for item in retention.inventory().opaque_evidence if item.name == evidence.name
+        )
+    finally:
+        evidence.chmod(0o600)
+
+    assert record.kind == "file"
+    assert record.content_observation == "metadata-only"
+    assert record.sha256 is None
 
 
 def test_apply_rejects_opaque_evidence_drift(tmp_path: Path) -> None:
