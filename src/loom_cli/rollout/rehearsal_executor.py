@@ -66,6 +66,10 @@ _KUBERNETES_UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 _RESOURCE_VERSION_RE = re.compile(r"[1-9][0-9]{0,31}\Z")
+_REHEARSAL_DUMP_PATH = "/var/lib/postgresql/data/loom-rehearsal.dump"
+_REHEARSAL_DUMP_TRANSFER_TIMEOUT = 180
+_REHEARSAL_DUMP_DIGEST_TIMEOUT = 120
+_REHEARSAL_DUMP_RESTORE_TIMEOUT = 1470
 
 
 class CommandResult(Protocol):
@@ -807,7 +811,7 @@ class IsolatedRehearsalExecutor:
                 return _database_ready(plan)
             return _blocked("database", "existing-restore-drift")
         dump_path = plan.checkpoint_manifest_path.parent / "postgres" / "loom.dump"
-        restore_argv = (
+        transfer_argv = (
             "kubectl",
             "--kubeconfig",
             str(self.kubeconfig),
@@ -819,17 +823,77 @@ class IsolatedRehearsalExecutor:
             "--container",
             "postgres",
             "--",
-            "pg_restore",
-            "--exit-on-error",
-            "--no-owner",
-            "--no-privileges",
-            f"--dbname={plan.resources.database}",
+            "tee",
+            "--",
+            _REHEARSAL_DUMP_PATH,
         )
         try:
-            restored = self.stream_run(restore_argv, dump_path, 1800)
+            transferred = self.stream_run(
+                transfer_argv,
+                dump_path,
+                _REHEARSAL_DUMP_TRANSFER_TIMEOUT,
+            )
         except (OSError, RuntimeError, subprocess.SubprocessError):
+            if not self._remove_staged_dump(plan):
+                return _blocked("database", "restore-staging-cleanup-failed")
             return _blocked("database", "restore-failed")
-        if restored.returncode != 0:
+        if transferred.returncode != 0:
+            if not self._remove_staged_dump(plan):
+                return _blocked("database", "restore-staging-cleanup-failed")
+            return _blocked("database", "restore-failed")
+        staged_digest = self._text_command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "exec",
+                "pod/loom-rehearsal-db",
+                "--container",
+                "postgres",
+                "--",
+                "sha256sum",
+                "--",
+                _REHEARSAL_DUMP_PATH,
+            ),
+            timeout=_REHEARSAL_DUMP_DIGEST_TIMEOUT,
+            max_bytes=256,
+        )
+        expected_dump_digest = plan.db_snapshot_identity.removeprefix("pgdump-sha256:")
+        if staged_digest is None or staged_digest.split() != [
+            expected_dump_digest,
+            _REHEARSAL_DUMP_PATH,
+        ]:
+            if not self._remove_staged_dump(plan):
+                return _blocked("database", "restore-staging-cleanup-failed")
+            return _blocked("database", "restore-staging-verification-failed")
+        restored = self._status(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "exec",
+                "pod/loom-rehearsal-db",
+                "--container",
+                "postgres",
+                "--",
+                "pg_restore",
+                "--exit-on-error",
+                "--jobs=4",
+                "--no-owner",
+                "--no-privileges",
+                f"--dbname={plan.resources.database}",
+                _REHEARSAL_DUMP_PATH,
+            ),
+            timeout=_REHEARSAL_DUMP_RESTORE_TIMEOUT,
+        )
+        removed = self._remove_staged_dump(plan)
+        if not removed:
+            return _blocked("database", "restore-staging-cleanup-failed")
+        if not restored:
             return _blocked("database", "restore-failed")
         identity = self._database_identity(plan)
         if (
@@ -840,6 +904,27 @@ class IsolatedRehearsalExecutor:
         ):
             return _blocked("database", "restore-verification-failed")
         return _database_ready(plan)
+
+    def _remove_staged_dump(self, plan: RehearsalPlan) -> bool:
+        return self._status(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "exec",
+                "pod/loom-rehearsal-db",
+                "--container",
+                "postgres",
+                "--",
+                "rm",
+                "-f",
+                "--",
+                _REHEARSAL_DUMP_PATH,
+            ),
+            timeout=30,
+        )
 
     def _database_identity(self, plan: RehearsalPlan) -> dict[str, object] | None:
         identity = self._psql_json(

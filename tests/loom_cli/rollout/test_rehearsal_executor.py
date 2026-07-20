@@ -291,9 +291,10 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     streams: list[tuple[tuple[str, ...], Path, int]] = []
     pod: dict[str, object] = {}
     restored = False
+    staged = False
 
     def run(argv, payload, timeout):
-        nonlocal pod
+        nonlocal pod, restored
         calls.append((tuple(argv), payload, timeout))
         if argv[:3] == ("docker", "image", "inspect"):
             tag = argv[-1]
@@ -311,6 +312,22 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
         if "wait" in argv:
             return subprocess.CompletedProcess(argv, 0, "ready\n", "")
+        if "sha256sum" in argv:
+            assert staged
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                plan.db_snapshot_identity.removeprefix("pgdump-sha256:")
+                + "  /var/lib/postgresql/data/loom-rehearsal.dump\n",
+                "",
+            )
+        if "pg_restore" in argv:
+            assert staged
+            restored = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "rm" in argv:
+            assert staged
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if "get" in argv and "pod" in argv:
             observed = {
                 **pod,
@@ -342,9 +359,9 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
         raise AssertionError(argv)
 
     def stream(argv, source, timeout):
-        nonlocal restored
+        nonlocal staged
         streams.append((tuple(argv), source, timeout))
-        restored = True
+        staged = True
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     outcome = IsolatedRehearsalExecutor(
@@ -361,7 +378,22 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     }
     assert len(streams) == 1
     assert streams[0][1] == plan.checkpoint_manifest_path.parent / "postgres" / "loom.dump"
-    assert streams[0][2] == 1800
+    assert streams[0][2] == 180
+    assert streams[0][0][-3:] == (
+        "tee",
+        "--",
+        "/var/lib/postgresql/data/loom-rehearsal.dump",
+    )
+    restore_call = next(call[0] for call in calls if "pg_restore" in call[0])
+    assert "--jobs=4" in restore_call
+    assert restore_call[-1] == "/var/lib/postgresql/data/loom-rehearsal.dump"
+    remove_call = next(call[0] for call in calls if "rm" in call[0])
+    assert remove_call[-4:] == (
+        "rm",
+        "-f",
+        "--",
+        "/var/lib/postgresql/data/loom-rehearsal.dump",
+    )
     manifest_call = next(call for call in calls if call[1] is not None)
     manifest = json.loads(manifest_call[1] or b"{}")
     for container in manifest["spec"]["containers"]:
@@ -376,6 +408,85 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     }
     assert manifest["spec"]["containers"][1]["image"] == ("loom-control-plane:" + plan.image_tag)
     assert manifest["spec"]["containers"][1]["command"] == ["/bin/sleep", "infinity"]
+
+
+@pytest.mark.parametrize(
+    ("transfer_succeeds", "digest_matches", "remove_succeeds", "expected_blocker"),
+    [
+        (False, True, True, "restore-failed"),
+        (False, True, False, "restore-staging-cleanup-failed"),
+        (True, False, True, "restore-staging-verification-failed"),
+        (True, False, False, "restore-staging-cleanup-failed"),
+        (True, True, False, "restore-staging-cleanup-failed"),
+    ],
+)
+def test_database_staged_restore_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    transfer_succeeds: bool,
+    digest_matches: bool,
+    remove_succeeds: bool,
+    expected_blocker: str,
+) -> None:
+    plan = _plan()
+    commands: list[tuple[str, ...]] = []
+    restore_called = False
+
+    executor = IsolatedRehearsalExecutor(
+        stream_run=lambda _argv, _source, _timeout: subprocess.CompletedProcess(
+            (), 0 if transfer_succeeds else 1, "", ""
+        )
+    )
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_load_images",
+        lambda _self, _plan, _names: True,
+    )
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_runtime_image_ids",
+        lambda _self, _plan, names: {name: (plan.image_digests[name],) for name in names},
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_executor._database_pod_matches",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_command", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_database_identity",
+        lambda _self, _plan: None,
+    )
+
+    def text_command(*_args, **_kwargs):
+        digest = (
+            plan.db_snapshot_identity.removeprefix("pgdump-sha256:") if digest_matches else "0" * 64
+        )
+        return f"{digest}  /var/lib/postgresql/data/loom-rehearsal.dump\n"
+
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_text_command", text_command)
+
+    def status(_self, argv, **_kwargs):
+        nonlocal restore_called
+        command = tuple(argv)
+        commands.append(command)
+        if "pg_restore" in command:
+            restore_called = True
+        if "rm" in command:
+            return remove_succeeds
+        return True
+
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_status", status)
+
+    outcome = executor.execute("rehearsal.db-clone", plan)
+
+    assert outcome.blockers == {"database": expected_blocker}
+    assert restore_called is (transfer_succeeds and digest_matches)
+    assert any("rm" in command for command in commands)
+
+
+def test_plan_rejects_non_sha256_database_snapshot_identity() -> None:
+    with pytest.raises(ValueError, match="identity"):
+        replace(_plan(), db_snapshot_identity="pgdump-sha256:" + "z" * 64)
 
 
 def test_database_rejects_unclassified_server_default_drift() -> None:

@@ -155,6 +155,8 @@ class RehearsalPlan:
             or self.rendered_manifest_path.name != "rendered.yaml"
             or self.production_defaults_path.name != "production-defaults.json"
             or not self.db_snapshot_identity.startswith("pgdump-sha256:")
+            or _SHA256_RE.fullmatch(self.db_snapshot_identity.removeprefix("pgdump-sha256:"))
+            is None
             or _REVISION_RE.fullmatch(self.schema_revision) is None
             or _REVISION_RE.fullmatch(self.migration_target_revision) is None
             or _IMAGE_TAG_RE.fullmatch(self.image_tag) is None
