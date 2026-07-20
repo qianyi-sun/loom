@@ -158,6 +158,56 @@ def test_plan_projects_live_values_and_omits_new_fields() -> None:
     )
 
 
+def test_plan_adopts_only_legacy_owned_api_normalized_empty_policy_fields() -> None:
+    desired = _desired()
+    lifecycle_desired = desired[-1]["spec"]
+    assert isinstance(lifecycle_desired, dict)
+    lifecycle_desired["ingress"] = []
+    rendered = yaml.safe_dump_all(desired, sort_keys=True)
+    artifact = ManifestArtifact(
+        rendered_yaml=rendered,
+        rendered_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
+        resource_count=4,
+        resource_set_digest="3" * 64,
+        image_identities={"loom-control-plane": "sha256:" + "4" * 64},
+        artifact_digest="5" * 64,
+    )
+    live = _live()
+    lifecycle_metadata = live[-1]["metadata"]
+    assert isinstance(lifecycle_metadata, dict)
+    lifecycle_metadata["managedFields"] = [
+        {
+            "manager": "loom-lifecycle-bootstrap",
+            "operation": "Apply",
+            "apiVersion": "networking.k8s.io/v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {"f:spec": {"f:ingress": {}, "f:policyTypes": {}}},
+        }
+    ]
+    plan = build_manifest_ownership_adoption_plan(
+        artifact=artifact,
+        live_resources=live,
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        mutation_epoch=3,
+    )
+    overlays = {item["metadata"]["name"]: item for item in yaml.safe_load_all(plan.overlay_yaml)}
+
+    assert overlays["loom-staging-data-lifecycle"]["spec"]["ingress"] == []
+    assert "ingress" not in overlays["loom-minio"]["spec"]
+    assert "ingress" not in overlays["loom-postgres"]["spec"]
+    assert (
+        len(
+            verify_ownership_adoption_dry_run(
+                plan,
+                live_resources=live,
+                dry_run_resources=copy.deepcopy(live),
+            )
+        )
+        == 64
+    )
+
+
 def test_plan_rejects_unknown_manager_target_and_prestate_drift() -> None:
     live = _live()
     live[0]["metadata"]["managedFields"] = _managed_fields("ambient-admin")  # type: ignore[index]

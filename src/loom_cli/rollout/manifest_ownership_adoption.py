@@ -313,6 +313,14 @@ def _build_overlay(
     projected_spec = _project(desired_spec, live_spec)
     if not isinstance(projected_spec, dict) or not projected_spec:
         raise ManifestOwnershipAdoptionError("ownership adoption overlay is empty")
+    if kind == "NetworkPolicy":
+        for field in ("egress", "ingress"):
+            if (
+                desired_spec.get(field) == []
+                and field not in live_spec
+                and _legacy_manager_owns_spec_field(live_metadata, field)
+            ):
+                projected_spec[field] = []
     overlay: dict[str, object] = {
         "apiVersion": api_version,
         "kind": kind,
@@ -322,6 +330,32 @@ def _build_overlay(
     if desired.get("apiVersion") != api_version or desired.get("kind") != kind:
         raise ManifestOwnershipAdoptionError("desired ownership identity drifted")
     return overlay
+
+
+def _legacy_manager_owns_spec_field(metadata: Mapping[str, object], field: str) -> bool:
+    """Recognize an API-normalized empty NetworkPolicy field still owned by legacy SSA."""
+
+    if field not in {"egress", "ingress"}:
+        raise ValueError("network policy ownership field is invalid")
+    managed_fields = metadata.get("managedFields")
+    if not isinstance(managed_fields, list):
+        return False
+    for entry in managed_fields:
+        if not isinstance(entry, dict):
+            continue
+        manager = entry.get("manager")
+        fields_v1 = entry.get("fieldsV1")
+        if (
+            not isinstance(manager, str)
+            or manager == MANIFEST_FIELD_MANAGER
+            or manager not in _ALLOWED_MANAGERS
+            or not isinstance(fields_v1, dict)
+        ):
+            continue
+        spec = fields_v1.get("f:spec")
+        if isinstance(spec, dict) and f"f:{field}" in spec:
+            return True
+    return False
 
 
 class _Missing:

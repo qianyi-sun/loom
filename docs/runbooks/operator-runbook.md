@@ -1521,6 +1521,13 @@ validated literals are rendered into one newline-free SQL argument. Do not
 replace this contract with `psql -v` substitution for `-c` statements or with
 operator-provided SQL.
 
+Kubernetes may omit an explicitly empty NetworkPolicy `ingress` or `egress`
+array from its live JSON while retaining legacy server-side-apply ownership for
+that field. The adoption overlay includes such an empty field only when the
+exact desired value is `[]` and a recognized legacy manager still owns the
+matching managed-field path. Non-empty or unowned fields remain excluded, and
+the server dry-run must still prove the overlay is a semantic no-op.
+
 After the exact post-readback and final no-force dry-run succeed, close the
 window through the same installed source; the command refuses if any rollout
 pointer or unit is active:
