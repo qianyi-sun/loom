@@ -607,7 +607,7 @@ class LegacyBackupRetention:
                         continue
                     try:
                         probe_fd = os.open(entry.name, directory_flags, dir_fd=backups_fd)
-                    except FileNotFoundError:
+                    except (FileNotFoundError, PermissionError):
                         opaque.append(
                             self._opaque_record(
                                 backups_fd=backups_fd,

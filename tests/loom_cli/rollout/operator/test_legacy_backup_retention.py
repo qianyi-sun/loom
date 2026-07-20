@@ -156,6 +156,24 @@ def test_inventory_preserves_unreadable_evidence_by_stable_metadata(tmp_path: Pa
     assert record.sha256 is None
 
 
+def test_inventory_preserves_unreadable_backup_shaped_directory(tmp_path: Path) -> None:
+    retention, _old, _latest, incomplete = _root(tmp_path)
+    evidence = incomplete.parent / "20260714T205453Z-breakglass-2649ce1"
+    evidence.mkdir(mode=0o700)
+    evidence.chmod(0o000)
+
+    try:
+        record = next(
+            item for item in retention.inventory().opaque_evidence if item.name == evidence.name
+        )
+    finally:
+        evidence.chmod(0o700)
+
+    assert record.kind == "directory"
+    assert record.content_observation == "metadata-only"
+    assert record.sha256 is None
+
+
 def test_apply_rejects_opaque_evidence_drift(tmp_path: Path) -> None:
     retention, _old, _latest, _incomplete = _root(tmp_path)
     log = retention.config.rollout_root / "backups" / "backup-refresh.log"
