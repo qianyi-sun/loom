@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .config import OperatorConfig
+from .manifest_apply_contract import server_side_apply_argv
 from .readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 
 
@@ -110,21 +111,13 @@ class InstalledPreflightCommands:
         if not rendered or len(rendered.encode("utf-8")) > 16 * 1024 * 1024:
             raise ValueError("preflight manifest payload is invalid")
         return self._execute(
-            (
-                "kubectl",
-                "--kubeconfig",
-                str(self.config.kubeconfig_path),
-                "--namespace",
+            server_side_apply_argv(
                 self.config.namespace,
-                "apply",
-                "--dry-run=server",
-                "--validate=strict",
-                "--request-timeout=30s",
-                "-f",
-                "-",
+                kubeconfig=self.config.kubeconfig_path,
+                dry_run=True,
             ),
             input=rendered,
-            timeout=60,
+            timeout=120,
         )
 
     def rehearsal_helper(

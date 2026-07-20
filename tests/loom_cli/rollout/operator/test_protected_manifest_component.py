@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.operator.manifest_apply_contract import server_side_apply_argv
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -71,6 +72,7 @@ def test_manifest_component_converges_exact_published_artifact(tmp_path: Path) -
     assert exact.observed_epoch == plan.starting_mutation_epoch + 1
     assert runner.calls[0][1] == Path(plan.rendered_manifest_path).read_bytes()
     apply_argv = runner.calls[2][0]
+    assert apply_argv == server_side_apply_argv(plan.namespace)
     assert "--server-side=true" in apply_argv
     assert "--field-manager=loom-staging-rollout" in apply_argv
     assert "--force-conflicts" not in apply_argv

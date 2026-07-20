@@ -6,6 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.operator.installed_preflight_commands import InstalledPreflightCommands
+from loom_cli.rollout.operator.manifest_apply_contract import (
+    MANIFEST_FIELD_MANAGER,
+    server_side_apply_argv,
+)
 from loom_cli.rollout.operator.readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
 
@@ -57,7 +61,17 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
         "KUBECONFIG": str(READONLY_KUBECONFIG_PATH),
     }
     assert calls[2]["argv"][-2:] == ("-f", "-")
+    assert calls[2]["argv"] == server_side_apply_argv(
+        config.namespace,
+        kubeconfig=config.kubeconfig_path,
+        dry_run=True,
+    )
+    assert f"--field-manager={MANIFEST_FIELD_MANAGER}" in calls[2]["argv"]
+    assert "--server-side=true" in calls[2]["argv"]
+    assert "--dry-run=server" in calls[2]["argv"]
+    assert "--force-conflicts" not in calls[2]["argv"]
     assert calls[2]["input"] == "apiVersion: v1\nkind: ConfigMap\n"
+    assert calls[2]["timeout"] == 120
     assert calls[3]["timeout"] == 3600
 
 

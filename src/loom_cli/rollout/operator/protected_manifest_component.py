@@ -12,6 +12,11 @@ from typing import Protocol
 from loom_cli.rollout.credential_authority import read_trusted_file
 
 from .final_gate_plan import FinalGatePlan
+from .manifest_apply_contract import (
+    MANIFEST_APPLY_CONTRACT_DIGEST,
+    server_side_apply_argv,
+    server_side_diff_argv,
+)
 from .protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -21,33 +26,8 @@ from .protected_apply_journal import (
 _MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 _DIFF_TIMEOUT_SECONDS = 120.0
 _APPLY_TIMEOUT_SECONDS = 300.0
-_FIELD_MANAGER = "loom-staging-rollout"
 _IMPLEMENTATION_DIGEST = hashlib.sha256(
-    json.dumps(
-        {
-            "apply": [
-                "kubectl",
-                "apply",
-                "--server-side=true",
-                f"--field-manager={_FIELD_MANAGER}",
-                "--validate=strict",
-                "-f",
-                "-",
-            ],
-            "diff": [
-                "kubectl",
-                "diff",
-                "--server-side=true",
-                f"--field-manager={_FIELD_MANAGER}",
-                "-f",
-                "-",
-            ],
-            "force_conflicts": False,
-            "version": "v1",
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    f"protected-manifest-component-v2|{MANIFEST_APPLY_CONTRACT_DIGEST}".encode()
 ).hexdigest()
 
 
@@ -135,35 +115,14 @@ class KubernetesProtectedManifestComponent:
         ):
             raise RuntimeError("protected manifest state changed before apply")
         self.runner.run_checked(
-            (
-                "kubectl",
-                "--namespace",
-                plan.namespace,
-                "apply",
-                "--server-side=true",
-                f"--field-manager={_FIELD_MANAGER}",
-                "--validate=strict",
-                "--request-timeout=60s",
-                "-f",
-                "-",
-            ),
+            server_side_apply_argv(plan.namespace),
             env=self.environment,
             input_payload=payload,
             timeout_seconds=_APPLY_TIMEOUT_SECONDS,
         )
 
     def _diff_argv(self, plan: FinalGatePlan) -> tuple[str, ...]:
-        return (
-            "kubectl",
-            "--namespace",
-            plan.namespace,
-            "diff",
-            "--server-side=true",
-            f"--field-manager={_FIELD_MANAGER}",
-            "--request-timeout=60s",
-            "-f",
-            "-",
-        )
+        return server_side_diff_argv(plan.namespace)
 
     def _read_manifest(self, plan: FinalGatePlan) -> bytes:
         trusted = read_trusted_file(

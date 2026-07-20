@@ -2062,10 +2062,13 @@ def build_manifest_preflight_checks(
             evidence_schema=common_evidence,
             timeout_seconds=120,
             freshness_ttl_seconds=300,
-            remediation="restore schema-valid resources and readonly server dry-run access",
+            remediation=(
+                "restore schema-valid resources and converge legacy field ownership through "
+                "the reviewed protected manager before another rollout"
+            ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe_server_schema},
     )
     return rendered, server_schema

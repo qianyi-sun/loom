@@ -164,6 +164,24 @@ spec:
 """
 
 
+def _valid_manifest_for_server_apply() -> str:
+    containers = "\n".join(
+        f"        - name: {name}\n          image: {name}:staging-aaaaaaa"
+        for name, _dockerfile in ROLLOUT_IMAGES
+    )
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exact-candidate
+  namespace: loom-staging
+spec:
+  template:
+    spec:
+      containers:
+{containers}
+"""
+
+
 def _denied_network_policy_manifest() -> str:
     containers = "\n".join(
         f"        - name: {name}\n          image: {name}:staging-aaaaaaa"
@@ -338,6 +356,20 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
         expected_candidate_sha=_CANDIDATE,
         expected_config_digest=config_digest,
     )
+    field_manager_render, field_manager_schema = build_manifest_preflight_checks(
+        _valid_manifest_for_server_apply,
+        lambda _payload: subprocess.CompletedProcess(
+            [],
+            1,
+            "",
+            'conflict with "kubectl-client-side-apply": .spec.template',
+        ),
+        _images,
+        image_tag="staging-aaaaaaa",
+        namespace="loom-staging",
+        expected_candidate_sha=_CANDIDATE,
+        expected_config_digest=config_digest,
+    )
     _image_build, image_contract = build_image_preflight_checks(
         _nonroot_contract_runner,
         candidate_root=repo_root,
@@ -408,6 +440,13 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
             "staging.mutation-epoch": _EPOCH,
         }
     )
+    manifest_context = CheckContext(
+        {
+            "candidate.sha": _CANDIDATE,
+            "runner.config.sha256": config_digest,
+        }
+    )
+    assert field_manager_render.operations[CheckOperation.PROBE](manifest_context).passed
     return (
         RegressionReplayCase(
             "browser-token-authority-mismatch",
@@ -498,13 +537,18 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
                 }
             ),
         ),
+        RegressionReplayCase(
+            "legacy-kubernetes-field-manager-conflict",
+            field_manager_schema,
+            manifest_context,
+        ),
     )
 
 
 def test_all_historical_blockers_replay_through_production_checks(tmp_path: Path) -> None:
     evidence = replay_regression_manifest(_cases(tmp_path))
 
-    assert len(evidence.implementation_digests) == 11
+    assert len(evidence.implementation_digests) == 12
     assert set(evidence.implementation_digests) == set(evidence.evidence_hashes)
 
 

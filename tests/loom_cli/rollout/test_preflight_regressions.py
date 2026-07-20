@@ -24,6 +24,7 @@ def test_historical_blockers_are_checked_in_and_earliest_stage_classified() -> N
         "workload-nonroot-identity-ambiguity",
         "control-plane-nonroot-source-permissions",
         "lifecycle-minio-network-policy-ingress",
+        "legacy-kubernetes-field-manager-conflict",
     }
 
 

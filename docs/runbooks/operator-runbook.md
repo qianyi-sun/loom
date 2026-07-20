@@ -1459,7 +1459,12 @@ unit, rollout directory, or staging mutation. The host installer uses only this
 command for its post-install readiness check. The minimal readonly epoch probe
 does not require the later runtime capacity row; the complete Tier 2 database
 check still does, so one requestless run reports that row as a blocker together
-with all independent failures. `start --dry-run` writes a
+with all independent failures. Tier 1 feeds the rendered bytes through the same
+`loom-staging-rollout` server-side apply field manager, strict validation,
+request timeout, and no-force-conflicts contract used by protected convergence,
+but with `--dry-run=server`. Schema rejection and legacy managed-field ownership
+conflicts therefore block before request or backup rather than appearing at the
+protected apply boundary. `start --dry-run` writes a
 non-active preview request but creates no backup, systemd unit, rollout
 directory, or staging mutation. A real `start` first writes and
 verifies a new immutable backup manifest, then publishes the private request
