@@ -81,7 +81,17 @@ class InstalledPreflightCommands:
         return self._execute(argv, timeout=120)
 
     def git(self, argv: list[str]) -> CommandResult:
-        return self._execute(argv, cwd=self.config.runner_repo, timeout=120)
+        environment = {
+            **self.child_environment,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
+        return self._execute(
+            argv,
+            cwd=self.config.runner_repo,
+            environment=environment,
+            timeout=120,
+        )
 
     def image(self, argv: Sequence[str], cwd: Path | None) -> CommandResult:
         if cwd is not None and cwd != self.config.runner_repo:

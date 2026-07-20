@@ -46,6 +46,11 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
     )
 
     assert calls[0]["cwd"] == config.runner_repo
+    assert calls[0]["env"] == {
+        **_environment(),
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
     assert calls[1]["input"] == '{"kind":"x"}'
     assert calls[1]["env"] == {
         **_environment(),
