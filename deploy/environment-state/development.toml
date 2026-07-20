@@ -1,0 +1,116 @@
+# Development DB-backed environment desired state (shared dev env, #857/#873).
+#
+# Shared dev runs trial execution on external Slurm (GB10 + OLDLAB), the same
+# model as staging/prod. This file is config-prep; activation is gated on:
+#   - the dev cluster existing (k3d on platform-dev, post-#879 + #881 soak);
+#   - the per-env broker + publisher writing candidates to
+#     /shared_work/loom/candidates/development/ (#874 publisher, #877 broker);
+#   - for the OLDLAB pool only: container-isolation evidence (#896), because
+#     OLDLAB nodes are double-duty (k3s + MinIO + slurmd) and run non-exclusive.
+#
+# Apply after image rollout with:
+#   loom admin environment-state apply \
+#     --environment development \
+#     --file deploy/environment-state/development.toml \
+#     --var IMAGE_TAG="$IMAGE_TAG" \
+#     --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION"
+
+environment = "development"
+
+# --- GB10 pool (ARM, Slurm-only single-tenant nodes) -------------------------
+# GB10 nodes run no k8s workload, so exclusive=true is safe (an escaped trial
+# container per P0-2 can only affect its own dedicated node). Dev takes a small
+# slice: one node, up to 5 concurrent trials. min_slots=0 (scale to zero when
+# idle; the #877 QoS boost, not an always-warm floor, provides dev's priority
+# guarantee once it lands) to avoid pinning a whole GB10 node 24/7.
+[[worker_pool_autoscaler_policies]]
+pool_name = "gb10-arm64"
+actuator = "slurm"
+enabled = true
+min_slots = 0
+max_slots = 5
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "arm64"
+partition = "gb10"
+allowed_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+# Candidate + env-file paths land under the service-owned publisher root
+# (#874). Not active until that publisher extension ships.
+env_file = "/shared_work/loom/candidates/development/env/development-gb10-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/loom/candidates/development/${IMAGE_TAG}"
+requested_cpus = 10
+requested_memory_mib = 57500
+requested_concurrency = 5
+max_jobs = 1
+pending_job_cap = 1
+time_limit = "2-00:00:00"
+exclusive = true
+external_runner = true
+
+# --- OLDLAB pool (x86_64, DOUBLE-DUTY nodes: k3s + MinIO + slurmd) ------------
+# GATED: enabled=false until #896 lands. OLDLAB nodes also run the k3s control
+# plane + MinIO/Longhorn, so workers must be non-exclusive (cannot claim a whole
+# node) and capped with headroom for k8s/MinIO. The resource values below are
+# PROVISIONAL placeholders reduced from the historical single-tenant profile
+# (12 CPU / 58000 MiB / concurrency 6); #896 must measure real double-duty
+# headroom and set the final values before flipping enabled=true.
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = false
+min_slots = 0
+max_slots = 4
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "x86_64"
+# OLDLAB jobs target the default partition (addressed by --nodelist), matching
+# the validated 2026-06-24 dry-run which passed no --partition.
+partition = ""
+allowed_nodes = [
+  "trt-eai-oldlab-1",
+  "trt-eai-oldlab-2",
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
+env_file = "/shared_work/loom/candidates/development/env/development-oldlab-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/loom/candidates/development/${IMAGE_TAG}"
+# PROVISIONAL (pending #896 headroom measurement): leave CPU/mem for k3s+MinIO.
+requested_cpus = 4
+requested_memory_mib = 16000
+requested_concurrency = 2
+max_jobs = 2
+pending_job_cap = 1
+time_limit = "2-00:00:00"
+# Double-duty: cannot own the whole node — MinIO/k8s share it.
+exclusive = false
+external_runner = true
