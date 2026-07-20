@@ -6,6 +6,7 @@ metadata:
   labels: { app: loom-staging-data-lifecycle }
 spec:
   schedule: "*/5 * * * *"
+  suspend: false
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 120
   successfulJobsHistoryLimit: 1

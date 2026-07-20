@@ -40,6 +40,7 @@ def test_staging_lifecycle_cronjob_is_staging_only_and_least_authority() -> None
     assert document is not None
     assert document["metadata"]["namespace"] == "loom-staging"  # type: ignore[index]
     spec = document["spec"]  # type: ignore[index]
+    assert spec["suspend"] is False
     assert spec["concurrencyPolicy"] == "Forbid"
     assert spec["jobTemplate"]["spec"]["backoffLimit"] == 0
     pod = spec["jobTemplate"]["spec"]["template"]["spec"]

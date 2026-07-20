@@ -344,7 +344,10 @@ python scripts/ops/staging_data_lifecycle_gc.py inventory \
 ```
 
 The staging-only `loom-staging-data-lifecycle` CronJob runs every five minutes
-inside the protected staging namespace. It first publishes capacity from the
+inside the protected staging namespace. Its desired scheduler state explicitly
+sets `suspend: false`, so a safety suspension is removed only by the next exact
+reviewed manifest apply rather than an ambient operator patch. It first
+publishes capacity from the
 same exact bucket inventory, then uses the `auto` action: no eligible owners is
 a journal-free no-op; any classification/reconciliation blocker makes the job
 fail and alert; otherwise the ordinary epoch-bound two-phase executor performs
