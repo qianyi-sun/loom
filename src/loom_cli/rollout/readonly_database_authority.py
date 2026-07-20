@@ -9,7 +9,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom.data_lifecycle import (
+    STAGING_ADMISSION_OBJECT_LIMIT,
+    StagingCapacity,
+    staging_capacity_policy_digest,
+)
 from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReference
 
 _REVISION_RE = re.compile(r"^[0-9]{4}$")
@@ -17,6 +21,7 @@ _ROLE = "loom_rollout_readonly"
 _LEGACY_LAST_REVISION = 65
 _EPOCH_FIRST_REVISION = 66
 _CAPACITY_FIRST_REVISION = 67
+_INVENTORY_PAGE_SIZE = 1024
 
 _AUTHORITY_SQL = """
 SELECT current_user AS role_name,
@@ -208,6 +213,23 @@ def _integer(value: object, *, label: str) -> int:
     return value
 
 
+def _immutable_inventory_rows(query: DatabaseQuery) -> tuple[Mapping[str, object], ...]:
+    """Read a policy-bounded inventory without relaxing per-query row limits."""
+
+    rows: list[Mapping[str, object]] = []
+    offset = 0
+    while True:
+        page = query(f"{_INVENTORY_SQL}\nLIMIT {_INVENTORY_PAGE_SIZE} OFFSET {offset}")
+        if len(page) > _INVENTORY_PAGE_SIZE:
+            raise ValueError("readonly database immutable inventory page is invalid")
+        rows.extend(page)
+        if len(rows) >= STAGING_ADMISSION_OBJECT_LIMIT:
+            raise ValueError("readonly database immutable inventory exceeds policy")
+        if len(page) < _INVENTORY_PAGE_SIZE:
+            return tuple(rows)
+        offset += _INVENTORY_PAGE_SIZE
+
+
 def _expected_role_authority() -> dict[str, object]:
     return {
         "role_name": _ROLE,
@@ -360,9 +382,7 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
 
     immutable_objects: tuple[ImmutableObjectReference, ...] = ()
     if revision_number >= _EPOCH_FIRST_REVISION:
-        inventory_rows = query(_INVENTORY_SQL)
-        if len(inventory_rows) > 1024:
-            raise ValueError("readonly database immutable inventory is too large")
+        inventory_rows = _immutable_inventory_rows(query)
         try:
             immutable_objects = tuple(
                 ImmutableObjectReference.from_dict(dict(row)) for row in inventory_rows

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.rollout import readonly_database_authority
 from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReference
 from loom_cli.rollout.readonly_database_authority import (
     probe_readonly_database,
@@ -51,7 +53,11 @@ class Query:
         if "staging_mutation_epochs" in sql:
             return ({"environment": "staging", "namespace": "loom-staging", "epoch": 9},)
         if "FROM data_lifecycle_objects" in sql:
-            return self.inventory
+            match = re.search(r"LIMIT (\d+) OFFSET (\d+)\Z", sql)
+            if match is None:
+                raise AssertionError("immutable inventory query is not bounded")
+            limit, offset = (int(value) for value in match.groups())
+            return self.inventory[offset : offset + limit]
         if "staging_lifecycle_capacity" in sql:
             capacity = StagingCapacity(10, 20, 80, 90)
             return (
@@ -113,6 +119,52 @@ def test_current_database_binds_sorted_immutable_inventory_in_same_snapshot() ->
 
     assert evidence.immutable_objects == (ImmutableObjectReference.from_dict(row),)
     assert any("FROM data_lifecycle_objects" in sql for sql in query.calls)
+
+
+def test_current_database_pages_immutable_inventory_in_same_snapshot() -> None:
+    inventory = tuple(
+        {
+            "authoritative_source": f"catalog:sha256:{index:064x}",
+            "bucket": "loom-staging-artifacts",
+            "content_sha256": f"{index:064x}",
+            "data_class": "catalog",
+            "object_key": f"catalog/{index:04d}.json",
+            "size_bytes": index,
+            "version_id": "v1",
+        }
+        for index in range(1_939)
+    )
+    query = Query(revision="0066", inventory=inventory)
+
+    evidence = probe_readonly_database(query)
+
+    assert len(evidence.immutable_objects) == 1_939
+    inventory_calls = [sql for sql in query.calls if "FROM data_lifecycle_objects" in sql]
+    assert len(inventory_calls) == 2
+    assert inventory_calls[0].endswith("LIMIT 1024 OFFSET 0")
+    assert inventory_calls[1].endswith("LIMIT 1024 OFFSET 1024")
+
+
+def test_current_database_rejects_inventory_at_admission_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = tuple(
+        {
+            "authoritative_source": f"catalog:sha256:{index:064x}",
+            "bucket": "loom-staging-artifacts",
+            "content_sha256": f"{index:064x}",
+            "data_class": "catalog",
+            "object_key": f"catalog/{index:04d}.json",
+            "size_bytes": index,
+            "version_id": "v1",
+        }
+        for index in range(2)
+    )
+    query = Query(revision="0066", inventory=inventory)
+    monkeypatch.setattr(readonly_database_authority, "STAGING_ADMISSION_OBJECT_LIMIT", 2)
+
+    with pytest.raises(ValueError, match="immutable inventory exceeds policy"):
+        probe_readonly_database(query)
 
 
 def test_current_database_rejects_unclassified_immutable_inventory() -> None:
