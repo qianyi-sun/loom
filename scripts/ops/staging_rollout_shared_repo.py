@@ -16,6 +16,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import secrets
 import stat
 import sys
@@ -35,6 +36,15 @@ REPOSITORY_ROOT = AUTHORITY_ROOT / "worker-repos"
 # The root itself (e.g. /shared_work/loom) is operator-provisioned; this helper
 # validates it is service-owned and ensures the candidate chain beneath it.
 SERVICE_DIR_MODE = 0o2750
+
+# The privileged service CLI is deliberately narrow (#874): it only ever
+# operates on candidates/<environment>/<sha> beneath a hardcoded, service-owned
+# root. It never accepts an arbitrary root or arbitrary path components, so it
+# cannot become a generic root-owned directory creator once wired through the
+# broker/sudoers.
+SERVICE_ROOT = Path("/shared_work/loom")
+ALLOWED_ENVIRONMENTS = ("development", "staging", "production")
+_CANDIDATE_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _DIRECTORY_FLAGS = (
     os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
@@ -362,7 +372,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
         os.close(parent.fd)
 
 
-def converge_service_owned(
+def _converge_service_owned(
     root: Path,
     relative_chain: tuple[str, ...],
     *,
@@ -466,22 +476,29 @@ def converge_service_owned(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("check", "ensure", "service-check", "service-ensure"))
-    parser.add_argument("--root", type=Path, help="Service-owned root (service-* commands).")
-    parser.add_argument(
-        "--path",
-        action="append",
-        default=[],
-        help="Relative chain component under --root (repeatable; service-* commands).",
-    )
+    # The privileged CLI accepts ONLY an environment + candidate SHA; the root
+    # and the candidates/<env>/<sha> layout are hardcoded so it can never be
+    # turned into a generic root-owned directory creator (#874).
+    parser.add_argument("--environment", choices=ALLOWED_ENVIRONMENTS)
+    parser.add_argument("--candidate-sha", help="Full 40-character hex candidate commit.")
     args = parser.parse_args(argv)
     try:
         if args.command in ("service-check", "service-ensure"):
-            if args.root is None or not args.path:
-                print("error: service commands require --root and --path", file=sys.stderr)
+            if args.environment is None or args.candidate_sha is None:
+                print(
+                    "error: service commands require --environment and --candidate-sha",
+                    file=sys.stderr,
+                )
                 return 2
-            report = converge_service_owned(
-                args.root,
-                tuple(args.path),
+            if _CANDIDATE_SHA_RE.fullmatch(args.candidate_sha) is None:
+                print(
+                    "error: --candidate-sha must be a full 40-character hex commit",
+                    file=sys.stderr,
+                )
+                return 2
+            report = _converge_service_owned(
+                SERVICE_ROOT,
+                ("candidates", args.environment, args.candidate_sha),
                 ensure=args.command == "service-ensure",
             )
         else:

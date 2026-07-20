@@ -133,13 +133,13 @@ def test_service_owned_rejects_invalid_relative_chain(
     monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
     for bad in ((), ("..",), ("candidates", ""), ("candidates", "a/b")):
         with pytest.raises(helper.AuthorityError, match="service path is invalid"):
-            helper.converge_service_owned(Path("/shared_work/loom"), bad, ensure=False)
+            helper._converge_service_owned(Path("/shared_work/loom"), bad, ensure=False)
 
 
 def test_service_owned_requires_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(helper.os, "geteuid", lambda: 1000)
     with pytest.raises(helper.AuthorityError, match="requires root"):
-        helper.converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+        helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
 
 
 def test_service_owned_rejects_bad_group_membership(
@@ -159,7 +159,7 @@ def test_service_owned_rejects_bad_group_membership(
         else helper.Identity(name, 2005, 2005, (2005,)),
     )
     with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
-        helper.converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+        helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
 
 
 def test_service_owned_rejects_service_in_shared_group(
@@ -178,4 +178,33 @@ def test_service_owned_rejects_service_in_shared_group(
         else helper.Identity(name, 2005, 2005, (2005, 2007)),
     )
     with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
-        helper.converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+        helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+
+
+def test_service_cli_rejects_short_or_nonhex_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The privileged CLI must validate a full 40-hex SHA and never touch the fs
+    # for a bad one. We don't reach converge (geteuid check would fail non-root),
+    # because SHA validation happens first and returns exit code 2.
+    for bad in ("abc1234", "z" * 40, "ABC" + "0" * 37, "0" * 39, "0" * 41):
+        rc = helper.main(["service-ensure", "--environment", "development", "--candidate-sha", bad])
+        assert rc == 2
+
+
+def test_service_cli_requires_environment_and_sha() -> None:
+    assert helper.main(["service-ensure", "--candidate-sha", "a" * 40]) == 2
+    assert helper.main(["service-check", "--environment", "staging"]) == 2
+
+
+def test_service_cli_rejects_unknown_environment() -> None:
+    # argparse choices reject anything outside development/staging/production.
+    with pytest.raises(SystemExit):
+        helper.main(["service-ensure", "--environment", "prod", "--candidate-sha", "a" * 40])
+
+
+def test_service_cli_hardcodes_root_and_layout() -> None:
+    # No --root / --path options exist anymore: an arbitrary path cannot be
+    # requested through the privileged CLI.
+    with pytest.raises(SystemExit):
+        helper.main(["service-ensure", "--root", "/etc", "--path", "shadow"])
+    assert helper.SERVICE_ROOT == Path("/shared_work/loom")
+    assert helper.ALLOWED_ENVIRONMENTS == ("development", "staging", "production")
