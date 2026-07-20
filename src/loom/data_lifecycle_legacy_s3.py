@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from botocore.exceptions import ClientError
+
 from loom.data_lifecycle_legacy import LegacyClassificationError
+
+_ABSENT_ERROR_CODES = frozenset({"404", "NoSuchKey", "NoSuchVersion"})
 
 
 class S3LegacyObjectInspector:
@@ -21,13 +25,20 @@ class S3LegacyObjectInspector:
         bucket: str,
         object_key: str,
         version_id: str | None,
-    ) -> tuple[str | None, str, int]:
+    ) -> tuple[str | None, str, int] | None:
         params = {"Bucket": bucket, "Key": object_key}
         if version_id is not None:
             params["VersionId"] = version_id
         try:
             response = self._client.get_object(**params)
             body = response["Body"]
+        except ClientError as exc:
+            error = exc.response.get("Error", {})
+            if error.get("Code") in _ABSENT_ERROR_CODES:
+                return None
+            raise LegacyClassificationError(
+                f"legacy object cannot be inspected: {bucket}/{object_key}"
+            ) from exc
         except Exception as exc:
             raise LegacyClassificationError(
                 f"legacy object cannot be inspected: {bucket}/{object_key}"

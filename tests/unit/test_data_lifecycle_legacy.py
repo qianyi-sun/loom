@@ -6,10 +6,12 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from botocore.exceptions import ClientError
 
 from loom.data_lifecycle import DataClass, OwnerKind
 from loom.data_lifecycle_gc import GcScope
 from loom.data_lifecycle_legacy import (
+    LegacyAbsentObject,
     LegacyClassificationError,
     LegacyObject,
     LegacyRow,
@@ -80,6 +82,17 @@ def _object() -> LegacyObject:
     )
 
 
+def _absent_object() -> LegacyAbsentObject:
+    return LegacyAbsentObject(
+        row_table="artifacts",
+        row_id=ARTIFACT_ID,
+        bucket="loom-staging-artifacts",
+        object_key=f"teams/{TEAM_ID}/artifacts/{ARTIFACT_ID}.json",
+        version_id=None,
+        created_at=NOW,
+    )
+
+
 def test_plan_is_deterministic_and_groups_event_rows_by_trial() -> None:
     rows = [_trial_event(), _trial_event(row_id=UUID(int=5)), _artifact()]
     first = build_legacy_classification_plan(
@@ -117,6 +130,42 @@ def test_artifact_without_exact_object_evidence_fails_closed() -> None:
 
     with pytest.raises(LegacyClassificationError, match="lacks exact object evidence"):
         plan.require_applicable()
+
+
+def test_verified_absent_object_is_digest_bound_and_applicable() -> None:
+    first = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        planned_at=NOW,
+        rows=[_artifact()],
+        objects=[],
+        absent_objects=[_absent_object()],
+    )
+    second = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        planned_at=NOW + timedelta(minutes=5),
+        rows=[_artifact()],
+        objects=[],
+        absent_objects=[_absent_object()],
+    )
+
+    first.require_applicable()
+    assert first.inventory_digest == second.inventory_digest
+    assert first.objects == ()
+    assert first.absent_objects == (_absent_object(),)
+    document = classification_plan_document(first)
+    assert document["objects"] == []
+    assert document["absent_objects"] == [
+        {
+            "row_table": "artifacts",
+            "row_id": str(ARTIFACT_ID),
+            "bucket": "loom-staging-artifacts",
+            "object_key": f"teams/{TEAM_ID}/artifacts/{ARTIFACT_ID}.json",
+            "version_id": None,
+            "created_at": NOW.isoformat(),
+        }
+    ]
 
 
 def test_pinned_legacy_object_is_registered_without_gc_expiry() -> None:
@@ -249,6 +298,40 @@ def test_s3_inspector_hashes_one_get_response_without_head_race() -> None:
     assert body.closed
 
 
+@pytest.mark.parametrize("error_code", ("404", "NoSuchKey", "NoSuchVersion"))
+def test_s3_inspector_returns_exact_absence_evidence(error_code: str) -> None:
+    class Client:
+        def get_object(self, **_kwargs: object) -> object:
+            raise ClientError(
+                {"Error": {"Code": error_code, "Message": "absent"}},
+                "GetObject",
+            )
+
+    observed = S3LegacyObjectInspector(Client()).inspect(
+        bucket="loom-staging-artifacts",
+        object_key="missing.json",
+        version_id=None,
+    )
+
+    assert observed is None
+
+
+def test_s3_inspector_does_not_treat_authority_failure_as_absence() -> None:
+    class Client:
+        def get_object(self, **_kwargs: object) -> object:
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "denied"}},
+                "GetObject",
+            )
+
+    with pytest.raises(LegacyClassificationError, match="cannot be inspected"):
+        S3LegacyObjectInspector(Client()).inspect(
+            bucket="loom-staging-artifacts",
+            object_key="unknown.json",
+            version_id=None,
+        )
+
+
 def test_legacy_migration_sentinels_bind_exact_observed_object() -> None:
     class Inspector:
         def inspect(self, **kwargs: object) -> tuple[None, str, int]:
@@ -267,9 +350,33 @@ def test_legacy_migration_sentinels_bind_exact_observed_object() -> None:
         bucket_aliases={"artifacts": "loom-staging-artifacts"},
     )
 
+    assert isinstance(observed, LegacyObject)
     assert observed.bucket == "loom-staging-artifacts"
     assert observed.content_sha256 == "f" * 64
     assert observed.size_bytes == 8192
+
+
+def test_legacy_missing_object_is_explicit_absence_evidence() -> None:
+    source = SimpleNamespace(
+        storage={"bucket": "artifacts", "key": "run/missing.json", "size_bytes": 0},
+        content_hash="pending:legacy-unhashed",
+    )
+
+    observed = _artifact_object(
+        _artifact(),
+        source,
+        SimpleNamespace(inspect=lambda **_kwargs: None),
+        bucket_aliases={"artifacts": "loom-staging-artifacts"},
+    )
+
+    assert observed == LegacyAbsentObject(
+        row_table="artifacts",
+        row_id=ARTIFACT_ID,
+        bucket="loom-staging-artifacts",
+        object_key="run/missing.json",
+        version_id=None,
+        created_at=NOW,
+    )
 
 
 def test_legacy_bucket_alias_authority_rejects_unnormalized_values() -> None:

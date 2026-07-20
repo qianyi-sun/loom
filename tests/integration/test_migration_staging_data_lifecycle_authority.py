@@ -608,6 +608,121 @@ def test_legacy_artifact_classification_is_digest_approved_and_epoch_bound(
         engine.dispose()
 
 
+def test_legacy_absent_object_is_bound_as_explicit_authority_evidence(
+    postgres_url_at_0065: str,
+) -> None:
+    team_id = uuid4()
+    artifact_id = uuid4()
+    created_at = datetime(2026, 7, 12, 5, tzinfo=UTC)
+    engine = create_engine(postgres_url_at_0065)
+
+    class Inspector:
+        def inspect(self, *, bucket, object_key, version_id):
+            assert bucket == "loom-staging-artifacts"
+            assert object_key == f"teams/{team_id}/artifacts/{artifact_id}.json"
+            assert version_id is None
+            return None
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO teams (id,name) VALUES (:id,:name)"),
+                {"id": team_id, "name": f"legacy-absent-{team_id}"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO artifacts "
+                    "(id, artifact_type, name, team_id, content_hash, storage, created_at) "
+                    "VALUES (:id,'evidence_bundle','legacy-absent',:team_id,"
+                    "'pending:legacy-unhashed',CAST(:storage AS jsonb),:created_at)"
+                ),
+                {
+                    "id": artifact_id,
+                    "team_id": team_id,
+                    "storage": json.dumps(
+                        {
+                            "bucket": "artifacts",
+                            "key": f"teams/{team_id}/artifacts/{artifact_id}.json",
+                            "size_bytes": 0,
+                        }
+                    ),
+                    "created_at": created_at,
+                },
+            )
+        classifier = SqlAlchemyLegacyClassifier(
+            engine,
+            Inspector(),
+            bucket_aliases={"artifacts": "loom-staging-artifacts"},
+        )
+        scope = GcScope(environment="staging", namespace="loom-staging")
+        plan = classifier.inventory(
+            scope=scope,
+            planned_at=datetime(2026, 7, 20, 5, tzinfo=UTC),
+        )
+        plan.require_applicable()
+        assert plan.objects == ()
+        assert [item.row_id for item in plan.absent_objects] == [artifact_id]
+
+        state = classifier.apply(
+            plan=plan,
+            approved_inventory_digest=plan.inventory_digest,
+            request_id="req-legacyabsent",
+            applied_at=datetime(2026, 7, 20, 5, 1, tzinfo=UTC),
+        )
+        with engine.connect() as connection:
+            artifact_authority = connection.execute(
+                text("SELECT lifecycle_authority_id FROM artifacts WHERE id=:id"),
+                {"id": artifact_id},
+            ).scalar_one()
+            registered_count = connection.execute(
+                text("SELECT count(*) FROM data_lifecycle_objects WHERE authority_id=:id"),
+                {"id": artifact_authority},
+            ).scalar_one()
+            authority = connection.execute(
+                text(
+                    "SELECT data_class, pinned, metadata FROM data_lifecycle_authorities "
+                    "WHERE id=:id"
+                ),
+                {"id": artifact_authority},
+            ).one()
+        assert state.epoch == plan.mutation_epoch + 1
+        assert registered_count == 0
+        assert authority.data_class == "artifact"
+        assert authority.pinned is False
+        assert authority.metadata == {
+            "classification": "legacy-staging-v1",
+            "inventory_digest": plan.inventory_digest,
+            "object_state": "verified_absent",
+        }
+    finally:
+        with engine.begin() as connection:
+            authority_ids = list(
+                connection.execute(
+                    text(
+                        "SELECT lifecycle_authority_id FROM artifacts "
+                        "WHERE id=:id AND lifecycle_authority_id IS NOT NULL"
+                    ),
+                    {"id": artifact_id},
+                ).scalars()
+            )
+            connection.execute(text("DELETE FROM artifacts WHERE id=:id"), {"id": artifact_id})
+            if authority_ids:
+                connection.execute(
+                    text(
+                        "DELETE FROM data_lifecycle_objects WHERE authority_id IN :ids"
+                    ).bindparams(bindparam("ids", expanding=True)),
+                    {"ids": authority_ids},
+                )
+                connection.execute(
+                    text("DELETE FROM data_lifecycle_authorities WHERE id IN :ids").bindparams(
+                        bindparam("ids", expanding=True)
+                    ),
+                    {"ids": authority_ids},
+                )
+            connection.execute(text("DELETE FROM teams WHERE id=:id"), {"id": team_id})
+        engine.dispose()
+
+
 def test_downgrade_refuses_to_discard_lifecycle_data(postgres_url_at_0065: str) -> None:
     cfg = _cfg(postgres_url_at_0065)
     engine = create_engine(postgres_url_at_0065)

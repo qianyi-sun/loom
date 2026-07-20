@@ -91,6 +91,40 @@ class LegacyObject:
 
 
 @dataclass(frozen=True, slots=True)
+class LegacyAbsentObject:
+    """Exact legacy DB reference proven absent from the observed object store."""
+
+    row_table: str
+    row_id: UUID
+    bucket: str
+    object_key: str
+    version_id: str | None
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.row_table != "artifacts":
+            raise ValueError("legacy absent object evidence must belong to an artifact row")
+        if (
+            not self.bucket
+            or self.bucket != self.bucket.strip()
+            or not self.object_key
+            or self.object_key != self.object_key.strip()
+            or self.object_key.startswith("/")
+        ):
+            raise ValueError("legacy absent object identity must be normalized and relative")
+        if self.version_id is not None and (
+            not self.version_id or self.version_id != self.version_id.strip()
+        ):
+            raise ValueError("legacy absent object version must be normalized")
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise ValueError("legacy absent object time must be timezone-aware")
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return self.bucket, self.object_key, self.version_id or ""
+
+
+@dataclass(frozen=True, slots=True)
 class LegacyAuthority:
     id: UUID
     team_id: UUID
@@ -116,6 +150,7 @@ class LegacyClassificationPlan:
     authorities: tuple[LegacyAuthority, ...]
     rows: tuple[LegacyRow, ...]
     objects: tuple[LegacyObject, ...]
+    absent_objects: tuple[LegacyAbsentObject, ...]
     blockers: tuple[str, ...]
     inventory_digest: str
 
@@ -149,6 +184,7 @@ def _payload(
     authorities: tuple[LegacyAuthority, ...],
     rows: tuple[LegacyRow, ...],
     objects: tuple[LegacyObject, ...],
+    absent_objects: tuple[LegacyAbsentObject, ...],
     blockers: tuple[str, ...],
 ) -> dict[str, object]:
     return {
@@ -197,6 +233,17 @@ def _payload(
             }
             for item in objects
         ],
+        "absent_objects": [
+            {
+                "row_table": item.row_table,
+                "row_id": str(item.row_id),
+                "bucket": item.bucket,
+                "object_key": item.object_key,
+                "version_id": item.version_id,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in absent_objects
+        ],
         "blockers": list(blockers),
     }
 
@@ -208,6 +255,7 @@ def build_legacy_classification_plan(
     planned_at: datetime,
     rows: Iterable[LegacyRow],
     objects: Iterable[LegacyObject],
+    absent_objects: Iterable[LegacyAbsentObject] = (),
     additional_blockers: Iterable[str] = (),
 ) -> LegacyClassificationPlan:
     """Bind complete legacy evidence to one deterministic, reviewable digest."""
@@ -246,18 +294,36 @@ def build_legacy_classification_plan(
             artifact_ids.add(row.row_id)
 
     selected_objects: list[LegacyObject] = []
+    selected_absent: list[LegacyAbsentObject] = []
     seen_objects: set[tuple[str, str, str]] = set()
     object_rows: set[UUID] = set()
-    for item in objects:
-        if item.row_id not in artifact_ids:
-            blockers.append(f"legacy object has no classified artifact row {item.row_id}")
+    for object_item in objects:
+        if object_item.row_id not in artifact_ids:
+            blockers.append(f"legacy object has no classified artifact row {object_item.row_id}")
             continue
-        if item.identity in seen_objects:
-            blockers.append(f"duplicate legacy object identity {item.bucket}/{item.object_key}")
+        if object_item.identity in seen_objects:
+            blockers.append(
+                f"duplicate legacy object identity {object_item.bucket}/{object_item.object_key}"
+            )
             continue
-        seen_objects.add(item.identity)
-        object_rows.add(item.row_id)
-        selected_objects.append(item)
+        seen_objects.add(object_item.identity)
+        object_rows.add(object_item.row_id)
+        selected_objects.append(object_item)
+
+    for absent_item in absent_objects:
+        if absent_item.row_id not in artifact_ids:
+            blockers.append(
+                f"legacy absent object has no classified artifact row {absent_item.row_id}"
+            )
+            continue
+        if absent_item.identity in seen_objects:
+            blockers.append(
+                f"duplicate legacy object identity {absent_item.bucket}/{absent_item.object_key}"
+            )
+            continue
+        seen_objects.add(absent_item.identity)
+        object_rows.add(absent_item.row_id)
+        selected_absent.append(absent_item)
 
     missing_object_rows = artifact_ids - object_rows
     blockers.extend(
@@ -275,6 +341,9 @@ def build_legacy_classification_plan(
     stable_objects = tuple(
         sorted(selected_objects, key=lambda item: (item.identity, str(item.row_id)))
     )
+    stable_absent = tuple(
+        sorted(selected_absent, key=lambda item: (item.identity, str(item.row_id)))
+    )
     stable_blockers = tuple(sorted(set(blockers)))
     payload = _payload(
         scope=scope,
@@ -283,6 +352,7 @@ def build_legacy_classification_plan(
         authorities=stable_authorities,
         rows=stable_rows,
         objects=stable_objects,
+        absent_objects=stable_absent,
         blockers=stable_blockers,
     )
     digest_payload = {key: value for key, value in payload.items() if key != "planned_at"}
@@ -296,6 +366,7 @@ def build_legacy_classification_plan(
         authorities=stable_authorities,
         rows=stable_rows,
         objects=stable_objects,
+        absent_objects=stable_absent,
         blockers=stable_blockers,
         inventory_digest=digest,
     )
@@ -310,12 +381,14 @@ def classification_plan_document(plan: LegacyClassificationPlan) -> Mapping[str,
         authorities=plan.authorities,
         rows=plan.rows,
         objects=plan.objects,
+        absent_objects=plan.absent_objects,
         blockers=plan.blockers,
     )
     return {**payload, "inventory_digest": plan.inventory_digest}
 
 
 __all__ = [
+    "LegacyAbsentObject",
     "LegacyAuthority",
     "LegacyClassificationError",
     "LegacyClassificationPlan",

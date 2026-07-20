@@ -14,6 +14,7 @@ from sqlalchemy import Connection, Engine, text
 from loom.data_lifecycle import DataClass, OwnerKind
 from loom.data_lifecycle_gc import GcScope
 from loom.data_lifecycle_legacy import (
+    LegacyAbsentObject,
     LegacyClassificationError,
     LegacyClassificationPlan,
     LegacyObject,
@@ -38,7 +39,7 @@ class LegacyObjectInspector(Protocol):
         bucket: str,
         object_key: str,
         version_id: str | None,
-    ) -> tuple[str | None, str, int]: ...
+    ) -> tuple[str | None, str, int] | None: ...
 
 
 def _fingerprint(values: Iterable[object]) -> str:
@@ -213,7 +214,7 @@ def _artifact_object(
     inspector: LegacyObjectInspector,
     *,
     bucket_aliases: Mapping[str, str] | None = None,
-) -> LegacyObject:
+) -> LegacyObject | LegacyAbsentObject:
     storage = source.storage
     if not isinstance(storage, dict):
         raise LegacyClassificationError(f"legacy artifact {row.row_id} storage is unclassified")
@@ -235,11 +236,21 @@ def _artifact_object(
         raise LegacyClassificationError(
             f"legacy artifact {row.row_id} has invalid version authority"
         )
-    observed_version, observed_sha, observed_size = inspector.inspect(
+    observation = inspector.inspect(
         bucket=bucket,
         object_key=object_key,
         version_id=version_id,
     )
+    if observation is None:
+        return LegacyAbsentObject(
+            row_table="artifacts",
+            row_id=row.row_id,
+            bucket=bucket,
+            object_key=object_key,
+            version_id=version_id,
+            created_at=row.created_at,
+        )
+    observed_version, observed_sha, observed_size = observation
     if version_id is not None and observed_version != version_id:
         raise LegacyClassificationError(f"legacy artifact {row.row_id} object version drifted")
     content_hash = source.content_hash
@@ -301,6 +312,7 @@ class SqlAlchemyLegacyClassifier:
     ) -> LegacyClassificationPlan:
         blockers: list[str] = []
         objects: list[LegacyObject] = []
+        absent_objects: list[LegacyAbsentObject] = []
         with self._engine.connect().execution_options(
             isolation_level="REPEATABLE READ"
         ) as connection:
@@ -320,14 +332,16 @@ class SqlAlchemyLegacyClassifier:
                 blockers.extend(row_blockers)
         for row, source in artifacts:
             try:
-                objects.append(
-                    _artifact_object(
-                        row,
-                        source,
-                        self._inspector,
-                        bucket_aliases=self._bucket_aliases,
-                    )
+                observation = _artifact_object(
+                    row,
+                    source,
+                    self._inspector,
+                    bucket_aliases=self._bucket_aliases,
                 )
+                if isinstance(observation, LegacyAbsentObject):
+                    absent_objects.append(observation)
+                else:
+                    objects.append(observation)
             except LegacyClassificationError as exc:
                 blockers.append(str(exc))
         return build_legacy_classification_plan(
@@ -336,6 +350,7 @@ class SqlAlchemyLegacyClassifier:
             planned_at=planned_at,
             rows=rows,
             objects=objects,
+            absent_objects=absent_objects,
             additional_blockers=blockers,
         )
 
@@ -374,6 +389,7 @@ class SqlAlchemyLegacyClassifier:
             if live_map != planned_rows:
                 raise LegacyClassificationError("legacy classification row inventory drifted")
 
+            absent_owner_ids = {str(item.row_id) for item in plan.absent_objects}
             for authority in plan.authorities:
                 connection.execute(
                     text(
@@ -399,6 +415,12 @@ class SqlAlchemyLegacyClassifier:
                             {
                                 "classification": "legacy-staging-v1",
                                 "inventory_digest": plan.inventory_digest,
+                                "object_state": (
+                                    "verified_absent"
+                                    if authority.owner_kind is OwnerKind.ARTIFACT
+                                    and authority.owner_id in absent_owner_ids
+                                    else "registered_or_not_applicable"
+                                ),
                             },
                             sort_keys=True,
                             separators=(",", ":"),
