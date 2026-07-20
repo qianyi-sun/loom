@@ -1,12 +1,16 @@
 # Development DB-backed environment desired state (shared dev env, #857/#873).
 #
 # Shared dev runs trial execution on external Slurm (GB10 + OLDLAB), the same
-# model as staging/prod. This file is config-prep; activation is gated on:
+# model as staging/prod. BOTH worker rows ship enabled=false (fail-closed):
+# applying this profile does NOT activate any external Slurm worker. Activation
+# is gated on:
 #   - the dev cluster existing (k3d on platform-dev, post-#879 + #881 soak);
 #   - the per-env broker + publisher writing candidates to
 #     /shared_work/loom/candidates/development/ (#874 publisher, #877 broker);
-#   - for the OLDLAB pool only: container-isolation evidence (#896), because
-#     OLDLAB nodes are double-duty (k3s + MinIO + slurmd) and run non-exclusive.
+#   - GB10: the #827 external-Slurm acceptance matrix AND #896 container-isolation
+#     evidence (packed exclusive=false workers) -- see the GB10 row comment;
+#   - OLDLAB: #896 container-isolation evidence + double-duty headroom
+#     measurement, because OLDLAB nodes are k3s + MinIO + slurmd.
 #
 # Apply after image rollout with:
 #   loom admin environment-state apply \
@@ -18,19 +22,24 @@
 environment = "development"
 
 # --- GB10 pool (ARM, Slurm-only nodes, shared across envs) -------------------
-# exclusive=false so multiple envs' workers pack onto the same GB10 node
-# instead of each claiming a whole node. GB10 runs no k8s/MinIO, so the only
-# co-tenants are other Slurm trial workers -- but the P0-2 docker-socket
-# cgroup-escape concern still applies to any non-exclusive node, so GB10
-# activation carries the same #896 container-isolation evidence expectation as
-# OLDLAB (dev is the lowest-stakes place it runs; staging/prod GB10 must not
-# flip to exclusive=false without #896). Dev slice: up to 5 concurrent trials;
-# min_slots=0 (scale to zero when idle; #877 QoS boost, not an always-warm
-# floor, provides dev's priority guarantee once it lands).
+# SHIPS DISABLED and fail-closed. Applying this profile must NOT activate GB10:
+#   - #827 requires external Slurm to stay disabled until its allocation-side
+#     acceptance matrix passes;
+#   - #896 requires container-isolation evidence before any non-exclusive
+#     (packed) worker runs.
+# So the checked-in state is enabled=false + exclusive=true (a single worker
+# owning a whole GB10 node is safe without the isolation gate). The intended
+# post-gate target is enabled=true + exclusive=false (pack multiple envs' workers
+# per node) -- flip both only after #827 AND #896 are satisfied.
+# min_slots=0 = scale to zero when idle, no warm floor. NOTE: with min_slots=0
+# the #877 QoS-boost trigger (count < min_slots) is unreachable, so it provides
+# NO dev-priority guarantee here; a priority mechanism is defined when the row
+# is activated, not via min_slots=0.
 [[worker_pool_autoscaler_policies]]
 pool_name = "gb10-arm64"
 actuator = "slurm"
-enabled = true
+enabled = false
+disabled_reason = "gated on #827 acceptance matrix + #896 container isolation; activate as exclusive=false only after both"
 min_slots = 0
 max_slots = 5
 scale_up_threshold_slots = 1
@@ -70,9 +79,10 @@ requested_concurrency = 5
 max_jobs = 1
 pending_job_cap = 1
 time_limit = "2-00:00:00"
-# Non-exclusive: pack multiple envs' workers per GB10 node. Isolation evidence
-# tracked in #896 (shared with OLDLAB); most critical before staging/prod GB10.
-exclusive = false
+# Fail-closed: exclusive=true (one worker per GB10 node) is the safe checked-in
+# value. The exclusive=false packing target is gated on #896 + #827 (see the
+# pool comment above); flip to false only after both are satisfied.
+exclusive = true
 external_runner = true
 
 # --- OLDLAB pool (x86_64, DOUBLE-DUTY nodes: k3s + MinIO + slurmd) ------------
@@ -86,6 +96,7 @@ external_runner = true
 pool_name = "oldlab"
 actuator = "slurm"
 enabled = false
+disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; exclusive=true is not viable on nodes shared with k3s/MinIO, so the disable IS the safety gate"
 min_slots = 0
 max_slots = 4
 scale_up_threshold_slots = 1
