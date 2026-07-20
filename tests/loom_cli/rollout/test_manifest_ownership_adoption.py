@@ -8,9 +8,13 @@ import pytest
 import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.manifest_ownership_adoption import (
+    ManagedFieldsCleanup,
     ManifestOwnershipAdoptionError,
+    build_managed_fields_cleanups,
     build_manifest_ownership_adoption_plan,
+    managed_fields_cleanup_argv,
     ownership_adoption_argv,
+    verify_managed_fields_cleanup,
     verify_ownership_adoption_dry_run,
 )
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
@@ -440,6 +444,7 @@ def test_maintenance_force_command_is_explicit_and_bounded() -> None:
         dry_run=False,
     )
     assert "--force-conflicts" in dry
+    assert "--show-managed-fields=true" in dry
     assert "--dry-run=server" in dry
     assert "--force-conflicts" in apply
     assert "--dry-run=server" not in apply
@@ -453,3 +458,113 @@ def test_maintenance_force_command_is_explicit_and_bounded() -> None:
 
     with pytest.raises(ValueError, match="kubeconfig"):
         ownership_adoption_argv(kubeconfig=Path("relative"), dry_run=True)
+
+
+def test_selective_managed_fields_cleanup_keeps_canonical_and_controller_owners() -> None:
+    live = _live()[:1]
+    metadata = live[0]["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["managedFields"] = _managed_fields(
+        "kubectl-patch",
+        "loom-lifecycle-bootstrap",
+        "loom-staging-rollout",
+        "kube-controller-manager",
+    )
+
+    cleanups = build_managed_fields_cleanups(live)
+
+    assert len(cleanups) == 1
+    cleanup = cleanups[0]
+    assert cleanup.identity == "batch/v1|CronJob|loom-staging|loom-staging-data-lifecycle"
+    assert [entry["manager"] for entry in cleanup.retained_fields] == [
+        "loom-staging-rollout",
+        "kube-controller-manager",
+    ]
+    observed = copy.deepcopy(live[0])
+    observed_metadata = observed["metadata"]
+    assert isinstance(observed_metadata, dict)
+    observed_metadata["managedFields"] = list(cleanup.retained_fields)
+    assert (
+        len(
+            verify_managed_fields_cleanup(
+                cleanup,
+                live_resource=live[0],
+                observed_resource=observed,
+            )
+        )
+        == 64
+    )
+
+    changed = copy.deepcopy(observed)
+    changed["spec"]["suspend"] = False  # type: ignore[index]
+    with pytest.raises(ManifestOwnershipAdoptionError, match="changed live state"):
+        verify_managed_fields_cleanup(
+            cleanup,
+            live_resource=live[0],
+            observed_resource=changed,
+        )
+
+
+def test_selective_cleanup_requires_canonical_owner_and_rejects_unknown_authority() -> None:
+    live = _live()[:1]
+    with pytest.raises(ManifestOwnershipAdoptionError, match="canonical owner"):
+        build_managed_fields_cleanups(live)
+
+    metadata = live[0]["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["managedFields"] = _managed_fields(
+        "loom-staging-rollout",
+        "ambient-admin",
+    )
+    with pytest.raises(ManifestOwnershipAdoptionError, match="unrecognized"):
+        build_managed_fields_cleanups(live)
+
+
+def test_managed_fields_cleanup_command_is_exact_and_dry_run_first_capable() -> None:
+    identity = "batch/v1|CronJob|loom-staging|loom-staging-data-lifecycle"
+    dry = managed_fields_cleanup_argv(
+        identity=identity,
+        kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
+        dry_run=True,
+    )
+    apply = managed_fields_cleanup_argv(
+        identity=identity,
+        kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
+        dry_run=False,
+    )
+    assert "--show-managed-fields=true" in dry
+    assert "--type=json" in dry
+    assert "--field-manager=loom-staging-rollout" in dry
+    assert "--dry-run=server" in dry
+    assert "--dry-run=server" not in apply
+    assert dry[-1] == "-p"
+    with pytest.raises(ValueError, match="identity"):
+        managed_fields_cleanup_argv(
+            identity="invalid",
+            kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
+            dry_run=True,
+        )
+    with pytest.raises(ValueError, match="identity"):
+        managed_fields_cleanup_argv(
+            identity="batch/v1|../CronJob|loom-staging|loom-staging-data-lifecycle",
+            kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
+            dry_run=True,
+        )
+
+
+def test_managed_fields_cleanup_rejects_duplicate_resources_and_malformed_patch() -> None:
+    live = _live()[:1]
+    metadata = live[0]["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["managedFields"] = _managed_fields(
+        "loom-staging-rollout",
+        "kubectl-patch",
+    )
+    with pytest.raises(ManifestOwnershipAdoptionError, match="duplicated"):
+        build_managed_fields_cleanups([live[0], copy.deepcopy(live[0])])
+    with pytest.raises(ValueError, match="patch"):
+        ManagedFieldsCleanup(
+            identity="batch/v1|CronJob|loom-staging|loom-staging-data-lifecycle",
+            patch_json="[1]",
+            patch_sha256="0" * 64,
+        )

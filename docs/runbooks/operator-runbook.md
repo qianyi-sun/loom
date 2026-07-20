@@ -1510,12 +1510,16 @@ loom-staging-rollout manifest-ownership apply \
 
 The broker recomputes the inventory before mutation, publishes it once under
 `/var/lib/loom-staging-rollout/maintenance/manifest-ownership/`, claims the
-protected mutation epoch, adopts the four existing field sets without semantic
-change, and applies only the three exact NetworkPolicies through the normal
-no-force manager. Any inventory, UID/resourceVersion, epoch, journal, apply or
-post-readback drift stops the request. Never invoke `kubectl --force-conflicts`
-directly, reuse a maintenance request ID, or unsuspend the CronJob as part of
-ownership adoption.
+protected mutation epoch, adopts every existing rendered field set without
+semantic change, and then retires only recognized legacy managed-field entries.
+That cleanup preserves `loom-staging-rollout` and controller ownership, uses an
+exact JSON Patch for each affected resource, and must pass a server-side dry-run
+and semantic comparison before the actual patch. It never clears the complete
+`managedFields` array. Only the three exact NetworkPolicies are then applied
+through the normal no-force manager. Any inventory, UID/resourceVersion, epoch,
+journal, cleanup, apply or post-readback drift stops the request. Never invoke
+`kubectl --force-conflicts` or patch `managedFields` directly, reuse a
+maintenance request ID, or unsuspend the CronJob as part of ownership adoption.
 
 The ownership path and the final rollout share one checked-in mutation-epoch
 CAS renderer. It accepts only bounded request IDs, hexadecimal evidence
@@ -1555,6 +1559,10 @@ still held by a recognized legacy manager or is already held by
 plan covers spec-bearing resources and top-level authorities such as ConfigMap
 `data`; its force dry-run must prove a semantic no-op for every target before
 mutation. Unknown managers and controller-only ownership remain fail-closed.
+If legacy entries remain after adoption, the next exact request repeats the
+selective cleanup; already-clean resources generate no patch. Cleanup journals
+its exact resource count and aggregate digest before any later convergence
+stage.
 
 After the exact post-readback and final no-force dry-run succeed, close the
 window through the same installed source; the command refuses if any rollout

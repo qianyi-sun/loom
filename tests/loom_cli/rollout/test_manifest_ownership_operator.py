@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -158,7 +159,40 @@ class _Harness:
         assert all(
             document["metadata"]["resourceVersion"] for document in yaml.safe_load_all(payload)
         )
+        for resource in self.live:
+            metadata = resource["metadata"]
+            assert isinstance(metadata, dict)
+            fields = metadata["managedFields"]
+            assert isinstance(fields, list)
+            if not any(
+                isinstance(entry, dict) and entry.get("manager") == "loom-staging-rollout"
+                for entry in fields
+            ):
+                fields.append(
+                    {
+                        "fieldsType": "FieldsV1",
+                        "fieldsV1": {"f:spec": {}},
+                        "manager": "loom-staging-rollout",
+                        "operation": "Apply",
+                    }
+                )
         return copy.deepcopy(self.live)
+
+    def managed_fields_action(self, identity: str, patch_json: str, dry_run: bool):
+        self.calls.append(f"managed-fields:{identity}:{'dry' if dry_run else 'apply'}")
+        patch = json.loads(patch_json)
+        assert isinstance(patch, list)
+        retained = patch[0]["value"]
+        current = next(item for item in self.live if _identity(item) == identity)
+        result = copy.deepcopy(current)
+        metadata = result["metadata"]
+        assert isinstance(metadata, dict)
+        metadata["managedFields"] = copy.deepcopy(retained)
+        if not dry_run:
+            self.live = [
+                copy.deepcopy(result) if _identity(item) == identity else item for item in self.live
+            ]
+        return result
 
     def no_force_dry_run(self, payload: str):
         documents = [item for item in yaml.safe_load_all(payload) if isinstance(item, dict)]
@@ -189,6 +223,7 @@ class _Harness:
             load_live=self.load_live,
             force_dry_run=self.force_dry_run,
             force_apply=self.force_apply,
+            managed_fields_action=self.managed_fields_action,
             no_force_dry_run=self.no_force_dry_run,
             no_force_apply=self.no_force_apply,
             claim_epoch=self.claim_epoch,
@@ -220,6 +255,7 @@ def test_inventory_is_immutable_and_apply_is_journaled() -> None:
         "inventory-approved",
         "epoch-claimed",
         "ownership-adopted",
+        "managed-fields-cleaned",
         "network-policies-converged",
         "live-state-verified",
         "completed",
@@ -303,6 +339,31 @@ def test_post_apply_live_drift_fails_closed() -> None:
     assert harness.journal.events[-1]["evidence"]["failure_code"] == (
         "manifest_ownership.live-state-verification.failed"
     )
+
+
+def test_managed_field_cleanup_dry_run_drift_fails_before_cleanup_apply() -> None:
+    harness = _Harness()
+    operator = harness.operator()
+
+    def drifted_cleanup(identity: str, patch_json: str, dry_run: bool):
+        result = harness.managed_fields_action(identity, patch_json, dry_run)
+        if dry_run:
+            spec = result["spec"]
+            assert isinstance(spec, dict)
+            spec["injected"] = True
+        return result
+
+    operator.managed_fields_action = drifted_cleanup
+    approved = operator.inventory().inventory_sha256
+    with pytest.raises(ManifestOwnershipAdoptionError, match="changed live state"):
+        operator.apply(
+            request_id="req-manifest-ownership-12345678",
+            approved_inventory_sha256=approved,
+        )
+    assert harness.journal.events[-1]["evidence"]["failure_code"] == (
+        "manifest_ownership.managed-field-cleanup.failed"
+    )
+    assert not any(call.endswith(":apply") for call in harness.calls)
 
 
 def test_post_apply_readback_retries_only_within_bounded_readonly_window() -> None:

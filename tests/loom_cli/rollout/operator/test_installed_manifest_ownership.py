@@ -162,6 +162,20 @@ class _Runner:
     def capture_stdout(self, argv, *, env, timeout_seconds):  # type: ignore[no-untyped-def]
         command = tuple(argv)
         self.calls.append(command)
+        if "patch" in command:
+            target = command[command.index("patch") + 1]
+            current = next(item for item in self.live if _identity(item) == target)
+            result = copy.deepcopy(current)
+            patch = json.loads(command[-1])
+            metadata = result["metadata"]
+            assert isinstance(metadata, dict)
+            metadata["managedFields"] = copy.deepcopy(patch[0]["value"])
+            if "--dry-run=server" not in command:
+                self.live = [
+                    copy.deepcopy(result) if _identity(item) == target else item
+                    for item in self.live
+                ]
+            return json.dumps(result).encode()
         target = command[command.index("get") + 1]
         resource = next(item for item in self.live if _identity(item) == target)
         return json.dumps(resource).encode()
@@ -184,6 +198,22 @@ class _Runner:
         dry_run = "--dry-run=server" in command
         if force:
             result = copy.deepcopy(current)
+            if not dry_run:
+                metadata = result["metadata"]
+                assert isinstance(metadata, dict)
+                fields = metadata["managedFields"]
+                assert isinstance(fields, list)
+                fields.append(
+                    {
+                        "manager": "loom-staging-rollout",
+                        "operation": "Apply",
+                        "fieldsV1": {"f:spec": {}},
+                    }
+                )
+                self.live = [
+                    copy.deepcopy(result) if _identity(item) == identity else item
+                    for item in self.live
+                ]
         else:
             result = copy.deepcopy(document)
             if not dry_run:
@@ -254,6 +284,16 @@ def test_installed_service_binds_exact_publication_and_fixed_commands(
     assert any("--force-conflicts" in command for command in runner.calls)
     assert any(
         "--force-conflicts" not in command and "apply" in command for command in runner.calls
+    )
+    cleanup_commands = [command for command in runner.calls if "patch" in command]
+    assert len(cleanup_commands) == 10
+    assert all("--show-managed-fields=true" in command for command in cleanup_commands)
+    assert all("--type=json" in command for command in cleanup_commands)
+    assert all("--field-manager=loom-staging-rollout" in command for command in cleanup_commands)
+    assert all(
+        "--dry-run=server" in cleanup_commands[index]
+        and "--dry-run=server" not in cleanup_commands[index + 1]
+        for index in range(0, len(cleanup_commands), 2)
     )
     assert journal.events[-1]["event"] == "completed"
     cron = runner.live[0]["spec"]

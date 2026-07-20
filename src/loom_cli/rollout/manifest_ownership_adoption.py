@@ -30,6 +30,8 @@ from loom_cli.rollout.operator.manifest_apply_contract import (
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+_API_VERSION_RE = re.compile(r"^[a-z0-9.-]+(?:/[a-z0-9.-]+)?$")
+_KIND_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
 _LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 _ALLOWED_MANAGERS = frozenset(
     {
@@ -48,10 +50,47 @@ NETWORK_POLICY_CONVERGENCE_TARGETS = (
     "networking.k8s.io/v1|NetworkPolicy|loom-staging|loom-staging-data-lifecycle",
 )
 _CONTROLLER_ONLY_MANAGERS = frozenset({"kube-controller-manager", "nginx-ingress-controller"})
+_LEGACY_MANAGERS = _ALLOWED_MANAGERS - _CONTROLLER_ONLY_MANAGERS - {MANIFEST_FIELD_MANAGER}
 
 
 class ManifestOwnershipAdoptionError(RuntimeError):
     """Raised when legacy ownership cannot be adopted without live drift."""
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedFieldsCleanup:
+    """One exact JSON Patch that retires recognized legacy field owners."""
+
+    identity: str
+    patch_json: str
+    patch_sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            patch = json.loads(self.patch_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("managed-field cleanup patch is invalid") from exc
+        if (
+            not self.identity
+            or not isinstance(patch, list)
+            or len(patch) != 1
+            or not isinstance(patch[0], dict)
+            or patch[0].get("op") != "replace"
+            or patch[0].get("path") != "/metadata/managedFields"
+            or not isinstance(patch[0].get("value"), list)
+            or _SHA256_RE.fullmatch(self.patch_sha256) is None
+            or self.patch_json != json.dumps(patch, sort_keys=True, separators=(",", ":"))
+            or self.patch_sha256 != _hash_json(patch)
+        ):
+            raise ValueError("managed-field cleanup patch is invalid")
+
+    @property
+    def retained_fields(self) -> tuple[dict[str, object], ...]:
+        patch = json.loads(self.patch_json)
+        value = patch[0]["value"]
+        if not isinstance(value, list):  # guarded by __post_init__
+            raise RuntimeError("managed-field cleanup patch drifted")
+        return tuple(copy.deepcopy(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +308,7 @@ def ownership_adoption_argv(
         "kubectl",
         "--kubeconfig",
         str(kubeconfig),
+        "--show-managed-fields=true",
         "--namespace",
         "loom-staging",
         "apply",
@@ -281,6 +321,49 @@ def ownership_adoption_argv(
     if output_json:
         argv.extend(("--output", "json"))
     argv.extend(("--validate=strict", f"--request-timeout={MANIFEST_REQUEST_TIMEOUT}", "-f", "-"))
+    return tuple(argv)
+
+
+def managed_fields_cleanup_argv(
+    *,
+    identity: str,
+    kubeconfig: Path,
+    dry_run: bool,
+) -> tuple[str, ...]:
+    """Return the fixed selective managedFields JSON Patch command."""
+
+    if not kubeconfig.is_absolute() or ".." in kubeconfig.parts:
+        raise ValueError("managed-field cleanup kubeconfig is invalid")
+    try:
+        api_version, kind, namespace, name = identity.split("|", 3)
+    except ValueError as exc:
+        raise ValueError("managed-field cleanup identity is invalid") from exc
+    if (
+        _API_VERSION_RE.fullmatch(api_version) is None
+        or _KIND_RE.fullmatch(kind) is None
+        or namespace not in {"", "loom-staging"}
+        or _DNS_RE.fullmatch(name) is None
+    ):
+        raise ValueError("managed-field cleanup identity is invalid")
+    argv = [
+        "kubectl",
+        "--kubeconfig",
+        str(kubeconfig),
+        "--show-managed-fields=true",
+    ]
+    if namespace:
+        argv.extend(("--namespace", namespace))
+    argv.extend(
+        (
+            "patch",
+            f"{kind.lower()}/{name}",
+            "--type=json",
+            f"--field-manager={MANIFEST_FIELD_MANAGER}",
+        )
+    )
+    if dry_run:
+        argv.append("--dry-run=server")
+    argv.extend(("--output=json", f"--request-timeout={MANIFEST_REQUEST_TIMEOUT}", "-p"))
     return tuple(argv)
 
 
@@ -434,6 +517,84 @@ def _validate_managed_fields(fields: list[object]) -> None:
         raise ManifestOwnershipAdoptionError("recognized managed-field authority is absent")
 
 
+def build_managed_fields_cleanups(
+    live_resources: Sequence[Mapping[str, object]],
+) -> tuple[ManagedFieldsCleanup, ...]:
+    """Build deterministic patches that retire only recognized legacy owners."""
+
+    cleanups: list[ManagedFieldsCleanup] = []
+    indexed = _resources_by_identity(live_resources, namespace="loom-staging")
+    for identity, resource in sorted(indexed.items()):
+        metadata = _mapping(resource.get("metadata"), label="managed-field metadata")
+        fields = metadata.get("managedFields")
+        if not isinstance(fields, list) or not fields:
+            raise ManifestOwnershipAdoptionError("managed-field cleanup evidence is absent")
+        _validate_managed_fields(fields)
+        managers = {entry.get("manager") for entry in fields if isinstance(entry, dict)}
+        legacy = managers & _LEGACY_MANAGERS
+        if not legacy:
+            continue
+        if MANIFEST_FIELD_MANAGER not in managers:
+            raise ManifestOwnershipAdoptionError("managed-field cleanup canonical owner is absent")
+        retained = [
+            copy.deepcopy(entry)
+            for entry in fields
+            if isinstance(entry, dict) and entry.get("manager") not in _LEGACY_MANAGERS
+        ]
+        patch: list[dict[str, object]] = [
+            {
+                "op": "replace",
+                "path": "/metadata/managedFields",
+                "value": retained,
+            }
+        ]
+        patch_json = json.dumps(patch, sort_keys=True, separators=(",", ":"))
+        cleanups.append(
+            ManagedFieldsCleanup(
+                identity=identity,
+                patch_json=patch_json,
+                patch_sha256=_hash_json(patch),
+            )
+        )
+    return tuple(cleanups)
+
+
+def verify_managed_fields_cleanup(
+    cleanup: ManagedFieldsCleanup,
+    *,
+    live_resource: Mapping[str, object],
+    observed_resource: Mapping[str, object],
+) -> str:
+    """Verify one selective cleanup keeps semantics and only approved owners."""
+
+    if (
+        _resource_identity(live_resource) != cleanup.identity
+        or _resource_identity(observed_resource) != cleanup.identity
+    ):
+        raise ManifestOwnershipAdoptionError("managed-field cleanup identity drifted")
+    if ownership_semantic_state(observed_resource) != ownership_semantic_state(live_resource):
+        raise ManifestOwnershipAdoptionError("managed-field cleanup changed live state")
+    metadata = _mapping(observed_resource.get("metadata"), label="managed-field cleanup metadata")
+    fields = metadata.get("managedFields")
+    if not isinstance(fields, list) or not fields:
+        raise ManifestOwnershipAdoptionError("managed-field cleanup evidence is absent")
+    _validate_managed_fields(fields)
+    managers = {entry.get("manager") for entry in fields if isinstance(entry, dict)}
+    if MANIFEST_FIELD_MANAGER not in managers or managers & _LEGACY_MANAGERS:
+        raise ManifestOwnershipAdoptionError("managed-field cleanup authority drifted")
+    if fields != list(cleanup.retained_fields):
+        raise ManifestOwnershipAdoptionError("managed-field cleanup result drifted")
+    return _hash_json(
+        {
+            "identity": cleanup.identity,
+            "managed_fields": fields,
+            "patch_sha256": cleanup.patch_sha256,
+            "semantic_state": ownership_semantic_state(observed_resource),
+            "version": "v1",
+        }
+    )
+
+
 def ownership_manifest_identities(rendered_yaml: str, *, namespace: str) -> tuple[str, ...]:
     """Return exact sorted rendered identities for maintenance live reads."""
 
@@ -581,11 +742,15 @@ def _hash_json(value: object) -> str:
 __all__ = [
     "NETWORK_POLICY_CONVERGENCE_TARGETS",
     "AdoptionResource",
+    "ManagedFieldsCleanup",
     "ManifestOwnershipAdoptionError",
     "ManifestOwnershipAdoptionPlan",
+    "build_managed_fields_cleanups",
     "build_manifest_ownership_adoption_plan",
+    "managed_fields_cleanup_argv",
     "ownership_adoption_argv",
     "ownership_manifest_identities",
     "ownership_semantic_state",
+    "verify_managed_fields_cleanup",
     "verify_ownership_adoption_dry_run",
 ]

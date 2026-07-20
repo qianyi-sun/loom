@@ -17,8 +17,10 @@ from loom_cli.rollout.manifest_ownership_adoption import (
     NETWORK_POLICY_CONVERGENCE_TARGETS,
     ManifestOwnershipAdoptionError,
     ManifestOwnershipAdoptionPlan,
+    build_managed_fields_cleanups,
     build_manifest_ownership_adoption_plan,
     ownership_semantic_state,
+    verify_managed_fields_cleanup,
     verify_ownership_adoption_dry_run,
 )
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
@@ -31,6 +33,7 @@ Resource = Mapping[str, object]
 ResourceSet = Sequence[Resource]
 LiveLoader = Callable[[], ResourceSet]
 ManifestAction = Callable[[str], ResourceSet]
+ManagedFieldsAction = Callable[[str, str, bool], Resource]
 EpochClaim = Callable[[int, str, str], int]
 
 
@@ -134,6 +137,7 @@ class ManifestOwnershipOperator:
     load_live: LiveLoader
     force_dry_run: ManifestAction
     force_apply: ManifestAction
+    managed_fields_action: ManagedFieldsAction
     no_force_dry_run: ManifestAction
     no_force_apply: ManifestAction
     claim_epoch: EpochClaim
@@ -215,6 +219,55 @@ class ManifestOwnershipOperator:
                 {"adoption_sha256": adoption_sha256},
             )
 
+            stage = "managed-field-cleanup"
+            live_after_adoption = adopted
+            live_by_identity = {_identity(item): item for item in live_after_adoption}
+            cleanups = build_managed_fields_cleanups(live_after_adoption)
+            cleanup_digests: list[str] = []
+            for cleanup in cleanups:
+                live_resource = live_by_identity.get(cleanup.identity)
+                if live_resource is None:
+                    raise ManifestOwnershipAdoptionError(
+                        "managed-field cleanup live resource is absent"
+                    )
+                dry_run = self.managed_fields_action(
+                    cleanup.identity,
+                    cleanup.patch_json,
+                    True,
+                )
+                verify_managed_fields_cleanup(
+                    cleanup,
+                    live_resource=live_resource,
+                    observed_resource=dry_run,
+                )
+                applied = self.managed_fields_action(
+                    cleanup.identity,
+                    cleanup.patch_json,
+                    False,
+                )
+                cleanup_digests.append(
+                    verify_managed_fields_cleanup(
+                        cleanup,
+                        live_resource=live_resource,
+                        observed_resource=applied,
+                    )
+                )
+            cleanup_sha256 = _hash_json(
+                {
+                    "cleanup_digests": cleanup_digests,
+                    "count": len(cleanups),
+                    "version": "v1",
+                }
+            )
+            self._record(
+                request_id,
+                "managed-fields-cleaned",
+                {
+                    "cleanup_count": len(cleanups),
+                    "cleanup_sha256": cleanup_sha256,
+                },
+            )
+
             stage = "network-policy-convergence"
             network_yaml = _network_policy_yaml(inventory.plan)
             expected_network = tuple(self.no_force_dry_run(network_yaml))
@@ -275,6 +328,8 @@ class ManifestOwnershipOperator:
             "mutation_epoch_before": inventory.plan.mutation_epoch,
             "mutation_epoch_after": observed_epoch,
             "adoption_sha256": adoption_sha256,
+            "managed_fields_cleanup_count": len(cleanups),
+            "managed_fields_cleanup_sha256": cleanup_sha256,
             "network_sha256": network_sha256,
             "post_apply_sha256": post_apply_sha256,
             "final_dry_run_sha256": final_sha256,

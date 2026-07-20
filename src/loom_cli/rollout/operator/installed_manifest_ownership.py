@@ -11,6 +11,7 @@ from typing import cast
 import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.manifest_ownership_adoption import (
+    managed_fields_cleanup_argv,
     ownership_adoption_argv,
     ownership_manifest_identities,
 )
@@ -157,6 +158,27 @@ class InstalledManifestOwnershipService:
                 )
             return tuple(results)
 
+        def managed_fields_action(
+            identity: str,
+            patch_json: str,
+            dry_run: bool,
+        ) -> Resource:
+            argv = (
+                *managed_fields_cleanup_argv(
+                    identity=identity,
+                    kubeconfig=self.config.kubeconfig_path,
+                    dry_run=dry_run,
+                ),
+                patch_json,
+            )
+            return _decode_resource(
+                runner.capture_stdout(
+                    argv,
+                    env=environment,
+                    timeout_seconds=60,
+                )
+            )
+
         return ManifestOwnershipOperator(
             artifact=artifacts.manifests,
             candidate_sha=candidate.resolved_sha,
@@ -165,6 +187,7 @@ class InstalledManifestOwnershipService:
             load_live=load_live,
             force_dry_run=lambda payload: action(payload, force=True, dry_run=True),
             force_apply=lambda payload: action(payload, force=True, dry_run=False),
+            managed_fields_action=managed_fields_action,
             no_force_dry_run=lambda payload: action(payload, force=False, dry_run=True),
             no_force_apply=lambda payload: action(payload, force=False, dry_run=False),
             claim_epoch=ManifestOwnershipEpochClaimer(

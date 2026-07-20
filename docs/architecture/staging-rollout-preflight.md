@@ -408,20 +408,23 @@ blocking immutable artifact publication or isolated rehearsal, and
 `--force-conflicts` cannot leak into the final apply command.
 
 Recognized legacy field ownership is converged only through the separate
-`manifest-ownership` maintenance protocol. It accepts exactly the lifecycle
-CronJob and its three NetworkPolicies, binds each live UID, resourceVersion,
-generation, managed-fields digest and semantic state, and builds an overlay
-from live values only. A force-conflicts server dry-run must prove that overlay
-is a semantic no-op before an operator can approve its inventory digest. Apply
-then requires the root-owned maintenance admission freeze, an idle rollout
-pointer, a no-replace private journal, and a compare-and-swap mutation-epoch
-claim. The force operation transfers only fields already present; the three
-NetworkPolicies subsequently converge through the normal no-force contract,
-while the suspended lifecycle CronJob remains suspended until lifecycle
-inventory and deletion authority are separately accepted. UID/resourceVersion
-preconditions, a post-apply live readback and a final full no-force dry-run
-make concurrent drift fail closed. This is a one-time ownership migration, not
-a general force flag or fallback apply path.
+`manifest-ownership` maintenance protocol. It accepts every existing exact
+rendered resource, binds each live UID, resourceVersion, optional generation,
+managed-fields digest and semantic state, and builds an overlay from live
+values only. A force-conflicts server dry-run must prove that overlay is a
+semantic no-op before an operator can approve its inventory digest. Apply then
+requires the root-owned maintenance admission freeze, an idle rollout pointer,
+a no-replace private journal, and a compare-and-swap mutation-epoch claim. The
+force operation transfers only fields already present. A following selective
+JSON Patch stage removes only checked-in recognized legacy managed-field
+entries after a semantic-no-op server dry-run; it retains the canonical Loom
+manager and controller ownership and never performs a blanket managed-fields
+reset. The three NetworkPolicies subsequently converge through the normal
+no-force contract, while the suspended lifecycle CronJob remains suspended
+until lifecycle inventory and deletion authority are separately accepted.
+UID/resourceVersion preconditions, cleanup evidence, a post-apply live readback
+and a final full no-force dry-run make concurrent drift fail closed. This is a
+one-time ownership migration, not a general force flag or fallback apply path.
 
 The maintenance marker is entered and left only by the exact installed root
 host helper. Entry is serialized with broker launch admission and proves that
