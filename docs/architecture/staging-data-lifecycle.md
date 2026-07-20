@@ -4,6 +4,19 @@ Shared staging is a bounded validation environment, not an archival data lake.
 Migration `0066` introduces typed lifecycle authority and the monotonic staging
 mutation epoch used by garbage collection and rollout backup leases.
 
+The migration is additive and deliberately does not guess which deployed
+database is the protected staging namespace. After upgrading an existing
+staging database, `scripts/ops/staging_data_lifecycle_bootstrap.py inventory`
+produces a digest-bound, read-only proof that the lifecycle registry, journal,
+classified links and epoch authority are all empty. A separate `apply` with
+that reviewed digest initializes only `staging/loom-staging` at epoch zero. It
+locks and rechecks the complete bootstrap inventory in one transaction; an
+existing non-bootstrap epoch, event, registry row, classified execution row,
+schema drift or concurrent publisher fails closed. The exact epoch-zero row is
+an idempotent no-op. This explicit maintenance bootstrap is also the earliest
+preflight predicate for cleanup; lifecycle tooling never relies on the rollout
+final-apply path to create its authority implicitly.
+
 ## Authority
 
 Every newly tracked run, trial, event, artifact, and object-store key must bind
