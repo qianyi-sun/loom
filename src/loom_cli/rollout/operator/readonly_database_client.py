@@ -22,7 +22,9 @@ from loom_cli.rollout.preflight_credential_paths import (
 from loom_cli.rollout.readonly_database_authority import (
     DatabaseQuery,
     ReadonlyDatabaseEvidence,
+    ReadonlyMutationEpochEvidence,
     probe_readonly_database,
+    probe_readonly_mutation_epoch,
 )
 from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredential
 
@@ -227,6 +229,19 @@ def probe_installed_readonly_database(
         return probe_readonly_database(query)
 
 
+def probe_installed_readonly_mutation_epoch(
+    *,
+    service_uid: int,
+    query_context: Callable[..., AbstractContextManager[DatabaseQuery]] = (
+        open_readonly_database_query
+    ),
+) -> ReadonlyMutationEpochEvidence:
+    """Return the exact epoch identity without requiring Tier 2 capacity state."""
+
+    with query_context(service_uid=service_uid) as query:
+        return probe_readonly_mutation_epoch(query)
+
+
 class InstalledReadonlyDatabaseEvidenceSource:
     """Single-flight process-local snapshot shared by the concurrent DAG."""
 
@@ -242,8 +257,40 @@ class InstalledReadonlyDatabaseEvidenceSource:
         self._probe = probe
         self._lock = Lock()
         self._evidence: ReadonlyDatabaseEvidence | None = None
+        self._failure: str | None = None
 
     def __call__(self) -> ReadonlyDatabaseEvidence:
+        with self._lock:
+            if self._failure is not None:
+                raise RuntimeError(self._failure)
+            if self._evidence is None:
+                try:
+                    self._evidence = self._probe(service_uid=self._service_uid)
+                except Exception as exc:
+                    self._failure = f"{type(exc).__name__}: {exc}"
+                    raise RuntimeError(self._failure) from exc
+            return self._evidence
+
+
+class InstalledReadonlyMutationEpochSource:
+    """Single-flight epoch source used before the concurrent preflight DAG."""
+
+    def __init__(
+        self,
+        *,
+        service_uid: int,
+        probe: Callable[..., ReadonlyMutationEpochEvidence] = (
+            probe_installed_readonly_mutation_epoch
+        ),
+    ) -> None:
+        if service_uid < 1:
+            raise ValueError("readonly mutation epoch source identity is invalid")
+        self._service_uid = service_uid
+        self._probe = probe
+        self._lock = Lock()
+        self._evidence: ReadonlyMutationEpochEvidence | None = None
+
+    def __call__(self) -> ReadonlyMutationEpochEvidence:
         with self._lock:
             if self._evidence is None:
                 self._evidence = self._probe(service_uid=self._service_uid)
@@ -254,10 +301,12 @@ __all__ = [
     "Connect",
     "DatabaseConnection",
     "InstalledReadonlyDatabaseEvidenceSource",
+    "InstalledReadonlyMutationEpochSource",
     "PortAllocator",
     "Spawn",
     "TunnelProcess",
     "WaitReady",
     "open_readonly_database_query",
     "probe_installed_readonly_database",
+    "probe_installed_readonly_mutation_epoch",
 ]

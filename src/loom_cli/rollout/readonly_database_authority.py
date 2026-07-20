@@ -89,6 +89,30 @@ DatabaseQuery = Callable[[str], tuple[Mapping[str, object], ...]]
 
 
 @dataclass(frozen=True, slots=True)
+class ReadonlyMutationEpochEvidence:
+    """Minimal readonly identity needed before the concurrent preflight DAG."""
+
+    schema_revision: str
+    mutation_epoch: int
+    epoch_authority: str
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            _REVISION_RE.fullmatch(self.schema_revision) is None
+            or self.mutation_epoch < 0
+            or self.epoch_authority not in {"legacy-pre-0066", "staging-mutation-epoch-v1"}
+            or len(self.evidence_sha256) != 64
+        ):
+            raise ValueError("readonly mutation epoch evidence is invalid")
+        if int(self.schema_revision) < _EPOCH_FIRST_REVISION:
+            if self.mutation_epoch != 0 or self.epoch_authority != "legacy-pre-0066":
+                raise ValueError("legacy database epoch authority is invalid")
+        elif self.epoch_authority != "staging-mutation-epoch-v1":
+            raise ValueError("database epoch authority is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ReadonlyDatabaseEvidence:
     """Secret-free evidence from one repeatable-read, read-only transaction."""
 
@@ -186,16 +210,8 @@ def _integer(value: object, *, label: str) -> int:
     return value
 
 
-def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
-    """Probe current staging without assuming migrations 0066/0067 already exist.
-
-    ``query`` must execute every statement in the same PostgreSQL
-    REPEATABLE READ, READ ONLY transaction. The first statement proves that
-    database-enforced boundary before any application table is inspected.
-    """
-
-    authority = _one(query, _AUTHORITY_SQL, label="role")
-    expected_authority = {
+def _expected_role_authority() -> dict[str, object]:
+    return {
         "role_name": _ROLE,
         "transaction_read_only": "on",
         "rolcanlogin": True,
@@ -211,6 +227,20 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
         "write_table_privileges": 0,
         "can_select_baseline": True,
     }
+
+
+def probe_readonly_mutation_epoch(query: DatabaseQuery) -> ReadonlyMutationEpochEvidence:
+    """Read the protected epoch without requiring later baseline/capacity rows.
+
+    This is the identity prerequisite for the concurrent DAG.  The complete
+    database baseline deliberately calls this same implementation before it
+    evaluates capacity and immutable-object authority, so a missing capacity
+    row is reported as its own earliest-stage blocker instead of masking every
+    independent preflight check.
+    """
+
+    authority = _one(query, _AUTHORITY_SQL, label="role")
+    expected_authority = _expected_role_authority()
     if dict(authority) != expected_authority:
         raise ValueError("readonly database role authority drifted")
 
@@ -221,11 +251,6 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
     if not isinstance(revision, str) or _REVISION_RE.fullmatch(revision) is None:
         raise ValueError("readonly database revision evidence is invalid")
     revision_number = int(revision)
-
-    baseline = _one(query, _BASELINE_SQL, label="baseline")
-    if set(baseline) != {"agents", "provider_models", "tasks", "teams", "users"}:
-        raise ValueError("readonly database baseline evidence is invalid")
-    counts = {name: _integer(value, label=name) for name, value in baseline.items()}
 
     if revision_number < _EPOCH_FIRST_REVISION:
         epoch = 0
@@ -240,6 +265,44 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
             raise ValueError("readonly database epoch evidence is invalid")
         epoch = _integer(epoch_row["epoch"], label="epoch")
         epoch_authority = "staging-mutation-epoch-v1"
+
+    canonical = {
+        "authority": expected_authority,
+        "epoch_authority": epoch_authority,
+        "mutation_epoch": epoch,
+        "schema_revision": revision,
+        "version": "v1",
+    }
+    return ReadonlyMutationEpochEvidence(
+        schema_revision=revision,
+        mutation_epoch=epoch,
+        epoch_authority=epoch_authority,
+        evidence_sha256=hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+
+
+def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
+    """Probe current staging without assuming migrations 0066/0067 already exist.
+
+    ``query`` must execute every statement in the same PostgreSQL
+    REPEATABLE READ, READ ONLY transaction. The first statements reuse the
+    mutation-epoch probe and prove the database-enforced boundary before any
+    application table is inspected.
+    """
+
+    epoch_evidence = probe_readonly_mutation_epoch(query)
+    revision = epoch_evidence.schema_revision
+    revision_number = int(revision)
+    epoch = epoch_evidence.mutation_epoch
+    epoch_authority = epoch_evidence.epoch_authority
+    expected_authority = _expected_role_authority()
+
+    baseline = _one(query, _BASELINE_SQL, label="baseline")
+    if set(baseline) != {"agents", "provider_models", "tasks", "teams", "users"}:
+        raise ValueError("readonly database baseline evidence is invalid")
+    counts = {name: _integer(value, label=name) for name, value in baseline.items()}
 
     capacity: dict[str, object] | None = None
     if revision_number >= _CAPACITY_FIRST_REVISION:
@@ -335,5 +398,7 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
 __all__ = [
     "DatabaseQuery",
     "ReadonlyDatabaseEvidence",
+    "ReadonlyMutationEpochEvidence",
     "probe_readonly_database",
+    "probe_readonly_mutation_epoch",
 ]

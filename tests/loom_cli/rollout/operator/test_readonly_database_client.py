@@ -10,9 +10,13 @@ import pytest
 
 from loom_cli.rollout.operator.readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
+    InstalledReadonlyMutationEpochSource,
     open_readonly_database_query,
 )
-from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
+from loom_cli.rollout.readonly_database_authority import (
+    ReadonlyDatabaseEvidence,
+    ReadonlyMutationEpochEvidence,
+)
 from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredential
 
 
@@ -224,3 +228,67 @@ def test_installed_evidence_source_is_single_flight_under_concurrent_dag() -> No
 
     assert results == [evidence] * 4
     assert calls == [os.getuid()]
+
+
+def test_installed_epoch_source_is_single_flight_before_concurrent_dag() -> None:
+    evidence = ReadonlyMutationEpochEvidence(
+        schema_revision="0067",
+        mutation_epoch=12,
+        epoch_authority="staging-mutation-epoch-v1",
+        evidence_sha256="b" * 64,
+    )
+    calls: list[int] = []
+    entered = threading.Barrier(4)
+
+    def probe(*, service_uid: int) -> ReadonlyMutationEpochEvidence:
+        calls.append(service_uid)
+        return evidence
+
+    source = InstalledReadonlyMutationEpochSource(
+        service_uid=os.getuid(),
+        probe=probe,
+    )
+    results: list[ReadonlyMutationEpochEvidence] = []
+
+    def invoke() -> None:
+        entered.wait()
+        results.append(source())
+
+    threads = [threading.Thread(target=invoke) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results == [evidence] * 4
+    assert calls == [os.getuid()]
+
+
+def test_installed_database_source_caches_one_fail_closed_probe_per_concurrent_dag() -> None:
+    calls: list[int] = []
+    entered = threading.Barrier(4)
+
+    def probe(*, service_uid: int) -> ReadonlyDatabaseEvidence:
+        calls.append(service_uid)
+        raise ValueError("readonly database capacity evidence is incomplete")
+
+    source = InstalledReadonlyDatabaseEvidenceSource(
+        service_uid=os.getuid(),
+        probe=probe,
+    )
+    failures: list[str] = []
+
+    def invoke() -> None:
+        entered.wait()
+        with pytest.raises(RuntimeError, match="capacity evidence is incomplete") as caught:
+            source()
+        failures.append(str(caught.value))
+
+    threads = [threading.Thread(target=invoke) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert calls == [os.getuid()]
+    assert failures == ["ValueError: readonly database capacity evidence is incomplete"] * 4

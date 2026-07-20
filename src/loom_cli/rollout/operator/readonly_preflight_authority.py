@@ -13,8 +13,15 @@ from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.preflight_credential_paths import READONLY_KUBECONFIG_PATH
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from loom_cli.rollout.readonly_authority_source import probe_readonly_authority
-from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
-from loom_cli.rollout.staging_baseline_readiness import ReadonlyProbe
+from loom_cli.rollout.readonly_database_authority import (
+    ReadonlyDatabaseEvidence,
+    ReadonlyMutationEpochEvidence,
+)
+from loom_cli.rollout.staging_baseline_readiness import (
+    STAGING_BASELINE_CHECK_IDS,
+    BaselineProbeResult,
+    ReadonlyProbe,
+)
 from loom_cli.rollout.staging_baseline_source import (
     CrossVersionStagingBaselineProbeSource,
     ObjectStoreProbe,
@@ -81,6 +88,7 @@ class ReadonlyPreflightAuthority:
     service_uid: int
     kubernetes_run: JsonRunner
     database_evidence: Callable[[], ReadonlyDatabaseEvidence]
+    mutation_epoch_evidence: Callable[[], ReadonlyMutationEpochEvidence]
     capacity_source: Callable[[], StagingCapacity]
     object_store_probe: ObjectStoreProbe
     public_http_get: PublicHttpGet = bounded_public_http_get
@@ -100,21 +108,34 @@ class ReadonlyPreflightAuthority:
         return derive_staging_route(self.config, service_uid=self.service_uid)
 
     def mutation_epoch(self) -> int:
-        return self.database_evidence().mutation_epoch
+        return self.mutation_epoch_evidence().mutation_epoch
 
     def capacity(self) -> StagingCapacity:
         return self.capacity_source()
 
     def baseline_probes(self, mutation_epoch: int) -> Mapping[str, ReadonlyProbe]:
-        database = self.database_evidence()
-        if database.mutation_epoch != mutation_epoch:
-            raise ValueError("readonly baseline mutation epoch drifted")
-        return CrossVersionStagingBaselineProbeSource(
-            route=self.route,
-            database=database,
-            object_store_probe=self.object_store_probe,
-            public_http_get=self.public_http_get,
-        ).probes()
+        if mutation_epoch < 0:
+            raise ValueError("readonly baseline mutation epoch is invalid")
+
+        def probe(check_id: str) -> BaselineProbeResult:
+            database = self.database_evidence()
+            if database.mutation_epoch != mutation_epoch:
+                raise ValueError("readonly baseline mutation epoch drifted")
+            sources = CrossVersionStagingBaselineProbeSource(
+                route=self.route,
+                database=database,
+                object_store_probe=self.object_store_probe,
+                public_http_get=self.public_http_get,
+            ).probes()
+            return sources[check_id]()
+
+        def bound(check_id: str) -> ReadonlyProbe:
+            def execute() -> BaselineProbeResult:
+                return probe(check_id)
+
+            return execute
+
+        return {check_id: bound(check_id) for check_id in STAGING_BASELINE_CHECK_IDS}
 
     def capabilities(self) -> ReadonlyAuthorityEvidence:
         return probe_readonly_authority(

@@ -42,7 +42,10 @@ from .readonly_capacity_client import (
     InstalledReadonlyCapacitySource,
     probe_installed_readonly_object_store_health,
 )
-from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
+from .readonly_database_client import (
+    InstalledReadonlyDatabaseEvidenceSource,
+    InstalledReadonlyMutationEpochSource,
+)
 from .readonly_preflight_authority import JsonRunner, ReadonlyPreflightAuthority
 from .staging_smoke_authority import staging_smoke_authority
 from .store import RequestStore
@@ -65,6 +68,9 @@ def build_installed_deep_preflight_composition(
     database_evidence = InstalledReadonlyDatabaseEvidenceSource(
         service_uid=service_uid,
     )
+    mutation_epoch_evidence = InstalledReadonlyMutationEpochSource(
+        service_uid=service_uid,
+    )
     cluster = load_cluster_config(config.cluster_config_path)
     minio_filesystem_path = Path(cluster.persistent_storage_host_path_root) / "minio"
     if minio_filesystem_path != Path("/data/loom-staging/minio"):
@@ -83,6 +89,7 @@ def build_installed_deep_preflight_composition(
         service_uid=service_uid,
         kubernetes_run=cast(JsonRunner, commands.readonly_json),
         database_evidence=database_evidence,
+        mutation_epoch_evidence=mutation_epoch_evidence,
         capacity_source=capacity_source,
         object_store_probe=lambda: probe_installed_readonly_object_store_health(
             service_uid=service_uid,

@@ -11,7 +11,7 @@ from threading import Lock
 from types import MappingProxyType
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_CHECK_IDS = (
+STAGING_BASELINE_CHECK_IDS = (
     "staging.health",
     "staging.auth",
     "staging.catalog-task",
@@ -34,7 +34,7 @@ class BaselineProbeResult:
     def __post_init__(self) -> None:
         blockers = dict(self.blockers)
         if (
-            self.check_id not in _CHECK_IDS
+            self.check_id not in STAGING_BASELINE_CHECK_IDS
             or self.environment != "staging"
             or not self.namespace
             or not self.route.startswith("https://")
@@ -71,7 +71,7 @@ class StagingBaselineSession:
         expected_mutation_epoch: int,
     ) -> None:
         if (
-            set(probes) != set(_CHECK_IDS)
+            set(probes) != set(STAGING_BASELINE_CHECK_IDS)
             or expected_environment != "staging"
             or not expected_namespace
             or not expected_route.startswith("https://")
@@ -106,7 +106,7 @@ class StagingBaselineSession:
 
     def aggregate(self) -> BaselineProbeResult:
         with self._lock:
-            if set(self._results) != set(_CHECK_IDS):
+            if set(self._results) != set(STAGING_BASELINE_CHECK_IDS):
                 raise ValueError("staging baseline probe set is incomplete")
             results = dict(self._results)
         blockers = {
@@ -140,6 +140,7 @@ class StagingBaselineSession:
 
 
 __all__ = [
+    "STAGING_BASELINE_CHECK_IDS",
     "BaselineProbeResult",
     "ReadonlyProbe",
     "StagingBaselineSession",

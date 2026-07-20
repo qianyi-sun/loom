@@ -1456,7 +1456,10 @@ Rollback is a merged revert on `dev` followed by another normal `start`.
 `preflight` is requestless: it binds the exact candidate and current mutation
 epoch, runs Tier 0-2, and creates no request, lifecycle pointer, backup, systemd
 unit, rollout directory, or staging mutation. The host installer uses only this
-command for its post-install readiness check. `start --dry-run` writes a
+command for its post-install readiness check. The minimal readonly epoch probe
+does not require the later runtime capacity row; the complete Tier 2 database
+check still does, so one requestless run reports that row as a blocker together
+with all independent failures. `start --dry-run` writes a
 non-active preview request but creates no backup, systemd unit, rollout
 directory, or staging mutation. A real `start` first writes and
 verifies a new immutable backup manifest, then publishes the private request

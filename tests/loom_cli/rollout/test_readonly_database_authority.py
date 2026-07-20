@@ -6,7 +6,10 @@ import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReference
-from loom_cli.rollout.readonly_database_authority import probe_readonly_database
+from loom_cli.rollout.readonly_database_authority import (
+    probe_readonly_database,
+    probe_readonly_mutation_epoch,
+)
 
 
 class Query:
@@ -186,3 +189,22 @@ def test_capacity_is_required_from_revision_0067() -> None:
 
     with pytest.raises(ValueError, match="capacity evidence is incomplete"):
         probe_readonly_database(missing)
+
+
+def test_epoch_probe_does_not_let_missing_capacity_mask_the_preflight_dag() -> None:
+    query = Query(revision="0067")
+    original = query.__call__
+
+    def missing(sql: str) -> tuple[Mapping[str, object], ...]:
+        if "staging_lifecycle_capacity" in sql:
+            return ()
+        return original(sql)
+
+    evidence = probe_readonly_mutation_epoch(missing)
+
+    assert evidence.schema_revision == "0067"
+    assert evidence.mutation_epoch == 9
+    assert evidence.epoch_authority == "staging-mutation-epoch-v1"
+    assert len(evidence.evidence_sha256) == 64
+    assert all("staging_lifecycle_capacity" not in sql for sql in query.calls)
+    assert all("AS provider_models" not in sql for sql in query.calls)

@@ -328,6 +328,13 @@ allows only bucket location/versioning and list/version-list operations for the
 two execution buckets, while the TokenRequest permits port-forward only to the
 exact MinIO and PostgreSQL pods. Credentials and object keys never enter DAG
 evidence.
+The requestless admission path reads the readonly role, schema revision, and
+mutation epoch through one minimal typed probe before it constructs the DAG.
+The full Tier 2 database baseline reuses that exact probe and then evaluates
+baseline rows, runtime capacity authority, and immutable-object inventory. A
+missing migration-`0067` capacity row therefore remains a blocking Tier 2
+failure, but it cannot prevent the DAG from reporting independent Tier 0–2
+blockers or mask the fresh `capacity.high-water` observation.
 The root installer converges that list-only identity through the exact MinIO
 pod and must invoke `kubectl exec --stdin`: the generated access and secret are
 delivered only on stdin, never argv, environment, logs, or evidence. A missing
