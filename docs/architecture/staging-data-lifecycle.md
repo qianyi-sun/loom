@@ -226,6 +226,17 @@ GC is staging-only and journaled:
 Runs are retryable and idempotent. Unknown or cross-environment objects are
 quarantined/reported. DB references without objects and objects without DB
 owners are reconciled in both directions; neither class is silently deleted.
+Migration `0068` normalizes resume evidence for large runs: the run row retains
+only the scope, epoch, canonical inventory digest and bounded counts, while
+the authority-membership journal retains every exact authority (including
+authorities with no object), and each object item retains its exact authority,
+bucket, key, version, hash and size. Apply copies that full identity into a
+temporary exact plan and compares every field while marking; changing object
+metadata without changing its UUID therefore rolls back the run before any
+external deletion. Resume reconstructs and re-hashes the canonical plan from
+both journals. Legacy schema-v1 run
+documents remain readable, but new runs no longer duplicate a hundreds-of-
+thousands-object plan in both JSONB and item rows.
 The operator requires every execution bucket as an explicit repeated
 `--bucket` argument, enumerates non-versioned objects or every exact
 version/delete marker as appropriate, and rejects registered-size drift. A

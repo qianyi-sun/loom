@@ -212,8 +212,7 @@ class StagingLifecycleCapacity(Base):
             name="staging_lifecycle_capacity_percent_check",
         ),
         CheckConstraint(
-            "policy_sha256 ~ '^[0-9a-f]{64}$' AND "
-            "evidence_sha256 ~ '^[0-9a-f]{64}$'",
+            "policy_sha256 ~ '^[0-9a-f]{64}$' AND evidence_sha256 ~ '^[0-9a-f]{64}$'",
             name="staging_lifecycle_capacity_digest_check",
         ),
     )
@@ -464,6 +463,22 @@ class DataLifecycleGcItem(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class DataLifecycleGcAuthority(Base):
+    """Exact lifecycle-authority membership retained for resumable GC."""
+
+    __tablename__ = "data_lifecycle_gc_authorities"
+    gc_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_gc_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    authority_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+    )
+    deletion_token: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
 
 
 class User(Base):

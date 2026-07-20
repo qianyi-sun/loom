@@ -109,6 +109,7 @@ def test_upgrade_adds_authority_journal_and_nullable_execution_links(
         "data_lifecycle_objects",
         "data_lifecycle_gc_runs",
         "data_lifecycle_gc_items",
+        "data_lifecycle_gc_authorities",
     }
     assert linked == {"batches", "trials", "llm_calls", "trial_events", "artifacts"}
     assert mutation_tables == {
@@ -276,6 +277,7 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
 ) -> None:
     engine = create_engine(postgres_url_at_0065)
     authority_id = uuid4()
+    empty_authority_id = uuid4()
     object_id = uuid4()
     now = datetime(2026, 7, 20, 1, tzinfo=UTC)
     with engine.connect() as connection:
@@ -296,7 +298,17 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
                 expires_at=now - timedelta(days=1),
                 pinned=False,
                 state="active",
-            )
+            ),
+            AuthorityInventory(
+                id=empty_authority_id,
+                environment="staging",
+                namespace="loom-staging",
+                owner_kind="trial",
+                owner_id="integration-empty-trial",
+                expires_at=now - timedelta(days=1),
+                pinned=False,
+                state="active",
+            ),
         ],
         objects=[
             RegisteredObject(
@@ -316,7 +328,7 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
 
     class NoBusinessRows:
         def delete_exact(self, connection, authority_ids) -> None:
-            assert authority_ids == (authority_id,)
+            assert authority_ids == tuple(sorted((authority_id, empty_authority_id)))
 
     class Deleter:
         deleted = False
@@ -341,6 +353,20 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
                 ),
                 {
                     "id": authority_id,
+                    "created_at": now - timedelta(days=8),
+                    "expires_at": now - timedelta(days=1),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO data_lifecycle_authorities "
+                    "(id, environment, namespace, data_class, owner_kind, owner_id, "
+                    "created_at, expires_at, pinned, state) VALUES "
+                    "(:id,'staging','loom-staging','trial','trial','integration-empty-trial',"
+                    ":created_at,:expires_at,false,'active')"
+                ),
+                {
+                    "id": empty_authority_id,
                     "created_at": now - timedelta(days=8),
                     "expires_at": now - timedelta(days=1),
                 },
@@ -373,13 +399,51 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
                 completed_at=now,
             )
         with engine.connect() as connection:
-            run_id = connection.execute(
+            run_id, inventory = connection.execute(
                 text(
-                    "SELECT id FROM data_lifecycle_gc_runs "
+                    "SELECT id, inventory FROM data_lifecycle_gc_runs "
                     "WHERE inventory->>'inventory_digest'=:digest"
                 ),
                 {"digest": plan.inventory_digest},
-            ).scalar_one()
+            ).one()
+            item_evidence = connection.execute(
+                text(
+                    "SELECT authority_id, bucket, object_key, version_id, "
+                    "content_sha256, size_bytes FROM data_lifecycle_gc_items "
+                    "WHERE gc_run_id=:run_id AND object_id=:object_id"
+                ),
+                {"run_id": run_id, "object_id": object_id},
+            ).one()
+            authority_evidence = tuple(
+                connection.execute(
+                    text(
+                        "SELECT authority_id FROM data_lifecycle_gc_authorities "
+                        "WHERE gc_run_id=:run_id ORDER BY authority_id"
+                    ),
+                    {"run_id": run_id},
+                ).scalars()
+            )
+        assert inventory == {
+            "schema_version": 2,
+            "environment": "staging",
+            "namespace": "loom-staging",
+            "mutation_epoch": epoch,
+            "planned_at": now.isoformat(),
+            "inventory_digest": plan.inventory_digest,
+            "authority_count": 2,
+            "object_count": 1,
+            "bytes_total": 7,
+            "blockers": [],
+        }
+        assert tuple(item_evidence) == (
+            authority_id,
+            "loom-staging-artifacts",
+            "integration/trial.json",
+            "version-1",
+            "b" * 64,
+            7,
+        )
+        assert authority_evidence == tuple(sorted((authority_id, empty_authority_id)))
         deleter.verify = True
         result = resume_gc(
             run_id=run_id,
@@ -404,13 +468,121 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
                 {"id": result.run_id, "object_id": object_id},
             ).scalar_one()
             authority_count = connection.execute(
-                text("SELECT count(*) FROM data_lifecycle_authorities WHERE id=:id"),
-                {"id": authority_id},
+                text("SELECT count(*) FROM data_lifecycle_authorities WHERE id IN (:a,:b)"),
+                {"a": authority_id, "b": empty_authority_id},
             ).scalar_one()
         assert tuple(run) == ("completed", epoch, epoch + 1)
         assert item_state == "metadata_deleted"
         assert authority_count == 0
     finally:
+        engine.dispose()
+
+
+def test_gc_mark_rejects_exact_object_identity_drift(
+    postgres_url_at_0065: str,
+) -> None:
+    engine = create_engine(postgres_url_at_0065)
+    authority_id = uuid4()
+    object_id = uuid4()
+    now = datetime(2026, 7, 20, 1, 30, tzinfo=UTC)
+    try:
+        with engine.begin() as connection:
+            epoch = connection.execute(
+                text("SELECT epoch FROM staging_mutation_epochs WHERE environment='staging'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO data_lifecycle_authorities "
+                    "(id, environment, namespace, data_class, owner_kind, owner_id, "
+                    "created_at, expires_at, pinned, state) VALUES "
+                    "(:id,'staging','loom-staging','artifact','artifact','drift-artifact',"
+                    ":created_at,:expires_at,false,'active')"
+                ),
+                {
+                    "id": authority_id,
+                    "created_at": now - timedelta(days=8),
+                    "expires_at": now - timedelta(days=1),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO data_lifecycle_objects "
+                    "(id, authority_id, environment, namespace, bucket, object_key, "
+                    "content_sha256, size_bytes, created_at, state) VALUES "
+                    "(:id,:authority_id,'staging','loom-staging','loom-staging-artifacts',"
+                    "'integration/drift.json',:sha,8,:created_at,'active')"
+                ),
+                {
+                    "id": object_id,
+                    "authority_id": authority_id,
+                    "sha": "c" * 64,
+                    "created_at": now - timedelta(days=8),
+                },
+            )
+        stale_plan = build_gc_plan(
+            scope=GcScope(environment="staging", namespace="loom-staging"),
+            mutation_epoch=epoch,
+            now=now,
+            authorities=[
+                AuthorityInventory(
+                    id=authority_id,
+                    environment="staging",
+                    namespace="loom-staging",
+                    owner_kind="artifact",
+                    owner_id="drift-artifact",
+                    expires_at=now - timedelta(days=1),
+                    pinned=False,
+                    state="active",
+                )
+            ],
+            objects=[
+                RegisteredObject(
+                    id=object_id,
+                    authority_id=authority_id,
+                    environment="staging",
+                    namespace="loom-staging",
+                    bucket="loom-staging-artifacts",
+                    object_key="integration/drift.json",
+                    version_id=None,
+                    content_sha256="c" * 64,
+                    size_bytes=7,
+                    state="active",
+                )
+            ],
+        )
+        with pytest.raises(RuntimeError, match="object mark count"):
+            SqlAlchemyGcJournal(engine).begin_apply(
+                plan=stale_plan,
+                requested_by="qianyi",
+                deletion_token=uuid4(),
+            )
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT state FROM data_lifecycle_objects WHERE id=:id"),
+                    {"id": object_id},
+                ).scalar_one()
+                == "active"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM data_lifecycle_gc_runs "
+                        "WHERE inventory->>'inventory_digest'=:digest"
+                    ),
+                    {"digest": stale_plan.inventory_digest},
+                ).scalar_one()
+                == 0
+            )
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM data_lifecycle_objects WHERE id=:id"), {"id": object_id}
+            )
+            connection.execute(
+                text("DELETE FROM data_lifecycle_authorities WHERE id=:id"),
+                {"id": authority_id},
+            )
         engine.dispose()
 
 

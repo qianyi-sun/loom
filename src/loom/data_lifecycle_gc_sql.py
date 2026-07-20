@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Protocol
+from datetime import datetime
+from typing import Protocol, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import Engine, text
@@ -13,6 +14,8 @@ from sqlalchemy.engine import Connection
 from loom.data_lifecycle_gc import (
     GcPlan,
     GcResumeSnapshot,
+    GcScope,
+    RegisteredObject,
     deserialize_gc_plan,
     serialize_gc_plan,
 )
@@ -48,7 +51,20 @@ class ExecutionMetadataPurger:
 
 
 def _plan_inventory(plan: GcPlan) -> dict[str, object]:
-    return serialize_gc_plan(plan)
+    """Compact run evidence; exact object authority lives in journal items."""
+
+    return {
+        "schema_version": 2,
+        "environment": plan.scope.environment,
+        "namespace": plan.scope.namespace,
+        "mutation_epoch": plan.mutation_epoch,
+        "planned_at": plan.planned_at.isoformat(),
+        "inventory_digest": plan.inventory_digest,
+        "authority_count": len(plan.authority_ids),
+        "object_count": plan.object_count,
+        "bytes_total": plan.bytes_total,
+        "blockers": list(plan.blockers),
+    }
 
 
 def _copy_uuid_rows(
@@ -62,6 +78,34 @@ def _copy_uuid_rows(
     with driver_connection.cursor().copy(statement) as copy:
         for value in rows:
             copy.write_row((value,))
+
+
+def _copy_gc_object_rows(
+    connection: Connection,
+    objects: Sequence[RegisteredObject],
+) -> None:
+    driver_connection = connection.connection.driver_connection
+    if driver_connection is None:
+        raise RuntimeError("PostgreSQL driver connection is unavailable")
+    with driver_connection.cursor().copy(
+        "COPY gc_object_plan "
+        "(object_id, authority_id, environment, namespace, bucket, object_key, "
+        "version_id, content_sha256, size_bytes) FROM STDIN"
+    ) as copy:
+        for item in objects:
+            copy.write_row(
+                (
+                    item.id,
+                    item.authority_id,
+                    item.environment,
+                    item.namespace,
+                    item.bucket,
+                    item.object_key,
+                    item.version_id,
+                    item.content_sha256,
+                    item.size_bytes,
+                )
+            )
 
 
 class SqlAlchemyGcJournal:
@@ -98,7 +142,6 @@ class SqlAlchemyGcJournal:
     ) -> UUID:
         run_id = uuid4()
         authority_ids = list(plan.authority_ids)
-        object_ids = [item.id for item in plan.objects]
         with self._engine.begin() as connection:
             epoch = connection.execute(
                 text(
@@ -127,18 +170,20 @@ class SqlAlchemyGcJournal:
                 )
             )
             connection.execute(
-                text("CREATE TEMP TABLE gc_object_plan (object_id uuid PRIMARY KEY) ON COMMIT DROP")
+                text(
+                    "CREATE TEMP TABLE gc_object_plan ("
+                    "object_id uuid PRIMARY KEY, authority_id uuid NOT NULL, "
+                    "environment text NOT NULL, namespace text NOT NULL, bucket text NOT NULL, "
+                    "object_key text NOT NULL, version_id text, content_sha256 text, "
+                    "size_bytes bigint NOT NULL) ON COMMIT DROP"
+                )
             )
             _copy_uuid_rows(
                 connection,
                 "COPY gc_authority_plan (authority_id) FROM STDIN",
                 authority_ids,
             )
-            _copy_uuid_rows(
-                connection,
-                "COPY gc_object_plan (object_id) FROM STDIN",
-                object_ids,
-            )
+            _copy_gc_object_rows(connection, plan.objects)
             authority_result = connection.execute(
                 text(
                     "UPDATE data_lifecycle_authorities AS authority "
@@ -155,22 +200,37 @@ class SqlAlchemyGcJournal:
             )
             if authority_result.rowcount != len(authority_ids):
                 raise RuntimeError("GC authority mark count does not match plan")
+            connection.execute(
+                text(
+                    "INSERT INTO data_lifecycle_gc_authorities "
+                    "(gc_run_id, authority_id, deletion_token) "
+                    "SELECT :run_id, authority_id, :token FROM gc_authority_plan"
+                ),
+                {"run_id": run_id, "token": deletion_token},
+            )
             object_result = connection.execute(
                 text(
                     "UPDATE data_lifecycle_objects AS object "
                     "SET state='delete_pending', deletion_token=:token "
                     "FROM gc_object_plan AS plan "
-                    "WHERE object.id=plan.object_id AND state='active'"
+                    "WHERE object.id=plan.object_id AND object.authority_id=plan.authority_id "
+                    "AND object.environment=plan.environment AND object.namespace=plan.namespace "
+                    "AND object.bucket=plan.bucket AND object.object_key=plan.object_key "
+                    "AND object.version_id IS NOT DISTINCT FROM plan.version_id "
+                    "AND object.content_sha256 IS NOT DISTINCT FROM plan.content_sha256 "
+                    "AND object.size_bytes=plan.size_bytes AND object.state='active'"
                 ),
                 {"token": deletion_token},
             )
-            if object_result.rowcount != len(object_ids):
+            if object_result.rowcount != len(plan.objects):
                 raise RuntimeError("GC object mark count does not match plan")
             connection.execute(
                 text(
                     "INSERT INTO data_lifecycle_gc_items "
-                    "(gc_run_id, object_id, deletion_token, state) "
-                    "SELECT :run_id, object_id, :token, 'marked' FROM gc_object_plan"
+                    "(gc_run_id, object_id, deletion_token, state, authority_id, bucket, "
+                    "object_key, version_id, content_sha256, size_bytes) "
+                    "SELECT :run_id, object_id, :token, 'marked', authority_id, bucket, "
+                    "object_key, version_id, content_sha256, size_bytes FROM gc_object_plan"
                 ),
                 {"run_id": run_id, "token": deletion_token},
             )
@@ -384,16 +444,32 @@ class SqlAlchemyGcJournal:
             inventory = run[2]
             if not isinstance(inventory, dict):
                 raise RuntimeError("GC run inventory is unavailable")
-            plan = deserialize_gc_plan(inventory)
             rows = connection.execute(
                 text(
-                    "SELECT object_id, deletion_token, state "
+                    "SELECT object_id, deletion_token, state, authority_id, bucket, object_key, "
+                    "version_id, content_sha256, size_bytes "
                     "FROM data_lifecycle_gc_items WHERE gc_run_id=:run_id "
                     "ORDER BY object_id"
                 ),
                 {"run_id": run_id},
             ).all()
-        tokens = {row[1] for row in rows}
+            authority_rows = connection.execute(
+                text(
+                    "SELECT authority_id, deletion_token "
+                    "FROM data_lifecycle_gc_authorities WHERE gc_run_id=:run_id "
+                    "ORDER BY authority_id"
+                ),
+                {"run_id": run_id},
+            ).all()
+        if inventory.get("schema_version") == 2:
+            plan = self._resume_plan_from_items(
+                inventory=inventory,
+                rows=[tuple(row) for row in rows],
+                authority_rows=[tuple(row) for row in authority_rows],
+            )
+        else:
+            plan = deserialize_gc_plan(inventory)
+        tokens = {row[1] for row in rows} | {row[1] for row in authority_rows}
         if len(tokens) != 1:
             raise RuntimeError("GC run deletion token authority is invalid")
         return GcResumeSnapshot(
@@ -403,21 +479,150 @@ class SqlAlchemyGcJournal:
             item_states=tuple((row[0], row[2]) for row in rows),
         )
 
+    @staticmethod
+    def _resume_plan_from_items(
+        *,
+        inventory: dict[str, object],
+        rows: Sequence[tuple[object, ...]],
+        authority_rows: Sequence[tuple[object, ...]],
+    ) -> GcPlan:
+        expected = {
+            "schema_version",
+            "environment",
+            "namespace",
+            "mutation_epoch",
+            "planned_at",
+            "inventory_digest",
+            "authority_count",
+            "object_count",
+            "bytes_total",
+            "blockers",
+        }
+        if set(inventory) != expected:
+            raise RuntimeError("GC run compact inventory schema is invalid")
+        try:
+            scope = GcScope(
+                environment=str(inventory["environment"]),
+                namespace=str(inventory["namespace"]),
+            )
+            mutation_epoch = inventory["mutation_epoch"]
+            if type(mutation_epoch) is not int:
+                raise ValueError("mutation epoch is invalid")
+            planned_at = datetime.fromisoformat(str(inventory["planned_at"]))
+            if planned_at.tzinfo is None:
+                raise ValueError("planned_at is not timezone-aware")
+            blockers = inventory["blockers"]
+            if not isinstance(blockers, list) or not all(
+                isinstance(item, str) for item in blockers
+            ):
+                raise ValueError("blockers are invalid")
+            if any(
+                len(row) != 9
+                or not isinstance(row[0], UUID)
+                or not isinstance(row[3], UUID)
+                or not isinstance(row[4], str)
+                or not row[4]
+                or not isinstance(row[5], str)
+                or not row[5]
+                or (row[6] is not None and not isinstance(row[6], str))
+                or (row[7] is not None and not isinstance(row[7], str))
+                or type(row[8]) is not int
+                for row in rows
+            ):
+                raise ValueError("journal item evidence is incomplete")
+            if any(
+                len(row) != 2 or not isinstance(row[0], UUID) or not isinstance(row[1], UUID)
+                for row in authority_rows
+            ):
+                raise ValueError("journal authority evidence is incomplete")
+            objects = tuple(
+                RegisteredObject(
+                    id=cast(UUID, row[0]),
+                    authority_id=cast(UUID, row[3]),
+                    environment=scope.environment,
+                    namespace=scope.namespace,
+                    bucket=cast(str, row[4]),
+                    object_key=cast(str, row[5]),
+                    version_id=cast(str | None, row[6]),
+                    content_sha256=cast(str | None, row[7]),
+                    size_bytes=cast(int, row[8]),
+                    state="active",
+                )
+                for row in rows
+            )
+            authority_ids = tuple(sorted(cast(UUID, row[0]) for row in authority_rows))
+            if len(authority_ids) != len(set(authority_ids)):
+                raise ValueError("journal authority evidence is duplicated")
+            authority_id_set = set(authority_ids)
+            if any(item.authority_id not in authority_id_set for item in objects):
+                raise ValueError("journal object authority is not in the exact GC plan")
+            plan = GcPlan(
+                scope=scope,
+                mutation_epoch=mutation_epoch,
+                planned_at=planned_at,
+                authority_ids=authority_ids,
+                objects=objects,
+                blockers=tuple(blockers),
+                inventory_digest=str(inventory["inventory_digest"]),
+            )
+            plan.require_applicable()
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("GC run compact inventory is invalid") from exc
+        if (
+            inventory["schema_version"] != 2
+            or inventory["authority_count"] != len(plan.authority_ids)
+            or inventory["object_count"] != plan.object_count
+            or inventory["bytes_total"] != plan.bytes_total
+            or serialize_gc_plan(plan)["inventory_digest"] != plan.inventory_digest
+        ):
+            raise RuntimeError("GC run compact inventory does not match journal items")
+        return plan
+
     def begin_resume(self, *, run_id: UUID, deletion_token: UUID) -> None:
         """Claim one failed run before continuing its exact journaled phases."""
         with self._engine.begin() as connection:
-            token_count = connection.execute(
+            schema_version = connection.execute(
+                text(
+                    "SELECT inventory->>'schema_version' FROM data_lifecycle_gc_runs "
+                    "WHERE id=:run_id"
+                ),
+                {"run_id": run_id},
+            ).scalar_one_or_none()
+            authority_token_count = connection.execute(
+                text(
+                    "SELECT count(*) FROM data_lifecycle_gc_authorities "
+                    "WHERE gc_run_id=:run_id AND deletion_token=:token"
+                ),
+                {"run_id": run_id, "token": deletion_token},
+            ).scalar_one()
+            authority_total_count = connection.execute(
+                text("SELECT count(*) FROM data_lifecycle_gc_authorities WHERE gc_run_id=:run_id"),
+                {"run_id": run_id},
+            ).scalar_one()
+            item_token_count = connection.execute(
                 text(
                     "SELECT count(*) FROM data_lifecycle_gc_items "
                     "WHERE gc_run_id=:run_id AND deletion_token=:token"
                 ),
                 {"run_id": run_id, "token": deletion_token},
             ).scalar_one()
-            total_count = connection.execute(
+            item_total_count = connection.execute(
                 text("SELECT count(*) FROM data_lifecycle_gc_items WHERE gc_run_id=:run_id"),
                 {"run_id": run_id},
             ).scalar_one()
-            if token_count == 0 or token_count != total_count:
+            exact_v2_valid = (
+                schema_version == "2"
+                and authority_token_count > 0
+                and authority_token_count == authority_total_count
+                and item_token_count == item_total_count
+            )
+            legacy_v1_valid = (
+                schema_version != "2"
+                and authority_total_count == 0
+                and item_token_count > 0
+                and item_token_count == item_total_count
+            )
+            if not exact_v2_valid and not legacy_v1_valid:
                 raise RuntimeError("GC resume deletion token authority is stale")
             result = connection.execute(
                 text(
