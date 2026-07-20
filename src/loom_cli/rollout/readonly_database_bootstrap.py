@@ -12,13 +12,18 @@ _DATABASE = "loom"
 _TABLES = (
     "agents",
     "alembic_version",
+    "artifacts",
+    "batches",
     "data_lifecycle_authorities",
     "data_lifecycle_objects",
+    "llm_calls",
     "provider_models_cache",
     "staging_lifecycle_capacity",
     "staging_mutation_epochs",
     "tasks",
     "teams",
+    "trial_events",
+    "trials",
     "users",
 )
 

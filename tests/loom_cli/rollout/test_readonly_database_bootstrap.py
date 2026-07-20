@@ -72,6 +72,14 @@ def test_role_bootstrap_is_exact_select_only_and_idempotent() -> None:
     assert "secrets" not in sql
     assert "tokens" not in sql
     assert "provider_connections" not in sql
+    for execution_table in (
+        "artifacts",
+        "batches",
+        "llm_calls",
+        "trial_events",
+        "trials",
+    ):
+        assert f"'{execution_table}'" in sql
     assert sql.count("a" * 64) == 1
 
 

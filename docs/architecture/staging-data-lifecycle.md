@@ -132,6 +132,13 @@ concurrent row or metadata change rolls the whole operation back. This
 classification step authorizes later inventory; it does not itself delete any
 DB row or object.
 
+The installed preflight database role has SELECT authority over these five
+execution-history tables in addition to the small control-plane baseline. It
+still has no TEMP, schema CREATE, write, sequence, secret, token, or provider
+connection authority. This lets preflight and the cleanup planner inventory
+legacy history before migration or deletion instead of discovering its shape
+only after a protected mutation.
+
 ```bash
 # Read-only; prints all blockers and the approval digest.
 python scripts/ops/staging_data_lifecycle_classify.py inventory \
