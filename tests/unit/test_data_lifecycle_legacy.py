@@ -251,7 +251,8 @@ def test_s3_inspector_hashes_one_get_response_without_head_race() -> None:
 
 def test_legacy_migration_sentinels_bind_exact_observed_object() -> None:
     class Inspector:
-        def inspect(self, **_kwargs: object) -> tuple[None, str, int]:
+        def inspect(self, **kwargs: object) -> tuple[None, str, int]:
+            assert kwargs["bucket"] == "loom-staging-artifacts"
             return None, "f" * 64, 8192
 
     source = SimpleNamespace(
@@ -259,10 +260,31 @@ def test_legacy_migration_sentinels_bind_exact_observed_object() -> None:
         content_hash="pending:legacy-unhashed",
     )
 
-    observed = _artifact_object(_artifact(), source, Inspector())
+    observed = _artifact_object(
+        _artifact(),
+        source,
+        Inspector(),
+        bucket_aliases={"artifacts": "loom-staging-artifacts"},
+    )
 
+    assert observed.bucket == "loom-staging-artifacts"
     assert observed.content_sha256 == "f" * 64
     assert observed.size_bytes == 8192
+
+
+def test_legacy_bucket_alias_authority_rejects_unnormalized_values() -> None:
+    source = SimpleNamespace(
+        storage={"bucket": "artifacts", "key": "run/output.json", "size_bytes": 1},
+        content_hash="sha256:" + "f" * 64,
+    )
+
+    with pytest.raises(LegacyClassificationError, match="bucket alias authority"):
+        _artifact_object(
+            _artifact(),
+            source,
+            SimpleNamespace(inspect=lambda **_kwargs: (None, "f" * 64, 1)),
+            bucket_aliases={"artifacts": " loom-staging-artifacts"},
+        )
 
 
 @pytest.mark.parametrize(

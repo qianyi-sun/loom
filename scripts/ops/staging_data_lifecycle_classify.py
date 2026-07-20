@@ -27,6 +27,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--requested-by")
     parser.add_argument("--approved-inventory-digest")
     parser.add_argument("--request-id")
+    parser.add_argument("--artifacts-bucket", required=True)
+    parser.add_argument("--trajectories-bucket", required=True)
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -71,7 +73,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         now = datetime.now(UTC)
-        classifier = SqlAlchemyLegacyClassifier(engine, S3LegacyObjectInspector(client))
+        classifier = SqlAlchemyLegacyClassifier(
+            engine,
+            S3LegacyObjectInspector(client),
+            bucket_aliases={
+                "artifacts": args.artifacts_bucket,
+                "trajectories": args.trajectories_bucket,
+            },
+        )
         plan = classifier.inventory(
             scope=GcScope(environment="staging", namespace=args.namespace),
             planned_at=now,

@@ -32,9 +32,9 @@ spec:
                 - --namespace
                 - {{ namespace }}
                 - --bucket
-                - trajectories
+                - {{ trajectories_bucket }}
                 - --bucket
-                - artifacts
+                - {{ artifacts_bucket }}
 {% if topology.multi_node %}
 {% for replica in range(topology.minio_replicas) %}
                 - --filesystem-path

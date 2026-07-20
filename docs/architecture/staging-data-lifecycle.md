@@ -146,11 +146,15 @@ only after a protected mutation.
 # Read-only; prints all blockers and the approval digest.
 python scripts/ops/staging_data_lifecycle_classify.py inventory \
   --namespace loom-staging \
+  --artifacts-bucket loom-staging-artifacts \
+  --trajectories-bucket loom-staging-trajectories \
   --output /secure/evidence/legacy-inventory.json
 
 # Separate, explicit mutation authority after reviewing that exact document.
 python scripts/ops/staging_data_lifecycle_classify.py apply \
   --namespace loom-staging \
+  --artifacts-bucket loom-staging-artifacts \
+  --trajectories-bucket loom-staging-trajectories \
   --requested-by qianyi \
   --request-id req-legacy-<reviewed-id> \
   --approved-inventory-digest <sha256> \

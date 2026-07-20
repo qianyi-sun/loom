@@ -58,6 +58,7 @@ def test_staging_lifecycle_cronjob_is_staging_only_and_least_authority() -> None
         "capabilities": {"drop": ["ALL"]},
         "readOnlyRootFilesystem": True,
     }
+    assert container["args"][container["args"].index("--bucket") + 1] == "trajectories"
     env_names = {item["name"] for item in container["env"]}
     assert env_names == {
         "LOOM_LIFECYCLE_DB_URL",
@@ -68,6 +69,27 @@ def test_staging_lifecycle_cronjob_is_staging_only_and_least_authority() -> None
         "LOOM_LIFECYCLE_STORAGE_AUTH_KIND",
     }
     assert all(volume["persistentVolumeClaim"]["readOnly"] for volume in pod["volumes"])
+
+
+def test_staging_lifecycle_uses_exact_physical_bucket_authority() -> None:
+    document = _resource(
+        ClusterConfig(
+            runtime_environment="staging",
+            namespace="loom-staging",
+            artifacts_bucket="loom-staging-artifacts",
+            trajectories_bucket="loom-staging-trajectories",
+        ),
+        "CronJob",
+        "loom-staging-data-lifecycle",
+    )
+
+    assert document is not None
+    args = document["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0][  # type: ignore[index]
+        "args"
+    ]
+    assert args.count("--bucket") == 2
+    assert "loom-staging-artifacts" in args
+    assert "loom-staging-trajectories" in args
 
 
 def test_staging_lifecycle_network_policy_is_staging_only() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -211,6 +211,8 @@ def _artifact_object(
     row: LegacyRow,
     source: Any,
     inspector: LegacyObjectInspector,
+    *,
+    bucket_aliases: Mapping[str, str] | None = None,
 ) -> LegacyObject:
     storage = source.storage
     if not isinstance(storage, dict):
@@ -222,6 +224,13 @@ def _artifact_object(
         raise LegacyClassificationError(
             f"legacy artifact {row.row_id} lacks exact bucket/key authority"
         )
+    aliases = {} if bucket_aliases is None else dict(bucket_aliases)
+    if any(
+        not key or key != key.strip() or not value or value != value.strip()
+        for key, value in aliases.items()
+    ):
+        raise LegacyClassificationError("legacy bucket alias authority is invalid")
+    bucket = aliases.get(bucket, bucket)
     if version_id is not None and not isinstance(version_id, str):
         raise LegacyClassificationError(
             f"legacy artifact {row.row_id} has invalid version authority"
@@ -268,9 +277,21 @@ def _artifact_object(
 class SqlAlchemyLegacyClassifier:
     """Inventory and apply exact legacy classification without prefix authority."""
 
-    def __init__(self, engine: Engine, inspector: LegacyObjectInspector) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        inspector: LegacyObjectInspector,
+        *,
+        bucket_aliases: Mapping[str, str] | None = None,
+    ) -> None:
         self._engine = engine
         self._inspector = inspector
+        self._bucket_aliases = {} if bucket_aliases is None else dict(bucket_aliases)
+        if any(
+            not key or key != key.strip() or not value or value != value.strip()
+            for key, value in self._bucket_aliases.items()
+        ):
+            raise ValueError("legacy bucket alias authority is invalid")
 
     def inventory(
         self,
@@ -299,7 +320,14 @@ class SqlAlchemyLegacyClassifier:
                 blockers.extend(row_blockers)
         for row, source in artifacts:
             try:
-                objects.append(_artifact_object(row, source, self._inspector))
+                objects.append(
+                    _artifact_object(
+                        row,
+                        source,
+                        self._inspector,
+                        bucket_aliases=self._bucket_aliases,
+                    )
+                )
             except LegacyClassificationError as exc:
                 blockers.append(str(exc))
         return build_legacy_classification_plan(
