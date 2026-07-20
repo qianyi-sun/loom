@@ -33,12 +33,12 @@ across rows.
 | Environment | Git branch / ref | GitHub Environment | Namespace | Public route | API base | DB name | Object buckets |
 |---|---|---|---|---|---|---|---|
 | `development` | `dev` only | `development` | `loom-dev` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_dev` | `loom-dev-trajectories`, `loom-dev-artifacts` |
-| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
+| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `https://yylx.world/staging` | `https://yylx.world/staging/api` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
 | `production` | `main` only; immutable `vX.Y.Z` tags are records | `production` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
 
-The public `/dev` route is the single non-production frontend surface. For
-v1.0 validation, physical `staging` owns that surface; do not deploy
-`development` and `staging` concurrently to claim `https://yylx.world/dev`.
+Staging owns `https://yylx.world/staging`; development owns
+`https://yylx.world/dev`. These are distinct public surfaces (the earlier
+`/dev` collision, where both claimed `/dev`, is resolved).
 They remain separate GitHub/Kubernetes/storage identities for controlled
 workflow isolation, but prod-vs-non-prod browser separation is `/prod` vs
 `/dev`.
@@ -533,8 +533,8 @@ knob you need.
    - For first production, use the committed route split instead of separate
      user-facing hosts: production renders `https://yylx.world/prod` with API
      calls under `https://yylx.world/prod/api`, and staging
-     renders `https://yylx.world/dev` with API calls under
-     `https://yylx.world/dev/api`. The web pod writes
+     renders `https://yylx.world/staging` with API calls under
+     `https://yylx.world/staging/api`. The web pod writes
      `loom-frontend-config.json` from runtime environment variables on startup
      and nginx serves it with `Cache-Control: no-store`, so a stale Vite build
      or browser-cached config cannot silently keep pointing at the wrong API.
@@ -1913,7 +1913,7 @@ there for the duration of `loom admin rate-cards sync-yibuapi` and
 `loom providers update/show`; rollout logs and inputs retain only the source
 reference. Provider default mutations set `X-Loom-Admin-Actor:
 rollout-production-defaults` for the service audit trail. The server URL is
-derived from the rollout cluster config, for example `https://yylx.world/dev`
+derived from the rollout cluster config, for example `https://yylx.world/staging`
 for staging and `https://yylx.world/prod` for first prod. Do not use stdin
 `-`; the source must be replayable as `env:VAR` or `file:PATH`.
 
@@ -4570,8 +4570,8 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `curl -sf https://<ingress_host>/` returns the SPA index when `loom-web`
    replicas > 0. For first prod route-split deployments, check
    `https://yylx.world/prod/api/v1/health`,
-   `https://yylx.world/dev/api/v1/health`, `https://yylx.world/prod`, and
-   `https://yylx.world/dev`.
+   `https://yylx.world/staging/api/v1/health`, `https://yylx.world/prod`, and
+   `https://yylx.world/staging`.
 3. **Boundary holds.** `loom cluster audit` exits 0. `kubectl get svc -n loom`
    shows no `LoadBalancer` / `NodePort` services. `kubectl get ingress -n loom`
    shows TLS enabled and backends only for `loom-service` at `/api/v1` and
@@ -4584,12 +4584,12 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    ```bash
    python scripts/ops/frontend_route_smoke.py \
      --route production=https://yylx.world/prod=https://yylx.world/prod/api \
-     --route development=https://yylx.world/dev=https://yylx.world/dev/api \
+     --route staging=https://yylx.world/staging=https://yylx.world/staging/api \
      --json
 
    python scripts/ops/frontend_security_headers.py \
      --route production=https://yylx.world/prod \
-     --route development=https://yylx.world/dev \
+     --route staging=https://yylx.world/staging \
      --json
    ```
    Both route documents must report the expected `environment`,
@@ -4609,7 +4609,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
      npx --no-install playwright install chromium
      npm run smoke:routes -- \
        --route https://yylx.world/prod \
-       --route https://yylx.world/dev \
+       --route https://yylx.world/staging \
        --trace ../frontend-route-browser-trace.zip
    )
    ```
@@ -4664,7 +4664,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    DEPLOYED_SHA="$(kubectl --context kind-loom-staging -n loom \
      exec deploy/loom-service -- cat /opt/loom/build-sha | tr -d '\r\n')"
    npm --prefix web run smoke:staging-admin -- \
-     --route https://yylx.world/dev \
+     --route https://yylx.world/staging \
      --expected-deployed-sha "$DEPLOYED_SHA" \
      --admin-token-source file:/absolute/path/to/mounted/staging-admin-token \
      --username qianyi \
@@ -4705,7 +4705,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    lands in the selected team without seeing raw API credentials. Generated
    setup/reset links must already use the public HTTPS route base from
    `LOOM_SVC_PUBLIC_BASE_URL` or ingress forwarded headers, for example
-   `https://yylx.world/dev` in staging or `https://yylx.world/prod` in
+   `https://yylx.world/staging` in staging or `https://yylx.world/prod` in
    production; fix that configuration before sharing any one-time link. Capture
    only safe prefixes and redacted links in shared evidence.
 6. **CLI login.** In a fresh shell, sign in with the approved account:
@@ -5024,7 +5024,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     `GET /api/v1/batches/{id}/delivery-export` and the returned
     route-aware `/api/v1/batches/{id}/delivery-export/{artifact_id}/download`
     URL. On hosted staging/prod the returned URL must include the environment
-    route prefix, for example `https://yylx.world/dev/api/v1/...` or
+    route prefix, for example `https://yylx.world/staging/api/v1/...` or
     `https://yylx.world/prod/api/v1/...`; users must not need to manually
     rewrite `/api` links. The SPA Batch Detail page should show the same
     Delivery bundle status, selected trial count, object counts, checksum, and

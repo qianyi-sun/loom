@@ -75,14 +75,14 @@ Attach these to the release issue or release PR:
   public LLM Gateway, no public Control Plane, and no public object store.
 - For first prod, `python scripts/ops/frontend_route_smoke.py --route ...`
   output proving `https://yylx.world/prod` exposes production identity and
-  `https://yylx.world/prod/api`, while `https://yylx.world/dev` exposes
-  staging identity and `https://yylx.world/dev/api`, with
+  `https://yylx.world/prod/api`, while `https://yylx.world/staging` exposes
+  staging identity and `https://yylx.world/staging/api`, with
   no-store runtime config responses.
 - `www.yylx.world` must not become a second staging/prod surface. It is only a
   TLS-bound redirect host via `ingress_redirect_hosts = ["www.yylx.world"]`;
   smoke and release evidence should use the canonical bare-domain routes.
 - Sanitized `loom-staging-admin-browser-smoke.json` evidence bound to the exact
-  build SHA reported by the running service and `https://yylx.world/dev`,
+  build SHA reported by the running service and `https://yylx.world/staging`,
   to be produced only by a candidate-bound brokered protected-staging rollout
   after the logged-out route smoke. Until that broker step exists and succeeds,
   this evidence item remains unmet. The ephemeral kind workflow remains

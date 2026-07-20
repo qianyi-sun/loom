@@ -3,18 +3,20 @@ ingress_host = "yylx.world"
 ingress_redirect_hosts = ["www.yylx.world"]
 ingress_tls_secret_name = "loom-dev-tls"
 frontend_environment = "development"
-frontend_environment_label = "Development / staging"
+frontend_environment_label = "Development"
 frontend_route_path = "/dev"
 frontend_api_base_path = "/dev"
 trajectories_bucket = "loom-dev-trajectories"
 artifacts_bucket = "loom-dev-artifacts"
+env_state_profile = "../environment-state/development.toml"
 
-# Local dev / kind clusters have no external Slurm capacity, so the
-# in-cluster loom-worker Deployment IS the trial execution path here.
-# See #383 for the OLDLAB-hosted-profile rationale that makes this
-# the odd one out.
+# Shared dev runs trial execution on external Slurm (OLDLAB + GB10), the
+# same as staging/prod, so the in-cluster loom-worker Deployment is disabled
+# here (#857/#873). Per-developer LOCAL dev (laptop) uses
+# deploy/local/local.example.cluster.toml, which can opt into k8s_worker for
+# offline / no-Slurm use.
 [k8s_worker]
-enabled = true
+enabled = false
 
 # Development kind clusters don't need pgbouncer (#609):
 # - Single-node kind has no realistic connection-count pressure.
