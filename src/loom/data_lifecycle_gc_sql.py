@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from sqlalchemy import Engine, bindparam, text
+from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection
 
 from loom.data_lifecycle_gc import (
@@ -36,18 +36,32 @@ class ExecutionMetadataPurger:
     _TABLES = ("trial_events", "llm_calls", "artifacts", "trials", "batches")
 
     def delete_exact(self, connection: Connection, authority_ids: Sequence[UUID]) -> None:
-        parameters = {"authority_ids": list(authority_ids)}
+        if not authority_ids:
+            return
         for table in self._TABLES:
             connection.execute(
                 text(
-                    f"DELETE FROM {table} WHERE lifecycle_authority_id IN :authority_ids"
-                ).bindparams(bindparam("authority_ids", expanding=True)),
-                parameters,
+                    f"DELETE FROM {table} WHERE lifecycle_authority_id IN "
+                    "(SELECT authority_id FROM gc_authority_delete_plan)"
+                )
             )
 
 
 def _plan_inventory(plan: GcPlan) -> dict[str, object]:
     return serialize_gc_plan(plan)
+
+
+def _copy_uuid_rows(
+    connection: Connection,
+    statement: str,
+    rows: Sequence[UUID],
+) -> None:
+    driver_connection = connection.connection.driver_connection
+    if driver_connection is None:
+        raise RuntimeError("PostgreSQL driver connection is unavailable")
+    with driver_connection.cursor().copy(statement) as copy:
+        for value in rows:
+            copy.write_row((value,))
 
 
 class SqlAlchemyGcJournal:
@@ -106,15 +120,34 @@ class SqlAlchemyGcJournal:
                 dry_run=False,
                 state="applying",
             )
+            connection.execute(
+                text(
+                    "CREATE TEMP TABLE gc_authority_plan "
+                    "(authority_id uuid PRIMARY KEY) ON COMMIT DROP"
+                )
+            )
+            connection.execute(
+                text("CREATE TEMP TABLE gc_object_plan (object_id uuid PRIMARY KEY) ON COMMIT DROP")
+            )
+            _copy_uuid_rows(
+                connection,
+                "COPY gc_authority_plan (authority_id) FROM STDIN",
+                authority_ids,
+            )
+            _copy_uuid_rows(
+                connection,
+                "COPY gc_object_plan (object_id) FROM STDIN",
+                object_ids,
+            )
             authority_result = connection.execute(
                 text(
-                    "UPDATE data_lifecycle_authorities "
+                    "UPDATE data_lifecycle_authorities AS authority "
                     "SET state='deleting', deletion_token=:token "
-                    "WHERE id IN :ids AND environment=:environment "
+                    "FROM gc_authority_plan AS plan "
+                    "WHERE authority.id=plan.authority_id AND environment=:environment "
                     "AND namespace=:namespace AND state='active' AND NOT pinned"
-                ).bindparams(bindparam("ids", expanding=True)),
+                ),
                 {
-                    "ids": authority_ids,
                     "token": deletion_token,
                     "environment": plan.scope.environment,
                     "namespace": plan.scope.namespace,
@@ -124,11 +157,12 @@ class SqlAlchemyGcJournal:
                 raise RuntimeError("GC authority mark count does not match plan")
             object_result = connection.execute(
                 text(
-                    "UPDATE data_lifecycle_objects "
+                    "UPDATE data_lifecycle_objects AS object "
                     "SET state='delete_pending', deletion_token=:token "
-                    "WHERE id IN :ids AND state='active'"
-                ).bindparams(bindparam("ids", expanding=True)),
-                {"ids": object_ids, "token": deletion_token},
+                    "FROM gc_object_plan AS plan "
+                    "WHERE object.id=plan.object_id AND state='active'"
+                ),
+                {"token": deletion_token},
             )
             if object_result.rowcount != len(object_ids):
                 raise RuntimeError("GC object mark count does not match plan")
@@ -136,16 +170,9 @@ class SqlAlchemyGcJournal:
                 text(
                     "INSERT INTO data_lifecycle_gc_items "
                     "(gc_run_id, object_id, deletion_token, state) "
-                    "VALUES (:run_id, :object_id, :token, 'marked')"
+                    "SELECT :run_id, object_id, :token, 'marked' FROM gc_object_plan"
                 ),
-                [
-                    {
-                        "run_id": run_id,
-                        "object_id": object_id,
-                        "token": deletion_token,
-                    }
-                    for object_id in object_ids
-                ],
+                {"run_id": run_id, "token": deletion_token},
             )
         return run_id
 
@@ -201,6 +228,17 @@ class SqlAlchemyGcJournal:
     ) -> None:
         ids = list(authority_ids)
         with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TEMP TABLE gc_authority_delete_plan "
+                    "(authority_id uuid PRIMARY KEY) ON COMMIT DROP"
+                )
+            )
+            _copy_uuid_rows(
+                connection,
+                "COPY gc_authority_delete_plan (authority_id) FROM STDIN",
+                ids,
+            )
             unverified = connection.execute(
                 text(
                     "SELECT count(*) FROM data_lifecycle_gc_items "
@@ -214,17 +252,21 @@ class SqlAlchemyGcJournal:
             self._metadata_purger.delete_exact(connection, authority_ids)
             connection.execute(
                 text(
-                    "DELETE FROM data_lifecycle_objects "
-                    "WHERE authority_id IN :ids AND deletion_token=:token AND state='deleted'"
-                ).bindparams(bindparam("ids", expanding=True)),
-                {"ids": ids, "token": deletion_token},
+                    "DELETE FROM data_lifecycle_objects AS object USING "
+                    "gc_authority_delete_plan AS plan "
+                    "WHERE object.authority_id=plan.authority_id "
+                    "AND deletion_token=:token AND state='deleted'"
+                ),
+                {"token": deletion_token},
             )
             authority_result = connection.execute(
                 text(
-                    "DELETE FROM data_lifecycle_authorities "
-                    "WHERE id IN :ids AND deletion_token=:token AND state='deleting'"
-                ).bindparams(bindparam("ids", expanding=True)),
-                {"ids": ids, "token": deletion_token},
+                    "DELETE FROM data_lifecycle_authorities AS authority USING "
+                    "gc_authority_delete_plan AS plan "
+                    "WHERE authority.id=plan.authority_id "
+                    "AND deletion_token=:token AND state='deleting'"
+                ),
+                {"token": deletion_token},
             )
             if authority_result.rowcount != len(ids):
                 raise RuntimeError("GC metadata authority delete count does not match plan")

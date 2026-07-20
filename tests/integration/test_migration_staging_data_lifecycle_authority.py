@@ -8,7 +8,7 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
@@ -35,7 +35,7 @@ from loom.data_lifecycle_gc import (
     execute_gc,
     resume_gc,
 )
-from loom.data_lifecycle_gc_sql import SqlAlchemyGcJournal
+from loom.data_lifecycle_gc_sql import SqlAlchemyGcJournal, _copy_uuid_rows
 from loom.data_lifecycle_inventory_sql import SqlAlchemyLifecycleInventory
 from loom.data_lifecycle_legacy_sql import SqlAlchemyLegacyClassifier
 from loom.data_lifecycle_registry import RuntimeLifecycleScope, ensure_lifecycle_authority
@@ -192,6 +192,30 @@ def test_capacity_store_publishes_only_newer_exact_evidence(
     finally:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM staging_lifecycle_capacity"))
+        engine.dispose()
+
+
+def test_gc_plan_copy_exceeds_postgres_parameter_limit_without_broadening(
+    postgres_url_at_0065: str,
+) -> None:
+    engine = create_engine(postgres_url_at_0065)
+    identifiers = [UUID(int=value) for value in range(1, 70_001)]
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TEMP TABLE gc_copy_scale_test "
+                    "(authority_id uuid PRIMARY KEY) ON COMMIT DROP"
+                )
+            )
+            _copy_uuid_rows(
+                connection,
+                "COPY gc_copy_scale_test (authority_id) FROM STDIN",
+                identifiers,
+            )
+            count = connection.execute(text("SELECT count(*) FROM gc_copy_scale_test")).scalar_one()
+        assert count == len(identifiers)
+    finally:
         engine.dispose()
 
 
