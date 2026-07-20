@@ -538,6 +538,16 @@ class PreflightCredentialInstaller:
         )
 
     def _converge_minio_authority(self, credential: ReadonlyMinioCredential) -> None:
+        # MinIO's policy-create operation is not a portable idempotent update:
+        # some supported ``mc`` versions reject an already-present policy even
+        # when its document and user binding are exact.  Prove the complete
+        # authority first and avoid all writes when it already converged.
+        try:
+            self._check_minio_authority(credential)
+        except CredentialInstallError:
+            pass
+        else:
+            return
         policy_payload = base64.b64encode(readonly_minio_policy_bytes()).decode("ascii")
         script = "\n".join(
             (
@@ -698,7 +708,11 @@ class PreflightCredentialInstaller:
         require_output: bool = True,
     ) -> CommandResult:
         result = self.run(argv, input=input, timeout=timeout)
-        if result.returncode != 0 or result.stderr.strip():
+        # stderr is a diagnostic stream, not a failure signal.  kubectl and mc
+        # may emit bounded warnings there while still returning success.  The
+        # subprocess exit status and the command-specific output validators
+        # below are the fail-closed authority.
+        if result.returncode != 0:
             raise CredentialInstallError("preflight credential command failed")
         if require_output and not result.stdout.strip():
             raise CredentialInstallError("preflight credential command returned no output")

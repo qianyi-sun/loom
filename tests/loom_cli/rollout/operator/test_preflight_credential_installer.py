@@ -232,14 +232,13 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     assert installer.paths.credential_root.stat().st_mode & 0o777 == 0o700
     assert installer.paths.database_credential_source.stat().st_mode & 0o777 == 0o600
     assert installer.paths.minio_credential_source.stat().st_mode & 0o777 == 0o600
-    assert any("admin policy create" in command[-1] for command, _ in runner.calls)
     assert any("admin user info" in command[-1] for command, _ in runner.calls)
     minio_calls = [
         (command, stdin) for command, stdin in runner.calls if "pod/loom-minio-0" in command
     ]
     assert minio_calls
     assert all("--stdin" in command for command, _stdin in minio_calls)
-    assert any(stdin is not None for _command, stdin in minio_calls)
+    assert all(stdin is None for _command, stdin in minio_calls)
     minio_secret = json.loads(installer.paths.minio_credential_source.read_bytes())["secret_key"]
     assert minio_secret not in rendered
     assert all(minio_secret not in item for command, _ in runner.calls for item in command)
@@ -354,6 +353,28 @@ def test_install_accepts_silent_success_only_for_mutating_convergence(
     assert installer.check()["ok"] is True
 
 
+def test_install_accepts_success_with_bounded_command_warning(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    original_run = runner.__call__
+
+    def warning_on_apply(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        command = tuple(argv)
+        if "apply" in command:
+            runner.calls.append((command, input))
+            return Result(stdout="applied\n", stderr="Warning: unchanged authority\n")
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = warning_on_apply
+
+    assert installer.install(TEAM_ID)["ok"] is True
+    assert installer.check()["ok"] is True
+
+
 def test_check_rejects_extra_or_rebound_minio_policy(tmp_path: Path) -> None:
     installer, runner = _installer(tmp_path)
     installer.install(TEAM_ID)
@@ -443,6 +464,55 @@ def test_check_retries_one_stale_minio_authority_read(tmp_path: Path) -> None:
     assert stale_reads == 1
 
 
+def test_install_converges_minio_only_after_exact_authority_check_fails(
+    tmp_path: Path,
+) -> None:
+    installer, runner = _installer(tmp_path)
+    original_run = runner.__call__
+    drift_reads = 0
+
+    def initially_drifted(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        nonlocal drift_reads
+        command = tuple(argv)
+        if "pod/loom-minio-0" in command and "admin user info" in command[-1] and drift_reads < 5:
+            drift_reads += 1
+            runner.calls.append((command, input))
+            return Result(
+                stdout=json.dumps({"status": "success", "policyName": "drifted-policy"})
+                + "\n"
+                + json.dumps(
+                    {
+                        "status": "success",
+                        "policy": READONLY_MINIO_POLICY_NAME,
+                        "policyInfo": {
+                            "PolicyName": READONLY_MINIO_POLICY_NAME,
+                            "Policy": readonly_minio_policy(),
+                        },
+                    }
+                )
+                + "\n"
+            )
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = initially_drifted
+
+    assert installer.install(TEAM_ID)["ok"] is True
+    assert drift_reads == 5
+    assert (
+        sum(
+            "admin policy create" in command[-1]
+            for command, _input in runner.calls
+            if "pod/loom-minio-0" in command
+        )
+        == 1
+    )
+
+
 def test_install_rejects_silent_success_for_required_token_output(tmp_path: Path) -> None:
     installer, runner = _installer(tmp_path)
     original_run = runner.__call__
@@ -466,12 +536,24 @@ def test_install_rejects_silent_success_for_required_token_output(tmp_path: Path
 
 
 def test_install_is_idempotent_only_while_bounded_tokens_are_unchanged(tmp_path: Path) -> None:
-    installer, _runner = _installer(tmp_path)
+    installer, runner = _installer(tmp_path)
     installer.install(TEAM_ID)
+    minio_mutations_before = sum(
+        "admin policy create" in command[-1]
+        for command, _input in runner.calls
+        if "pod/loom-minio-0" in command
+    )
     second = installer.install(TEAM_ID)
+    minio_mutations_after = sum(
+        "admin policy create" in command[-1]
+        for command, _input in runner.calls
+        if "pod/loom-minio-0" in command
+    )
 
     assert second["changed"] == []
     assert second["ok"] is True
+    assert minio_mutations_before == 0
+    assert minio_mutations_after == minio_mutations_before
 
 
 def test_check_fails_closed_after_token_freshness_expires(tmp_path: Path) -> None:
