@@ -280,10 +280,11 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     plan = _plan()
     postgres_config = "sha256:" + "a" * 64
     postgres_manifest = "sha256:" + "b" * 64
+    postgres_import = "sha256:" + "e" * 64
     control_plane_config = "sha256:" + "c" * 64
     control_plane_manifest = "sha256:" + "d" * 64
     runtime_images = {
-        "loom-rehearsal-postgres": (postgres_config, postgres_manifest),
+        "loom-rehearsal-postgres": (postgres_config, postgres_manifest, postgres_import),
         "loom-control-plane": (control_plane_config, control_plane_manifest),
     }
     calls: list[tuple[tuple[str, ...], bytes | None, int]] = []
@@ -318,7 +319,7 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
                     "conditions": [{"type": "Ready", "status": "True"}],
                     "containerStatuses": [
                         {
-                            "imageID": "docker.io/library/import-2026-07-20@" + postgres_manifest,
+                            "imageID": "docker.io/library/import-2026-07-20@" + postgres_import,
                             "name": "postgres",
                             "ready": True,
                         },
@@ -422,6 +423,7 @@ def test_runtime_image_binding_resolves_exact_index_platform_config() -> None:
     reference = f"docker.io/library/{name}:{plan.image_tag}"
     manifest_digest = "sha256:" + "c" * 64
     config_digest = "sha256:" + "d" * 64
+    import_digest = "sha256:" + "f" * 64
 
     def run(argv, _payload, _timeout):
         command = tuple(argv)
@@ -461,13 +463,30 @@ def test_runtime_image_binding_resolves_exact_index_platform_config() -> None:
                     },
                 }
             )
+        elif "content" in command and command[-1] == import_digest:
+            value = json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.index.v1+json",
+                    "manifests": [
+                        {
+                            "digest": expected,
+                            "mediaType": "application/vnd.oci.image.index.v1+json",
+                            "annotations": {
+                                "io.containerd.image.name": reference,
+                                "org.opencontainers.image.ref.name": plan.image_tag,
+                            },
+                        }
+                    ],
+                }
+            )
         elif "crictl" in command:
             value = json.dumps(
                 {
                     "status": {
                         "id": config_digest,
                         "repoTags": [reference],
-                        "repoDigests": [f"docker.io/library/import@{manifest_digest}"],
+                        "repoDigests": [f"docker.io/library/import-2026-07-20@{import_digest}"],
                     },
                     "info": {
                         "imageSpec": {
@@ -486,14 +505,14 @@ def test_runtime_image_binding_resolves_exact_index_platform_config() -> None:
 
     resolved = IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,))
 
-    assert resolved == {name: (config_digest, manifest_digest)}
+    assert resolved == {name: (config_digest, manifest_digest, import_digest)}
 
     def repo_digest_drift(argv, payload, timeout):
         result = run(argv, payload, timeout)
-        if "crictl" not in tuple(argv):
+        if "content" not in tuple(argv) or argv[-1] != import_digest:
             return result
         value = json.loads(result.stdout)
-        value["status"]["repoDigests"] = ["docker.io/library/import@sha256:" + "f" * 64]
+        value["manifests"][0]["annotations"]["org.opencontainers.image.ref.name"] = "drift"
         return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
 
     assert (

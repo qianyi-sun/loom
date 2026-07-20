@@ -498,8 +498,10 @@ fails before restore. After each exact image is loaded, rehearsal resolves the
 Kind/containerd tag back to the attested OCI index, selects the single
 `linux/amd64` manifest, and binds both that manifest digest and its resulting
 config digest plus the exact candidate revision label. Kubernetes may report
-either exact runtime identity, depending on containerd's CRI readback form;
-the parent OCI index digest and every non-derived digest remain invalid.
+either exact runtime identity or Kind's dated import-index digest. The latter
+is accepted only after resolving the exact containerd content and proving it
+contains the attested parent index under the exact tag annotations. Every
+unresolved or non-derived digest remains invalid.
 
 `RehearsalActionSource` is the sole plan and resource-name authority for these
 actions. Its identity factory and action factory consume the same checkpoint,

@@ -1126,7 +1126,7 @@ class IsolatedRehearsalExecutor:
                 or any(
                     isinstance(value, str)
                     or not isinstance(value, Sequence)
-                    or not 1 <= len(value) <= 2
+                    or not 1 <= len(value) <= 3
                     or len(set(value)) != len(value)
                     or any(
                         not isinstance(digest, str)
@@ -1233,18 +1233,24 @@ class IsolatedRehearsalExecutor:
         image_config = image_spec.get("config") if isinstance(image_spec, dict) else None
         labels = image_config.get("Labels") if isinstance(image_config, dict) else None
         repo_digests = status.get("repoDigests") if isinstance(status, dict) else None
+        imported_digests = (
+            self._validated_import_digests(
+                node,
+                repo_digests,
+                expected=expected,
+                expected_media_type=media_type,
+                reference=reference,
+                image_tag=plan.image_tag,
+            )
+            if isinstance(repo_digests, list)
+            else None
+        )
         if not (
             isinstance(status, dict)
             and status.get("id") == config_digest
             and isinstance(status.get("repoTags"), list)
             and reference in status["repoTags"]
-            and isinstance(repo_digests, list)
-            and all(
-                isinstance(repo_digest, str)
-                and repo_digest.count("@") == 1
-                and repo_digest.rsplit("@", 1)[1] == manifest_digest
-                for repo_digest in repo_digests
-            )
+            and imported_digests is not None
             and isinstance(image_spec, dict)
             and image_spec.get("architecture") == "amd64"
             and image_spec.get("os") == "linux"
@@ -1252,7 +1258,55 @@ class IsolatedRehearsalExecutor:
             and labels.get("org.opencontainers.image.revision") == plan.candidate_sha
         ):
             return None
-        return tuple(dict.fromkeys((config_digest, manifest_digest)))
+        return tuple(dict.fromkeys((config_digest, manifest_digest, *imported_digests)))
+
+    def _validated_import_digests(
+        self,
+        node: str,
+        repo_digests: Sequence[object],
+        *,
+        expected: str,
+        expected_media_type: object,
+        reference: str,
+        image_tag: str,
+    ) -> tuple[str, ...] | None:
+        if len(repo_digests) > 1:
+            return None
+        validated: list[str] = []
+        for repo_digest in repo_digests:
+            if not isinstance(repo_digest, str) or repo_digest.count("@") != 1:
+                return None
+            repository, digest = repo_digest.rsplit("@", 1)
+            if (
+                re.fullmatch(r"docker\.io/library/import-[0-9]{4}-[0-9]{2}-[0-9]{2}", repository)
+                is None
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            ):
+                return None
+            imported = self._containerd_content(node, digest)
+            descriptors = imported.get("manifests") if imported is not None else None
+            matches = (
+                [
+                    item
+                    for item in descriptors
+                    if isinstance(item, dict)
+                    and item.get("digest") == expected
+                    and item.get("mediaType") == expected_media_type
+                    and item.get("annotations")
+                    == {
+                        "io.containerd.image.name": reference,
+                        "org.opencontainers.image.ref.name": image_tag,
+                    }
+                ]
+                if imported is not None
+                and imported.get("mediaType") == "application/vnd.oci.image.index.v1+json"
+                and isinstance(descriptors, list)
+                else []
+            )
+            if len(matches) != 1:
+                return None
+            validated.append(digest)
+        return tuple(validated)
 
     def _containerd_content(self, node: str, digest: str) -> dict[str, object] | None:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
