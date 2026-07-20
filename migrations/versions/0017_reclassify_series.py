@@ -17,7 +17,7 @@ it's NULL (so it doesn't clobber operator overrides on re-seed); this
 migration explicitly resyncs the moved adapters. No-op if a row
 doesn't exist (operator hasn't seeded yet).
 
-Reversible: downgrade reverts to the (\#37) classification."""
+Reversible: downgrade reverts to the (#37) classification."""
 
 from __future__ import annotations
 

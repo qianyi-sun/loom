@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +20,14 @@ from tests.loom_cli.rollout.test_preflight_artifact_store import _images
 @dataclass(frozen=True)
 class Result:
     returncode: int
+
+
+def test_all_migration_sources_compile_without_syntax_warnings() -> None:
+    migration_root = Path(__file__).resolve().parents[3] / "migrations/versions"
+    for path in sorted(migration_root.glob("*.py")):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            compile(path.read_bytes(), str(path), "exec")
 
 
 def _artifact(*, returncode: int = 0):
