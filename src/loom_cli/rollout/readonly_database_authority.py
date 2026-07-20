@@ -146,8 +146,6 @@ class ReadonlyDatabaseEvidence:
                 raise ValueError("legacy database immutable object authority is invalid")
         elif self.epoch_authority != "staging-mutation-epoch-v1":
             raise ValueError("database epoch authority is invalid")
-        if (int(self.schema_revision) >= _CAPACITY_FIRST_REVISION) != (capacity is not None):
-            raise ValueError("database capacity authority is incomplete")
         if capacity is not None:
             expected_capacity = {
                 "environment",
@@ -306,7 +304,10 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
 
     capacity: dict[str, object] | None = None
     if revision_number >= _CAPACITY_FIRST_REVISION:
-        capacity_row = _one(query, _CAPACITY_SQL, label="capacity")
+        capacity_rows = query(_CAPACITY_SQL)
+        if len(capacity_rows) > 1:
+            raise ValueError("readonly database capacity evidence is incomplete")
+        capacity_row = capacity_rows[0] if capacity_rows else None
         expected = {
             "environment",
             "namespace",
@@ -319,7 +320,7 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
             "source",
             "observed_at_epoch",
         }
-        if (
+        if capacity_row is not None and (
             set(capacity_row) != expected
             or capacity_row["environment"] != "staging"
             or capacity_row["namespace"] != "loom-staging"
@@ -330,31 +331,32 @@ def probe_readonly_database(query: DatabaseQuery) -> ReadonlyDatabaseEvidence:
             or len(capacity_row["evidence_sha256"]) != 64
         ):
             raise ValueError("readonly database capacity evidence is invalid")
-        capacity = dict(capacity_row)
-        capacity_values = {
-            name: _integer(capacity[name], label=f"capacity-{name}")
-            for name in (
-                "object_count",
-                "bytes_used",
-                "disk_free_percent",
-                "inode_free_percent",
-                "observed_at_epoch",
-            )
-        }
-        try:
-            capacity_value = StagingCapacity(
-                object_count=capacity_values["object_count"],
-                bytes_used=capacity_values["bytes_used"],
-                disk_free_percent=capacity_values["disk_free_percent"],
-                inode_free_percent=capacity_values["inode_free_percent"],
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("readonly database capacity evidence is invalid") from exc
-        if (
-            capacity["policy_sha256"] != staging_capacity_policy_digest()
-            or capacity["evidence_sha256"] != capacity_value.evidence_digest
-        ):
-            raise ValueError("readonly database capacity evidence is invalid")
+        if capacity_row is not None:
+            capacity = dict(capacity_row)
+            capacity_values = {
+                name: _integer(capacity[name], label=f"capacity-{name}")
+                for name in (
+                    "object_count",
+                    "bytes_used",
+                    "disk_free_percent",
+                    "inode_free_percent",
+                    "observed_at_epoch",
+                )
+            }
+            try:
+                capacity_value = StagingCapacity(
+                    object_count=capacity_values["object_count"],
+                    bytes_used=capacity_values["bytes_used"],
+                    disk_free_percent=capacity_values["disk_free_percent"],
+                    inode_free_percent=capacity_values["inode_free_percent"],
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("readonly database capacity evidence is invalid") from exc
+            if (
+                capacity["policy_sha256"] != staging_capacity_policy_digest()
+                or capacity["evidence_sha256"] != capacity_value.evidence_digest
+            ):
+                raise ValueError("readonly database capacity evidence is invalid")
 
     immutable_objects: tuple[ImmutableObjectReference, ...] = ()
     if revision_number >= _EPOCH_FIRST_REVISION:

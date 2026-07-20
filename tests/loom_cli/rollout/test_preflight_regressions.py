@@ -18,6 +18,7 @@ def test_historical_blockers_are_checked_in_and_earliest_stage_classified() -> N
         "gb10-candidate-source-drift",
         "systemd-user-manager-latency",
         "backup-object-inode-growth",
+        "capacity-row-baseline-isolation",
         "release-baseline-drift",
         "candidate-api-smoke-binding",
         "candidate-browser-binding",

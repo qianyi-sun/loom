@@ -26,7 +26,9 @@ from loom_cli.rollout.staging_baseline_source import (
     CrossVersionStagingBaselineProbeSource,
     ObjectStoreProbe,
     PublicHttpGet,
+    TlsProbe,
     bounded_public_http_get,
+    probe_tls_route,
 )
 
 from .config import OperatorConfig
@@ -92,6 +94,7 @@ class ReadonlyPreflightAuthority:
     capacity_source: Callable[[], StagingCapacity]
     object_store_probe: ObjectStoreProbe
     public_http_get: PublicHttpGet = bounded_public_http_get
+    tls_probe: TlsProbe = probe_tls_route
     kubeconfig_path: Path = READONLY_KUBECONFIG_PATH
 
     def __post_init__(self) -> None:
@@ -126,6 +129,7 @@ class ReadonlyPreflightAuthority:
                 database=database,
                 object_store_probe=self.object_store_probe,
                 public_http_get=self.public_http_get,
+                tls_probe=self.tls_probe,
             ).probes()
             return sources[check_id]()
 

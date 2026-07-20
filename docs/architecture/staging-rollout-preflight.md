@@ -215,6 +215,12 @@ mutation-epoch authority digest. It never consumes baseline rows, lifecycle
 capacity, or immutable-object inventory. Those predicates remain independent
 registered checks, so a missing capacity row cannot mask a valid readonly
 principal or collapse all Tier 2 failures into `readonly.authority.unsafe`.
+The complete database snapshot likewise preserves a missing capacity row as
+`capacity = null` while retaining its exact role, schema, mutation epoch,
+catalog counts and immutable-object inventory. Only `staging.storage-db`
+reports `dependency-capacity-unready`; health, authentication, catalog and
+network probes continue independently so the DAG returns the real complete
+blocker set in one pass.
 The Kubernetes side is declared in
 `deploy/k8s/staging-rollout-readonly.yaml`: one namespace-scoped service
 account, Role, and RoleBinding, with token automount disabled and only

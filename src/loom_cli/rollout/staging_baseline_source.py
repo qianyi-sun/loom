@@ -556,6 +556,11 @@ class CrossVersionStagingBaselineProbeSource:
             object_store = self._object_store_probe()
         except (OSError, RuntimeError, ValueError):
             object_store = ObjectStoreBaselineEvidence(False, "0" * 64)
+        blockers: dict[str, str] = {}
+        if not object_store.ready:
+            blockers["object-store"] = "object-store-readiness-failed"
+        if int(self._database.schema_revision) >= 67 and self._database.capacity is None:
+            blockers["capacity"] = "dependency-capacity-unready"
         return self._result(
             "staging.storage-db",
             summaries={
@@ -565,9 +570,7 @@ class CrossVersionStagingBaselineProbeSource:
                 "object-store-ready": object_store.ready,
                 "schema-revision": self._database.schema_revision,
             },
-            blockers=(
-                {} if object_store.ready else {"object-store": "object-store-readiness-failed"}
-            ),
+            blockers=blockers,
         )
 
     def _network(self) -> BaselineProbeResult:

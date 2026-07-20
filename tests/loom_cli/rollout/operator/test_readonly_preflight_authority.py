@@ -5,8 +5,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.operator.readonly_preflight_authority import (
     ReadonlyPreflightAuthority,
@@ -19,6 +17,7 @@ from loom_cli.rollout.readonly_database_authority import (
 from loom_cli.rollout.staging_baseline_source import (
     BaselineHttpResponse,
     ObjectStoreBaselineEvidence,
+    TlsRouteEvidence,
 )
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
 
@@ -144,6 +143,7 @@ def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Pat
         capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
         public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
+        tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),
         kubeconfig_path=tmp_path / "readonly-kubeconfig",
     )
 
@@ -237,24 +237,35 @@ def test_authority_uses_fresh_live_capacity_before_schema_0067(tmp_path: Path) -
     assert len(calls) == 1
 
 
-def test_baseline_factory_defers_missing_capacity_to_registered_checks(tmp_path: Path) -> None:
+def test_baseline_factory_reports_only_storage_when_capacity_is_missing(tmp_path: Path) -> None:
     config = _config(tmp_path)
     cluster, _token = _write_authority(tmp_path)
     object.__setattr__(config, "cluster_config_path", cluster)
-    calls: list[object] = []
-
-    def missing_capacity() -> ReadonlyDatabaseEvidence:
-        calls.append(object())
-        raise ValueError("readonly database capacity evidence is incomplete")
+    database = ReadonlyDatabaseEvidence(
+        schema_revision="0067",
+        mutation_epoch=11,
+        epoch_authority="staging-mutation-epoch-v1",
+        baseline_counts={
+            "agents": 1,
+            "provider_models": 2,
+            "tasks": 3,
+            "teams": 4,
+            "users": 5,
+        },
+        capacity=None,
+        evidence_sha256="e" * 64,
+    )
 
     authority = ReadonlyPreflightAuthority(
         config=config,
         service_uid=os.getuid(),
         kubernetes_run=lambda _argv, _stdin: _Result(1, ""),
-        database_evidence=missing_capacity,
+        database_evidence=lambda: database,
         mutation_epoch_evidence=_mutation_epoch,
         capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
+        public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
+        tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),
         kubeconfig_path=tmp_path / "readonly-kubeconfig",
     )
 
@@ -267,10 +278,12 @@ def test_baseline_factory_defers_missing_capacity_to_registered_checks(tmp_path:
         "staging.storage-db",
         "staging.network",
     }
-    assert calls == []
-    with pytest.raises(ValueError, match="capacity evidence is incomplete"):
-        probes["staging.health"]()
-    assert len(calls) == 1
+    results = {check_id: execute() for check_id, execute in probes.items()}
+
+    assert results["staging.storage-db"].blockers == {"capacity": "dependency-capacity-unready"}
+    assert all(
+        result.ready for check_id, result in results.items() if check_id != "staging.storage-db"
+    )
 
 
 def test_capability_probe_does_not_consume_capacity_or_baseline_evidence(

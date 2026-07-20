@@ -248,6 +248,37 @@ def test_cross_version_baseline_aggregates_public_and_object_blockers() -> None:
     assert probes["staging.network"]().blockers == {"route": "dns-tls-authentication-failed"}
 
 
+def test_cross_version_baseline_localizes_missing_capacity_to_storage() -> None:
+    database = ReadonlyDatabaseEvidence(
+        schema_revision="0067",
+        mutation_epoch=9,
+        epoch_authority="staging-mutation-epoch-v1",
+        baseline_counts={
+            "agents": 2,
+            "provider_models": 3,
+            "tasks": 4,
+            "teams": 5,
+            "users": 6,
+        },
+        capacity=None,
+        evidence_sha256="d" * 64,
+    )
+    source = CrossVersionStagingBaselineProbeSource(
+        route=ROUTE,
+        database=database,
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "e" * 64),
+        public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
+        tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),
+    )
+
+    results = {check_id: probe() for check_id, probe in source.probes().items()}
+
+    assert results["staging.storage-db"].blockers == {"capacity": "dependency-capacity-unready"}
+    assert all(
+        result.ready for check_id, result in results.items() if check_id != "staging.storage-db"
+    )
+
+
 def _body_names() -> tuple[str, ...]:
     return ("ready", "whoami", "agents", "models", "tasks", "health")
 

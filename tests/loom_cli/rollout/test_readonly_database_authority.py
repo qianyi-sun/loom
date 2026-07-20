@@ -178,7 +178,7 @@ def test_new_schema_cannot_fall_back_when_epoch_is_missing() -> None:
         probe_readonly_database(missing)
 
 
-def test_capacity_is_required_from_revision_0067() -> None:
+def test_missing_capacity_remains_explicit_without_masking_database_baseline() -> None:
     query = Query(revision="0067")
     original = query.__call__
 
@@ -187,8 +187,27 @@ def test_capacity_is_required_from_revision_0067() -> None:
             return ()
         return original(sql)
 
+    evidence = probe_readonly_database(missing)
+
+    assert evidence.schema_revision == "0067"
+    assert evidence.mutation_epoch == 9
+    assert evidence.baseline_counts["tasks"] == 5
+    assert evidence.capacity is None
+    assert any("FROM data_lifecycle_objects" in sql for sql in query.calls)
+
+
+def test_duplicate_capacity_authority_is_rejected() -> None:
+    query = Query(revision="0067")
+    original = query.__call__
+
+    def duplicated(sql: str) -> tuple[Mapping[str, object], ...]:
+        rows = original(sql)
+        if "staging_lifecycle_capacity" in sql:
+            return rows + rows
+        return rows
+
     with pytest.raises(ValueError, match="capacity evidence is incomplete"):
-        probe_readonly_database(missing)
+        probe_readonly_database(duplicated)
 
 
 def test_epoch_probe_does_not_let_missing_capacity_mask_the_preflight_dag() -> None:

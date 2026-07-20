@@ -434,6 +434,9 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
     baseline = next(
         check for check in baseline_checks if check.spec.check_id == "staging.release-baseline"
     )
+    storage_baseline = next(
+        check for check in baseline_checks if check.spec.check_id == "staging.storage-db"
+    )
     rehearsal_context = CheckContext(
         {
             "candidate.sha": _CANDIDATE,
@@ -498,6 +501,11 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
                 }
             ),
         ),
+        RegressionReplayCase(
+            "capacity-row-baseline-isolation",
+            storage_baseline,
+            baseline_context,
+        ),
         RegressionReplayCase("release-baseline-drift", baseline, baseline_context),
         RegressionReplayCase(
             "candidate-api-smoke-binding",
@@ -550,7 +558,7 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
 def test_all_historical_blockers_replay_through_production_checks(tmp_path: Path) -> None:
     evidence = replay_regression_manifest(_cases(tmp_path))
 
-    assert len(evidence.implementation_digests) == 12
+    assert len(evidence.implementation_digests) == 13
     assert set(evidence.implementation_digests) == set(evidence.evidence_hashes)
 
 

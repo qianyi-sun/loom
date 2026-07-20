@@ -1459,7 +1459,10 @@ unit, rollout directory, or staging mutation. The host installer uses only this
 command for its post-install readiness check. The minimal readonly epoch probe
 does not require the later runtime capacity row; the complete Tier 2 database
 check still does, so one requestless run reports that row as a blocker together
-with all independent failures. Tier 1 feeds the rendered bytes through the same
+with all independent failures. A missing row is retained as explicit database
+evidence rather than masking health, authentication, catalog or network
+results; only `staging.storage-db` reports
+`dependency-capacity-unready`. Tier 1 feeds the rendered bytes through the same
 `loom-staging-rollout` server-side apply field manager, strict validation, and
 request timeout used by protected convergence. API/schema validation uses a
 mutation-free server dry-run whose conflict forcing is confined to that one
