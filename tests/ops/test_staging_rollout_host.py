@@ -2916,6 +2916,25 @@ def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
     assert runner.calls[-1][1] == {"check": False}
 
 
+def test_service_git_disables_optional_locks_and_replace_refs() -> None:
+    class GitRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            assert "GIT_NO_REPLACE_OBJECTS=1" in call
+            assert "GIT_OPTIONAL_LOCKS=0" in call
+            assert call[-2:] == ["status", "--porcelain=v1"]
+            assert kwargs == {"check": False}
+            return host.CommandResult(0)
+
+    result = host.HostSystem(GitRunner())._service_git(
+        "status",
+        "--porcelain=v1",
+        check=False,
+    )
+
+    assert result.returncode == 0
+
+
 def test_candidate_source_publication_uses_fixed_service_user_boundary() -> None:
     class PublicationRunner:
         def __init__(self) -> None:

@@ -240,7 +240,9 @@ immutable target as already matched. Both paths verify every authority path
 with no-follow metadata and atomically claim an absent final child with
 no-replace `mkdir` at private mode `2700`, inheriting sharedwork/setgid from the
 authority root. Neither installer publication nor its read-only check installs
-or activates GB10 units. The materializer clones with `--no-hardlinks` while
+or activates GB10 units. All installer-side Git identity/status probes disable
+optional locks and replacement refs so a nominal read cannot refresh or
+rewrite the protected index. The materializer clones with `--no-hardlinks` while
 consumers cannot search the claimed directory. It permits tracked git symlinks
 but rejects authority symlinks,
 foreign ownership, group/other write, hard-linked or special files, and a
