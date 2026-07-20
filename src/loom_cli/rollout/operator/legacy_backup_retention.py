@@ -8,9 +8,14 @@ import os
 import re
 import stat
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import cast
 
-from loom_cli.cluster_backup_guard import backup_manifest_sha256
+from loom_cli.cluster_backup_guard import (
+    REQUIRED_BACKUP_COMPONENTS,
+    ROLLOUT_CHECKPOINT_COMPONENTS,
+)
 
 from .backup import BackupCreator
 from .backup_retirement import BackupPayloadRetirer
@@ -28,14 +33,79 @@ class LegacyBackupRetentionError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class LegacyBackupInventoryRecord:
+    """Manifest-bound size evidence for one exact legacy payload root."""
+
+    retirement: BackupRetirementRecord
+    schema_version: int
+    manifest_size_bytes: int
+    payload_file_count: int
+    payload_size_bytes: int
+    component_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version not in {1, 2}
+            or self.manifest_size_bytes <= 0
+            or self.payload_file_count <= 0
+            or self.payload_size_bytes <= 0
+            or not self.component_names
+            or tuple(sorted(self.component_names)) != self.component_names
+            or len(set(self.component_names)) != len(self.component_names)
+            or self.retirement.manifest_sha256 is None
+        ):
+            raise ValueError("legacy backup inventory record is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "component_names": list(self.component_names),
+            "manifest_size_bytes": self.manifest_size_bytes,
+            "payload_file_count": self.payload_file_count,
+            "payload_size_bytes": self.payload_size_bytes,
+            "retirement": self.retirement.to_dict(),
+            "schema_version": self.schema_version,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> LegacyBackupInventoryRecord:
+        expected = {
+            "component_names",
+            "manifest_size_bytes",
+            "payload_file_count",
+            "payload_size_bytes",
+            "retirement",
+            "schema_version",
+        }
+        if (
+            set(data) != expected
+            or not isinstance(data["retirement"], dict)
+            or type(data["schema_version"]) is not int
+            or type(data["manifest_size_bytes"]) is not int
+            or type(data["payload_file_count"]) is not int
+            or type(data["payload_size_bytes"]) is not int
+            or not isinstance(data["component_names"], list)
+            or not all(isinstance(name, str) for name in data["component_names"])
+        ):
+            raise ValueError("legacy backup inventory record schema is invalid")
+        return cls(
+            retirement=BackupRetirementRecord.from_dict(data["retirement"]),
+            schema_version=data["schema_version"],
+            manifest_size_bytes=data["manifest_size_bytes"],
+            payload_file_count=data["payload_file_count"],
+            payload_size_bytes=data["payload_size_bytes"],
+            component_names=tuple(data["component_names"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class LegacyBackupRetentionPlan:
     """Immutable inventory authorizing only exact complete superseded roots."""
 
     backups_device: int
     backups_inode: int
     latest_bundle: str
-    candidates: tuple[BackupRetirementRecord, ...]
-    protected: tuple[BackupRetirementRecord, ...]
+    candidates: tuple[LegacyBackupInventoryRecord, ...]
+    protected: tuple[LegacyBackupInventoryRecord, ...]
     incomplete_bundles: tuple[str, ...]
     environment: str = "staging"
     namespace: str = "loom-staging"
@@ -49,8 +119,9 @@ class LegacyBackupRetentionPlan:
             or not self.namespace
         ):
             raise ValueError("legacy backup retention plan authority is invalid")
-        names = [record.bundle_name for record in (*self.candidates, *self.protected)]
-        payload_ids = [record.payload_id for record in (*self.candidates, *self.protected)]
+        retirements = [record.retirement for record in (*self.candidates, *self.protected)]
+        names = [record.bundle_name for record in retirements]
+        payload_ids = [record.payload_id for record in retirements]
         if (
             any(name is None for name in names)
             or len(set(names)) != len(names)
@@ -72,7 +143,7 @@ class LegacyBackupRetentionPlan:
             "latest_bundle": self.latest_bundle,
             "namespace": self.namespace,
             "protected": [record.to_dict() for record in self.protected],
-            "schema_version": 1,
+            "schema_version": 2,
         }
 
     @classmethod
@@ -90,7 +161,7 @@ class LegacyBackupRetentionPlan:
         }
         if (
             set(data) != expected
-            or data["schema_version"] != 1
+            or data["schema_version"] != 2
             or type(data["backups_device"]) is not int
             or type(data["backups_inode"]) is not int
             or not isinstance(data["latest_bundle"], str)
@@ -108,8 +179,12 @@ class LegacyBackupRetentionPlan:
             backups_device=data["backups_device"],
             backups_inode=data["backups_inode"],
             latest_bundle=data["latest_bundle"],
-            candidates=tuple(BackupRetirementRecord.from_dict(item) for item in data["candidates"]),
-            protected=tuple(BackupRetirementRecord.from_dict(item) for item in data["protected"]),
+            candidates=tuple(
+                LegacyBackupInventoryRecord.from_dict(item) for item in data["candidates"]
+            ),
+            protected=tuple(
+                LegacyBackupInventoryRecord.from_dict(item) for item in data["protected"]
+            ),
             incomplete_bundles=tuple(data["incomplete_bundles"]),
             environment=data["environment"],
             namespace=data["namespace"],
@@ -130,24 +205,160 @@ class LegacyBackupRetention:
     service_uid: int
     store: RequestStore
 
-    def _record(self, bundle_name: str, manifest_path: Path) -> BackupRetirementRecord:
+    def _record(
+        self,
+        *,
+        backups_fd: int,
+        bundle_name: str,
+        expected_bundle_metadata: os.stat_result,
+    ) -> LegacyBackupInventoryRecord:
         matched = _BUNDLE_RE.fullmatch(bundle_name)
         if matched is None:
             raise LegacyBackupRetentionError("legacy backup bundle name is invalid")
-        digest = backup_manifest_sha256(
-            manifest_path,
-            expected_owner_uid=self.service_uid,
-            require_private_file=True,
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
         )
+        file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            bundle_fd = os.open(bundle_name, directory_flags, dir_fd=backups_fd)
+        except OSError as exc:
+            raise LegacyBackupRetentionError(
+                "legacy backup root could not be opened safely"
+            ) from exc
+        try:
+            opened_bundle = os.fstat(bundle_fd)
+            if _identity(opened_bundle) != _identity(expected_bundle_metadata):
+                raise LegacyBackupRetentionError("legacy backup root changed during inventory")
+            try:
+                manifest_fd = os.open("backup-manifest.json", file_flags, dir_fd=bundle_fd)
+            except OSError as exc:
+                raise LegacyBackupRetentionError(
+                    "legacy backup manifest could not be opened safely"
+                ) from exc
+            try:
+                before = os.fstat(manifest_fd)
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or before.st_uid != self.service_uid
+                    or stat.S_IMODE(before.st_mode) != 0o600
+                    or before.st_nlink != 1
+                    or before.st_size <= 0
+                    or before.st_size > 1024 * 1024
+                ):
+                    raise LegacyBackupRetentionError("legacy backup manifest metadata is unsafe")
+                payload = _read_bounded(manifest_fd, maximum_bytes=1024 * 1024)
+                after = os.fstat(manifest_fd)
+                if _identity(before) != _identity(after) or len(payload) != after.st_size:
+                    raise LegacyBackupRetentionError(
+                        "legacy backup manifest changed during inventory"
+                    )
+            finally:
+                os.close(manifest_fd)
+            if _identity(os.fstat(bundle_fd)) != _identity(opened_bundle):
+                raise LegacyBackupRetentionError("legacy backup root changed during inventory")
+        finally:
+            os.close(bundle_fd)
+
+        digest = hashlib.sha256(payload).hexdigest()
+        try:
+            manifest = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LegacyBackupRetentionError("legacy backup manifest is not valid JSON") from exc
+        if not isinstance(manifest, dict):
+            raise LegacyBackupRetentionError("legacy backup manifest must be an object")
+        schema_version = manifest.get("schema_version")
+        required_components = {
+            1: REQUIRED_BACKUP_COMPONENTS,
+            2: ROLLOUT_CHECKPOINT_COMPONENTS,
+        }.get(schema_version if type(schema_version) is int else -1)
+        if required_components is None:
+            raise LegacyBackupRetentionError("legacy backup manifest schema is unsupported")
+        if (
+            manifest.get("environment") != "staging"
+            or manifest.get("namespace") != self.config.namespace
+        ):
+            raise LegacyBackupRetentionError("legacy backup manifest scope does not match")
+        created_at = manifest.get("created_at")
+        if not isinstance(created_at, str):
+            raise LegacyBackupRetentionError("legacy backup manifest timestamp is invalid")
+        try:
+            parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise LegacyBackupRetentionError("legacy backup manifest timestamp is invalid") from exc
+        if parsed_created_at.tzinfo is None or parsed_created_at.utcoffset() is None:
+            raise LegacyBackupRetentionError("legacy backup manifest timestamp is invalid")
+        verification = manifest.get("verification")
+        if (
+            not isinstance(verification, dict)
+            or verification.get("status") != "verified"
+            or verification.get("required_components") != list(required_components)
+        ):
+            raise LegacyBackupRetentionError("legacy backup manifest verification is invalid")
+        components = manifest.get("components")
+        if not isinstance(components, dict) or set(components) != set(required_components):
+            raise LegacyBackupRetentionError("legacy backup manifest components are invalid")
+        bundle_root = self.config.rollout_root / "backups" / bundle_name
+        payload_file_count = 0
+        payload_size_bytes = 0
+        for name in required_components:
+            component = components.get(name)
+            if not isinstance(component, dict):
+                raise LegacyBackupRetentionError("legacy backup component is invalid")
+            kind = component.get("kind")
+            size_bytes = component.get("size_bytes")
+            sha256 = component.get("sha256")
+            component_path = component.get("path")
+            if (
+                kind not in {"file", "directory"}
+                or type(size_bytes) is not int
+                or size_bytes <= 0
+                or not isinstance(sha256, str)
+                or len(sha256) != 64
+                or any(character not in "0123456789abcdef" for character in sha256)
+                or not isinstance(component_path, str)
+            ):
+                raise LegacyBackupRetentionError("legacy backup component metadata is invalid")
+            component_fs_path = Path(component_path)
+            if (
+                not component_fs_path.is_absolute()
+                or ".." in component_fs_path.parts
+                or component_fs_path == bundle_root
+                or not component_fs_path.is_relative_to(bundle_root)
+            ):
+                raise LegacyBackupRetentionError("legacy backup component path is invalid")
+            if kind == "directory":
+                file_count = component.get("file_count")
+                if type(file_count) is not int or file_count <= 0:
+                    raise LegacyBackupRetentionError(
+                        "legacy backup component file count is invalid"
+                    )
+            else:
+                if "file_count" in component:
+                    raise LegacyBackupRetentionError(
+                        "legacy backup file component has unexpected file count"
+                    )
+                file_count = 1
+            payload_file_count += file_count
+            payload_size_bytes += size_bytes
         payload_id = (
             "payload-legacy-" + hashlib.sha256(f"{bundle_name}\0{digest}".encode()).hexdigest()[:16]
         )
-        return BackupRetirementRecord(
-            payload_id=payload_id,
-            request_id=matched.group("request_id"),
-            bundle_name=bundle_name,
-            reason="superseded",
-            manifest_sha256=digest,
+        return LegacyBackupInventoryRecord(
+            retirement=BackupRetirementRecord(
+                payload_id=payload_id,
+                request_id=matched.group("request_id"),
+                bundle_name=bundle_name,
+                reason="superseded",
+                manifest_sha256=digest,
+            ),
+            schema_version=cast(int, schema_version),
+            manifest_size_bytes=len(payload),
+            payload_file_count=payload_file_count,
+            payload_size_bytes=payload_size_bytes,
+            component_names=tuple(sorted(components)),
         )
 
     def inventory(
@@ -163,51 +374,91 @@ class LegacyBackupRetention:
             or (metadata.st_uid != self.service_uid and mode == 0o770)
         ):
             raise LegacyBackupRetentionError("backup root metadata is unsafe")
-        latest_path = backups / "latest"
-        latest_metadata = latest_path.lstat()
-        if not stat.S_ISLNK(latest_metadata.st_mode):
-            raise LegacyBackupRetentionError("latest backup pointer is not a symlink")
-        latest_bundle = os.readlink(latest_path)
-        if _BUNDLE_RE.fullmatch(latest_bundle) is None or "/" in latest_bundle:
-            raise LegacyBackupRetentionError("latest backup pointer is unsafe")
-        protected_names = {latest_bundle, *additionally_protected}
-        candidates: list[BackupRetirementRecord] = []
-        protected: list[BackupRetirementRecord] = []
-        incomplete: list[str] = []
-        observed_names: set[str] = set()
-        with os.scandir(backups) as entries:
-            for entry in entries:
-                if entry.name == "latest":
-                    continue
-                observed_names.add(entry.name)
-                entry_metadata = entry.stat(follow_symlinks=False)
-                if (
-                    not stat.S_ISDIR(entry_metadata.st_mode)
-                    or entry_metadata.st_uid != self.service_uid
-                    or stat.S_IMODE(entry_metadata.st_mode) != 0o700
-                ):
-                    raise LegacyBackupRetentionError("legacy backup root contains an unsafe entry")
-                if _BUNDLE_RE.fullmatch(entry.name) is None:
-                    incomplete.append(entry.name)
-                    continue
-                manifest = backups / entry.name / "backup-manifest.json"
-                try:
-                    manifest.lstat()
-                except FileNotFoundError:
-                    incomplete.append(entry.name)
-                    continue
-                record = self._record(entry.name, manifest)
-                (protected if entry.name in protected_names else candidates).append(record)
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            backups_fd = os.open(backups, directory_flags)
+        except OSError as exc:
+            raise LegacyBackupRetentionError("backup root could not be opened safely") from exc
+        try:
+            if _identity(os.fstat(backups_fd)) != _identity(metadata):
+                raise LegacyBackupRetentionError("backup root changed during inventory")
+            latest_metadata = os.stat("latest", dir_fd=backups_fd, follow_symlinks=False)
+            if not stat.S_ISLNK(latest_metadata.st_mode):
+                raise LegacyBackupRetentionError("latest backup pointer is not a symlink")
+            latest_bundle = os.readlink("latest", dir_fd=backups_fd)
+            if _BUNDLE_RE.fullmatch(latest_bundle) is None or "/" in latest_bundle:
+                raise LegacyBackupRetentionError("latest backup pointer is unsafe")
+            protected_names = {latest_bundle, *additionally_protected}
+            candidates: list[LegacyBackupInventoryRecord] = []
+            protected: list[LegacyBackupInventoryRecord] = []
+            incomplete: list[str] = []
+            observed_names: set[str] = set()
+            with os.scandir(backups_fd) as entries:
+                for entry in entries:
+                    if entry.name == "latest":
+                        continue
+                    observed_names.add(entry.name)
+                    entry_metadata = entry.stat(follow_symlinks=False)
+                    if (
+                        not stat.S_ISDIR(entry_metadata.st_mode)
+                        or entry_metadata.st_uid != self.service_uid
+                        or stat.S_IMODE(entry_metadata.st_mode) != 0o700
+                    ):
+                        raise LegacyBackupRetentionError(
+                            "legacy backup root contains an unsafe entry"
+                        )
+                    if _BUNDLE_RE.fullmatch(entry.name) is None:
+                        incomplete.append(entry.name)
+                        continue
+                    try:
+                        probe_fd = os.open(entry.name, directory_flags, dir_fd=backups_fd)
+                    except FileNotFoundError:
+                        incomplete.append(entry.name)
+                        continue
+                    try:
+                        manifest_metadata = os.stat(
+                            "backup-manifest.json",
+                            dir_fd=probe_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        incomplete.append(entry.name)
+                        continue
+                    finally:
+                        os.close(probe_fd)
+                    if not stat.S_ISREG(manifest_metadata.st_mode):
+                        raise LegacyBackupRetentionError(
+                            "legacy backup manifest metadata is unsafe"
+                        )
+                    record = self._record(
+                        backups_fd=backups_fd,
+                        bundle_name=entry.name,
+                        expected_bundle_metadata=entry_metadata,
+                    )
+                    (protected if entry.name in protected_names else candidates).append(record)
+            if _identity(os.fstat(backups_fd)) != _identity(metadata):
+                raise LegacyBackupRetentionError("backup root changed during inventory")
+        finally:
+            os.close(backups_fd)
         if not additionally_protected.issubset(observed_names):
             raise LegacyBackupRetentionError("explicitly protected backup root is missing")
-        if latest_bundle not in {record.bundle_name for record in protected}:
+        if latest_bundle not in {record.retirement.bundle_name for record in protected}:
             raise LegacyBackupRetentionError("latest backup manifest is unavailable")
         return LegacyBackupRetentionPlan(
             backups_device=metadata.st_dev,
             backups_inode=metadata.st_ino,
             latest_bundle=latest_bundle,
-            candidates=tuple(sorted(candidates, key=lambda record: record.bundle_name or "")),
-            protected=tuple(sorted(protected, key=lambda record: record.bundle_name or "")),
+            candidates=tuple(
+                sorted(candidates, key=lambda record: record.retirement.bundle_name or "")
+            ),
+            protected=tuple(
+                sorted(protected, key=lambda record: record.retirement.bundle_name or "")
+            ),
             incomplete_bundles=tuple(sorted(incomplete)),
             namespace=self.config.namespace,
         )
@@ -224,7 +475,9 @@ class LegacyBackupRetention:
             raise LegacyBackupRetentionError("active rollout blocks backup retention apply")
         current = self.inventory(
             additionally_protected=frozenset(
-                record.bundle_name for record in plan.protected if record.bundle_name is not None
+                record.retirement.bundle_name
+                for record in plan.protected
+                if record.retirement.bundle_name is not None
             )
         )
         if (
@@ -235,8 +488,8 @@ class LegacyBackupRetention:
             or current.incomplete_bundles != plan.incomplete_bundles
         ):
             raise LegacyBackupRetentionError("legacy backup protected inventory drifted")
-        planned = {record.payload_id: record for record in plan.candidates}
-        present = {record.payload_id: record for record in current.candidates}
+        planned = {record.retirement.payload_id: record for record in plan.candidates}
+        present = {record.retirement.payload_id: record for record in current.candidates}
         if not set(present).issubset(planned) or any(
             planned[payload_id] != record for payload_id, record in present.items()
         ):
@@ -246,7 +499,8 @@ class LegacyBackupRetention:
             store=self.store,
         )
         retired: list[str] = []
-        for record in plan.candidates:
+        for inventory_record in plan.candidates:
+            record = inventory_record.retirement
             if record.payload_id in present:
                 retirer(record)
                 retired.append(record.payload_id)
@@ -265,7 +519,33 @@ class LegacyBackupRetention:
 
 
 __all__ = [
+    "LegacyBackupInventoryRecord",
     "LegacyBackupRetention",
     "LegacyBackupRetentionError",
     "LegacyBackupRetentionPlan",
 ]
+
+
+def _identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_bounded(descriptor: int, *, maximum_bytes: int) -> bytes:
+    payload = bytearray()
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, maximum_bytes - len(payload) + 1))
+        if not chunk:
+            return bytes(payload)
+        payload.extend(chunk)
+        if len(payload) > maximum_bytes:
+            raise LegacyBackupRetentionError("legacy backup manifest exceeds size limit")

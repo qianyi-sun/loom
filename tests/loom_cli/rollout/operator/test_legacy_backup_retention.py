@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
 
+from loom_cli.cluster_backup_guard import write_backup_manifest
 from loom_cli.rollout.operator.legacy_backup_retention import (
     LegacyBackupRetention,
     LegacyBackupRetentionError,
@@ -30,9 +32,23 @@ def _root(tmp_path: Path) -> tuple[LegacyBackupRetention, Path, Path, Path]:
     shared.chmod(0o600)
     os.link(shared, latest / "postgres" / "dump.bin")
     for bundle in (old, latest):
-        manifest = bundle / "backup-manifest.json"
-        manifest.write_bytes((bundle.name + "\n").encode())
-        manifest.chmod(0o600)
+        minio = bundle / "minio"
+        minio.mkdir(mode=0o700)
+        (minio / "artifact.bin").write_bytes(b"artifact-payload")
+        (minio / "artifact.bin").chmod(0o600)
+        secrets = bundle / "k8s-secrets.yaml"
+        secrets.write_bytes(b"sealed-secret-payload")
+        secrets.chmod(0o600)
+        write_backup_manifest(
+            environment="staging",
+            namespace=config.namespace,
+            output_path=bundle / "backup-manifest.json",
+            components={
+                "postgres": bundle / "postgres",
+                "minio": minio,
+                "k8s_secrets": secrets,
+            },
+        )
     (incomplete / "postgres" / "partial.bin").write_bytes(b"partial")
     (incomplete / "postgres" / "partial.bin").chmod(0o600)
     (backups / "latest").symlink_to(latest.name)
@@ -58,13 +74,17 @@ def test_inventory_and_digest_approved_apply_preserve_latest_and_incomplete(
     assert reconstructed == plan
     assert len(plan.candidates) == 1
     assert len(plan.protected) == 1
+    assert plan.candidates[0].payload_file_count == 3
+    assert plan.candidates[0].payload_size_bytes == 51
+    assert plan.candidates[0].component_names == ("k8s_secrets", "minio", "postgres")
     assert plan.incomplete_bundles == (incomplete.name,)
     assert not old.exists()
     assert latest.is_dir()
     assert incomplete.is_dir()
-    assert report["retired_payload_ids"] == [plan.candidates[0].payload_id]
+    payload_id = plan.candidates[0].retirement.payload_id
+    assert report["retired_payload_ids"] == [payload_id]
     assert retried["retired_payload_ids"] == []
-    assert retention.store.has_backup_retirement_receipt(plan.candidates[0].payload_id)
+    assert retention.store.has_backup_retirement_receipt(payload_id)
 
 
 def test_apply_rejects_digest_drift_and_active_rollout(tmp_path: Path) -> None:
@@ -92,4 +112,49 @@ def test_inventory_fails_closed_on_unsafe_unknown_entry(tmp_path: Path) -> None:
     unsafe.symlink_to(old.name)
 
     with pytest.raises(LegacyBackupRetentionError, match="unsafe entry"):
+        retention.inventory()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("scope", "scope"),
+        ("schema", "schema"),
+        ("verification", "verification"),
+        ("component-path", "component path"),
+        ("component-size", "component metadata"),
+    ],
+)
+def test_inventory_rejects_manifest_authority_drift(
+    tmp_path: Path,
+    mutation: str,
+    expected: str,
+) -> None:
+    retention, old, _latest, _incomplete = _root(tmp_path)
+    manifest_path = old / "backup-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "scope":
+        manifest["environment"] = "production"
+    elif mutation == "schema":
+        manifest["schema_version"] = 99
+    elif mutation == "verification":
+        manifest["verification"]["status"] = "pending"
+    elif mutation == "component-path":
+        manifest["components"]["postgres"]["path"] = str(tmp_path / "outside")
+    else:
+        manifest["components"]["postgres"]["size_bytes"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path.chmod(0o600)
+
+    with pytest.raises(LegacyBackupRetentionError, match=expected):
+        retention.inventory()
+
+
+def test_inventory_rejects_linked_manifest(tmp_path: Path) -> None:
+    retention, old, _latest, _incomplete = _root(tmp_path)
+    manifest = old / "backup-manifest.json"
+    linked = tmp_path / "linked-manifest.json"
+    os.link(manifest, linked)
+
+    with pytest.raises(LegacyBackupRetentionError, match="metadata is unsafe"):
         retention.inventory()

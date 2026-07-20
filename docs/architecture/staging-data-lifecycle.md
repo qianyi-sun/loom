@@ -414,10 +414,17 @@ Payload roots created before the rotation record are converged with
 `scripts/ops/staging_rollout_backup_retention.py`, never with `rm` or a prefix
 glob. `inventory` binds the backup filesystem identity, exact `latest` target,
 every complete timestamped root and manifest digest, plus every incomplete or
-noncanonical directory that must remain untouched. `apply` requires the exact
-plan file and its separately approved digest. It refuses an active rollout,
-re-inventories protected inputs, then retires only exact listed complete roots
-through the same evidence-first no-follow remover used by normal rotation.
+noncanonical directory that must remain untouched. A complete root is eligible
+only when its private single-link manifest parses under the known schema,
+matches `staging` and the configured namespace, carries the exact verified
+component set, and keeps every recorded component path lexically inside that
+root. The immutable plan records manifest bytes, component names, payload file
+count and logical payload bytes for each protected or retiring root; operators
+therefore review an exact deletion inventory rather than authorizing a path
+prefix. `apply` requires the exact plan file and its separately approved digest.
+It refuses an active rollout, re-inventories protected inputs, then retires only
+exact listed complete roots through the same evidence-first no-follow remover
+used by normal rotation.
 Hard-linked regular payload files are safe to unlink from the selected root;
 directories, symlinks, special files, ownership/mode drift, manifest drift and
 cross-filesystem traversal remain fail closed. A crash-safe receipt makes the
