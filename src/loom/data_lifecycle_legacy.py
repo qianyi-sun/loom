@@ -275,21 +275,27 @@ def build_legacy_classification_plan(
             continue
         row_map[row_key] = row
         authority_id = _authority_id(scope, row)
-        authority = LegacyAuthority(
-            id=authority_id,
-            team_id=row.team_id,
-            data_class=row.data_class,
-            owner_kind=row.owner_kind,
-            owner_id=row.owner_id,
-            created_at=row.created_at,
-            expires_at=None if row.pinned else row.created_at + STAGING_EPHEMERAL_TTL,
-            pinned=row.pinned,
-        )
         existing = authority_specs.get(authority_id)
-        if existing is not None and existing != authority:
+        if existing is not None and (
+            existing.team_id != row.team_id
+            or existing.data_class is not row.data_class
+            or existing.owner_kind is not row.owner_kind
+            or existing.owner_id != row.owner_id
+            or existing.pinned != row.pinned
+        ):
             blockers.append(f"legacy authority facts conflict for {row.owner_kind}/{row.owner_id}")
         else:
-            authority_specs[authority_id] = authority
+            created_at = min(existing.created_at, row.created_at) if existing else row.created_at
+            authority_specs[authority_id] = LegacyAuthority(
+                id=authority_id,
+                team_id=row.team_id,
+                data_class=row.data_class,
+                owner_kind=row.owner_kind,
+                owner_id=row.owner_id,
+                created_at=created_at,
+                expires_at=None if row.pinned else created_at + STAGING_EPHEMERAL_TTL,
+                pinned=row.pinned,
+            )
         if row.table == "artifacts":
             artifact_ids.add(row.row_id)
 

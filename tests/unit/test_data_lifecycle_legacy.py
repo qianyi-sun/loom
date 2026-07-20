@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
@@ -35,7 +36,7 @@ ARTIFACT_ID = UUID("33333333-3333-3333-3333-333333333333")
 EVENT_ID = UUID(int=4)
 
 
-def _trial_event(*, row_id: UUID = EVENT_ID) -> LegacyRow:
+def _trial_event(*, row_id: UUID = EVENT_ID, created_at: datetime = NOW) -> LegacyRow:
     return LegacyRow(
         table="trial_events",
         row_id=row_id,
@@ -43,7 +44,7 @@ def _trial_event(*, row_id: UUID = EVENT_ID) -> LegacyRow:
         data_class=DataClass.EVENT,
         owner_kind=OwnerKind.TRIAL,
         owner_id=str(TRIAL_ID),
-        created_at=NOW,
+        created_at=created_at,
         source_fingerprint="a" * 64,
     )
 
@@ -100,7 +101,12 @@ def _absent_object() -> LegacyAbsentObject:
 
 
 def test_plan_is_deterministic_and_groups_event_rows_by_trial() -> None:
-    rows = [_trial_event(), _trial_event(row_id=UUID(int=5)), _artifact()]
+    earlier = NOW - timedelta(hours=3)
+    rows = [
+        _trial_event(),
+        _trial_event(row_id=UUID(int=5), created_at=earlier),
+        _artifact(),
+    ]
     first = build_legacy_classification_plan(
         scope=SCOPE,
         mutation_epoch=7,
@@ -121,8 +127,23 @@ def test_plan_is_deterministic_and_groups_event_rows_by_trial() -> None:
     assert len(first.authorities) == 2
     event_authority = next(item for item in first.authorities if item.data_class is DataClass.EVENT)
     assert event_authority.owner_id == str(TRIAL_ID)
-    assert event_authority.expires_at == NOW + timedelta(days=7)
+    assert event_authority.created_at == earlier
+    assert event_authority.expires_at == earlier + timedelta(days=7)
     assert classification_plan_document(first)["inventory_digest"] == first.inventory_digest
+
+
+def test_grouped_legacy_authority_rejects_cross_team_owner_facts() -> None:
+    first = _trial_event()
+    plan = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        planned_at=NOW,
+        rows=[first, replace(first, row_id=UUID(int=6), team_id=UUID(int=7))],
+        objects=[],
+    )
+
+    with pytest.raises(LegacyClassificationError, match="authority facts conflict"):
+        plan.require_applicable()
 
 
 def test_artifact_without_exact_object_evidence_fails_closed() -> None:
