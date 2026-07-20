@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
@@ -137,6 +138,7 @@ class CommandResult(Protocol):
 
 Run = Callable[..., CommandResult]
 Now = Callable[[], datetime]
+Sleep = Callable[[float], None]
 
 
 def _run(
@@ -179,6 +181,7 @@ class PreflightCredentialInstaller:
     paths: CredentialPaths = CredentialPaths()
     run: Run = _run
     now: Now = lambda: datetime.now(UTC)
+    sleep: Sleep = time.sleep
     euid: int = -1
     service_uid: int = -1
     service_gid: int = -1
@@ -560,6 +563,20 @@ class PreflightCredentialInstaller:
         self._check_minio_authority(credential)
 
     def _check_minio_authority(self, credential: ReadonlyMinioCredential) -> None:
+        last_error: CredentialInstallError | None = None
+        for attempt in range(3):
+            try:
+                self._check_minio_authority_once(credential)
+                return
+            except CredentialInstallError as exc:
+                last_error = exc
+                if attempt < 2:
+                    self.sleep(0.2)
+        if last_error is None:  # pragma: no cover - fixed non-empty range owns this
+            raise CredentialInstallError("readonly MinIO authority check did not run")
+        raise last_error
+
+    def _check_minio_authority_once(self, credential: ReadonlyMinioCredential) -> None:
         script = "\n".join(
             (
                 'test -n "${MINIO_ROOT_USER:-}"',

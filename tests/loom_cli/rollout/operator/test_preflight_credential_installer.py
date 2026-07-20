@@ -174,6 +174,7 @@ def _installer(tmp_path: Path) -> tuple[PreflightCredentialInstaller, Runner]:
         paths=paths,
         run=runner,
         now=lambda: NOW,
+        sleep=lambda _seconds: None,
         euid=0,
         service_uid=uid,
         service_gid=gid,
@@ -389,6 +390,53 @@ def test_check_rejects_extra_or_rebound_minio_policy(tmp_path: Path) -> None:
     installer.run = drifted_policy
 
     assert installer.check()["failures"] == ["readonly-minio"]
+
+
+def test_check_retries_one_stale_minio_authority_read(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    original_run = runner.__call__
+    stale_reads = 0
+
+    def stale_once(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        nonlocal stale_reads
+        command = tuple(argv)
+        if "pod/loom-minio-0" in command and "admin user info" in command[-1] and stale_reads == 0:
+            stale_reads += 1
+            return Result(
+                stdout="\n".join(
+                    (
+                        json.dumps(
+                            {
+                                "status": "success",
+                                "policyName": READONLY_MINIO_POLICY_NAME,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "status": "success",
+                                "policy": READONLY_MINIO_POLICY_NAME,
+                                "policyInfo": {
+                                    "PolicyName": READONLY_MINIO_POLICY_NAME,
+                                    "Policy": {"Version": "stale"},
+                                },
+                            }
+                        ),
+                    )
+                )
+                + "\n"
+            )
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = stale_once
+
+    assert installer.check()["ok"] is True
+    assert stale_reads == 1
 
 
 def test_install_rejects_silent_success_for_required_token_output(tmp_path: Path) -> None:
