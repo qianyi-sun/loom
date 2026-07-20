@@ -240,7 +240,7 @@ class DataLifecycleAuthority(Base):
             name="data_lifecycle_authorities_class_check",
         ),
         CheckConstraint(
-            "owner_kind IN ('batch','trial','artifact','benchmark','system')",
+            "owner_kind IN ('batch','trial','artifact','benchmark','system','orphan')",
             name="data_lifecycle_authorities_owner_kind_check",
         ),
         CheckConstraint(

@@ -142,6 +142,16 @@ submission. Missing owners, cross-team links, incomplete bucket/key metadata,
 and digest/size/version drift are returned together as blockers. There is no
 prefix fallback.
 
+A historical LLM-call row can legitimately outlive a trial because the legacy
+schema did not enforce that reference. Such a row still carries an exact team,
+row identity and capture time, so the classifier assigns it a distinct
+ephemeral `event/orphan` authority rather than inventing a trial relationship
+or blocking all unrelated cleanup. The authority owner ID is the exact LLM-call
+UUID with a typed prefix. A trial event without any recoverable team authority,
+an LLM call linked to a trial owned by another team, and any artifact whose
+declared team conflicts with its linked batch/trial, remain blockers because
+their deletion scope cannot be proven.
+
 Legacy benchmark, catalog, bootstrap, and system artifacts follow the same
 exact-object inspection path, but the classifier registers only those durable
 data classes as pinned authorities with no expiry. A legacy

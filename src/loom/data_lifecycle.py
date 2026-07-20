@@ -56,6 +56,7 @@ class OwnerKind(StrEnum):
     ARTIFACT = "artifact"
     BENCHMARK = "benchmark"
     SYSTEM = "system"
+    ORPHAN = "orphan"
 
 
 class LifecycleState(StrEnum):

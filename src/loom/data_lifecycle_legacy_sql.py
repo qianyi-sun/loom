@@ -141,8 +141,22 @@ def _load_rows(
             "WHERE l.lifecycle_authority_id IS NULL ORDER BY l.id"
         )
     ):
-        if item.trial_team_id is None or item.team_id != item.trial_team_id:
-            blockers.append(f"legacy llm_call {item.id} has missing or cross-team trial owner")
+        if item.trial_team_id is None:
+            rows.append(
+                _row(
+                    table="llm_calls",
+                    row_id=item.id,
+                    team_id=item.team_id,
+                    data_class=DataClass.EVENT,
+                    owner_kind=OwnerKind.ORPHAN,
+                    owner_id=f"llm-call:{item.id}",
+                    created_at=item.captured_at,
+                    source_values=item,
+                )
+            )
+            continue
+        if item.team_id != item.trial_team_id:
+            blockers.append(f"legacy llm_call {item.id} has cross-team trial owner")
             continue
         rows.append(
             _row(

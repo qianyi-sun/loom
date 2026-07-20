@@ -804,6 +804,107 @@ def test_legacy_artifact_classification_is_digest_approved_and_epoch_bound(
         engine.dispose()
 
 
+def test_legacy_orphan_llm_call_receives_explicit_ephemeral_authority(
+    postgres_url_at_0065: str,
+) -> None:
+    call_id = uuid4()
+    team_id = uuid4()
+    missing_trial_id = uuid4()
+    captured_at = datetime(2026, 7, 12, 4, tzinfo=UTC)
+    engine = create_engine(postgres_url_at_0065)
+
+    class NoObjectInspector:
+        def inspect(self, *, bucket, object_key, version_id):
+            raise AssertionError("an orphan LLM call has no object authority")
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO teams (id,name) VALUES (:id,:name)"),
+                {"id": team_id, "name": f"legacy-orphan-{team_id}"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO llm_calls "
+                    "(id,team_id,trial_id,step_id,model,dialect,input_tokens,output_tokens,"
+                    "provider_extras,cost_usd,rate_card_hash,captured_at) VALUES "
+                    "(:id,:team_id,:trial_id,'orphan-step','model','openai',1,1,'{}',"
+                    "0.0,:rate_card_hash,:captured_at)"
+                ),
+                {
+                    "id": call_id,
+                    "team_id": team_id,
+                    "trial_id": missing_trial_id,
+                    "rate_card_hash": "d" * 64,
+                    "captured_at": captured_at,
+                },
+            )
+        classifier = SqlAlchemyLegacyClassifier(engine, NoObjectInspector())
+        plan = classifier.inventory(
+            scope=GcScope(environment="staging", namespace="loom-staging"),
+            planned_at=datetime(2026, 7, 20, 4, 30, tzinfo=UTC),
+            expire_created_before=datetime(2026, 7, 19, tzinfo=UTC),
+        )
+        plan.require_applicable()
+        assert plan.blockers == ()
+        assert [(row.table, row.row_id, row.owner_kind) for row in plan.rows] == [
+            ("llm_calls", call_id, OwnerKind.ORPHAN)
+        ]
+        authority = plan.authorities[0]
+        assert authority.data_class is DataClass.EVENT
+        assert authority.owner_kind is OwnerKind.ORPHAN
+        assert authority.owner_id == f"llm-call:{call_id}"
+        assert authority.team_id == team_id
+        assert authority.created_at == captured_at
+        assert authority.expires_at == datetime(2026, 7, 19, tzinfo=UTC)
+
+        classifier.apply(
+            plan=plan,
+            approved_inventory_digest=plan.inventory_digest,
+            request_id="req-legacy-orphan",
+            applied_at=datetime(2026, 7, 20, 4, 31, tzinfo=UTC),
+        )
+        with engine.connect() as connection:
+            linked_authority = connection.execute(
+                text("SELECT lifecycle_authority_id FROM llm_calls WHERE id=:id"),
+                {"id": call_id},
+            ).scalar_one()
+            authority_row = connection.execute(
+                text(
+                    "SELECT team_id,data_class,owner_kind,owner_id,pinned,expires_at "
+                    "FROM data_lifecycle_authorities WHERE id=:id"
+                ),
+                {"id": linked_authority},
+            ).one()
+        assert tuple(authority_row) == (
+            team_id,
+            "event",
+            "orphan",
+            f"llm-call:{call_id}",
+            False,
+            datetime(2026, 7, 19, tzinfo=UTC),
+        )
+    finally:
+        with engine.begin() as connection:
+            authority_ids = list(
+                connection.execute(
+                    text(
+                        "SELECT lifecycle_authority_id FROM llm_calls "
+                        "WHERE id=:id AND lifecycle_authority_id IS NOT NULL"
+                    ),
+                    {"id": call_id},
+                ).scalars()
+            )
+            connection.execute(text("DELETE FROM llm_calls WHERE id=:id"), {"id": call_id})
+            for authority_id in authority_ids:
+                connection.execute(
+                    text("DELETE FROM data_lifecycle_authorities WHERE id=:id"),
+                    {"id": authority_id},
+                )
+            connection.execute(text("DELETE FROM teams WHERE id=:id"), {"id": team_id})
+        engine.dispose()
+
+
 def test_legacy_absent_object_is_bound_as_explicit_authority_evidence(
     postgres_url_at_0065: str,
 ) -> None:
