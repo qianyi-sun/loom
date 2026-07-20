@@ -658,7 +658,7 @@ manifest = {
             "url": "https://example.invalid/smoke",
             "batch_id": "batch-release-smoke",
             "trial_id": "trial-release-smoke",
-            "artifact_url": "https://yylx.world/dev/api/v1/trials/trial-release-smoke/atif",
+            "artifact_url": "https://yylx.world/staging/api/v1/trials/trial-release-smoke/atif",
             "service_no_oom_restarts_row": "final service.no_oom_restarts row after route probes passed",
         },
         "frontend_route_evidence": {
