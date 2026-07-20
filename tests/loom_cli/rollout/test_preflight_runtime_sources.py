@@ -4,6 +4,9 @@ import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+import loom_cli.rollout.preflight_runtime_sources as runtime_sources_module
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
 from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
@@ -11,6 +14,7 @@ from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBindin
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_registered_checks import CredentialProbeSource
 from loom_cli.rollout.preflight_runtime_sources import (
+    GB10_PREFLIGHT_FLEET_CONCURRENCY,
     BackupAdmissionAuthority,
     PreflightRuntimeSources,
 )
@@ -52,6 +56,13 @@ def test_fresh_authority_is_explicit_and_does_not_claim_a_lease() -> None:
     }
 
 
+def test_nested_gb10_checks_share_a_bounded_fleet_budget() -> None:
+    # Mount and host readiness may run in the same DAG wave; candidate-source
+    # can overlap a settling host probe in the next wave. Keeping each nested
+    # fleet pool at four bounds total concurrent SSH work to eight.
+    assert GB10_PREFLIGHT_FLEET_CONCURRENCY == 4
+
+
 def test_unavailable_authority_builds_a_fail_closed_registered_check() -> None:
     authority = BackupAdmissionAuthority.unavailable(schema_revision="0067")
 
@@ -65,7 +76,10 @@ def test_unavailable_authority_builds_a_fail_closed_registered_check() -> None:
         raise AssertionError("unavailable backup authority returned a lease")
 
 
-def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: Path) -> None:
+def test_sources_build_complete_exact_registry_without_running_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = _config(tmp_path)
     candidate = _candidate()
     token = tmp_path / "state" / "admin"
@@ -74,6 +88,25 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
 
     def command(*_args, **_kwargs):
         return _result()
+
+    gb10_concurrency: dict[str, int] = {}
+    for builder_name in (
+        "build_gb10_ssh_topology_check",
+        "build_gb10_candidate_source_check",
+        "build_gb10_host_readiness_check",
+    ):
+        original = getattr(runtime_sources_module, builder_name)
+
+        def record_concurrency(
+            *args,
+            _builder_name=builder_name,
+            _original=original,
+            **kwargs,
+        ):
+            gb10_concurrency[_builder_name] = kwargs["max_concurrency"]
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(runtime_sources_module, builder_name, record_concurrency)
 
     sources = PreflightRuntimeSources(
         config=config,
@@ -167,3 +200,8 @@ def test_sources_build_complete_exact_registry_without_running_probes(tmp_path: 
     }
     assert plan.context.bindings["staging.mutation-epoch"] == 9
     assert plan.context.bindings["backup.source-request"] == "fresh-checkpoint"
+    assert gb10_concurrency == {
+        "build_gb10_candidate_source_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,
+        "build_gb10_host_readiness_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,
+        "build_gb10_ssh_topology_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,
+    }

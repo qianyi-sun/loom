@@ -21,7 +21,10 @@ from loom_cli.rollout.preflight_artifact_store import (
 )
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_runtime import RehearsalActionFactory, RehearsalIdentityFactory
-from loom_cli.rollout.preflight_runtime_sources import BackupAdmissionAuthority
+from loom_cli.rollout.preflight_runtime_sources import (
+    GB10_PREFLIGHT_FLEET_CONCURRENCY,
+    BackupAdmissionAuthority,
+)
 from loom_cli.rollout.rehearsal_action_source import RehearsalActionSource
 from loom_cli.rollout.rehearsal_command_runner import InstalledRehearsalStepRunner
 from loom_cli.rollout.rehearsal_journal_backend import JournaledRehearsalBackend
@@ -133,6 +136,7 @@ def build_installed_deep_preflight_composition(
             identity=inputs.gb10_identity,
             hosts=tuple(target.ssh_target for target in inputs.gb10_targets),
             binding=inputs.gb10_mount_binding,
+            max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
         )
 
     route = readonly.route

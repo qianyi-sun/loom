@@ -92,6 +92,7 @@ from loom_cli.rollout.systemd_unit_readiness import (
 )
 
 _SHA256_ZERO = "0" * 64
+GB10_PREFLIGHT_FLEET_CONCURRENCY = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +399,7 @@ class PreflightRuntimeSources:
                 service_uid=self.service_uid,
                 expected_ssh_config_sha256=self.gb10_ssh_config_sha256,
                 expected_identity_metadata_fingerprint=self.gb10_identity_metadata_fingerprint,
+                max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
             ),
             build_gb10_shared_mount_check(
                 self.gb10_mount_source,
@@ -413,12 +415,14 @@ class PreflightRuntimeSources:
                 expected_candidate_sha=self.candidate.resolved_sha,
                 expected_candidate_tree=self.candidate.resolved_tree or "",
                 image_tag=self.candidate.image_tag,
+                max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
             ),
             build_gb10_host_readiness_check(
                 self.gb10_run,
                 targets=self.gb10_targets,
                 ssh_config=self.gb10_ssh_config,
                 identity=self.gb10_identity,
+                max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
             ),
             build_backup_lease_eligibility_check(
                 authority.lease_source,
@@ -569,4 +573,8 @@ class PreflightRuntimeSources:
         }
 
 
-__all__ = ["BackupAdmissionAuthority", "PreflightRuntimeSources"]
+__all__ = [
+    "GB10_PREFLIGHT_FLEET_CONCURRENCY",
+    "BackupAdmissionAuthority",
+    "PreflightRuntimeSources",
+]
