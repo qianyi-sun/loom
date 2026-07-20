@@ -362,6 +362,11 @@ module import as `65532:65532` before publishing Tier 1 evidence. The pod
 receives only its dedicated lifecycle database and object-store
 credentials. A namespace-scoped
 NetworkPolicy limits egress to the selected Postgres and MinIO pods. The
+corresponding Postgres and MinIO ingress policies explicitly admit only the
+lifecycle pod selector on ports 5432 and 9000. Tier 1 validates this
+bidirectional policy graph from the same rendered artifact, so applying only
+the source egress change to a candidate without its matching target ingress
+change cannot qualify as candidate evidence. The
 capacity PVC mounts are read-only and all configured data filesystems must be
 measured; missing or duplicate filesystem authority fails closed. Development
 and production renders omit the CronJob entirely. Automatic policy authority

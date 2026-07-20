@@ -30,6 +30,9 @@ spec:
           app: loom-staging-data-lifecycle
     - podSelector:
         matchLabels:
+          app: loom-egress-xds
+    - podSelector:
+        matchLabels:
           app: loom-pgbouncer
     - podSelector:
         matchLabels:
@@ -184,6 +187,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-family-orchestrator
+    - podSelector:
+        matchLabels:
+          app: loom-gateway-router
     ports:
     - port: 9100
       protocol: TCP
@@ -514,6 +520,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-family-orchestrator
+    - podSelector:
+        matchLabels:
+          app: loom-egress-xds
     ports:
     - port: 6432
       protocol: TCP
@@ -532,13 +541,6 @@ spec:
           cnpg.io/cluster: loom-postgres
     ports:
     - port: 5432
-      protocol: TCP
-  - to:
-    - podSelector:
-        matchLabels:
-          app: loom-pgbouncer
-    ports:
-    - port: 6432
       protocol: TCP
   - to:
     - namespaceSelector:

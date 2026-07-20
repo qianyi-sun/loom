@@ -114,3 +114,16 @@ def test_staging_lifecycle_network_policy_is_staging_only() -> None:
         for port in rule["ports"]
     }
     assert ports == {(53, "TCP"), (53, "UDP"), (5432, "TCP"), (9000, "TCP")}
+
+    minio = _resource(
+        ClusterConfig(runtime_environment="staging"),
+        "NetworkPolicy",
+        "loom-minio",
+    )
+    assert minio is not None
+    allowed_sources = {
+        peer["podSelector"]["matchLabels"]["app"]
+        for rule in minio["spec"]["ingress"]  # type: ignore[index]
+        for peer in rule["from"]
+    }
+    assert "loom-staging-data-lifecycle" in allowed_sources

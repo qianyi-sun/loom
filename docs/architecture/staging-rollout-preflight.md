@@ -152,6 +152,15 @@ survive static rendering and fail only at protected container creation. This
 predicate is shared by preflight artifact publication and the final consumer;
 the final path does not carry a second, weaker copy.
 
+The render check also evaluates the in-namespace NetworkPolicy graph. For every
+explicit pod-selector egress edge whose destination is ingress-isolated in the
+same render, at least one target ingress policy must admit the source selector
+on a compatible port and protocol. Kubernetes policy-union semantics are
+preserved; external namespaces and IP-block destinations remain runtime probes.
+This shifts lifecycle-to-MinIO, gateway-router-to-LLM-gateway, and
+xDS-to-Postgres/pgBouncer asymmetry to `manifests.render.failed` before an exact
+artifact can be published.
+
 `images.contract` complements the manifest predicate with an actual bounded
 runtime probe. Every declared non-root import is launched from the immutable
 build-once image using its exact UID/GID, `--network none`, and a read-only root

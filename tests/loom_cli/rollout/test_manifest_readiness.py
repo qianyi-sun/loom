@@ -185,6 +185,78 @@ spec:
     assert artifact.resource_count == 2
 
 
+def test_manifest_render_rejects_declared_egress_denied_by_target_ingress() -> None:
+    rendered = _rendered() + _network_policy_graph(allow_source=False)
+
+    with pytest.raises(ValueError, match="network policy graph denies declared egress"):
+        inspect_rendered_manifests(
+            rendered,
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+        )
+
+
+def test_manifest_render_accepts_symmetric_network_policy_graph() -> None:
+    artifact = inspect_rendered_manifests(
+        _rendered() + _network_policy_graph(allow_source=True),
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    assert artifact.resource_count == 5
+
+
+def _network_policy_graph(*, allow_source: bool) -> str:
+    allowed_app = "lifecycle" if allow_source else "other"
+    return f"""---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lifecycle-pod
+  namespace: loom-staging
+  labels: {{app: lifecycle}}
+spec:
+  containers: [{{name: lifecycle, image: external.example/lifecycle:exact}}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: object-store-pod
+  namespace: loom-staging
+  labels: {{app: object-store}}
+spec:
+  containers: [{{name: object-store, image: external.example/object-store:exact}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lifecycle
+  namespace: loom-staging
+spec:
+  podSelector: {{matchLabels: {{app: lifecycle}}}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {{matchLabels: {{app: object-store}}}}
+      ports: [{{port: 9000, protocol: TCP}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: object-store
+  namespace: loom-staging
+spec:
+  podSelector: {{matchLabels: {{app: object-store}}}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {{matchLabels: {{app: {allowed_app}}}}}
+      ports: [{{port: 9000, protocol: TCP}}]
+"""
+
+
 def test_manifest_session_renders_once_and_server_validates_same_bytes() -> None:
     render_calls: list[object] = []
     server_inputs: list[str] = []

@@ -164,6 +164,68 @@ spec:
 """
 
 
+def _denied_network_policy_manifest() -> str:
+    containers = "\n".join(
+        f"        - name: {name}\n          image: {name}:staging-aaaaaaa"
+        for name, _dockerfile in ROLLOUT_IMAGES
+    )
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exact-candidate
+  namespace: loom-staging
+spec:
+  template:
+    spec:
+      containers:
+{containers}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lifecycle-pod
+  namespace: loom-staging
+  labels: {{app: lifecycle}}
+spec:
+  containers: [{{name: lifecycle, image: external.example/lifecycle:exact}}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: object-store-pod
+  namespace: loom-staging
+  labels: {{app: object-store}}
+spec:
+  containers: [{{name: object-store, image: external.example/object-store:exact}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lifecycle
+  namespace: loom-staging
+spec:
+  podSelector: {{matchLabels: {{app: lifecycle}}}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {{matchLabels: {{app: object-store}}}}
+      ports: [{{port: 9000, protocol: TCP}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: object-store
+  namespace: loom-staging
+spec:
+  podSelector: {{matchLabels: {{app: object-store}}}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {{matchLabels: {{app: other}}}}
+      ports: [{{port: 9000, protocol: TCP}}]
+"""
+
+
 def _nonroot_contract_runner(argv, _cwd):
     command = tuple(argv)
     if command[:3] == ("docker", "image", "inspect"):
@@ -260,6 +322,15 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
     )
     manifest_render, _manifest_schema = build_manifest_preflight_checks(
         _ambiguous_nonroot_manifest,
+        lambda payload: subprocess.CompletedProcess([], 0, payload, ""),
+        _images,
+        image_tag="staging-aaaaaaa",
+        namespace="loom-staging",
+        expected_candidate_sha=_CANDIDATE,
+        expected_config_digest=config_digest,
+    )
+    network_policy_render, _network_policy_schema = build_manifest_preflight_checks(
+        _denied_network_policy_manifest,
         lambda payload: subprocess.CompletedProcess([], 0, payload, ""),
         _images,
         image_tag="staging-aaaaaaa",
@@ -417,13 +488,23 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
                 }
             ),
         ),
+        RegressionReplayCase(
+            "lifecycle-minio-network-policy-ingress",
+            network_policy_render,
+            CheckContext(
+                {
+                    "candidate.sha": _CANDIDATE,
+                    "runner.config.sha256": config_digest,
+                }
+            ),
+        ),
     )
 
 
 def test_all_historical_blockers_replay_through_production_checks(tmp_path: Path) -> None:
     evidence = replay_regression_manifest(_cases(tmp_path))
 
-    assert len(evidence.implementation_digests) == 10
+    assert len(evidence.implementation_digests) == 11
     assert set(evidence.implementation_digests) == set(evidence.evidence_hashes)
 
 
