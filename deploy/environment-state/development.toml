@@ -17,12 +17,16 @@
 
 environment = "development"
 
-# --- GB10 pool (ARM, Slurm-only single-tenant nodes) -------------------------
-# GB10 nodes run no k8s workload, so exclusive=true is safe (an escaped trial
-# container per P0-2 can only affect its own dedicated node). Dev takes a small
-# slice: one node, up to 5 concurrent trials. min_slots=0 (scale to zero when
-# idle; the #877 QoS boost, not an always-warm floor, provides dev's priority
-# guarantee once it lands) to avoid pinning a whole GB10 node 24/7.
+# --- GB10 pool (ARM, Slurm-only nodes, shared across envs) -------------------
+# exclusive=false so multiple envs' workers pack onto the same GB10 node
+# instead of each claiming a whole node. GB10 runs no k8s/MinIO, so the only
+# co-tenants are other Slurm trial workers -- but the P0-2 docker-socket
+# cgroup-escape concern still applies to any non-exclusive node, so GB10
+# activation carries the same #896 container-isolation evidence expectation as
+# OLDLAB (dev is the lowest-stakes place it runs; staging/prod GB10 must not
+# flip to exclusive=false without #896). Dev slice: up to 5 concurrent trials;
+# min_slots=0 (scale to zero when idle; #877 QoS boost, not an always-warm
+# floor, provides dev's priority guarantee once it lands).
 [[worker_pool_autoscaler_policies]]
 pool_name = "gb10-arm64"
 actuator = "slurm"
@@ -66,7 +70,9 @@ requested_concurrency = 5
 max_jobs = 1
 pending_job_cap = 1
 time_limit = "2-00:00:00"
-exclusive = true
+# Non-exclusive: pack multiple envs' workers per GB10 node. Isolation evidence
+# tracked in #896 (shared with OLDLAB); most critical before staging/prod GB10.
+exclusive = false
 external_runner = true
 
 # --- OLDLAB pool (x86_64, DOUBLE-DUTY nodes: k3s + MinIO + slurmd) ------------
