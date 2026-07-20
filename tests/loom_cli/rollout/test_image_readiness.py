@@ -11,6 +11,7 @@ from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
     BROWSER_ENTRYPOINT,
     BROWSER_IMAGE,
+    NONROOT_RUNTIME_PROBES,
     REHEARSAL_POSTGRES_ENTRYPOINT,
     REHEARSAL_POSTGRES_IMAGE,
     REVISION_LABEL,
@@ -153,6 +154,8 @@ def test_seeded_image_session_never_rebuilds_exact_artifact(tmp_path: Path) -> N
         command = tuple(argv)
         calls.append(command)
         assert cwd is None
+        if command[:2] == ("docker", "run"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
         name = command[-1].split(":", 1)[0]
         return subprocess.CompletedProcess(argv, 0, _inspect_payload(name, revision), "")
 
@@ -177,4 +180,50 @@ def test_seeded_image_session_never_rebuilds_exact_artifact(tmp_path: Path) -> N
     assert session.build() is artifact
     assert session.verify() == artifact
     assert calls
-    assert all(command[:3] == ("docker", "image", "inspect") for command in calls)
+    assert all(
+        command[:3] == ("docker", "image", "inspect") or command[:2] == ("docker", "run")
+        for command in calls
+    )
+
+
+def test_image_contract_runs_exact_nonroot_runtime_probe() -> None:
+    revision = "a" * 40
+    expected = {
+        name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _cwd):
+        command = tuple(argv)
+        calls.append(command)
+        if command[:3] == ("docker", "image", "inspect"):
+            name = command[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(
+                argv, 0, _inspect_payload(name, revision, image_id=expected[name]), ""
+            )
+        return subprocess.CompletedProcess(argv, 1, "", "permission denied")
+
+    with pytest.raises(ValueError, match="non-root runtime failed for loom-control-plane"):
+        verify_image_contract(
+            run,
+            image_tag="staging-aaaaaaaa",
+            resolved_sha=revision,
+            expected_digests=expected,
+        )
+
+    uid, command = NONROOT_RUNTIME_PROBES["loom-control-plane"]
+    assert (
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--user",
+        f"{uid}:{uid}",
+        "--entrypoint",
+        command[0],
+        "loom-control-plane:staging-aaaaaaaa",
+        *command[1:],
+    ) in calls

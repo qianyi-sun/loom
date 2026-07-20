@@ -152,6 +152,16 @@ survive static rendering and fail only at protected container creation. This
 predicate is shared by preflight artifact publication and the final consumer;
 the final path does not carry a second, weaker copy.
 
+`images.contract` complements the manifest predicate with an actual bounded
+runtime probe. Every declared non-root import is launched from the immutable
+build-once image using its exact UID/GID, `--network none`, and a read-only root
+filesystem. The probe imports only its fixed module and carries no staging
+credential. A file-mode, package-layout, interpreter, or image-user mismatch is
+therefore an `images.contract.invalid` Tier 1 blocker rather than the first
+protected CronJob launch discovering it. The probe specification is included
+in the image-plan digest and is rerun when the immutable image IDs are verified;
+the rollout consumes those IDs and does not rebuild the images.
+
 Tier 1 also normalizes the environment profile's rate-card sync and hosted
 provider pricing defaults into one canonical, secret-free
 `ProductionDefaultsArtifact`. Provider ordering, optional sync inputs,

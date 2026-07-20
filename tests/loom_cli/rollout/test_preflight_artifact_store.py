@@ -134,6 +134,8 @@ def _migration(
 
 
 def _docker(argv, _cwd):
+    if tuple(argv[:2]) == ("docker", "run"):
+        return _Result(0, "")
     tag = str(argv[-1])
     name = tag.split(":", 1)[0]
     index = next(

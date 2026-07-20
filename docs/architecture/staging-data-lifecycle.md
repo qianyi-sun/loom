@@ -356,7 +356,10 @@ filesystem, drops every Linux capability, and declares the fixed unprivileged
 UID/GID `65532:65532` instead of depending on image-default user metadata. The
 shared Tier 1 rendered-manifest check rejects any effective `runAsNonRoot`
 workload without an explicit positive numeric UID before Kubernetes apply. The
-pod receives only its dedicated lifecycle database and object-store
+control-plane image normalizes exact source and migration reads for that
+identity, and the build-once image contract launches a no-network, read-only
+module import as `65532:65532` before publishing Tier 1 evidence. The pod
+receives only its dedicated lifecycle database and object-store
 credentials. A namespace-scoped
 NetworkPolicy limits egress to the selected Postgres and MinIO pods. The
 capacity PVC mounts are read-only and all configured data filesystems must be

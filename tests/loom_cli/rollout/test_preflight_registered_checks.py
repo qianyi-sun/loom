@@ -1523,6 +1523,9 @@ def test_registered_image_checks_build_once_then_reinspect_exact_ids(tmp_path: P
 
     def run(argv, cwd):
         command = tuple(argv)
+        if command[:2] == ("docker", "run"):
+            assert cwd is None
+            return subprocess.CompletedProcess(argv, 0, "", "")
         assert command[:3] == ("docker", "image", "inspect")
         assert cwd is None
         name = command[-1].split(":", 1)[0]

@@ -31,6 +31,14 @@ BROWSER_IMAGE = "loom-staging-admin-browser-smoke"
 BROWSER_ENTRYPOINT = ("node", "/opt/loom/web/scripts/staging-admin-browser-smoke.mjs")
 REHEARSAL_POSTGRES_IMAGE = "loom-rehearsal-postgres"
 REHEARSAL_POSTGRES_ENTRYPOINT = ("docker-entrypoint.sh",)
+NONROOT_RUNTIME_PROBES: Mapping[str, tuple[int, tuple[str, ...]]] = MappingProxyType(
+    {
+        "loom-control-plane": (
+            65532,
+            ("python", "-I", "-B", "-c", "import loom.data_lifecycle_maintenance"),
+        ),
+    }
+)
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _IMAGE_TAG_RE = re.compile(r"^staging-[a-z0-9][a-z0-9-]{5,63}$")
@@ -115,8 +123,7 @@ class ImageBuildSession:
         if artifact is not None and (
             artifact.plan_digest != image_plan_digest()
             or any(
-                descriptor.revision != resolved_sha
-                for descriptor in artifact.descriptors.values()
+                descriptor.revision != resolved_sha for descriptor in artifact.descriptors.values()
             )
         ):
             raise ValueError("seeded rollout image artifact identity is invalid")
@@ -151,6 +158,7 @@ def image_plan_digest() -> str:
     payload = {
         "browser_entrypoint": BROWSER_ENTRYPOINT,
         "images": ALL_BUILD_IMAGES,
+        "nonroot_runtime_probes": dict(NONROOT_RUNTIME_PROBES),
         "revision_label": REVISION_LABEL,
     }
     return hashlib.sha256(
@@ -291,7 +299,33 @@ def verify_image_contract(
         ):
             raise ValueError(f"rollout image contract drifted for {name}")
         descriptors[name] = descriptor
+    _verify_nonroot_runtime_contract(run, image_tag=image_tag)
     return _artifact_set(descriptors)
+
+
+def _verify_nonroot_runtime_contract(run: DockerRunner, *, image_tag: str) -> None:
+    """Launch bounded no-network imports under every declared non-root identity."""
+    for name, (uid, command) in NONROOT_RUNTIME_PROBES.items():
+        entrypoint, *arguments = command
+        result = run(
+            (
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--read-only",
+                "--user",
+                f"{uid}:{uid}",
+                "--entrypoint",
+                entrypoint,
+                f"{name}:{image_tag}",
+                *arguments,
+            ),
+            None,
+        )
+        if result.returncode != 0:
+            raise ValueError(f"rollout image non-root runtime failed for {name}")
 
 
 def _artifact_set(descriptors: Mapping[str, ImageDescriptor]) -> ImageArtifactSet:
@@ -322,6 +356,7 @@ __all__ = [
     "AUXILIARY_ROLLOUT_IMAGES",
     "BROWSER_ENTRYPOINT",
     "BROWSER_IMAGE",
+    "NONROOT_RUNTIME_PROBES",
     "REHEARSAL_POSTGRES_ENTRYPOINT",
     "REHEARSAL_POSTGRES_IMAGE",
     "REVISION_LABEL",

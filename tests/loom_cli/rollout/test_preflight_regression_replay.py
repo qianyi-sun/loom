@@ -12,9 +12,12 @@ from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_dig
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
+    REVISION_LABEL,
     ROLLOUT_IMAGES,
     ImageArtifactSet,
+    ImageBuildSession,
     ImageDescriptor,
+    image_plan_digest,
 )
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -27,6 +30,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
+    build_image_preflight_checks,
     build_manifest_preflight_checks,
     build_rehearsal_checks,
     build_staging_baseline_checks,
@@ -62,7 +66,7 @@ def _images() -> ImageArtifactSet:
             )
             for index, (name, _dockerfile) in enumerate(ALL_BUILD_IMAGES)
         },
-        plan_digest="1" * 64,
+        plan_digest=image_plan_digest(),
         artifact_digest="2" * 64,
     )
 
@@ -160,6 +164,34 @@ spec:
 """
 
 
+def _nonroot_contract_runner(argv, _cwd):
+    command = tuple(argv)
+    if command[:3] == ("docker", "image", "inspect"):
+        name = command[-1].split(":", 1)[0]
+        descriptor = _images().descriptors[name]
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                [
+                    {
+                        "Id": descriptor.image_id,
+                        "Os": descriptor.os,
+                        "Architecture": descriptor.architecture,
+                        "Config": {
+                            "Labels": {REVISION_LABEL: descriptor.revision},
+                            "Entrypoint": list(descriptor.entrypoint),
+                        },
+                    }
+                ]
+            ),
+            "",
+        )
+    if command[:2] == ("docker", "run"):
+        return subprocess.CompletedProcess(argv, 1, "", "permission denied")
+    raise AssertionError(command)
+
+
 def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
     repo_root = Path(__file__).resolve().parents[3]
     config_digest = "7" * 64
@@ -234,6 +266,19 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
         namespace="loom-staging",
         expected_candidate_sha=_CANDIDATE,
         expected_config_digest=config_digest,
+    )
+    _image_build, image_contract = build_image_preflight_checks(
+        _nonroot_contract_runner,
+        candidate_root=repo_root,
+        image_tag="staging-aaaaaaa",
+        expected_candidate_sha=_CANDIDATE,
+        session=ImageBuildSession(
+            _nonroot_contract_runner,
+            candidate_root=repo_root,
+            image_tag="staging-aaaaaaa",
+            resolved_sha=_CANDIDATE,
+            artifact=_images(),
+        ),
     )
 
     probes = {
@@ -362,13 +407,23 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
                 }
             ),
         ),
+        RegressionReplayCase(
+            "control-plane-nonroot-source-permissions",
+            image_contract,
+            CheckContext(
+                {
+                    "candidate.sha": _CANDIDATE,
+                    "image.plan.sha256": image_plan_digest(),
+                }
+            ),
+        ),
     )
 
 
 def test_all_historical_blockers_replay_through_production_checks(tmp_path: Path) -> None:
     evidence = replay_regression_manifest(_cases(tmp_path))
 
-    assert len(evidence.implementation_digests) == 9
+    assert len(evidence.implementation_digests) == 10
     assert set(evidence.implementation_digests) == set(evidence.evidence_hashes)
 
 
