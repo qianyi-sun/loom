@@ -30,6 +30,7 @@ from loom_cli.rollout.operator.manifest_apply_contract import (
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+_LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 _ALLOWED_MANAGERS = frozenset(
     {
         MANIFEST_FIELD_MANAGER,
@@ -498,13 +499,22 @@ def _semantic_state(resource: Mapping[str, object]) -> dict[str, object]:
         "apiVersion": resource.get("apiVersion"),
         "kind": resource.get("kind"),
         "metadata": {
-            "annotations": metadata.get("annotations", {}),
+            "annotations": _semantic_annotations(metadata),
             "labels": metadata.get("labels", {}),
             "name": metadata.get("name"),
             "namespace": metadata.get("namespace"),
         },
         "spec": spec,
     }
+
+
+def _semantic_annotations(metadata: Mapping[str, object]) -> dict[str, object]:
+    value = metadata.get("annotations", {})
+    if not isinstance(value, dict):
+        raise ManifestOwnershipAdoptionError("semantic annotations are invalid")
+    annotations = copy.deepcopy(value)
+    annotations.pop(_LAST_APPLIED_ANNOTATION, None)
+    return annotations
 
 
 def _plan_digest(plan: ManifestOwnershipAdoptionPlan) -> str:

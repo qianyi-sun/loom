@@ -1530,6 +1530,10 @@ the server dry-run must still prove the overlay is a semantic no-op.
 For that proof only, a missing NetworkPolicy rule list is equivalent to `[]`
 when the matching `policyTypes` entry is explicit; a non-empty rule change is
 never normalized away.
+The exact legacy `kubectl.kubernetes.io/last-applied-configuration` annotation
+is also excluded from that semantic comparison because it is client-side
+bookkeeping and server dry-run may omit it. Every other annotation remains
+protected and must match.
 
 If a request claims the epoch and adopts only part of the four-resource set
 before failing, preserve that request and use a new request only after a new

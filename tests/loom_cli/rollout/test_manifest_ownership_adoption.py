@@ -315,6 +315,51 @@ def test_dry_run_must_be_semantic_noop_and_binds_exact_live_prestate() -> None:
         )
 
 
+def test_dry_run_ignores_only_legacy_last_applied_annotation() -> None:
+    live = _live()
+    for resource in live:
+        metadata = resource["metadata"]
+        assert isinstance(metadata, dict)
+        metadata["annotations"] = {
+            "kubectl.kubernetes.io/last-applied-configuration": "legacy",
+            "loom.example/protected": "exact",
+        }
+    plan = build_manifest_ownership_adoption_plan(
+        artifact=_artifact(),
+        live_resources=live,
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        mutation_epoch=3,
+    )
+    dry_run = copy.deepcopy(live)
+    for resource in dry_run:
+        metadata = resource["metadata"]
+        assert isinstance(metadata, dict)
+        metadata["annotations"] = {"loom.example/protected": "exact"}
+
+    assert (
+        len(
+            verify_ownership_adoption_dry_run(
+                plan,
+                live_resources=live,
+                dry_run_resources=dry_run,
+            )
+        )
+        == 64
+    )
+
+    changed = copy.deepcopy(dry_run)
+    changed_metadata = changed[0]["metadata"]
+    assert isinstance(changed_metadata, dict)
+    changed_metadata["annotations"] = {}
+    with pytest.raises(ManifestOwnershipAdoptionError, match="change live state"):
+        verify_ownership_adoption_dry_run(
+            plan,
+            live_resources=live,
+            dry_run_resources=changed,
+        )
+
+
 def test_maintenance_force_command_is_explicit_and_bounded() -> None:
     dry = ownership_adoption_argv(
         kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
