@@ -358,6 +358,7 @@ def test_check_rejects_extra_or_rebound_minio_policy(tmp_path: Path) -> None:
     installer, runner = _installer(tmp_path)
     installer.install(TEAM_ID)
     original_run = runner.__call__
+    drift_reads = 0
 
     def drifted_policy(
         argv: Sequence[str],
@@ -365,8 +366,10 @@ def test_check_rejects_extra_or_rebound_minio_policy(tmp_path: Path) -> None:
         input: str | None,
         timeout: int,
     ) -> Result:
+        nonlocal drift_reads
         command = tuple(argv)
         if "pod/loom-minio-0" in command and "admin user info" in command[-1]:
+            drift_reads += 1
             return Result(
                 stdout="\n".join(
                     (
@@ -390,6 +393,7 @@ def test_check_rejects_extra_or_rebound_minio_policy(tmp_path: Path) -> None:
     installer.run = drifted_policy
 
     assert installer.check()["failures"] == ["readonly-minio"]
+    assert drift_reads == 5
 
 
 def test_check_retries_one_stale_minio_authority_read(tmp_path: Path) -> None:

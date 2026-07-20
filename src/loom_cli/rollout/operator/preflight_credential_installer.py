@@ -62,6 +62,7 @@ _TOKEN_AUDIENCE = "https://kubernetes.default.svc.cluster.local"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{32,1024}$")
 _READONLY_PROBE_NAME = "staging-rollout-readonly-probe"
 _READONLY_PROBE_ACTOR = "deployment:staging-rollout"
+_MINIO_AUTHORITY_RETRY_DELAYS = (0.25, 0.5, 1.0, 1.0)
 _CHILD_ENVIRONMENT = {
     "HOME": "/root",
     "LANG": "C.UTF-8",
@@ -564,14 +565,14 @@ class PreflightCredentialInstaller:
 
     def _check_minio_authority(self, credential: ReadonlyMinioCredential) -> None:
         last_error: CredentialInstallError | None = None
-        for attempt in range(3):
+        for attempt in range(len(_MINIO_AUTHORITY_RETRY_DELAYS) + 1):
             try:
                 self._check_minio_authority_once(credential)
                 return
             except CredentialInstallError as exc:
                 last_error = exc
-                if attempt < 2:
-                    self.sleep(0.2)
+                if attempt < len(_MINIO_AUTHORITY_RETRY_DELAYS):
+                    self.sleep(_MINIO_AUTHORITY_RETRY_DELAYS[attempt])
         if last_error is None:  # pragma: no cover - fixed non-empty range owns this
             raise CredentialInstallError("readonly MinIO authority check did not run")
         raise last_error

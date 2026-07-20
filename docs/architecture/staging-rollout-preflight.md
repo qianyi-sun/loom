@@ -324,9 +324,10 @@ delivered only on stdin, never argv, environment, logs, or evidence. A missing
 stdin-forwarding flag fails before policy publication and is a preflight
 coverage defect, not a retryable rollout failure.
 MinIO IAM publication may briefly return a stale read immediately after an
-exact policy attachment. The installer performs only three bounded read-only
-observations of the same immutable user/policy contract; every field must
-converge exactly, and persistent absence or drift remains a hard failure.
+exact policy attachment. The installer performs only five bounded read-only
+observations over 2.75 seconds of the same immutable user/policy contract;
+every field must converge exactly, and persistent absence or drift remains a
+hard failure.
 
 Lease eligibility is an admission decision, not a requirement that a reusable
 lease already exist. An exact, fresh, restore-verified active lease selects
