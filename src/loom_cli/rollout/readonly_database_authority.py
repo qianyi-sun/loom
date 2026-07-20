@@ -68,7 +68,7 @@ WHERE environment = 'staging' AND namespace = 'loom-staging'
 _CAPACITY_SQL = """
 SELECT environment, namespace, object_count, bytes_used, disk_free_percent,
        inode_free_percent, policy_sha256, evidence_sha256, source,
-       extract(epoch FROM observed_at)::bigint AS observed_at_epoch
+       floor(extract(epoch FROM observed_at))::bigint AS observed_at_epoch
 FROM staging_lifecycle_capacity
 WHERE environment = 'staging' AND namespace = 'loom-staging'
 """.strip()

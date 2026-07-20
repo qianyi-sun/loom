@@ -115,7 +115,7 @@ def _capacity() -> tuple[dict[str, object], ReadonlyDatabaseEvidence]:
         "gc_required": False,
         "inode_free_percent": model.inode_free_percent,
         "object_count": model.object_count,
-        "observed_at": "2026-07-20T00:00:00+00:00",
+        "observed_at": "2026-07-20T00:00:00.640068+00:00",
         "policy_sha256": staging_capacity_policy_digest(),
     }
     database_capacity = {
@@ -128,7 +128,7 @@ def _capacity() -> tuple[dict[str, object], ReadonlyDatabaseEvidence]:
         "policy_sha256": staging_capacity_policy_digest(),
         "evidence_sha256": model.evidence_digest,
         "source": "exact-object-inventory-v1",
-        "observed_at_epoch": int(datetime(2026, 7, 20, tzinfo=UTC).timestamp()),
+        "observed_at_epoch": int(datetime(2026, 7, 20, 0, 0, 0, 640068, tzinfo=UTC).timestamp()),
     }
     database = ReadonlyDatabaseEvidence(
         schema_revision="0069",
@@ -191,7 +191,7 @@ def _service(
         load_artifacts=lambda _candidate, _epoch: loaded,  # type: ignore[arg-type]
         commands=commands,
         read_database=lambda: database,
-        now=lambda: datetime(2026, 7, 20, tzinfo=UTC),
+        now=lambda: datetime(2026, 7, 20, 0, 0, 1, tzinfo=UTC),
         expected_buckets=("trajectories", "artifacts"),
         expected_filesystem_paths=("/var/lib/loom-minio-capacity/0",),
     )

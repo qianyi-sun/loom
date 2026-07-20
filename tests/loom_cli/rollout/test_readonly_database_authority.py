@@ -104,6 +104,13 @@ def test_current_database_requires_exact_epoch_and_capacity() -> None:
     assert len(evidence.evidence_sha256) == 64
 
 
+def test_capacity_query_floors_fractional_seconds_for_exact_identity() -> None:
+    assert (
+        "floor(extract(epoch FROM observed_at))::bigint"
+        in readonly_database_authority._CAPACITY_SQL
+    )
+
+
 def test_current_database_binds_sorted_immutable_inventory_in_same_snapshot() -> None:
     row = {
         "authoritative_source": "catalog:sha256:" + "f" * 64,
