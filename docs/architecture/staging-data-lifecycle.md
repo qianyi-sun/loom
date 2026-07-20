@@ -142,6 +142,30 @@ submission. Missing owners, cross-team links, incomplete bucket/key metadata,
 and digest/size/version drift are returned together as blockers. There is no
 prefix fallback.
 
+The same inventory also reconciles physical legacy objects that were written
+outside an artifact row's single `storage` descriptor. Each accepted object is
+still a separate bucket/key/version/digest/size registration: the classifier
+never converts a directory into deletion authority. It recognizes only these
+database-proven layouts:
+
+- `<team>/<trial>/main/...` workspaces and exact
+  `<team>/<trial>/{events.jsonl,atif.json}` trajectories, when both UUIDs match
+  the trial row;
+- delivery-export sidecars whose team, batch, and artifact UUIDs all match;
+- family-state snapshots whose batch and complete family key match one
+  `batch_family_state` row;
+- user TaskSet roots whose team and slug match one `task_sets` row; these are
+  pinned catalog authority, not execution-history deletion authority; and
+- the two fixed pre-lifecycle sample/catalog roots, retained under pinned
+  system authority.
+
+Every key must use the strict canonical grammar, every S3 inventory entry must
+carry a timezone-aware creation timestamp, and a second exact GET must reproduce
+the enumerated version and size while producing its SHA-256. A malformed,
+cross-team, unknown, changed, disappeared, or delete-marker identity remains a
+blocker. This permits referential cleanup of legacy trial/family/export objects
+without putting TaskSet, catalog, bootstrap, or system inputs into the purge.
+
 A historical LLM-call row can legitimately outlive a trial because the legacy
 schema did not enforce that reference. Such a row still carries an exact team,
 row identity and capture time, so the classifier assigns it a distinct

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -12,6 +13,7 @@ from loom.data_lifecycle_inventory_s3 import (
 from loom.data_lifecycle_inventory_sql import LifecycleInventorySnapshot
 
 SCOPE = GcScope(environment="staging", namespace="loom-staging")
+NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
 
 
 class _Paginator:
@@ -26,12 +28,12 @@ class _Paginator:
 
 class _Client:
     def __init__(self) -> None:
-        self.current = _Paginator([{"Contents": [{"Key": "a", "Size": 1}]}])
+        self.current = _Paginator([{"Contents": [{"Key": "a", "Size": 1, "LastModified": NOW}]}])
         self.versions = _Paginator(
             [
                 {
-                    "Versions": [{"Key": "b", "VersionId": "v1", "Size": 2}],
-                    "DeleteMarkers": [{"Key": "old", "VersionId": "d1"}],
+                    "Versions": [{"Key": "b", "VersionId": "v1", "Size": 2, "LastModified": NOW}],
+                    "DeleteMarkers": [{"Key": "old", "VersionId": "d1", "LastModified": NOW}],
                 }
             ]
         )
@@ -54,6 +56,18 @@ def test_inventory_lists_current_versions_and_delete_markers_exactly() -> None:
     ]
     assert client.current.calls == [{"Bucket": "plain"}]
     assert client.versions.calls == [{"Bucket": "versioned"}]
+    assert all(item.last_modified == NOW for item in observed)
+    assert [item.delete_marker for item in observed] == [False, False, True]
+
+
+def test_inventory_rejects_naive_last_modified_authority() -> None:
+    client = _Client()
+    client.current = _Paginator(
+        [{"Contents": [{"Key": "a", "Size": 1, "LastModified": datetime(2026, 7, 19, 12)}]}]
+    )
+
+    with pytest.raises(RuntimeError, match="invalid LastModified authority"):
+        S3ObservedObjectInventory(client).load(buckets=["plain"])
 
 
 def test_reconciliation_binds_both_orphan_directions_and_size_drift() -> None:

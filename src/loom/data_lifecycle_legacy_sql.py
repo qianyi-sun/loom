@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import Any, Protocol
@@ -13,14 +13,21 @@ from uuid import UUID
 from sqlalchemy import Connection, Engine, text
 
 from loom.data_lifecycle import DataClass, OwnerKind
-from loom.data_lifecycle_gc import GcScope
+from loom.data_lifecycle_gc import GcScope, ObservedObject
 from loom.data_lifecycle_legacy import (
     LegacyAbsentObject,
+    LegacyAuthoritySeed,
     LegacyClassificationError,
     LegacyClassificationPlan,
     LegacyObject,
     LegacyRow,
+    LegacySupplementalObject,
     build_legacy_classification_plan,
+)
+from loom.data_lifecycle_legacy_supplemental import (
+    LegacyArtifactSource,
+    LegacySupplementalSources,
+    inspect_supplemental_object,
 )
 from loom.staging_mutation_epoch import (
     MutationEpochAdvance,
@@ -41,6 +48,12 @@ class LegacyObjectInspector(Protocol):
         object_key: str,
         version_id: str | None,
     ) -> tuple[str | None, str, int] | None: ...
+
+
+class LegacyObjectInventory(Protocol):
+    """Enumerate exact observed identities without mutation authority."""
+
+    def load(self, *, buckets: Sequence[str]) -> tuple[ObservedObject, ...]: ...
 
 
 def _fingerprint(values: Iterable[object]) -> str:
@@ -353,6 +366,118 @@ def _inspect_artifacts(
     return objects, absent_objects, blockers
 
 
+def _authority_seed(row: LegacyRow) -> LegacyAuthoritySeed:
+    return LegacyAuthoritySeed(
+        team_id=row.team_id,
+        data_class=row.data_class,
+        owner_kind=row.owner_kind,
+        owner_id=row.owner_id,
+        created_at=row.created_at,
+        pinned=row.pinned,
+    )
+
+
+def _load_supplemental_sources(
+    connection: Connection,
+    *,
+    rows: Sequence[LegacyRow],
+    artifacts: Sequence[tuple[LegacyRow, Any]],
+) -> LegacySupplementalSources:
+    trials = {str(row.row_id): _authority_seed(row) for row in rows if row.table == "trials"}
+    batches = {str(row.row_id): _authority_seed(row) for row in rows if row.table == "batches"}
+    artifact_sources = {
+        str(row.row_id): LegacyArtifactSource(
+            authority=_authority_seed(row),
+            batch_id=str(source.batch_id) if source.batch_id is not None else None,
+        )
+        for row, source in artifacts
+    }
+    task_sets: dict[tuple[str, str], LegacyAuthoritySeed] = {}
+    for item in connection.execute(
+        text(
+            "SELECT id, owning_team_id, slug, created_at FROM task_sets "
+            "ORDER BY owning_team_id, slug"
+        )
+    ):
+        task_sets[(str(item.owning_team_id), item.slug)] = LegacyAuthoritySeed(
+            team_id=item.owning_team_id,
+            data_class=DataClass.CATALOG,
+            owner_kind=OwnerKind.SYSTEM,
+            owner_id=f"taskset:{item.id}",
+            created_at=item.created_at,
+            pinned=True,
+        )
+    family_states = frozenset(
+        (str(item.batch_id), item.family_key)
+        for item in connection.execute(
+            text(
+                "SELECT batch_id, family_key FROM batch_family_state ORDER BY batch_id, family_key"
+            )
+        )
+    )
+    return LegacySupplementalSources(
+        trials=trials,
+        batches=batches,
+        artifacts=artifact_sources,
+        task_sets=task_sets,
+        family_states=family_states,
+    )
+
+
+def _inspect_supplemental_objects(
+    observed: Iterable[ObservedObject],
+    *,
+    existing_identities: set[tuple[str, str, str]],
+    sources: LegacySupplementalSources,
+    inspector: LegacyObjectInspector,
+    bucket_aliases: Mapping[str, str],
+    workers: int,
+) -> tuple[list[LegacyAuthoritySeed], list[LegacySupplementalObject], list[str]]:
+    artifacts_bucket = bucket_aliases.get("artifacts")
+    trajectories_bucket = bucket_aliases.get("trajectories")
+    if not artifacts_bucket or not trajectories_bucket:
+        return [], [], ["legacy supplemental inventory requires exact bucket aliases"]
+    pending_items = (item for item in observed if item.identity not in existing_identities)
+    authorities: list[LegacyAuthoritySeed] = []
+    objects: list[LegacySupplementalObject] = []
+    blockers: list[str] = []
+
+    def inspect(item: ObservedObject) -> tuple[LegacyAuthoritySeed, LegacySupplementalObject]:
+        return inspect_supplemental_object(
+            item,
+            artifacts_bucket=artifacts_bucket,
+            trajectories_bucket=trajectories_bucket,
+            sources=sources,
+            inspector=inspector,
+        )
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="legacy-supplemental") as pool:
+        pending: dict[Future[tuple[LegacyAuthoritySeed, LegacySupplementalObject]], None] = {}
+
+        def fill() -> None:
+            while len(pending) < workers * 2:
+                try:
+                    item = next(pending_items)
+                except StopIteration:
+                    return
+                pending[pool.submit(inspect, item)] = None
+
+        fill()
+        while pending:
+            completed, _remaining = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                del pending[future]
+                try:
+                    authority, object_item = future.result()
+                except LegacyClassificationError as exc:
+                    blockers.append(str(exc))
+                else:
+                    authorities.append(authority)
+                    objects.append(object_item)
+            fill()
+    return authorities, objects, blockers
+
+
 def _copy_rows(
     connection: Connection,
     statement: str,
@@ -438,6 +563,12 @@ def _stage_plan(connection: Connection, plan: LegacyClassificationPlan) -> None:
         for row in plan.rows
         if row.table == "artifacts"
     }
+
+    def object_authority(item: LegacyObject | LegacySupplementalObject) -> UUID:
+        if isinstance(item, LegacySupplementalObject):
+            return authority_by_owner[item.authority_key]
+        return artifact_authority[item.row_id]
+
     _copy_rows(
         connection,
         "COPY legacy_object_plan "
@@ -445,7 +576,7 @@ def _stage_plan(connection: Connection, plan: LegacyClassificationPlan) -> None:
         "FROM STDIN",
         (
             (
-                artifact_authority[item.row_id],
+                object_authority(item),
                 item.bucket,
                 item.object_key,
                 item.version_id or "",
@@ -467,7 +598,7 @@ def _apply_staged_plan(connection: Connection, plan: LegacyClassificationPlan) -
             "expires_at,pinned,state,metadata) "
             "SELECT id,:environment,:namespace,team_id,data_class,owner_kind,owner_id,"
             "created_at,expires_at,pinned,'active',"
-            "jsonb_build_object('classification','legacy-staging-v1',"
+            "jsonb_build_object('classification','legacy-staging-v2',"
             "'inventory_digest',CAST(:digest AS text),'object_state',object_state,"
             "'expire_created_before',CAST(:expire_created_before AS text)) "
             "FROM legacy_authority_plan ON CONFLICT DO NOTHING"
@@ -490,7 +621,7 @@ def _apply_staged_plan(connection: Connection, plan: LegacyClassificationPlan) -
             "AND a.owner_kind=p.owner_kind AND a.owner_id=p.owner_id "
             "AND a.created_at=p.created_at AND a.expires_at IS NOT DISTINCT FROM p.expires_at "
             "AND a.pinned=p.pinned AND a.state='active' "
-            "AND a.metadata=jsonb_build_object('classification','legacy-staging-v1',"
+            "AND a.metadata=jsonb_build_object('classification','legacy-staging-v2',"
             "'inventory_digest',CAST(:digest AS text),'object_state',p.object_state,"
             "'expire_created_before',CAST(:expire_created_before AS text))"
         ),
@@ -561,11 +692,13 @@ class SqlAlchemyLegacyClassifier:
         engine: Engine,
         inspector: LegacyObjectInspector,
         *,
+        object_inventory: LegacyObjectInventory | None = None,
         bucket_aliases: Mapping[str, str] | None = None,
         inspection_workers: int = 1,
     ) -> None:
         self._engine = engine
         self._inspector = inspector
+        self._object_inventory = object_inventory
         self._bucket_aliases = {} if bucket_aliases is None else dict(bucket_aliases)
         if any(
             not key or key != key.strip() or not value or value != value.strip()
@@ -586,6 +719,8 @@ class SqlAlchemyLegacyClassifier:
         blockers: list[str] = []
         objects: list[LegacyObject] = []
         absent_objects: list[LegacyAbsentObject] = []
+        supplemental_authorities: list[LegacyAuthoritySeed] = []
+        supplemental_objects: list[LegacySupplementalObject] = []
         with self._engine.connect().execution_options(
             isolation_level="REPEATABLE READ"
         ) as connection:
@@ -603,6 +738,11 @@ class SqlAlchemyLegacyClassifier:
                     )
                 rows, artifacts, row_blockers = _load_rows(connection)
                 blockers.extend(row_blockers)
+                supplemental_sources = _load_supplemental_sources(
+                    connection,
+                    rows=rows,
+                    artifacts=artifacts,
+                )
         objects, absent_objects, object_blockers = _inspect_artifacts(
             artifacts,
             self._inspector,
@@ -610,12 +750,35 @@ class SqlAlchemyLegacyClassifier:
             workers=self._inspection_workers,
         )
         blockers.extend(object_blockers)
+        if self._object_inventory is not None:
+            observed = self._object_inventory.load(
+                buckets=(
+                    self._bucket_aliases.get("artifacts", ""),
+                    self._bucket_aliases.get("trajectories", ""),
+                )
+            )
+            supplemental_authorities, supplemental_objects, supplemental_blockers = (
+                _inspect_supplemental_objects(
+                    observed,
+                    existing_identities=(
+                        {item.identity for item in objects}
+                        | {item.identity for item in absent_objects}
+                    ),
+                    sources=supplemental_sources,
+                    inspector=self._inspector,
+                    bucket_aliases=self._bucket_aliases,
+                    workers=self._inspection_workers,
+                )
+            )
+            blockers.extend(supplemental_blockers)
         return build_legacy_classification_plan(
             scope=scope,
             mutation_epoch=int(epoch),
             planned_at=planned_at,
             rows=rows,
             objects=objects,
+            supplemental_authorities=supplemental_authorities,
+            supplemental_objects=supplemental_objects,
             absent_objects=absent_objects,
             expire_created_before=expire_created_before,
             additional_blockers=blockers,

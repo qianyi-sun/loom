@@ -92,6 +92,85 @@ class LegacyObject:
 
 
 @dataclass(frozen=True, slots=True)
+class LegacyAuthoritySeed:
+    """An exact legacy owner that has no lifecycle-bearing source row.
+
+    This is deliberately separate from :class:`LegacyRow`: applying a seed
+    creates only the lifecycle authority and never grants permission to update
+    an unrelated table.  It is used for durable catalog/system objects whose
+    owning rows predate the execution-data lifecycle schema.
+    """
+
+    team_id: UUID | None
+    data_class: DataClass
+    owner_kind: OwnerKind
+    owner_id: str
+    created_at: datetime
+    pinned: bool
+
+    def __post_init__(self) -> None:
+        if not self.owner_id or self.owner_id != self.owner_id.strip():
+            raise ValueError("legacy lifecycle owner id must be normalized")
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise ValueError("legacy lifecycle authority time must be timezone-aware")
+        if self.team_id is None and not self.pinned:
+            raise ValueError("unowned legacy authorities must be pinned")
+        if self.data_class in {DataClass.CATALOG, DataClass.SYSTEM} and not self.pinned:
+            raise ValueError("legacy catalog/system authorities must be pinned")
+
+
+@dataclass(frozen=True, slots=True)
+class LegacySupplementalObject:
+    """Exact object evidence bound to an already classified logical owner."""
+
+    authority_data_class: DataClass
+    authority_owner_kind: OwnerKind
+    authority_owner_id: str
+    bucket: str
+    object_key: str
+    version_id: str | None
+    content_sha256: str
+    size_bytes: int
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.authority_owner_id or (
+            self.authority_owner_id != self.authority_owner_id.strip()
+        ):
+            raise ValueError("legacy supplemental object owner must be normalized")
+        if (
+            not self.bucket
+            or self.bucket != self.bucket.strip()
+            or not self.object_key
+            or self.object_key != self.object_key.strip()
+            or self.object_key.startswith("/")
+        ):
+            raise ValueError("legacy object identity must be normalized and relative")
+        if self.version_id is not None and (
+            not self.version_id or self.version_id != self.version_id.strip()
+        ):
+            raise ValueError("legacy object version must be normalized")
+        if _SHA256_RE.fullmatch(self.content_sha256) is None:
+            raise ValueError("legacy object SHA-256 is invalid")
+        if self.size_bytes < 0:
+            raise ValueError("legacy object size must be non-negative")
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise ValueError("legacy object time must be timezone-aware")
+
+    @property
+    def authority_key(self) -> tuple[DataClass, OwnerKind, str]:
+        return (
+            self.authority_data_class,
+            self.authority_owner_kind,
+            self.authority_owner_id,
+        )
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return self.bucket, self.object_key, self.version_id or ""
+
+
+@dataclass(frozen=True, slots=True)
 class LegacyAbsentObject:
     """Exact legacy DB reference proven absent from the observed object store."""
 
@@ -128,7 +207,7 @@ class LegacyAbsentObject:
 @dataclass(frozen=True, slots=True)
 class LegacyAuthority:
     id: UUID
-    team_id: UUID
+    team_id: UUID | None
     data_class: DataClass
     owner_kind: OwnerKind
     owner_id: str
@@ -151,7 +230,7 @@ class LegacyClassificationPlan:
     expire_created_before: datetime | None
     authorities: tuple[LegacyAuthority, ...]
     rows: tuple[LegacyRow, ...]
-    objects: tuple[LegacyObject, ...]
+    objects: tuple[LegacyObject | LegacySupplementalObject, ...]
     absent_objects: tuple[LegacyAbsentObject, ...]
     blockers: tuple[str, ...]
     inventory_digest: str
@@ -163,16 +242,21 @@ class LegacyClassificationPlan:
             raise LegacyClassificationError("legacy classification contains no rows")
 
 
-def _authority_id(scope: GcScope, row: LegacyRow) -> UUID:
+def _authority_id(
+    scope: GcScope,
+    data_class: DataClass,
+    owner_kind: OwnerKind,
+    owner_id: str,
+) -> UUID:
     return uuid5(
         _AUTHORITY_NAMESPACE,
         "\0".join(
             (
                 scope.environment,
                 scope.namespace,
-                row.data_class.value,
-                row.owner_kind.value,
-                row.owner_id,
+                data_class.value,
+                owner_kind.value,
+                owner_id,
             )
         ),
     )
@@ -186,12 +270,12 @@ def _payload(
     expire_created_before: datetime | None,
     authorities: tuple[LegacyAuthority, ...],
     rows: tuple[LegacyRow, ...],
-    objects: tuple[LegacyObject, ...],
+    objects: tuple[LegacyObject | LegacySupplementalObject, ...],
     absent_objects: tuple[LegacyAbsentObject, ...],
     blockers: tuple[str, ...],
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "environment": scope.environment,
         "namespace": scope.namespace,
         "mutation_epoch": mutation_epoch,
@@ -227,16 +311,30 @@ def _payload(
             for item in rows
         ],
         "objects": [
-            {
-                "row_table": item.row_table,
-                "row_id": str(item.row_id),
-                "bucket": item.bucket,
-                "object_key": item.object_key,
-                "version_id": item.version_id,
-                "content_sha256": item.content_sha256,
-                "size_bytes": item.size_bytes,
-                "created_at": item.created_at.isoformat(),
-            }
+            (
+                {
+                    "authority_data_class": item.authority_data_class.value,
+                    "authority_owner_kind": item.authority_owner_kind.value,
+                    "authority_owner_id": item.authority_owner_id,
+                    "bucket": item.bucket,
+                    "object_key": item.object_key,
+                    "version_id": item.version_id,
+                    "content_sha256": item.content_sha256,
+                    "size_bytes": item.size_bytes,
+                    "created_at": item.created_at.isoformat(),
+                }
+                if isinstance(item, LegacySupplementalObject)
+                else {
+                    "row_table": item.row_table,
+                    "row_id": str(item.row_id),
+                    "bucket": item.bucket,
+                    "object_key": item.object_key,
+                    "version_id": item.version_id,
+                    "content_sha256": item.content_sha256,
+                    "size_bytes": item.size_bytes,
+                    "created_at": item.created_at.isoformat(),
+                }
+            )
             for item in objects
         ],
         "absent_objects": [
@@ -261,6 +359,8 @@ def build_legacy_classification_plan(
     planned_at: datetime,
     rows: Iterable[LegacyRow],
     objects: Iterable[LegacyObject],
+    supplemental_authorities: Iterable[LegacyAuthoritySeed] = (),
+    supplemental_objects: Iterable[LegacySupplementalObject] = (),
     absent_objects: Iterable[LegacyAbsentObject] = (),
     expire_created_before: datetime | None = None,
     additional_blockers: Iterable[str] = (),
@@ -285,7 +385,7 @@ def build_legacy_classification_plan(
             blockers.append(f"duplicate legacy row {row.table}/{row.row_id}")
             continue
         row_map[row_key] = row
-        authority_id = _authority_id(scope, row)
+        authority_id = _authority_id(scope, row.data_class, row.owner_kind, row.owner_id)
         existing = authority_specs.get(authority_id)
         if existing is not None and (
             existing.team_id != row.team_id
@@ -318,7 +418,46 @@ def build_legacy_classification_plan(
         if row.table == "artifacts":
             artifact_ids.add(row.row_id)
 
-    selected_objects: list[LegacyObject] = []
+    for seed in supplemental_authorities:
+        authority_id = _authority_id(
+            scope,
+            seed.data_class,
+            seed.owner_kind,
+            seed.owner_id,
+        )
+        existing = authority_specs.get(authority_id)
+        if existing is not None and (
+            existing.team_id != seed.team_id
+            or existing.data_class is not seed.data_class
+            or existing.owner_kind is not seed.owner_kind
+            or existing.owner_id != seed.owner_id
+            or existing.pinned != seed.pinned
+        ):
+            blockers.append(
+                f"legacy authority facts conflict for {seed.owner_kind}/{seed.owner_id}"
+            )
+            continue
+        created_at = min(existing.created_at, seed.created_at) if existing else seed.created_at
+        default_expiry = created_at + STAGING_EPHEMERAL_TTL
+        expires_at = None
+        if not seed.pinned:
+            expires_at = (
+                min(default_expiry, expire_created_before)
+                if expire_created_before is not None and created_at < expire_created_before
+                else default_expiry
+            )
+        authority_specs[authority_id] = LegacyAuthority(
+            id=authority_id,
+            team_id=seed.team_id,
+            data_class=seed.data_class,
+            owner_kind=seed.owner_kind,
+            owner_id=seed.owner_id,
+            created_at=created_at,
+            expires_at=expires_at,
+            pinned=seed.pinned,
+        )
+
+    selected_objects: list[LegacyObject | LegacySupplementalObject] = []
     selected_absent: list[LegacyAbsentObject] = []
     seen_objects: set[tuple[str, str, str]] = set()
     object_rows: set[UUID] = set()
@@ -334,6 +473,26 @@ def build_legacy_classification_plan(
         seen_objects.add(object_item.identity)
         object_rows.add(object_item.row_id)
         selected_objects.append(object_item)
+
+    authority_keys = {
+        (item.data_class, item.owner_kind, item.owner_id) for item in authority_specs.values()
+    }
+    for supplemental_object in supplemental_objects:
+        if supplemental_object.authority_key not in authority_keys:
+            blockers.append(
+                "legacy supplemental object has no classified authority "
+                f"{supplemental_object.authority_owner_kind}/"
+                f"{supplemental_object.authority_owner_id}"
+            )
+            continue
+        if supplemental_object.identity in seen_objects:
+            blockers.append(
+                "duplicate legacy object identity "
+                f"{supplemental_object.bucket}/{supplemental_object.object_key}"
+            )
+            continue
+        seen_objects.add(supplemental_object.identity)
+        selected_objects.append(supplemental_object)
 
     for absent_item in absent_objects:
         if absent_item.row_id not in artifact_ids:
@@ -364,7 +523,21 @@ def build_legacy_classification_plan(
         )
     )
     stable_objects = tuple(
-        sorted(selected_objects, key=lambda item: (item.identity, str(item.row_id)))
+        sorted(
+            selected_objects,
+            key=lambda item: (
+                item.identity,
+                str(item.row_id)
+                if isinstance(item, LegacyObject)
+                else "/".join(
+                    (
+                        item.authority_data_class.value,
+                        item.authority_owner_kind.value,
+                        item.authority_owner_id,
+                    )
+                ),
+            ),
+        )
     )
     stable_absent = tuple(
         sorted(selected_absent, key=lambda item: (item.identity, str(item.row_id)))
@@ -454,10 +627,12 @@ def classification_plan_summary(plan: LegacyClassificationPlan) -> Mapping[str, 
 __all__ = [
     "LegacyAbsentObject",
     "LegacyAuthority",
+    "LegacyAuthoritySeed",
     "LegacyClassificationError",
     "LegacyClassificationPlan",
     "LegacyObject",
     "LegacyRow",
+    "LegacySupplementalObject",
     "build_legacy_classification_plan",
     "classification_plan_document",
     "classification_plan_summary",

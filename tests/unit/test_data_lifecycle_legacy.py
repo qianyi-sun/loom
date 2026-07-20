@@ -15,9 +15,11 @@ from loom.data_lifecycle import DataClass, OwnerKind
 from loom.data_lifecycle_gc import GcScope
 from loom.data_lifecycle_legacy import (
     LegacyAbsentObject,
+    LegacyAuthoritySeed,
     LegacyClassificationError,
     LegacyObject,
     LegacyRow,
+    LegacySupplementalObject,
     build_legacy_classification_plan,
     classification_plan_document,
     classification_plan_summary,
@@ -324,6 +326,60 @@ def test_unknown_object_owner_and_duplicate_identity_are_reported_together() -> 
     assert any("duplicate legacy object" in blocker for blocker in plan.blockers)
     assert any("no classified artifact" in blocker for blocker in plan.blockers)
     assert "trial owner missing" in plan.blockers
+
+
+def test_supplemental_authority_and_exact_object_are_digest_bound() -> None:
+    seed = LegacyAuthoritySeed(
+        team_id=TEAM_ID,
+        data_class=DataClass.CATALOG,
+        owner_kind=OwnerKind.SYSTEM,
+        owner_id="taskset:alpha",
+        created_at=NOW,
+        pinned=True,
+    )
+    object_item = LegacySupplementalObject(
+        authority_data_class=seed.data_class,
+        authority_owner_kind=seed.owner_kind,
+        authority_owner_id=seed.owner_id,
+        bucket="loom-staging-artifacts",
+        object_key="tasksets/user/team/alpha/manifest.yaml",
+        version_id=None,
+        content_sha256="f" * 64,
+        size_bytes=9,
+        created_at=NOW,
+    )
+    plan = build_legacy_classification_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        planned_at=NOW,
+        rows=[_artifact()],
+        objects=[_object()],
+        supplemental_authorities=[seed],
+        supplemental_objects=[object_item],
+    )
+
+    plan.require_applicable()
+    assert len(plan.authorities) == 2
+    assert len(plan.objects) == 2
+    assert next(item for item in plan.authorities if item.owner_id == seed.owner_id).pinned
+    document = classification_plan_document(plan)
+    assert document["schema_version"] == 2
+    assert any(
+        item.get("authority_owner_id") == seed.owner_id
+        for item in document["objects"]  # type: ignore[union-attr]
+    )
+
+
+def test_supplemental_authority_rejects_unowned_ephemeral_data() -> None:
+    with pytest.raises(ValueError, match="unowned legacy authorities must be pinned"):
+        LegacyAuthoritySeed(
+            team_id=None,
+            data_class=DataClass.TRIAL,
+            owner_kind=OwnerKind.TRIAL,
+            owner_id="orphan-trial",
+            created_at=NOW,
+            pinned=False,
+        )
 
 
 @pytest.mark.parametrize(

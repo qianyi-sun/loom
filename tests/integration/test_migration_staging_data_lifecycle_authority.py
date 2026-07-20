@@ -30,6 +30,7 @@ from loom.data_lifecycle_gc import (
     AuthorityInventory,
     GcScope,
     LifecycleGcExecutionError,
+    ObservedObject,
     RegisteredObject,
     build_gc_plan,
     execute_gc,
@@ -702,6 +703,14 @@ def test_legacy_artifact_classification_is_digest_approved_and_epoch_bound(
     try:
         with engine.begin() as connection:
             connection.execute(
+                text(
+                    "INSERT INTO staging_mutation_epochs "
+                    "(environment, namespace, epoch, reason) "
+                    "VALUES ('staging','loom-staging',0,'bootstrap') "
+                    "ON CONFLICT (environment) DO NOTHING"
+                )
+            )
+            connection.execute(
                 text("INSERT INTO teams (id,name) VALUES (:id,:name)"),
                 {"id": team_id, "name": f"legacy-{team_id}"},
             )
@@ -800,6 +809,165 @@ def test_legacy_artifact_classification_is_digest_approved_and_epoch_bound(
                     ),
                     {"ids": authority_ids},
                 )
+            connection.execute(text("DELETE FROM teams WHERE id=:id"), {"id": team_id})
+        engine.dispose()
+
+
+def test_legacy_supplemental_catalog_object_is_exact_and_pinned(
+    postgres_url_at_0065: str,
+) -> None:
+    command.upgrade(_cfg(postgres_url_at_0065), "head")
+    team_id = uuid4()
+    artifact_id = uuid4()
+    created_at = datetime(2026, 7, 12, 4, 15, tzinfo=UTC)
+    primary_key = f"teams/{team_id}/artifacts/{artifact_id}.json"
+    catalog_key = f"tasksets/user/{team_id}/alpha/manifest.yaml"
+    bodies = {primary_key: b"artifact", catalog_key: b"manifest"}
+    engine = create_engine(postgres_url_at_0065)
+    created_authority_ids: list[UUID] = []
+
+    class Inspector:
+        def inspect(self, *, bucket, object_key, version_id):
+            assert bucket == "loom-staging-artifacts"
+            assert version_id is None
+            body = bodies[object_key]
+            return None, hashlib.sha256(body).hexdigest(), len(body)
+
+    class Inventory:
+        def load(self, *, buckets):
+            assert tuple(sorted(buckets)) == (
+                "loom-staging-artifacts",
+                "loom-staging-trajectories",
+            )
+            return tuple(
+                ObservedObject(
+                    bucket="loom-staging-artifacts",
+                    object_key=key,
+                    version_id=None,
+                    size_bytes=len(body),
+                    last_modified=created_at,
+                )
+                for key, body in bodies.items()
+            )
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO staging_mutation_epochs "
+                    "(environment, namespace, epoch, reason) "
+                    "VALUES ('staging','loom-staging',0,'bootstrap') "
+                    "ON CONFLICT (environment) DO NOTHING"
+                )
+            )
+            connection.execute(
+                text("INSERT INTO teams (id,name) VALUES (:id,:name)"),
+                {"id": team_id, "name": f"legacy-supplemental-{team_id}"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO artifacts "
+                    "(id, artifact_type, name, team_id, content_hash, storage, created_at) "
+                    "VALUES (:id,'evidence_bundle','legacy',:team_id,:content_hash,"
+                    "CAST(:storage AS jsonb),:created_at)"
+                ),
+                {
+                    "id": artifact_id,
+                    "team_id": team_id,
+                    "content_hash": f"sha256:{hashlib.sha256(b'artifact').hexdigest()}",
+                    "storage": json.dumps(
+                        {
+                            "bucket": "artifacts",
+                            "key": primary_key,
+                            "size_bytes": len(b"artifact"),
+                        }
+                    ),
+                    "created_at": created_at,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO task_sets "
+                    "(id,owning_team_id,slug,display_name,status,intents,manifest_blob_uri,"
+                    "created_at,updated_at) VALUES "
+                    "(:id,:team_id,'alpha','Alpha','ready',ARRAY['evaluation'],:uri,"
+                    ":created_at,:created_at)"
+                ),
+                {
+                    "id": f"ts/{team_id}/alpha",
+                    "team_id": team_id,
+                    "uri": f"s3://loom-staging-artifacts/{catalog_key}",
+                    "created_at": created_at,
+                },
+            )
+        classifier = SqlAlchemyLegacyClassifier(
+            engine,
+            Inspector(),
+            object_inventory=Inventory(),
+            bucket_aliases={
+                "artifacts": "loom-staging-artifacts",
+                "trajectories": "loom-staging-trajectories",
+            },
+        )
+        plan = classifier.inventory(
+            scope=GcScope(environment="staging", namespace="loom-staging"),
+            planned_at=datetime(2026, 7, 20, 4, 15, tzinfo=UTC),
+        )
+        plan.require_applicable()
+        assert len(plan.objects) == 2
+        assert {item.object_key for item in plan.objects} == {primary_key, catalog_key}
+        catalog_authority = next(
+            item for item in plan.authorities if item.owner_id.startswith("taskset:")
+        )
+        created_authority_ids = [
+            item.id
+            for item in plan.authorities
+            if item.owner_id in {str(artifact_id), f"taskset:ts/{team_id}/alpha"}
+        ]
+        assert len(created_authority_ids) == 2
+        assert catalog_authority.data_class is DataClass.CATALOG
+        assert catalog_authority.team_id == team_id
+        assert catalog_authority.pinned is True
+
+        classifier.apply(
+            plan=plan,
+            approved_inventory_digest=plan.inventory_digest,
+            request_id="req-legacy-supplemental",
+            applied_at=datetime(2026, 7, 20, 4, 16, tzinfo=UTC),
+        )
+        with engine.connect() as connection:
+            registered = connection.execute(
+                text(
+                    "SELECT a.data_class,a.pinned,o.object_key FROM data_lifecycle_objects o "
+                    "JOIN data_lifecycle_authorities a ON a.id=o.authority_id "
+                    "ORDER BY o.object_key"
+                )
+            ).all()
+        assert ("catalog", True, catalog_key) in map(tuple, registered)
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE artifacts SET lifecycle_authority_id=NULL WHERE id=:id"),
+                {"id": artifact_id},
+            )
+            if created_authority_ids:
+                connection.execute(
+                    text(
+                        "DELETE FROM data_lifecycle_objects WHERE authority_id IN :ids"
+                    ).bindparams(bindparam("ids", expanding=True)),
+                    {"ids": created_authority_ids},
+                )
+                connection.execute(
+                    text("DELETE FROM data_lifecycle_authorities WHERE id IN :ids").bindparams(
+                        bindparam("ids", expanding=True)
+                    ),
+                    {"ids": created_authority_ids},
+                )
+            connection.execute(
+                text("DELETE FROM task_sets WHERE owning_team_id=:team_id"),
+                {"team_id": team_id},
+            )
+            connection.execute(text("DELETE FROM artifacts WHERE id=:id"), {"id": artifact_id})
             connection.execute(text("DELETE FROM teams WHERE id=:id"), {"id": team_id})
         engine.dispose()
 
@@ -987,7 +1155,7 @@ def test_legacy_absent_object_is_bound_as_explicit_authority_evidence(
         assert authority.data_class == "artifact"
         assert authority.pinned is False
         assert authority.metadata == {
-            "classification": "legacy-staging-v1",
+            "classification": "legacy-staging-v2",
             "expire_created_before": None,
             "inventory_digest": plan.inventory_digest,
             "object_state": "verified_absent",

@@ -88,6 +88,8 @@ class ObservedObject:
     object_key: str
     version_id: str | None
     size_bytes: int
+    last_modified: datetime | None = None
+    delete_marker: bool = False
 
     @property
     def identity(self) -> tuple[str, str, str]:

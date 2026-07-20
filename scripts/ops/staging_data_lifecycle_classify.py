@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from loom.data_lifecycle_gc import GcScope
+from loom.data_lifecycle_inventory_s3 import S3ObservedObjectInventory
 from loom.data_lifecycle_legacy import classification_plan_summary
 from loom.data_lifecycle_legacy_s3 import S3LegacyObjectInspector
 from loom.data_lifecycle_legacy_sql import SqlAlchemyLegacyClassifier
@@ -77,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         classifier = SqlAlchemyLegacyClassifier(
             engine,
             S3LegacyObjectInspector(client),
+            object_inventory=S3ObservedObjectInventory(client),
             bucket_aliases={
                 "artifacts": args.artifacts_bucket,
                 "trajectories": args.trajectories_bucket,

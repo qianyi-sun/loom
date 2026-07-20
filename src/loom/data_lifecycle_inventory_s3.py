@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
+from datetime import datetime
 from typing import Any, Protocol
 
 from loom.data_lifecycle_gc import GcScope, ObservedObject, reconcile_object_inventory
@@ -53,6 +54,7 @@ class S3ObservedObjectInventory:
                         object_key=str(item["Key"]),
                         version_id=None,
                         size_bytes=int(item["Size"]),
+                        last_modified=_last_modified(item),
                     )
                 )
         return result
@@ -68,6 +70,7 @@ class S3ObservedObjectInventory:
                         object_key=str(item["Key"]),
                         version_id=str(item["VersionId"]),
                         size_bytes=int(item["Size"]),
+                        last_modified=_last_modified(item),
                     )
                 )
             for marker in page.get("DeleteMarkers", ()):
@@ -77,9 +80,20 @@ class S3ObservedObjectInventory:
                         object_key=str(marker["Key"]),
                         version_id=str(marker["VersionId"]),
                         size_bytes=0,
+                        last_modified=_last_modified(marker),
+                        delete_marker=True,
                     )
                 )
         return result
+
+
+def _last_modified(item: dict[str, Any]) -> datetime | None:
+    value = item.get("LastModified")
+    if value is None:
+        return None
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise RuntimeError("object inventory returned invalid LastModified authority")
+    return value
 
 
 class ReconcilingLifecycleInventory:
