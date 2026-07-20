@@ -17,7 +17,7 @@ from loom.data_lifecycle_legacy import (
     classification_plan_document,
 )
 from loom.data_lifecycle_legacy_s3 import S3LegacyObjectInspector
-from loom.data_lifecycle_legacy_sql import _artifact_object
+from loom.data_lifecycle_legacy_sql import _artifact_object, _legacy_artifact_authority
 
 NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
 SCOPE = GcScope(environment="staging", namespace="loom-staging")
@@ -137,6 +137,27 @@ def test_pinned_legacy_object_is_registered_without_gc_expiry() -> None:
     document = classification_plan_document(plan)
     assert document["authorities"][0]["pinned"] is True  # type: ignore[index]
     assert document["authorities"][0]["expires_at"] is None  # type: ignore[index]
+
+
+@pytest.mark.parametrize("artifact_type", ("benchmark", "catalog", "bootstrap", "system"))
+def test_only_durable_legacy_data_classes_are_pinned(artifact_type: str) -> None:
+    _data_class, _owner_kind, pinned = _legacy_artifact_authority(artifact_type)
+
+    assert pinned is True
+
+
+@pytest.mark.parametrize(
+    "artifact_type",
+    ("evidence_bundle", "debug_bundle", "atif_projection", "trajectory_bundle"),
+)
+def test_per_run_legacy_artifacts_remain_ephemeral_even_when_shared(
+    artifact_type: str,
+) -> None:
+    assert _legacy_artifact_authority(artifact_type) == (
+        DataClass.ARTIFACT,
+        OwnerKind.ARTIFACT,
+        False,
+    )
 
 
 def test_unknown_object_owner_and_duplicate_identity_are_reported_together() -> None:

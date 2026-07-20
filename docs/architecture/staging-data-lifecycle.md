@@ -115,12 +115,15 @@ S3/MinIO credentials. Missing owners, cross-team links, incomplete bucket/key
 metadata, and digest/size/version drift are returned together as blockers.
 There is no prefix fallback.
 
-Legacy benchmark, catalog, bootstrap, system, and explicitly
-`shared_reusable` artifacts follow the same exact-object inspection path, but
-the classifier registers them as pinned authorities with no expiry. This keeps
-their keys visible to referential reconciliation without ever making them
-eligible for the seven-day execution-history purge. An unknown retention class
-or an object whose exact identity cannot be proven still fails closed.
+Legacy benchmark, catalog, bootstrap, and system artifacts follow the same
+exact-object inspection path, but the classifier registers only those durable
+data classes as pinned authorities with no expiry. A legacy
+`shared_reusable` retention hint does not by itself turn a per-run evidence,
+debug, trajectory, or ATIF artifact into permanent storage; those artifacts
+remain subject to the seven-day execution-history policy. This keeps true
+durable keys visible to referential reconciliation without letting a sharing
+hint create unbounded retention. An unknown data class or an object whose
+exact identity cannot be proven still fails closed.
 
 The inventory digest excludes wall-clock report time, but binds every row
 fingerprint, exact object identity, retention authority, scope, and current

@@ -51,6 +51,19 @@ def _fingerprint(values: Iterable[object]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _legacy_artifact_authority(
+    artifact_type: str,
+) -> tuple[DataClass, OwnerKind, bool]:
+    """Classify retention from the durable data class, never a sharing hint."""
+    if artifact_type == "benchmark":
+        return DataClass.BENCHMARK, OwnerKind.BENCHMARK, True
+    if artifact_type == "catalog":
+        return DataClass.CATALOG, OwnerKind.SYSTEM, True
+    if artifact_type in {"bootstrap", "system"}:
+        return DataClass.SYSTEM, OwnerKind.SYSTEM, True
+    return DataClass.ARTIFACT, OwnerKind.ARTIFACT, False
+
+
 def _row(
     *,
     table: str,
@@ -173,27 +186,7 @@ def _load_rows(
             "WHERE a.lifecycle_authority_id IS NULL ORDER BY a.id"
         )
     ):
-        retention_class = (
-            item.retention.get("class") if isinstance(item.retention, dict) else None
-        )
-        pinned = item.artifact_type in {
-            "benchmark",
-            "catalog",
-            "bootstrap",
-            "system",
-        } or retention_class == "shared_reusable"
-        if item.artifact_type == "benchmark":
-            data_class = DataClass.BENCHMARK
-            owner_kind = OwnerKind.BENCHMARK
-        elif item.artifact_type == "catalog":
-            data_class = DataClass.CATALOG
-            owner_kind = OwnerKind.SYSTEM
-        elif item.artifact_type in {"bootstrap", "system"}:
-            data_class = DataClass.SYSTEM
-            owner_kind = OwnerKind.SYSTEM
-        else:
-            data_class = DataClass.ARTIFACT
-            owner_kind = OwnerKind.ARTIFACT
+        data_class, owner_kind, pinned = _legacy_artifact_authority(item.artifact_type)
         if item.batch_id is not None and item.batch_team_id != item.team_id:
             blockers.append(f"legacy artifact {item.id} has missing or cross-team batch owner")
         if item.trial_id is not None and item.trial_team_id != item.team_id:
