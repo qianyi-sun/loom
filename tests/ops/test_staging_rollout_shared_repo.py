@@ -208,3 +208,44 @@ def test_service_cli_hardcodes_root_and_layout() -> None:
         helper.main(["service-ensure", "--root", "/etc", "--path", "shadow"])
     assert helper.SERVICE_ROOT == Path("/shared_work/loom")
     assert helper.ALLOWED_ENVIRONMENTS == ("development", "staging", "production")
+
+
+def test_service_ensure_never_precreates_sha_and_reports_target(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Privileged setup must ensure ONLY candidates/<env>; the final <sha> dir
+    # is left absent so the materializer can atomically rename-no-replace into
+    # it. Pre-creating an empty <sha> would defeat all-or-nothing publication.
+    captured: dict[str, object] = {}
+
+    def fake(root: object, chain: object, *, ensure: bool) -> dict[str, object]:
+        captured["chain"] = chain
+        captured["ensure"] = ensure
+        return {"model": "service-owned"}
+
+    monkeypatch.setattr(helper, "_converge_service_owned", fake)
+    rc = helper.main(
+        ["service-ensure", "--environment", "staging", "--candidate-sha", "a" * 40],
+    )
+    assert rc == 0
+    assert captured["chain"] == ("candidates", "staging")  # NO sha component
+    assert captured["ensure"] is True
+    import json as _json
+
+    report = _json.loads(capsys.readouterr().out)
+    assert report["candidate_target"] == "/shared_work/loom/candidates/staging/" + "a" * 40
+
+
+def test_atomic_publish_fails_closed_on_existing_target(tmp_path: Path) -> None:
+    # rename-no-replace is what makes publication all-or-nothing: an existing
+    # final target must fail closed rather than overwrite or expose partial data.
+    parent = tmp_path
+    (parent / "src").mkdir()
+    (parent / "dest").mkdir()  # target already exists
+    parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(FileExistsError):
+            helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
+    finally:
+        os.close(parent_fd)

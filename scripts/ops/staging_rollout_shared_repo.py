@@ -496,10 +496,22 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
+            # Privileged setup ensures ONLY the per-env parent
+            # (candidates/<environment>). The final <sha> directory is
+            # deliberately NOT created here: the publisher/materializer builds
+            # the complete candidate in a private temporary tree and atomically
+            # rename-no-replaces it into candidates/<environment>/<sha>. Pre-
+            # creating an empty <sha> would block that rename or expose a
+            # partial candidate.
             report = _converge_service_owned(
                 SERVICE_ROOT,
-                ("candidates", args.environment, args.candidate_sha),
+                ("candidates", args.environment),
                 ensure=args.command == "service-ensure",
+            )
+            # Report the derived publish target for the materializer; do not
+            # create it.
+            report["candidate_target"] = str(
+                SERVICE_ROOT / "candidates" / args.environment / args.candidate_sha,
             )
         else:
             report = converge(ensure=args.command == "ensure")
