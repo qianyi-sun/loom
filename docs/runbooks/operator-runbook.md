@@ -1521,6 +1521,12 @@ validated literals are rendered into one newline-free SQL argument. Do not
 replace this contract with `psql -v` substitution for `-c` statements or with
 operator-provided SQL.
 
+After server-side apply returns, the operator permits only three read-only
+live-state observations over a bounded one-second window (immediate, +250 ms,
++750 ms). This absorbs a stale API-server read without repeating any mutation;
+the successful observation count is journaled. Persistent drift keeps the same
+fail-closed failure code and requires a new request after diagnosis.
+
 Kubernetes may omit an explicitly empty NetworkPolicy `ingress` or `egress`
 array from its live JSON while retaining legacy server-side-apply ownership for
 that field. The adoption overlay includes such an empty field only when the

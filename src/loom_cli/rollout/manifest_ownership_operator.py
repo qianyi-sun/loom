@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +23,7 @@ from loom_cli.rollout.manifest_readiness import ManifestArtifact
 
 _REQUEST_RE = re.compile(r"^req-manifest-ownership-[a-z0-9]{8,32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_POST_APPLY_READ_DELAYS = (0.25, 0.75)
 
 Resource = Mapping[str, object]
 ResourceSet = Sequence[Resource]
@@ -135,6 +137,7 @@ class ManifestOwnershipOperator:
     claim_epoch: EpochClaim
     journal: OwnershipJournal
     now: Callable[[], datetime]
+    settle: Callable[[float], None] = time.sleep
 
     def inventory(self) -> OwnershipInventory:
         epoch = self.read_mutation_epoch()
@@ -225,15 +228,14 @@ class ManifestOwnershipOperator:
             )
 
             stage = "live-state-verification"
-            live_after = tuple(self.load_live())
-            post_apply_sha256 = _verify_post_apply_live(
-                inventory=inventory,
-                live_resources=live_after,
-            )
+            post_apply_sha256, post_apply_attempts = self._verify_live_convergence(inventory)
             self._record(
                 request_id,
                 "live-state-verified",
-                {"post_apply_sha256": post_apply_sha256},
+                {
+                    "attempts": post_apply_attempts,
+                    "post_apply_sha256": post_apply_sha256,
+                },
             )
 
             stage = "final-no-force-dry-run"
@@ -275,6 +277,22 @@ class ManifestOwnershipOperator:
             "post_apply_sha256": post_apply_sha256,
             "final_dry_run_sha256": final_sha256,
         }
+
+    def _verify_live_convergence(self, inventory: OwnershipInventory) -> tuple[str, int]:
+        for attempt in range(1, len(_POST_APPLY_READ_DELAYS) + 2):
+            try:
+                return (
+                    _verify_post_apply_live(
+                        inventory=inventory,
+                        live_resources=tuple(self.load_live()),
+                    ),
+                    attempt,
+                )
+            except ManifestOwnershipAdoptionError:
+                if attempt > len(_POST_APPLY_READ_DELAYS):
+                    raise
+                self.settle(_POST_APPLY_READ_DELAYS[attempt - 1])
+        raise RuntimeError("ownership live convergence attempt accounting drifted")
 
     def _record(self, request_id: str, name: str, evidence: Mapping[str, object]) -> None:
         observed_at = self.now()

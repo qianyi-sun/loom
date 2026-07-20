@@ -120,9 +120,15 @@ class _Harness:
     calls: list[str] = field(default_factory=list)
     fail_force_apply: bool = False
     claimed_epoch: int | None = None
+    post_apply_stale_reads: int = 0
+    stale_live: list[dict[str, object]] | None = None
+    settle_calls: list[float] = field(default_factory=list)
 
     def load_live(self):
         self.calls.append("load-live")
+        if self.stale_live is not None and self.post_apply_stale_reads > 0:
+            self.post_apply_stale_reads -= 1
+            return copy.deepcopy(self.stale_live)
         return copy.deepcopy(self.live)
 
     def force_dry_run(self, payload: str):
@@ -147,6 +153,7 @@ class _Harness:
     def no_force_apply(self, payload: str):
         documents = [item for item in yaml.safe_load_all(payload) if isinstance(item, dict)]
         self.calls.append(f"no-force-apply:{len(documents)}")
+        self.stale_live = copy.deepcopy(self.live)
         desired_by_identity = {_identity(item): item for item in documents}
         self.live = [
             copy.deepcopy(desired_by_identity.get(_identity(item), item)) for item in self.live
@@ -172,6 +179,7 @@ class _Harness:
             claim_epoch=self.claim_epoch,
             journal=self.journal,
             now=lambda: datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+            settle=self.settle_calls.append,
         )
 
 
@@ -276,6 +284,44 @@ def test_post_apply_live_drift_fails_closed() -> None:
             request_id="req-manifest-ownership-12345678",
             approved_inventory_sha256=approved,
         )
+    assert harness.journal.events[-1]["event"] == "failed"
+    assert harness.journal.events[-1]["evidence"]["failure_code"] == (
+        "manifest_ownership.live-state-verification.failed"
+    )
+
+
+def test_post_apply_readback_retries_only_within_bounded_readonly_window() -> None:
+    harness = _Harness(post_apply_stale_reads=1)
+    operator = harness.operator()
+    approved = operator.inventory().inventory_sha256
+
+    result = operator.apply(
+        request_id="req-manifest-ownership-12345678",
+        approved_inventory_sha256=approved,
+    )
+
+    assert result["mutation_epoch_after"] == 3
+    verified = next(
+        event for event in harness.journal.events if event["event"] == "live-state-verified"
+    )
+    evidence = verified["evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["attempts"] == 2
+    assert harness.settle_calls == [0.25]
+
+
+def test_post_apply_readback_fails_closed_after_bounded_stale_views() -> None:
+    harness = _Harness(post_apply_stale_reads=3)
+    operator = harness.operator()
+    approved = operator.inventory().inventory_sha256
+
+    with pytest.raises(ManifestOwnershipAdoptionError, match="post-apply"):
+        operator.apply(
+            request_id="req-manifest-ownership-12345678",
+            approved_inventory_sha256=approved,
+        )
+
+    assert harness.settle_calls == [0.25, 0.75]
     assert harness.journal.events[-1]["event"] == "failed"
     assert harness.journal.events[-1]["evidence"]["failure_code"] == (
         "manifest_ownership.live-state-verification.failed"
