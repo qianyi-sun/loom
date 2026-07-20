@@ -83,6 +83,11 @@ def test_candidate_source_remote_command_is_fixed_readonly_and_exact() -> None:
     assert "fetch" not in command
     assert "systemctl" not in command
     assert 'getattr(os, "O_NOFOLLOW", 0)' in command
+    assert '"GIT_CONFIG_GLOBAL": "/dev/null"' in command
+    assert '"GIT_CONFIG_NOSYSTEM": "1"' in command
+    assert '"GIT_NO_REPLACE_OBJECTS": "1"' in command
+    assert '"GIT_OPTIONAL_LOCKS": "0"' in command
+    assert '"GIT_TERMINAL_PROMPT": "0"' in command
 
 
 def test_candidate_source_probe_collects_all_exact_hosts() -> None:

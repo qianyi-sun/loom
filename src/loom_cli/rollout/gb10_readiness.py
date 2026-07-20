@@ -239,7 +239,16 @@ def git(*args):
         capture_output=True,
         text=True,
         timeout=10,
-        env={{"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"}},
+        env={{
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        }},
     )
     if result.returncode != 0 or result.stderr or "\x00" in result.stdout:
         raise SystemExit(1)
