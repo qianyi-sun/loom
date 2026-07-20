@@ -1902,9 +1902,13 @@ def test_post_install_preflight_invokes_requestless_broker_command() -> None:
                 0,
                 json.dumps(
                     {
-                        "assessment_digest": "d" * 64,
-                        "blockers": [],
-                        "passed": True,
+                        "candidate_sha": "a" * 40,
+                        "candidate_tree": "b" * 40,
+                        "coverage_sha256": "c" * 64,
+                        "mutation_epoch": 8,
+                        "preflight_assessment_sha256": "d" * 64,
+                        "registry_sha256": "e" * 64,
+                        "status": "passed",
                     }
                 ),
             )
@@ -1938,7 +1942,7 @@ def test_post_install_preflight_preserves_normalized_admission_blockers() -> Non
             assert kwargs == {"check": False}
             return host.CommandResult(
                 1,
-                json.dumps(
+                stderr=json.dumps(
                     {
                         "assessment_digest": "e" * 64,
                         "blockers": [
@@ -1952,6 +1956,35 @@ def test_post_install_preflight_preserves_normalized_admission_blockers() -> Non
     assert host.HostSystem(BlockedRunner()).run_post_install_preflight() == {
         "assessment_digest": "e" * 64,
         "blocker_codes": ["backup.lease.ineligible"],
+        "status": "blocked",
+    }
+
+
+def test_post_install_preflight_preserves_legacy_report_blockers() -> None:
+    payload = {
+        "checks": [
+            {"name": "candidate", "passed": True, "remediation": None},
+            {
+                "name": "gb10-shared-source",
+                "passed": False,
+                "remediation": "repair exact shared source",
+            },
+        ],
+        "passed": False,
+    }
+
+    class BlockedRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs == {"check": False}
+            return host.CommandResult(1, stderr=json.dumps(payload))
+
+    result = host.HostSystem(BlockedRunner()).run_post_install_preflight()
+
+    assert result == {
+        "assessment_digest": hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "blocker_codes": ["gb10-shared-source"],
         "status": "blocked",
     }
 

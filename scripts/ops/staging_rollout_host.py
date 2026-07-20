@@ -3468,17 +3468,43 @@ class HostSystem:
         )
         if result.returncode not in {0, 1}:
             raise InstallError("post-install preflight command failed safely")
+        rendered = result.stdout if result.returncode == 0 else result.stderr
+        unexpected = result.stderr if result.returncode == 0 else result.stdout
+        if unexpected.strip():
+            raise InstallError("post-install preflight result streams are ambiguous")
         try:
-            payload = json.loads(result.stdout)
+            payload = json.loads(rendered)
         except json.JSONDecodeError as exc:
             raise InstallError("post-install preflight result is invalid") from exc
-        if not isinstance(payload, dict) or type(payload.get("passed")) is not bool:
+        if not isinstance(payload, dict):
             raise InstallError("post-install preflight result is invalid")
-        passed = payload["passed"]
-        if result.returncode != (0 if passed else 1):
+        if result.returncode == 0:
+            assessment_digest = payload.get("preflight_assessment_sha256")
+            if payload.get("status") != "passed":
+                raise InstallError("post-install preflight status is inconsistent")
+            blockers: object = []
+            passed = True
+        elif type(payload.get("passed")) is not bool or payload["passed"] is not False:
             raise InstallError("post-install preflight status is inconsistent")
-        assessment_digest = payload.get("assessment_digest")
-        blockers = payload.get("blockers")
+        else:
+            passed = False
+            assessment_digest = payload.get("assessment_digest")
+            blockers = payload.get("blockers")
+            if assessment_digest is None and isinstance(payload.get("checks"), list):
+                checks = payload["checks"]
+                failed_checks: list[dict[str, str]] = []
+                for check in checks:
+                    if not isinstance(check, dict) or type(check.get("passed")) is not bool:
+                        raise InstallError("post-install preflight legacy check is invalid")
+                    name = check.get("name")
+                    if not isinstance(name, str) or not name:
+                        raise InstallError("post-install preflight legacy check is invalid")
+                    if check["passed"] is False:
+                        failed_checks.append({"failure_code": name})
+                blockers = failed_checks
+                assessment_digest = hashlib.sha256(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
         if (
             not isinstance(assessment_digest, str)
             or re.fullmatch(r"[0-9a-f]{64}", assessment_digest) is None
