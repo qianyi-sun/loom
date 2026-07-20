@@ -33,6 +33,11 @@ environments. `docs/index.md` at the repo docs root is the task-router.
    Docker-capable hosts to an existing Loom control node for shared-dev or
    staging capacity before moving to full Kubernetes cluster mode.
 
+7. **[local-dev-workflow.md](local-dev-workflow.md)** — developer-facing
+   setup for pre-push testing on a laptop. Single-node kind/k3s, external
+   Slurm by default with an in-cluster `k8s_worker` fallback. Local is not a
+   formal environment; it is not in the identity contract or on `yylx.world`.
+
 ## When to open a new runbook
 
 For a repeated procedure that spans more than a few commands, has hazards

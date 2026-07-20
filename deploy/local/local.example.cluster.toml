@@ -1,0 +1,106 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Loom LOCAL developer cluster config — EXAMPLE TEMPLATE
+#
+# Copy this file to a git-ignored path and fill in the placeholders:
+#
+#     cp deploy/local/local.example.cluster.toml deploy/local/local.cluster.toml
+#
+# `deploy/local/local.cluster.toml` is for pre-push testing on your own
+# laptop. Local is NOT a formal Loom environment: it is not in the env
+# identity contract, it is not routed on yylx.world, and nothing here is
+# deployed by the operator rollout. Shared `dev`/`staging`/`production`
+# live under deploy/environments/ and are the only real deploy targets.
+#
+# See docs/runbooks/local-dev-workflow.md for the full walkthrough
+# (kind/k3s bootstrap, Slurm submit credentials, the k8s_worker fallback,
+# and the `uv run` recipe for the API + backing services).
+#
+# Every value below with a <PLACEHOLDER> or a "CHANGE ME" note is
+# developer-specific. Localhost routing only — do NOT point this at
+# yylx.world.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Kubernetes namespace for your local single-node kind/k3s cluster.
+namespace = "loom-local"
+
+# Localhost routing. A local kind/k3s cluster has no public DNS or TLS;
+# reach the API and web through `kubectl port-forward` (see the runbook).
+# Keep this as `localhost` — never a yylx.world host.
+ingress_host = "localhost"
+ingress_redirect_hosts = []
+ingress_tls_secret_name = "loom-local-tls"
+
+frontend_environment = "development"
+frontend_environment_label = "Local dev"
+frontend_route_path = "/"
+frontend_api_base_path = "/api"
+
+# Local buckets in your standalone MinIO. Any name works as long as it is
+# unique within your local MinIO instance.
+trajectories_bucket = "loom-local-trajectories"
+artifacts_bucket = "loom-local-artifacts"
+
+# Local single-node cluster: pgbouncer adds a Deployment and slows kind
+# boot with no upside at single-developer connection counts. Keep it off.
+[pgbouncer]
+enabled = false
+
+# ─── Worker execution ────────────────────────────────────────────────────────
+#
+# DEFAULT PATH: external Slurm.
+#
+# The recommended local setup submits trial workers to the SHARED Slurm
+# cluster using YOUR OWN credentials. This keeps `k8s_worker` OFF so your
+# laptop's kind/k3s node does not also try to run trial sandboxes.
+[k8s_worker]
+enabled = false
+
+# The elastic Slurm worker controller is NOT configured in this file. It
+# lives in the control-plane service env (it runs `sbatch`/`squeue`/`sacct`
+# as local subprocesses on whatever host runs loom-control-plane — your
+# laptop, in local dev). You must therefore have Slurm client tools on your
+# PATH and working submit-host reachability + credentials to the shared
+# cluster (typically an SSH-forwarded login environment; supply your own SSH
+# creds — see the runbook).
+#
+# Set these on the control-plane process (env vars, or your local .env):
+#
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_ENABLED=true
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_ENVIRONMENT=local-<your-name>
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_POOL_NAME=<your-slurm-pool>       # CHANGE ME
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_PARTITION=<slurm-partition>       # CHANGE ME, if required
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_ENV_FILE=/abs/path/worker.env     # CHANGE ME
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_REPO_DIR=/abs/path/to/loom        # CHANGE ME
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_REQUESTED_CPUS=12
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_REQUESTED_MEMORY_MIB=58000
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_REQUESTED_CONCURRENCY=6
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_MAX_JOBS=2                         # keep small for local dev
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_PENDING_JOB_CAP=1
+#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_MIN_QUEUED_TRIALS=1
+#     # sbatch/squeue/sacct/scancel default to bare names on PATH; override
+#     # with *_SBATCH_PATH etc. if your Slurm client tools live elsewhere.
+#
+# ─── FALLBACK PATH: in-cluster k8s_worker (offline / no Slurm) ────────────────
+#
+# If you have no Slurm access (offline, or a laptop that can't reach the
+# submit host), run trials in-cluster instead. Flip the section above to
+# `enabled = true` and leave the Slurm controller env vars UNSET:
+#
+#     [k8s_worker]
+#     enabled = true
+#
+# With this, the local loom-worker Deployment IS the trial execution path
+# and `POST /api/v1/batches` accepts the `k8s-worker` pool. Pick exactly
+# one path — do not enable both Slurm submission and the k8s_worker pool.
+
+# ─── Topology ────────────────────────────────────────────────────────────────
+#
+# Local dev is single-node by construction: single-pod Postgres and MinIO
+# on hostPath storage. Do not raise these — a local kind/k3s node has no HA
+# capacity, and multi_node=true pulls in CloudNativePG / distributed MinIO /
+# Longhorn that a laptop cluster cannot satisfy.
+[topology]
+multi_node = false
+storage_backend = "host_path"
+postgres_replicas = 1
+minio_replicas = 1
