@@ -1047,3 +1047,24 @@ def test_release_pr_template_requires_promotion_evidence() -> None:
         "DB recovery point",
     ):
         assert required_text in template
+
+
+def test_first_prod_runbook_frontend_evidence_matches_gate_schema() -> None:
+    """The documented release-evidence example must stay aligned with the gate
+    schema: following the runbook must produce evidence this gate accepts, not
+    rejects. Guards against the /dev-vs-/staging drift (qianyi review on #880)."""
+    from scripts.ops import release_gate
+
+    runbook = (REPO_ROOT / "docs/runbooks/first-prod-release-runbook.md").read_text(
+        encoding="utf-8",
+    )
+    canonical = release_gate.CANONICAL_FRONTEND_ROUTES
+
+    # The renamed 3-env fields + /staging values must appear; the retired 2-env
+    # field names must not (they would produce gate-rejected evidence).
+    assert '"staging_route": "https://yylx.world/staging"' in runbook
+    assert '"staging_api_base": "https://yylx.world/staging/api"' in runbook
+    assert '"development_route"' not in runbook
+    assert '"development_api_base"' not in runbook
+    for key in ("production_route", "staging_route", "production_api_base", "staging_api_base"):
+        assert f'"{key}": "{canonical[key]}"' in runbook, f"runbook missing canonical {key}"
