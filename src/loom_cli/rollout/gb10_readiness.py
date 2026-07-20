@@ -332,12 +332,17 @@ def probe_gb10_candidate_source_readonly(
     unit_sha256: Mapping[str, str],
     unit_set_digest: str,
     max_concurrency: int = 8,
+    settle_attempts: int = 3,
+    settle_interval_seconds: float = 0.5,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> GB10CandidateSourceReadiness:
     """Verify the same exact shared source on the complete fixed GB10 fleet."""
     if (
         not targets
         or len({target.ssh_target for target in targets}) != len(targets)
         or not 1 <= max_concurrency <= 16
+        or not 1 <= settle_attempts <= 4
+        or not 0 <= settle_interval_seconds <= 5
         or _SHA256_RE.fullmatch(unit_set_digest) is None
     ):
         raise ValueError("GB10 candidate source probe bounds are invalid")
@@ -354,18 +359,22 @@ def probe_gb10_candidate_source_readonly(
     }
 
     def probe(target: GB10ProbeTarget) -> str | None:
-        try:
-            result = run(
-                (*_ssh_argv(target, ssh_config=ssh_config, identity=identity)[:-1], command)
-            )
-            payload = json.loads(result.stdout)
-        except Exception:
-            return None
-        if result.returncode != 0 or payload != expected_payload:
-            return None
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        for attempt in range(settle_attempts):
+            try:
+                result = run(
+                    (*_ssh_argv(target, ssh_config=ssh_config, identity=identity)[:-1], command)
+                )
+                payload = json.loads(result.stdout)
+            except Exception:
+                payload = None
+                result = None
+            if result is not None and result.returncode == 0 and payload == expected_payload:
+                return hashlib.sha256(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+            if attempt + 1 < settle_attempts:
+                sleep(settle_interval_seconds)
+        return None
 
     outcomes: dict[str, str | None] = {}
     with ThreadPoolExecutor(
