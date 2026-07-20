@@ -47,51 +47,51 @@ enabled = false
 
 # ─── Worker execution ────────────────────────────────────────────────────────
 #
-# DEFAULT PATH: external Slurm.
+# DEFAULT PATH: in-cluster k8s_worker.
 #
-# The recommended local setup submits trial workers to the SHARED Slurm
-# cluster using YOUR OWN credentials. This keeps `k8s_worker` OFF so your
-# laptop's kind/k3s node does not also try to run trial sandboxes.
+# On a laptop the safe default is to run trials IN the local cluster: the
+# loom-worker Deployment is the trial execution path and `POST /api/v1/batches`
+# accepts the `k8s-worker` pool. This needs nothing beyond the local cluster —
+# no Slurm, no shared filesystem, no submit host.
 [k8s_worker]
-enabled = false
+enabled = true
 
-# The elastic Slurm worker controller is NOT configured in this file. It
-# lives in the control-plane service env (it runs `sbatch`/`squeue`/`sacct`
-# as local subprocesses on whatever host runs loom-control-plane — your
-# laptop, in local dev). You must therefore have Slurm client tools on your
-# PATH and working submit-host reachability + credentials to the shared
-# cluster (typically an SSH-forwarded login environment; supply your own SSH
-# creds — see the runbook).
+# ─── ADVANCED OPTIONAL: external Slurm ────────────────────────────────────────
 #
-# Set these on the control-plane process (env vars, or your local .env):
+# Use ONLY if you have a submit host that can BOTH reach the shared Slurm
+# cluster AND make your candidate + worker env-file visible on the allocated
+# COMPUTE nodes. This is the exact blocker recorded in #827: `env_file` and
+# `repo_dir` are read inside the sbatch script ON THE COMPUTE NODE, so
+# laptop-absolute paths and an SSH-forwarded login shell do NOT make them
+# compute-visible. Do not use this path until a tested candidate-bound
+# submit-host path (shared filesystem visible to the compute nodes) exists for
+# your setup.
 #
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_ENABLED=true
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_ENVIRONMENT=local-<your-name>
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_POOL_NAME=<your-slurm-pool>       # CHANGE ME
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_PARTITION=<slurm-partition>       # CHANGE ME, if required
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_ENV_FILE=/abs/path/worker.env     # CHANGE ME
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_REPO_DIR=/abs/path/to/loom        # CHANGE ME
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_REQUESTED_CPUS=12
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_REQUESTED_MEMORY_MIB=58000
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_REQUESTED_CONCURRENCY=6
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_MAX_JOBS=2                         # keep small for local dev
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_PENDING_JOB_CAP=1
-#     LOOM_CONTROL_PLANE_SLURM_WORKER_CONTROLLER_MIN_QUEUED_TRIALS=1
+# The elastic Slurm worker controller is configured on the control-plane
+# PROCESS (env vars), not in this file, and runs sbatch/squeue as local
+# subprocesses on the host running loom-control-plane. To use it: set
+# `[k8s_worker] enabled = false` above (pick exactly ONE path) and set the
+# following on the control-plane process, using the `LOOM_CP_` prefix — the
+# real control-plane setting prefix; `LOOM_CONTROL_PLANE_` is NOT recognized:
+#
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=true
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_ENVIRONMENT=local-<your-name>
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_POOL_NAME=<your-slurm-pool>            # CHANGE ME
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_PARTITION=<slurm-partition>            # CHANGE ME, if required
+#     # env_file/repo_dir MUST exist and be readable ON THE COMPUTE NODES
+#     # (a shared filesystem), not just on your laptop (see #827 above):
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_ENV_FILE=/shared/abs/path/worker.env   # CHANGE ME (compute-visible)
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_REPO_DIR=/shared/abs/path/to/loom      # CHANGE ME (compute-visible)
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CPUS=12
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_MEMORY_MIB=58000
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CONCURRENCY=6
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS=2                             # keep small for local dev
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_PENDING_JOB_CAP=1
+#     LOOM_CP_SLURM_WORKER_CONTROLLER_MIN_QUEUED_TRIALS=1
 #     # sbatch/squeue/sacct/scancel default to bare names on PATH; override
 #     # with *_SBATCH_PATH etc. if your Slurm client tools live elsewhere.
 #
-# ─── FALLBACK PATH: in-cluster k8s_worker (offline / no Slurm) ────────────────
-#
-# If you have no Slurm access (offline, or a laptop that can't reach the
-# submit host), run trials in-cluster instead. Flip the section above to
-# `enabled = true` and leave the Slurm controller env vars UNSET:
-#
-#     [k8s_worker]
-#     enabled = true
-#
-# With this, the local loom-worker Deployment IS the trial execution path
-# and `POST /api/v1/batches` accepts the `k8s-worker` pool. Pick exactly
-# one path — do not enable both Slurm submission and the k8s_worker pool.
+# Pick exactly ONE path: do not enable both the k8s_worker pool and Slurm.
 
 # ─── Topology ────────────────────────────────────────────────────────────────
 #
