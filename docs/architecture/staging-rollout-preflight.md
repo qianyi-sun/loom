@@ -785,6 +785,16 @@ completed oneshot result, enabled timer, and only the documented
 reported in one result; the attestation retains per-host boot IDs and evidence
 digests, while raw SSH output and service diagnostics are never published.
 
+The root installer prepares the exact image-tagged shared candidate checkout
+before it invokes the requestless Tier 0–2 assessment. Preparation runs as the
+fixed `loom-rollout` service account and calls the same no-replace,
+inode-bound materializer later consumed by environment-state; it creates only
+the immutable checkout beneath the fixed `/shared_work2` authority. It never
+installs, starts, enables, or restarts a GB10 unit. Installer `check` and Tier 0
+then use the same read-only verifier, so the candidate-source gate cannot be
+made circular by asking a rollout mutation step to satisfy its own admission
+predicate.
+
 The initial contract and coverage manifest are additive foundations. Existing
 broker predicates remain mapped while adapters are converted to the shared
 implementations. The coverage test prevents an unmapped legacy predicate or

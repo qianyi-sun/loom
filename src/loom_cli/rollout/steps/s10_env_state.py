@@ -2435,7 +2435,7 @@ def _remove_directory_at(parent_fd: int, name: str, *, expected: os.stat_result)
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _materialize_repo_dir(
+def materialize_external_runner_repo(
     *,
     repo_dir: Path,
     source_repo: Path,
@@ -2533,6 +2533,29 @@ def _materialize_repo_dir(
                     _remove_directory_at(root.fd, repo_dir.name, expected=claim_identity)
         finally:
             os.close(root.fd)
+
+
+def verify_external_runner_repo(
+    *,
+    repo_dir: Path,
+    resolved_sha: str,
+    expected_ref: str,
+) -> dict[str, Any]:
+    """Verify one already-published immutable external-runner checkout."""
+    root = _validate_repo_root(repo_dir, expected_ref)
+    try:
+        matched = _repo_matches(repo_dir, resolved_sha, root=root)
+        if matched is None:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository is unavailable",
+            )
+        return matched
+    finally:
+        os.close(root.fd)
+
+
+# Compatibility alias retained for the focused materializer regression suite.
+_materialize_repo_dir = materialize_external_runner_repo
 
 
 def _materialize_external_slurm_runner_prerequisites(

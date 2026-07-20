@@ -621,9 +621,14 @@ the platform-dev installer installs `shared_work2.mount` and verifies exact
 NFS source, mountpoint, NFSv4.2 options, and device identity. A local directory
 at `/shared_work2` fails closed. Runtime readiness proves that `loom-rollout`
 can write/search the dedicated root and that the `qianyi` Slurm submitter can
-read/search but not write it. Step 11 publishes only the exact image-tagged
-direct child through a private final-name claim and inode-bound publication
-mode transition. Authority symlinks, wrong owner/group/mode, hardlinks,
+read/search but not write it. Before running the requestless Tier 0–2
+assessment, the installer publishes only the exact image-tagged direct child
+through the fixed `loom-rollout` command, private final-name claim, and
+inode-bound publication mode transition. This prepares source only and cannot
+install or activate a GB10 unit. Installer `check`, Tier 0, and Step 11 share
+the same read-only verifier; Step 11 reuses the same materializer and accepts
+the already-matched immutable checkout. Authority symlinks, wrong
+owner/group/mode, hardlinks,
 special files, or a
 non-exact resolved SHA fail closed. Publication is no-replace and immutable:
 an exact existing target is accepted only after full index/physical-tree

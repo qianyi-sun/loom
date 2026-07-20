@@ -232,12 +232,17 @@ identity with sudoers last; success removes the copies only after new identity
 validation. This is not a general authority-upgrade mechanism and refuses any
 authority with install evidence.
 
-Candidate checkout publication is a single-writer lifecycle. Step 11 accepts
-only the exact image-tagged direct child, verifies every authority path with
-no-follow metadata, and atomically claims that final child with no-replace
-`mkdir` at private mode `2700`, inheriting sharedwork/setgid from the authority
-root. It clones with `--no-hardlinks` while consumers cannot search the claimed
-directory. It permits tracked git symlinks but rejects authority symlinks,
+Candidate checkout publication is a single-source lifecycle. During an
+admission-closed installer transaction, the fixed service-user publication
+command prepares the exact image-tagged direct child before requestless
+preflight. Step 11 calls the same materializer and normally observes the exact
+immutable target as already matched. Both paths verify every authority path
+with no-follow metadata and atomically claim an absent final child with
+no-replace `mkdir` at private mode `2700`, inheriting sharedwork/setgid from the
+authority root. Neither installer publication nor its read-only check installs
+or activates GB10 units. The materializer clones with `--no-hardlinks` while
+consumers cannot search the claimed directory. It permits tracked git symlinks
+but rejects authority symlinks,
 foreign ownership, group/other write, hard-linked or special files, and a
 non-exact resolved HEAD. After complete validation, an inode-bound `fchmod`
 from `2700` to immutable consumer-readable `0750` is the publication point.

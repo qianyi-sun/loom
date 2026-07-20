@@ -67,6 +67,7 @@ class FakeSystem:
         self.shared_worker_identity_ready = True
         self.shared_work2_mounted = False
         self.preflight_credentials = False
+        self.preflight_candidate_source = False
 
     def validate_prerequisites(self) -> None:
         self.validated += 1
@@ -382,6 +383,14 @@ class FakeSystem:
             host.PREFLIGHT_CREDENTIAL_ROOT / "rehearsal-kubeconfig",
         ):
             self.filesystem.atomic_write(path, b"credential-fixture\n", 0o600)
+        return changed
+
+    def preflight_candidate_source_ready(self) -> bool:
+        return self.preflight_candidate_source
+
+    def ensure_preflight_candidate_source(self) -> bool:
+        changed = not self.preflight_candidate_source
+        self.preflight_candidate_source = True
         return changed
 
     def ensure_service_key(self) -> bool:
@@ -2711,6 +2720,49 @@ def _runtime_probe_argv(service_uid: int, program: str) -> list[str]:
     ]
 
 
+def _candidate_source_publication_argv(service_uid: int, operation: str) -> list[str]:
+    return [
+        "sudo",
+        "-n",
+        "-u",
+        host.SERVICE_USER,
+        "--",
+        "/usr/bin/env",
+        "-i",
+        f"HOME={host.STATE_ROOT}",
+        f"USER={host.SERVICE_USER}",
+        f"LOGNAME={host.SERVICE_USER}",
+        f"PATH={host.VENV / 'bin'}:{host._ROOT_PATH}",
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+        f"KUBECONFIG={host.KUBECONFIG_PATH}",
+        f"LOOM_STAGING_ROLLOUT_CONFIG={host.CONFIG_PATH}",
+        str(host.VENV / "bin/python"),
+        "-I",
+        "-B",
+        "-m",
+        "loom_cli.rollout.operator.candidate_source_publication",
+        operation,
+    ]
+
+
+def _candidate_source_publication_payload(action: str = "matched") -> str:
+    payload: dict[str, object] = {
+        "action": action,
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "service_uid": 1001,
+        "status": "clean",
+    }
+    payload["evidence_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return json.dumps(payload, sort_keys=True) + "\n"
+
+
 def _service_identity_result(
     call: list[str],
     *,
@@ -2862,6 +2914,42 @@ def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
 
     assert host.HostSystem(runner).broker_runtime_ready() is True
     assert runner.calls[-1][1] == {"check": False}
+
+
+def test_candidate_source_publication_uses_fixed_service_user_boundary() -> None:
+    class PublicationRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            self.calls.append((call, kwargs))
+            service_identity = _service_identity_result(call)
+            if service_identity is not None:
+                return service_identity
+            assert call == _candidate_source_publication_argv(1001, "check")
+            return host.CommandResult(0, _candidate_source_publication_payload())
+
+    runner = PublicationRunner()
+
+    assert host.HostSystem(runner).preflight_candidate_source_ready() is True
+    assert runner.calls[-1][1] == {"check": False}
+
+
+def test_candidate_source_publication_rejects_tampered_evidence_digest() -> None:
+    class TamperedRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            service_identity = _service_identity_result(call)
+            if service_identity is not None:
+                return service_identity
+            payload = json.loads(_candidate_source_publication_payload())
+            payload["candidate_tree"] = "c" * 40
+            return host.CommandResult(0, json.dumps(payload) + "\n")
+
+    with pytest.raises(host.InstallError, match="evidence digest"):
+        host.HostSystem(TamperedRunner()).preflight_candidate_source_ready()
 
 
 @pytest.mark.parametrize(

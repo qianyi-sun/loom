@@ -2580,6 +2580,100 @@ class HostSystem:
         """Exercise packaged assets and load the protected broker config."""
         return self._runtime_probe(_BROKER_RUNTIME_PROBE)
 
+    def _candidate_source_publication(
+        self,
+        operation: str,
+    ) -> dict[str, object] | None:
+        """Run the fixed service-user candidate checkout publication boundary."""
+        if operation not in {"prepare", "check"}:
+            raise InstallError("candidate source publication operation is invalid")
+        service_uid, _service_gid = self._service_ids()
+        result = self.runner.run(
+            [
+                "sudo",
+                "-n",
+                "-u",
+                SERVICE_USER,
+                "--",
+                "/usr/bin/env",
+                "-i",
+                f"HOME={STATE_ROOT}",
+                f"USER={SERVICE_USER}",
+                f"LOGNAME={SERVICE_USER}",
+                f"PATH={VENV / 'bin'}:{_ROOT_PATH}",
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+                f"KUBECONFIG={KUBECONFIG_PATH}",
+                f"LOOM_STAGING_ROLLOUT_CONFIG={CONFIG_PATH}",
+                str(VENV / "bin/python"),
+                "-I",
+                "-B",
+                "-m",
+                "loom_cli.rollout.operator.candidate_source_publication",
+                operation,
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            if operation == "check":
+                return None
+            raise InstallError("candidate source publication failed safely")
+        if result.stderr.strip():
+            raise InstallError("candidate source publication emitted unexpected diagnostics")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, ValueError) as exc:
+            raise InstallError("candidate source publication report is invalid") from exc
+        expected_keys = {
+            "action",
+            "candidate_sha",
+            "candidate_tree",
+            "evidence_sha256",
+            "image_tag",
+            "service_uid",
+            "status",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected_keys
+            or payload.get("action") not in {"created", "matched"}
+            or not isinstance(payload.get("candidate_sha"), str)
+            or _SHA_RE.fullmatch(str(payload["candidate_sha"])) is None
+            or not isinstance(payload.get("candidate_tree"), str)
+            or _SHA_RE.fullmatch(str(payload["candidate_tree"])) is None
+            or payload.get("image_tag") != f"staging-{str(payload['candidate_sha'])[:7]}"
+            or payload.get("service_uid") != service_uid
+            or payload.get("status") != "clean"
+            or not isinstance(payload.get("evidence_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", str(payload["evidence_sha256"])) is None
+        ):
+            raise InstallError("candidate source publication report is invalid")
+        evidence = dict(payload)
+        digest = str(evidence.pop("evidence_sha256"))
+        expected_digest = hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if digest != expected_digest:
+            raise InstallError("candidate source publication evidence digest is invalid")
+        return dict(payload)
+
+    def preflight_candidate_source_ready(self) -> bool:
+        """Verify the exact immutable shared checkout without changing it."""
+        report = self._candidate_source_publication("check")
+        return report is not None and report.get("action") == "matched"
+
+    def ensure_preflight_candidate_source(self) -> bool:
+        """Publish the exact immutable shared checkout without activating GB10."""
+        before = self.preflight_candidate_source_ready()
+        report = self._candidate_source_publication("prepare")
+        if report is None:  # pragma: no cover - prepare raises on failure
+            raise InstallError("candidate source publication failed safely")
+        if not self.preflight_candidate_source_ready():
+            raise InstallError("candidate source publication did not converge")
+        return not before or report.get("action") == "created"
+
     def ensure_service_key(self) -> bool:
         if self.service_key_present():
             return False
@@ -4439,6 +4533,11 @@ class HostInstaller:
         broker_runtime_ready = (
             package_runtime_ready and installed_files_ready and self.system.broker_runtime_ready()
         )
+        preflight_candidate_source_ready = bool(
+            broker_runtime_ready
+            and shared_worker_repo_ready
+            and self.system.preflight_candidate_source_ready()
+        )
         runtime_ready = not service_user_missing and self.system.runtime_directory_ready()
         kubeconfig_ready = (
             not service_user_missing
@@ -4522,6 +4621,7 @@ class HostInstaller:
             or not venv_ready
             or not package_runtime_ready
             or not preflight_credentials_ready
+            or not preflight_candidate_source_ready
             or not broker_runtime_ready
             or not installed_files_ready
             or not runtime_ready
@@ -4699,6 +4799,8 @@ class HostInstaller:
                 changes.append(f"ownership:{destination}")
         if not self.system.broker_runtime_ready():
             raise InstallError("installed broker config probe failed")
+        if self.system.ensure_preflight_candidate_source():
+            changes.append("candidate-source-publication")
         if self.system.create_runtime_directory():
             changes.append(f"directory:{RUNTIME_ROOT}")
 
@@ -4902,6 +5004,8 @@ class HostInstaller:
             failures.append(str(KUBECONFIG_PATH))
         if not self.system.preflight_credentials_ready():
             failures.append("preflight-credentials")
+        if not self.system.preflight_candidate_source_ready():
+            failures.append("candidate-source-publication")
         if not self.filesystem.exists(SERVICE_KEY):
             failures.append(str(SERVICE_KEY))
         generated_env_templates = self.filesystem.generated_gb10_env_templates()
