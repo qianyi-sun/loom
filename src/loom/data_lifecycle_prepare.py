@@ -218,6 +218,11 @@ class SqlAlchemyLifecyclePreparer:
 
     def _config(self) -> Config:
         config = Config(str(self._alembic_config_path))
+        # The installed maintenance command has no repository working-directory
+        # contract.  Bind Alembic to the exact sealed migrations directory just
+        # as the shared preflight migration inspector does.
+        config.set_main_option("path_separator", "os")
+        config.set_main_option("script_location", str(self._alembic_config_path.parent))
         # Alembic's Config interpolation treats percent characters specially.
         database_url = self._engine.url.render_as_string(hide_password=False)
         config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))

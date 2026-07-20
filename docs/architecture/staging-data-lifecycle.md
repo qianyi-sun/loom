@@ -29,7 +29,9 @@ is fixed to `staging/loom-staging`; an earlier legacy revision, an ahead or
 branched migration graph, a partial schema, source drift, another preparer or
 any inventory drift fails closed. A crash never silently resumes: the operator
 must inventory and approve the newly observed exact revision before another
-apply. No classification or deletion occurs in this step.
+apply. The Alembic script location is the absolute sealed-source migrations
+directory and never depends on the invoking process's working directory. No
+classification or deletion occurs in this step.
 
 ## Authority
 

@@ -38,6 +38,8 @@ def postgres_at_0065() -> Iterator[str]:
 
 def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
     postgres_at_0065: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     engine = create_engine(postgres_at_0065)
     try:
@@ -95,6 +97,8 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
                 {"key": int.from_bytes(b"LOOMLIFE", "big")},
             ).scalar_one()
 
+        # Installed execution is intentionally independent of the caller CWD.
+        monkeypatch.chdir(tmp_path)
         converged = preparer.apply(
             plan=partial,
             approved_inventory_digest=partial.inventory_digest,
