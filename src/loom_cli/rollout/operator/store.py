@@ -538,6 +538,36 @@ class RequestStore:
             raise RequestStoreError("backup retirement receipt identity drifted")
         return path
 
+    def has_backup_retirement_receipt(self, payload_id: str) -> bool:
+        """Return true only for a complete digest-bound retirement receipt."""
+        validate_safe_identifier(payload_id, "payload_id")
+        try:
+            _validate_private_directory(
+                self.backup_retirements_root,
+                "backup retirements directory",
+            )
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                return False
+            raise
+        evidence_path = self.backup_retirements_root / f"{payload_id}.json"
+        receipt_path = self.backup_retirements_root / f"{payload_id}.deleted.json"
+        try:
+            evidence = _read_json(evidence_path, "backup retirement evidence")
+            receipt = _read_json(receipt_path, "backup retirement receipt")
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                return False
+            raise
+        expected = {
+            "evidence_sha256": hashlib.sha256(_json_bytes(evidence)).hexdigest(),
+            "payload_id": payload_id,
+            "schema_version": 1,
+        }
+        if receipt != expected:
+            raise RequestStoreError("backup retirement receipt identity drifted")
+        return True
+
     def _request_directory(self, request_id: object) -> Path:
         return self.requests_root / _request_id(request_id)
 

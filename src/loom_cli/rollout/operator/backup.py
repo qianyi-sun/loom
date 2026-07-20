@@ -1247,7 +1247,12 @@ class _CleanupTraversal:
                 raise ValueError("backup cleanup exceeded byte limit")
 
 
-def _require_cleanup_entry(metadata: os.stat_result, *, service_uid: int) -> None:
+def _require_cleanup_entry(
+    metadata: os.stat_result,
+    *,
+    service_uid: int,
+    allow_regular_hardlinks: bool = False,
+) -> None:
     if metadata.st_uid != service_uid:
         raise ValueError("backup cleanup entry owner does not match service account")
     mode = stat.S_IMODE(metadata.st_mode)
@@ -1256,7 +1261,7 @@ def _require_cleanup_entry(metadata: os.stat_result, *, service_uid: int) -> Non
             raise ValueError("backup cleanup directory mode must be 0700")
         return
     if stat.S_ISREG(metadata.st_mode):
-        if mode != _PRIVATE_FILE_MODE or metadata.st_nlink != 1:
+        if mode != _PRIVATE_FILE_MODE or (not allow_regular_hardlinks and metadata.st_nlink != 1):
             raise ValueError("backup cleanup file metadata is unsafe")
         return
     raise ValueError("backup cleanup tree contains a non-regular entry")
@@ -1268,6 +1273,7 @@ def _validate_cleanup_directory(
     service_uid: int,
     budget: _CleanupTraversal,
     depth: int,
+    allow_regular_hardlinks: bool = False,
 ) -> None:
     directory_metadata = os.fstat(directory_fd)
     _require_cleanup_entry(directory_metadata, service_uid=service_uid)
@@ -1282,7 +1288,11 @@ def _validate_cleanup_directory(
                 raise ValueError("backup cleanup exceeded directory entry limit")
     for name in names:
         metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        _require_cleanup_entry(metadata, service_uid=service_uid)
+        _require_cleanup_entry(
+            metadata,
+            service_uid=service_uid,
+            allow_regular_hardlinks=allow_regular_hardlinks,
+        )
         budget.check(metadata, depth=depth)
         if not stat.S_ISDIR(metadata.st_mode):
             continue
@@ -1296,6 +1306,7 @@ def _validate_cleanup_directory(
                 service_uid=service_uid,
                 budget=budget,
                 depth=depth + 1,
+                allow_regular_hardlinks=allow_regular_hardlinks,
             )
         finally:
             os.close(child_fd)
@@ -1308,6 +1319,7 @@ def _remove_cleanup_directory(
     budget: _CleanupTraversal,
     depth: int,
     allow_root_manifest: bool = False,
+    allow_regular_hardlinks: bool = False,
 ) -> None:
     directory_metadata = os.fstat(directory_fd)
     _require_cleanup_entry(directory_metadata, service_uid=service_uid)
@@ -1324,7 +1336,11 @@ def _remove_cleanup_directory(
         raise ValueError("manifest-backed backup cannot be cleaned")
     for name in names:
         metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        _require_cleanup_entry(metadata, service_uid=service_uid)
+        _require_cleanup_entry(
+            metadata,
+            service_uid=service_uid,
+            allow_regular_hardlinks=allow_regular_hardlinks,
+        )
         budget.check(metadata, depth=depth)
         if stat.S_ISDIR(metadata.st_mode):
             budget.check_deadline()
@@ -1339,6 +1355,7 @@ def _remove_cleanup_directory(
                     budget=budget,
                     depth=depth + 1,
                     allow_root_manifest=False,
+                    allow_regular_hardlinks=allow_regular_hardlinks,
                 )
             finally:
                 os.close(child_fd)
@@ -2605,6 +2622,7 @@ class BackupCreator:
                     service_uid=self.service_uid,
                     budget=traversal,
                     depth=1,
+                    allow_regular_hardlinks=expected_manifest_sha256 is not None,
                 )
                 current = os.stat(bundle_name, dir_fd=backups_fd, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) != (
@@ -2643,6 +2661,7 @@ class BackupCreator:
                     budget=traversal.fresh_pass(),
                     depth=1,
                     allow_root_manifest=expected_manifest_sha256 is not None,
+                    allow_regular_hardlinks=expected_manifest_sha256 is not None,
                 )
                 traversal.check_deadline()
                 os.close(bundle_fd)

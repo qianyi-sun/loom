@@ -20,7 +20,7 @@ from typing import cast
 from .backup_lease import BackupLease
 
 _PAYLOAD_ID_RE = re.compile(r"^payload-[a-z0-9][a-z0-9-]{7,63}$")
-_REQUEST_ID_RE = re.compile(r"^req-[a-z0-9][a-z0-9-]{7,63}$")
+_REQUEST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 
 
 class BackupRotationError(RuntimeError):

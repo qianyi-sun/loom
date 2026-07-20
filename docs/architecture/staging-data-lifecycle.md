@@ -407,3 +407,19 @@ or a manifest-only backup can never become rollout lease authority.
 If any proof is unavailable, the operator must fail closed to a fresh verified
 checkpoint. A changed-epoch checkpoint plus restore must complete within 30
 minutes before shared staging rollout may proceed.
+
+### One-time convergence of legacy payload generations
+
+Payload roots created before the rotation record are converged with
+`scripts/ops/staging_rollout_backup_retention.py`, never with `rm` or a prefix
+glob. `inventory` binds the backup filesystem identity, exact `latest` target,
+every complete timestamped root and manifest digest, plus every incomplete or
+noncanonical directory that must remain untouched. `apply` requires the exact
+plan file and its separately approved digest. It refuses an active rollout,
+re-inventories protected inputs, then retires only exact listed complete roots
+through the same evidence-first no-follow remover used by normal rotation.
+Hard-linked regular payload files are safe to unlink from the selected root;
+directories, symlinks, special files, ownership/mode drift, manifest drift and
+cross-filesystem traversal remain fail closed. A crash-safe receipt makes the
+same approved plan idempotently retryable. The current `latest` payload and all
+manifest-less failed, partial or route-cutover evidence remain preserved.
