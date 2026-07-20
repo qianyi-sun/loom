@@ -8,7 +8,7 @@ import pytest
 
 from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope
-from loom_cli.rollout.operator.backup_rotation import begin_candidate
+from loom_cli.rollout.operator.backup_rotation import BackupRetirementRecord, begin_candidate
 from loom_cli.rollout.operator.checkpoint_coordinator import (
     CheckpointCoordinatorError,
     DetachedCheckpointCoordinator,
@@ -133,7 +133,7 @@ def _coordinator(
     tmp_path: Path,
     *,
     verify_restore=None,
-    retired: list[str] | None = None,
+    retired: list[BackupRetirementRecord] | None = None,
 ) -> tuple[DetachedCheckpointCoordinator, FakeCreator, RequestStore, PreflightBackupJobEnvelope]:
     manifest_path = tmp_path / "20260719T210000Z-req-checkpoint1" / "backup-manifest.json"
     creator = FakeCreator(manifest_path)
@@ -176,6 +176,7 @@ def test_detached_checkpoint_accepts_exact_short_lock_reservation(tmp_path: Path
         current,
         payload_id=job.payload_id,
         request_id=job.request_id,
+        bundle_name=job.bundle_name,
         created_at=job.created_at,
     )
     store.replace_backup_rotation(
@@ -194,7 +195,7 @@ def test_detached_checkpoint_accepts_exact_short_lock_reservation(tmp_path: Path
 def test_restore_failure_preserves_old_active_and_never_publishes_new_lease(
     tmp_path: Path,
 ) -> None:
-    retired: list[str] = []
+    retired: list[BackupRetirementRecord] = []
     coordinator, _creator, store, job = _coordinator(tmp_path, retired=retired)
     coordinator(_request(), job, lambda: False)
     old = store.read_backup_rotation().active
@@ -236,13 +237,13 @@ def test_restore_failure_preserves_old_active_and_never_publishes_new_lease(
     state = store.read_backup_rotation()
     assert state.active == old
     assert state.candidate is None
-    assert retired == [second_job.payload_id]
+    assert [record.payload_id for record in retired] == [second_job.payload_id]
 
 
 def test_successful_replacement_acknowledges_persisted_old_payload_retirement(
     tmp_path: Path,
 ) -> None:
-    retired: list[str] = []
+    retired: list[BackupRetirementRecord] = []
     coordinator, _creator, store, job = _coordinator(tmp_path, retired=retired)
     coordinator(_request(), job, lambda: False)
 
@@ -282,7 +283,7 @@ def test_successful_replacement_acknowledges_persisted_old_payload_retirement(
     assert state.active.payload_id == second_job.payload_id
     assert state.retirements == ()
     assert state.payload_count == 1
-    assert retired == [job.payload_id]
+    assert [record.payload_id for record in retired] == [job.payload_id]
 
 
 def test_binding_drift_and_early_cancel_do_not_reserve_payload(tmp_path: Path) -> None:

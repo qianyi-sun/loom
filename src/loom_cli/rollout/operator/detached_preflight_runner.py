@@ -12,6 +12,7 @@ from loom_cli.rollout.preflight_pipeline import PreflightAssessment
 
 from .backup import VerifiedBackup
 from .backup_job import PreflightBackupJobEnvelope
+from .backup_rotation import BackupRetirementRecord
 from .checkpoint_coordinator import (
     CheckpointStore,
     CriticalBackupCreator,
@@ -46,7 +47,7 @@ class DetachedPreflightBackupRunner:
     now: Callable[[], datetime]
     lease_ttl: timedelta
     referenced_payload_ids: Callable[[], frozenset[str]] = frozenset
-    retire_payload: Callable[[str], None] | None = None
+    retire_payload: Callable[[BackupRetirementRecord], None] | None = None
 
     def __post_init__(self) -> None:
         if self.lease_ttl <= timedelta(0):

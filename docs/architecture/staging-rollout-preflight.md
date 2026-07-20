@@ -257,7 +257,10 @@ authority.
 `DetachedPreflightBackupRunner` is the worker-side composition root. It first
 revalidates the persisted assessment against the immutable request, then owns
 the checkpoint, rehearsal, restore proof, lease, attestation, rotation and
-retirement sequence. Restore and attestation each rebuild their attestor from
+retirement sequence. Its installed composition must include the private-store
+active-payload resolver and the evidence-first exact payload retirer; leaving
+either callback unbound is not a valid production composition. Restore and
+attestation each rebuild their attestor from
 recorded authority; only the persisted rehearsal bridges them.
 
 Restore evidence is derived from the immutable rehearsal itself, not from an

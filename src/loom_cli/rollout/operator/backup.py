@@ -1307,6 +1307,7 @@ def _remove_cleanup_directory(
     service_uid: int,
     budget: _CleanupTraversal,
     depth: int,
+    allow_root_manifest: bool = False,
 ) -> None:
     directory_metadata = os.fstat(directory_fd)
     _require_cleanup_entry(directory_metadata, service_uid=service_uid)
@@ -1319,7 +1320,7 @@ def _remove_cleanup_directory(
             names.append(entry.name)
             if len(names) > budget.limits.max_directory_entries:
                 raise ValueError("backup cleanup exceeded directory entry limit")
-    if depth == 1 and "backup-manifest.json" in names:
+    if depth == 1 and "backup-manifest.json" in names and not allow_root_manifest:
         raise ValueError("manifest-backed backup cannot be cleaned")
     for name in names:
         metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -1337,6 +1338,7 @@ def _remove_cleanup_directory(
                     service_uid=service_uid,
                     budget=budget,
                     depth=depth + 1,
+                    allow_root_manifest=False,
                 )
             finally:
                 os.close(child_fd)
@@ -2463,6 +2465,44 @@ class BackupCreator:
 
     def cleanup_incomplete(self, request_id: str, *, bundle_name: str | None = None) -> bool:
         """Remove only the no-manifest backup root bound to one failed request."""
+        return self._remove_bound_payload(
+            request_id,
+            bundle_name=bundle_name,
+            expected_manifest_sha256=None,
+        )
+
+    def retire_payload(
+        self,
+        request_id: str,
+        *,
+        bundle_name: str,
+        expected_manifest_sha256: str,
+    ) -> bool:
+        """Remove one exact non-latest manifest-backed payload after compaction.
+
+        The caller must first persist compact retirement evidence.  This method
+        revalidates the request/root/manifest identity immediately before and
+        during bounded no-follow deletion and is idempotent only after the
+        exact root has disappeared.
+        """
+        if len(expected_manifest_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_manifest_sha256
+        ):
+            raise BackupError("backup_retirement_manifest_invalid")
+        return self._remove_bound_payload(
+            request_id,
+            bundle_name=bundle_name,
+            expected_manifest_sha256=expected_manifest_sha256,
+        )
+
+    def _remove_bound_payload(
+        self,
+        request_id: str,
+        *,
+        bundle_name: str | None,
+        expected_manifest_sha256: str | None,
+    ) -> bool:
+        """Bounded no-follow removal for incomplete or retired exact payloads."""
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,79}", request_id):
             raise BackupError("backup_cleanup_request_invalid")
 
@@ -2542,10 +2582,24 @@ class BackupCreator:
                         follow_symlinks=False,
                     )
                 except FileNotFoundError:
-                    pass
+                    if expected_manifest_sha256 is not None:
+                        raise ValueError("retired backup manifest is missing") from None
                 else:
-                    del manifest_metadata
-                    raise ValueError("manifest-backed backup cannot be cleaned")
+                    if expected_manifest_sha256 is None:
+                        raise ValueError("manifest-backed backup cannot be cleaned")
+                    if not stat.S_ISREG(manifest_metadata.st_mode):
+                        raise ValueError("retired backup manifest is not a regular file")
+                    actual_manifest_sha256 = backup_manifest_sha256(
+                        backups_root / bundle_name / "backup-manifest.json",
+                        expected_owner_uid=self.service_uid,
+                        require_private_file=True,
+                        limits=self._traversal_limits,
+                    )
+                    if not hmac.compare_digest(
+                        actual_manifest_sha256,
+                        expected_manifest_sha256,
+                    ):
+                        raise ValueError("retired backup manifest digest drifted")
                 _validate_cleanup_directory(
                     bundle_fd,
                     service_uid=self.service_uid,
@@ -2567,14 +2621,28 @@ class BackupCreator:
                         follow_symlinks=False,
                     )
                 except FileNotFoundError:
-                    pass
+                    if expected_manifest_sha256 is not None:
+                        raise ValueError("retired backup manifest disappeared") from None
                 else:
-                    raise ValueError("manifest-backed backup cannot be cleaned")
+                    if expected_manifest_sha256 is None:
+                        raise ValueError("manifest-backed backup cannot be cleaned")
+                    actual_manifest_sha256 = backup_manifest_sha256(
+                        backups_root / bundle_name / "backup-manifest.json",
+                        expected_owner_uid=self.service_uid,
+                        require_private_file=True,
+                        limits=self._traversal_limits,
+                    )
+                    if not hmac.compare_digest(
+                        actual_manifest_sha256,
+                        expected_manifest_sha256,
+                    ):
+                        raise ValueError("retired backup manifest digest drifted")
                 _remove_cleanup_directory(
                     bundle_fd,
                     service_uid=self.service_uid,
                     budget=traversal.fresh_pass(),
                     depth=1,
+                    allow_root_manifest=expected_manifest_sha256 is not None,
                 )
                 traversal.check_deadline()
                 os.close(bundle_fd)
@@ -2595,7 +2663,12 @@ class BackupCreator:
                     os.close(bundle_fd)
                 os.close(backups_fd)
 
-        return _stage("backup_cleanup_failed", cleanup)
+        failure_code = (
+            "backup_cleanup_failed"
+            if expected_manifest_sha256 is None
+            else "backup_retirement_failed"
+        )
+        return _stage(failure_code, cleanup)
 
     def create(
         self,

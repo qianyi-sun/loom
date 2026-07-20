@@ -311,6 +311,7 @@ def test_backup_lease_and_rotation_are_digest_bound_and_compare_and_swap(
         BackupRotationState(),
         payload_id="payload-alpha000",
         request_id="req-alpha0000",
+        bundle_name="20260719T200000Z-req-alpha0000",
         created_at=datetime(2026, 7, 19, 20, tzinfo=UTC),
     ).state
     store.replace_backup_rotation(state, expected_generation=0)
@@ -395,6 +396,38 @@ def test_preflight_request_backup_and_promotion_are_separate_immutable_authoriti
     assert store.read_preflight_request(REQUEST_ID) == preliminary
     with pytest.raises(RequestStoreError, match="already exists"):
         store.promote_preflight_request(promoted)
+
+
+def test_active_attempt_resolves_exact_backup_payload_reference(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    assessment = make_assessment(tmp_path)
+    request = replace(
+        make_preflight_request(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    job = replace(
+        make_preflight_backup_job(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    store.create_preflight_request(request)
+    store.publish_preflight_assessment(REQUEST_ID, assessment)
+    store.publish_preflight_backup_job(job)
+
+    assert store.referenced_backup_payload_ids() == frozenset()
+    store.set_active(
+        ActivePointer(
+            request_id=REQUEST_ID,
+            attempt_number=1,
+            unit_name="loom-staging-rollout-test.service",
+            status="running",
+        )
+    )
+
+    assert store.referenced_backup_payload_ids() == frozenset({job.payload_id})
 
 
 def test_preflight_promotion_and_backup_reject_identity_drift(tmp_path: Path) -> None:

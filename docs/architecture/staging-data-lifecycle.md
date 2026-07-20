@@ -379,8 +379,15 @@ only an already-published byte-equivalent lease. Deletion is always a returned
 post-publication action: a crash can retain an extra old payload for retry, but
 cannot erase the current known-good payload or promote an unverified candidate.
 Every post-publication deletion is also retained in that rotation record as an
-exact retirement entry until the idempotent payload remover succeeds and a
-second compare-and-swap acknowledges it. A pending or referenced retirement
+exact retirement entry, including its request, timestamped bundle, reason and
+manifest digest, until the idempotent payload remover succeeds and a second
+compare-and-swap acknowledges it. Before deleting the large root, the worker
+publishes compact immutable evidence and later a deletion receipt under the
+private request store. The remover revalidates the non-`latest` root, request,
+manifest digest, service ownership, modes, link counts, filesystem boundary and
+bounded no-follow traversal immediately before removal. The installed worker
+also resolves the sole active attempt back to its exact payload; it may not
+retire a referenced rollback point. A pending or referenced retirement
 blocks admission of another candidate, so repeated process crashes cannot lose
 the payload identity or accumulate more generations. Immediately after a
 promotion the physical bound is transiently two payloads; after retirement

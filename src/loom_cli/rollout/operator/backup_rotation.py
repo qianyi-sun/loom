@@ -13,7 +13,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import cast
 
@@ -41,7 +41,9 @@ class BackupRetirementRecord:
 
     payload_id: str
     request_id: str
+    bundle_name: str | None
     reason: str
+    manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -50,21 +52,64 @@ class BackupRetirementRecord:
             or self.reason not in {"failed", "superseded"}
         ):
             raise ValueError("backup retirement identity is invalid")
+        if self.bundle_name is not None and (
+            not self.bundle_name
+            or "/" in self.bundle_name
+            or self.bundle_name != self.bundle_name.strip()
+        ):
+            raise ValueError("backup retirement bundle identity is invalid")
+        if self.manifest_sha256 is not None and (
+            len(self.manifest_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.manifest_sha256)
+        ):
+            raise ValueError("backup retirement manifest digest is invalid")
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str | None]:
         return {
+            "bundle_name": self.bundle_name,
+            "manifest_sha256": self.manifest_sha256,
             "payload_id": self.payload_id,
             "reason": self.reason,
             "request_id": self.request_id,
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, object]) -> BackupRetirementRecord:
-        if set(data) != {"payload_id", "reason", "request_id"} or not all(
-            isinstance(data[field], str) for field in data
+    def from_dict(
+        cls,
+        data: Mapping[str, object],
+        *,
+        legacy: bool = False,
+    ) -> BackupRetirementRecord:
+        expected = (
+            {"payload_id", "reason", "request_id"}
+            if legacy
+            else {
+                "bundle_name",
+                "manifest_sha256",
+                "payload_id",
+                "reason",
+                "request_id",
+            }
+        )
+        if set(data) != expected or not all(
+            isinstance(data[field], str) for field in ("payload_id", "reason", "request_id")
+        ):
+            raise ValueError("backup retirement record schema is invalid")
+        if (
+            not legacy
+            and data["bundle_name"] is not None
+            and not isinstance(data["bundle_name"], str)
+        ):
+            raise ValueError("backup retirement record schema is invalid")
+        if (
+            not legacy
+            and data["manifest_sha256"] is not None
+            and not isinstance(data["manifest_sha256"], str)
         ):
             raise ValueError("backup retirement record schema is invalid")
         return cls(
+            bundle_name=(None if legacy else data["bundle_name"]),  # type: ignore[arg-type]
+            manifest_sha256=cast(str | None, None if legacy else data["manifest_sha256"]),
             payload_id=data["payload_id"],  # type: ignore[arg-type]
             request_id=data["request_id"],  # type: ignore[arg-type]
             reason=data["reason"],  # type: ignore[arg-type]
@@ -77,6 +122,7 @@ class BackupPayloadRecord:
 
     payload_id: str
     request_id: str
+    bundle_name: str
     phase: BackupPayloadPhase
     created_at: datetime
     manifest_sha256: str | None = None
@@ -87,6 +133,9 @@ class BackupPayloadRecord:
         if (
             _PAYLOAD_ID_RE.fullmatch(self.payload_id) is None
             or _REQUEST_ID_RE.fullmatch(self.request_id) is None
+            or not self.bundle_name
+            or "/" in self.bundle_name
+            or self.bundle_name != self.bundle_name.strip()
             or self.created_at.tzinfo is None
             or self.created_at.utcoffset() is None
         ):
@@ -121,6 +170,7 @@ class BackupPayloadRecord:
     def to_dict(self) -> dict[str, object]:
         return {
             "created_at": self.created_at.isoformat(),
+            "bundle_name": self.bundle_name,
             "failure_code": self.failure_code,
             "lease": self.lease.to_dict() if self.lease is not None else None,
             "manifest_sha256": self.manifest_sha256,
@@ -130,7 +180,12 @@ class BackupPayloadRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, object]) -> BackupPayloadRecord:
+    def from_dict(
+        cls,
+        data: Mapping[str, object],
+        *,
+        legacy: bool = False,
+    ) -> BackupPayloadRecord:
         expected = {
             "created_at",
             "failure_code",
@@ -140,6 +195,8 @@ class BackupPayloadRecord:
             "phase",
             "request_id",
         }
+        if not legacy:
+            expected.add("bundle_name")
         if set(data) != expected or not all(
             isinstance(data[field], str)
             for field in ("created_at", "payload_id", "phase", "request_id")
@@ -156,9 +213,18 @@ class BackupPayloadRecord:
             phase = BackupPayloadPhase(data["phase"])  # type: ignore[arg-type]
         except ValueError as exc:
             raise ValueError("backup payload record phase or timestamp is invalid") from exc
+        bundle_name = (
+            datetime.fromisoformat(data["created_at"])  # type: ignore[arg-type]
+            .astimezone(UTC)
+            .strftime("%Y%m%dT%H%M%SZ")
+            + f"-{data['request_id']}"
+            if legacy
+            else data["bundle_name"]
+        )
         return cls(
             payload_id=data["payload_id"],  # type: ignore[arg-type]
             request_id=data["request_id"],  # type: ignore[arg-type]
+            bundle_name=bundle_name,  # type: ignore[arg-type]
             phase=phase,
             created_at=created_at,
             lease=(
@@ -220,7 +286,7 @@ class BackupRotationState:
             "candidate": self.candidate.to_dict() if self.candidate is not None else None,
             "generation": self.generation,
             "retirements": [record.to_dict() for record in self.retirements],
-            "schema_version": 2,
+            "schema_version": 3,
         }
 
     @classmethod
@@ -233,14 +299,14 @@ class BackupRotationState:
         )
         if (
             set(data) != expected
-            or schema_version not in {1, 2}
+            or schema_version not in {1, 2, 3}
             or type(data["generation"]) is not int
             or any(
                 data[field] is not None and not isinstance(data[field], Mapping)
                 for field in ("active", "candidate")
             )
             or (
-                schema_version == 2
+                schema_version in {2, 3}
                 and (
                     not isinstance(data["retirements"], list)
                     or not all(isinstance(item, Mapping) for item in data["retirements"])
@@ -251,21 +317,21 @@ class BackupRotationState:
         return cls(
             generation=data["generation"],
             active=(
-                BackupPayloadRecord.from_dict(data["active"])
+                BackupPayloadRecord.from_dict(data["active"], legacy=schema_version in {1, 2})
                 if isinstance(data["active"], Mapping)
                 else None
             ),
             candidate=(
-                BackupPayloadRecord.from_dict(data["candidate"])
+                BackupPayloadRecord.from_dict(data["candidate"], legacy=schema_version in {1, 2})
                 if isinstance(data["candidate"], Mapping)
                 else None
             ),
             retirements=(
                 tuple(
-                    BackupRetirementRecord.from_dict(item)
+                    BackupRetirementRecord.from_dict(item, legacy=schema_version == 2)
                     for item in cast(list[Mapping[str, object]], data["retirements"])
                 )
-                if schema_version == 2
+                if schema_version in {2, 3}
                 else ()
             ),
         )
@@ -284,6 +350,7 @@ def begin_candidate(
     *,
     payload_id: str,
     request_id: str,
+    bundle_name: str,
     created_at: datetime,
 ) -> BackupRotationResult:
     """Reserve the sole transient candidate without replacing the active lease."""
@@ -294,6 +361,7 @@ def begin_candidate(
     candidate = BackupPayloadRecord(
         payload_id=payload_id,
         request_id=request_id,
+        bundle_name=bundle_name,
         phase=BackupPayloadPhase.CREATING,
         created_at=created_at,
     )
@@ -363,6 +431,7 @@ def fail_candidate(
     failed = BackupPayloadRecord(
         payload_id=candidate.payload_id,
         request_id=candidate.request_id,
+        bundle_name=candidate.bundle_name,
         phase=BackupPayloadPhase.FAILED,
         created_at=candidate.created_at,
         failure_code=failure_code,
@@ -372,7 +441,9 @@ def fail_candidate(
     retirement = BackupRetirementRecord(
         payload_id=failed.payload_id,
         request_id=failed.request_id,
+        bundle_name=failed.bundle_name,
         reason="failed",
+        manifest_sha256=candidate.manifest_sha256,
     )
     return BackupRotationResult(
         BackupRotationState(
@@ -398,7 +469,9 @@ def collect_failed_candidate(
     retirement = BackupRetirementRecord(
         payload_id=candidate.payload_id,
         request_id=candidate.request_id,
+        bundle_name=candidate.bundle_name,
         reason="failed",
+        manifest_sha256=candidate.manifest_sha256,
     )
     return BackupRotationResult(
         BackupRotationState(
@@ -433,7 +506,9 @@ def promote_candidate(
             BackupRetirementRecord(
                 payload_id=previous.payload_id,
                 request_id=previous.request_id,
+                bundle_name=previous.bundle_name,
                 reason="superseded",
+                manifest_sha256=previous.manifest_sha256,
             ),
         )
     if previous is not None and previous.payload_id not in referenced_payload_ids:

@@ -50,6 +50,7 @@ def _verified_candidate(
         state,
         payload_id=payload_id,
         request_id=request_id,
+        bundle_name=f"20260719T200000Z-{request_id}",
         created_at=NOW,
     ).state
     state = record_manifest_verified(
@@ -76,6 +77,7 @@ def test_candidate_failure_before_manifest_preserves_active_until_compacted() ->
         active_state,
         payload_id="payload-failed00",
         request_id="req-failed000",
+        bundle_name="20260719T200000Z-req-failed000",
         created_at=NOW,
     ).state
 
@@ -96,6 +98,7 @@ def test_validation_and_restore_failure_never_promote_candidate() -> None:
         BackupRotationState(),
         payload_id="payload-candidate0",
         request_id="req-candidate0",
+        bundle_name="20260719T200000Z-req-candidate0",
         created_at=NOW,
     ).state
     with pytest.raises(ValueError, match="digest"):
@@ -134,6 +137,7 @@ def test_active_request_reference_defers_payload_deletion_until_retry() -> None:
         BackupRotationState(),
         payload_id="payload-failed00",
         request_id="req-failed000",
+        bundle_name="20260719T200000Z-req-failed000",
         created_at=NOW,
     ).state
     state = fail_candidate(
@@ -191,6 +195,7 @@ def test_promotion_state_is_crash_safe_before_old_payload_deletion() -> None:
             promoted.state,
             payload_id="payload-third000",
             request_id="req-third0000",
+            bundle_name="20260719T200000Z-req-third0000",
             created_at=NOW,
         )
 
@@ -236,6 +241,7 @@ def test_second_candidate_is_rejected_and_state_digest_is_deterministic() -> Non
         BackupRotationState(),
         payload_id="payload-first000",
         request_id="req-first0000",
+        bundle_name="20260719T200000Z-req-first0000",
         created_at=NOW,
     ).state
 
@@ -244,6 +250,7 @@ def test_second_candidate_is_rejected_and_state_digest_is_deterministic() -> Non
             state,
             payload_id="payload-second00",
             request_id="req-second000",
+            bundle_name="20260719T200000Z-req-second000",
             created_at=NOW,
         )
 
@@ -264,4 +271,33 @@ def test_schema_one_rotation_state_upgrades_without_retirements() -> None:
 
     assert state.generation == 3
     assert state.retirements == ()
-    assert state.to_dict()["schema_version"] == 2
+    assert state.to_dict()["schema_version"] == 3
+
+
+def test_schema_two_rotation_derives_bundle_and_defers_retirement_resolution() -> None:
+    state = _verified_candidate(
+        BackupRotationState(),
+        request_id="req-legacy0000",
+        payload_id="payload-legacy000",
+        suffix="a",
+    )
+    state = promote_candidate(state, payload_id="payload-legacy000").state
+    payload = state.to_dict()
+    payload["schema_version"] = 2
+    active = payload["active"]
+    assert isinstance(active, dict)
+    active.pop("bundle_name")
+    payload["retirements"] = [
+        {
+            "payload_id": "payload-retired00",
+            "reason": "superseded",
+            "request_id": "req-retired000",
+        }
+    ]
+
+    upgraded = BackupRotationState.from_dict(payload)
+
+    assert upgraded.active is not None
+    assert upgraded.active.bundle_name == "20260719T200000Z-req-legacy0000"
+    assert upgraded.retirements[0].bundle_name is None
+    assert upgraded.to_dict()["schema_version"] == 3

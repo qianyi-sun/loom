@@ -3564,6 +3564,43 @@ def test_cleanup_incomplete_refuses_manifest_backed_or_latest_bundle(tmp_path: P
     assert latest_bundle.exists()
 
 
+def test_retire_payload_requires_exact_manifest_and_refuses_latest(tmp_path: Path) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+    manifest = bundle / "backup-manifest.json"
+    manifest.write_bytes(b"{}\n")
+    manifest.chmod(0o600)
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    with pytest.raises(BackupError, match="backup_retirement_failed"):
+        creator.retire_payload(
+            "stg-20260713-abcdef12",
+            bundle_name=bundle.name,
+            expected_manifest_sha256="f" * 64,
+        )
+    assert bundle.exists()
+
+    (bundle.parent / "latest").symlink_to(bundle.name)
+    with pytest.raises(BackupError, match="backup_retirement_failed"):
+        creator.retire_payload(
+            "stg-20260713-abcdef12",
+            bundle_name=bundle.name,
+            expected_manifest_sha256=digest,
+        )
+    (bundle.parent / "latest").unlink()
+
+    assert creator.retire_payload(
+        "stg-20260713-abcdef12",
+        bundle_name=bundle.name,
+        expected_manifest_sha256=digest,
+    )
+    assert not bundle.exists()
+    assert not creator.retire_payload(
+        "stg-20260713-abcdef12",
+        bundle_name=bundle.name,
+        expected_manifest_sha256=digest,
+    )
+
+
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo"])
 def test_cleanup_incomplete_refuses_unsafe_entries(
     tmp_path: Path,

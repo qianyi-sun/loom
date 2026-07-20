@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import stat
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -23,7 +25,7 @@ from .backup_job import (
     validate_job_binding,
 )
 from .backup_lease import BackupLease
-from .backup_rotation import BackupRotationState
+from .backup_rotation import BackupRetirementRecord, BackupRotationState
 from .model import (
     ActivePointer,
     DriverEnvelope,
@@ -305,6 +307,7 @@ class RequestStore:
         self.backup_rotation_path = self.root / "backup-rotation.json"
         self._backup_rotation_lock_path = self.root / ".backup-rotation.lock"
         self.backup_leases_root = self.root / "backup-leases"
+        self.backup_retirements_root = self.root / "backup-retirements"
 
     def _ensure_store(self) -> None:
         if not self.root.exists():
@@ -407,6 +410,133 @@ class RequestStore:
                 with contextlib.suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+    def referenced_backup_payload_ids(self) -> frozenset[str]:
+        """Return payloads referenced by the sole active rollout attempt."""
+        active = self.read_active()
+        if active is None:
+            return frozenset()
+        readers = (self.read_preflight_backup_job, self.read_backup_job)
+        for reader in readers:
+            try:
+                envelope = reader(active.request_id)
+            except RequestStoreError as exc:
+                if "does not exist" in str(exc) or "not promoted" in str(exc):
+                    continue
+                raise
+            return frozenset({envelope.payload_id})
+        raise RequestStoreError("active rollout payload reference is missing")
+
+    def resolve_backup_retirement(
+        self,
+        record: BackupRetirementRecord,
+    ) -> BackupRetirementRecord:
+        """Upgrade a legacy retirement from its immutable job authority."""
+        if record.bundle_name is not None:
+            return record
+        readers = (
+            (self.read_preflight_backup_job, self.read_preflight_backup_job_state),
+            (self.read_backup_job, self.read_backup_job_state),
+        )
+        for read_job, read_state in readers:
+            try:
+                envelope = read_job(record.request_id)
+                state = read_state(record.request_id)
+            except RequestStoreError as exc:
+                if "does not exist" in str(exc) or "not promoted" in str(exc):
+                    continue
+                raise
+            if envelope.payload_id != record.payload_id:
+                raise RequestStoreError("legacy retirement payload identity drifted")
+            manifest_sha256 = record.manifest_sha256 or state.manifest_sha256
+            if record.reason == "superseded" and manifest_sha256 is None:
+                raise RequestStoreError("legacy retirement manifest authority is missing")
+            return replace(
+                record,
+                bundle_name=envelope.bundle_name,
+                manifest_sha256=manifest_sha256,
+            )
+        raise RequestStoreError("legacy retirement job authority is missing")
+
+    def publish_backup_retirement_evidence(
+        self,
+        record: BackupRetirementRecord,
+        *,
+        manifest_path: Path | None,
+    ) -> Path:
+        """Persist compact exact evidence before deleting a large payload."""
+        self._ensure_store()
+        _ensure_private_directory(
+            self.backup_retirements_root,
+            "backup retirements directory",
+        )
+        path = self.backup_retirements_root / f"{record.payload_id}.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            existing = _read_json(path, "backup retirement evidence")
+            if existing.get("record") != record.to_dict():
+                raise RequestStoreError("backup retirement evidence identity drifted")
+            return path
+        manifest_size: int | None = None
+        if record.manifest_sha256 is None:
+            if manifest_path is not None:
+                raise RequestStoreError("incomplete retirement cannot bind a manifest")
+        else:
+            if manifest_path is None or not manifest_path.is_absolute():
+                raise RequestStoreError("manifest retirement evidence path is invalid")
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(manifest_path, flags)
+            except OSError as exc:
+                raise RequestStoreError("could not open retirement manifest evidence") from exc
+            try:
+                metadata = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+                ):
+                    raise RequestStoreError("retirement manifest evidence is unsafe")
+                digest = hashlib.sha256()
+                while chunk := os.read(fd, 1024 * 1024):
+                    digest.update(chunk)
+                manifest_size = metadata.st_size
+            finally:
+                os.close(fd)
+            if digest.hexdigest() != record.manifest_sha256:
+                raise RequestStoreError("retirement manifest evidence digest drifted")
+        payload: dict[str, object] = {
+            "manifest_size": manifest_size,
+            "record": record.to_dict(),
+            "schema_version": 1,
+        }
+        return _publish_immutable(path, payload)
+
+    def publish_backup_retirement_receipt(self, payload_id: str) -> Path:
+        """Record exact payload absence after idempotent retirement."""
+        validate_safe_identifier(payload_id, "payload_id")
+        _validate_private_directory(
+            self.backup_retirements_root,
+            "backup retirements directory",
+        )
+        evidence_path = self.backup_retirements_root / f"{payload_id}.json"
+        evidence = _read_json(evidence_path, "backup retirement evidence")
+        payload = {
+            "evidence_sha256": hashlib.sha256(_json_bytes(evidence)).hexdigest(),
+            "payload_id": payload_id,
+            "schema_version": 1,
+        }
+        path = self.backup_retirements_root / f"{payload_id}.deleted.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return _publish_immutable(path, payload)
+        if _read_json(path, "backup retirement receipt") != payload:
+            raise RequestStoreError("backup retirement receipt identity drifted")
+        return path
 
     def _request_directory(self, request_id: object) -> Path:
         return self.requests_root / _request_id(request_id)

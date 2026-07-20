@@ -12,6 +12,7 @@ from .backup_job import PreflightBackupJobEnvelope
 from .backup_lease import BackupLease
 from .backup_rotation import (
     BackupPayloadPhase,
+    BackupRetirementRecord,
     BackupRotationResult,
     BackupRotationState,
     acknowledge_retirement,
@@ -79,7 +80,7 @@ class DetachedCheckpointCoordinator:
     now: Callable[[], datetime]
     lease_ttl: timedelta
     referenced_payload_ids: Callable[[], frozenset[str]] = frozenset
-    retire_payload: Callable[[str], None] | None = None
+    retire_payload: Callable[[BackupRetirementRecord], None] | None = None
 
     def __post_init__(self) -> None:
         if self.lease_ttl <= timedelta(0):
@@ -118,7 +119,7 @@ class DetachedCheckpointCoordinator:
             if retirement.payload_id in referenced or self.retire_payload is None:
                 continue
             try:
-                self.retire_payload(retirement.payload_id)
+                self.retire_payload(retirement)
                 current = self.store.read_backup_rotation()
                 acknowledged = acknowledge_retirement(
                     current,
@@ -171,12 +172,14 @@ class DetachedCheckpointCoordinator:
                 state,
                 payload_id=envelope.payload_id,
                 request_id=request.request_id,
+                bundle_name=envelope.bundle_name,
                 created_at=envelope.created_at,
             )
             self._publish_rotation(state, reservation)
         elif (
             candidate.payload_id != envelope.payload_id
             or candidate.request_id != request.request_id
+            or candidate.bundle_name != envelope.bundle_name
             or candidate.created_at != envelope.created_at
             or candidate.phase is not BackupPayloadPhase.CREATING
         ):

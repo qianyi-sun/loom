@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from loom_cli.cluster_backup_guard import DEFAULT_BACKUP_MAX_AGE_HOURS
 
 from .backup import BackupCreator, SubprocessBackupCommandRunner, VerifiedBackup
+from .backup_retirement import BackupPayloadRetirer
 from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .checkpoint_lease import CriticalCheckpointEvidence, inspect_critical_checkpoint
 from .config import OperatorConfig
@@ -48,6 +49,7 @@ def build_installed_detached_preflight_runner(
         now=now,
         object_inventory_provider=inventory_source,
     )
+    payload_retirer = BackupPayloadRetirer(creator=creator, store=store)
     deep_preflight = (
         authority
         or build_installed_deep_preflight_composition(
@@ -81,6 +83,8 @@ def build_installed_detached_preflight_runner(
         inspect_checkpoint=inspect,
         now=now,
         lease_ttl=_RESTORE_VERIFIED_LEASE_TTL,
+        referenced_payload_ids=store.referenced_backup_payload_ids,
+        retire_payload=payload_retirer,
     )
 
 

@@ -72,6 +72,7 @@ def test_active_lease_is_bound_and_disappearance_fails_closed() -> None:
     record = BackupPayloadRecord(
         payload_id="payload-current01",
         request_id=lease.source_request_id,
+        bundle_name="20260719T120000Z-req-source0000",
         phase=BackupPayloadPhase.ACTIVE,
         created_at=lease.created_at,
         manifest_sha256=lease.manifest_sha256,

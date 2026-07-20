@@ -476,6 +476,7 @@ def _start_staged(
             rotation,
             payload_id=payload_id,
             request_id=request.request_id,
+            bundle_name=bundle_name,
             created_at=created_at,
         )
         dependencies.store.replace_backup_rotation(
