@@ -138,11 +138,12 @@ class ReadonlyPreflightAuthority:
         return {check_id: bound(check_id) for check_id in STAGING_BASELINE_CHECK_IDS}
 
     def capabilities(self) -> ReadonlyAuthorityEvidence:
+        epoch = self.mutation_epoch_evidence()
         return probe_readonly_authority(
             self.kubernetes_run,
             kubeconfig=self.kubeconfig_path,
             namespace=self.config.namespace,
-            database_authority_digest=self.database_evidence().evidence_sha256,
+            database_authority_digest=epoch.evidence_sha256,
         )
 
 

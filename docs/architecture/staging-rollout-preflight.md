@@ -210,6 +210,11 @@ HEAD, never updates token usage timestamps while authenticating it, and all
 other services reject the type by default. A normal team, worker, browser, or
 admin credential cannot satisfy this authority check merely because the
 selected baseline endpoints happen to be reads.
+The capability probe consumes only the minimal SELECT-only role, schema, and
+mutation-epoch authority digest. It never consumes baseline rows, lifecycle
+capacity, or immutable-object inventory. Those predicates remain independent
+registered checks, so a missing capacity row cannot mask a valid readonly
+principal or collapse all Tier 2 failures into `readonly.authority.unsafe`.
 The Kubernetes side is declared in
 `deploy/k8s/staging-rollout-readonly.yaml`: one namespace-scoped service
 account, Role, and RoleBinding, with token automount disabled and only

@@ -271,3 +271,56 @@ def test_baseline_factory_defers_missing_capacity_to_registered_checks(tmp_path:
     with pytest.raises(ValueError, match="capacity evidence is incomplete"):
         probes["staging.health"]()
     assert len(calls) == 1
+
+
+def test_capability_probe_does_not_consume_capacity_or_baseline_evidence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    cluster, _token = _write_authority(tmp_path)
+    object.__setattr__(config, "cluster_config_path", cluster)
+    database_calls: list[object] = []
+    payloads = iter(
+        (
+            {
+                "status": {
+                    "userInfo": {
+                        "username": ("system:serviceaccount:loom-staging:loom-rollout-readonly")
+                    }
+                }
+            },
+            {
+                "status": {
+                    "incomplete": False,
+                    "resourceRules": [
+                        {
+                            "apiGroups": [""],
+                            "resources": ["pods"],
+                            "verbs": ["get", "list", "watch"],
+                        }
+                    ],
+                    "nonResourceRules": [],
+                }
+            },
+        )
+    )
+
+    def missing_capacity() -> ReadonlyDatabaseEvidence:
+        database_calls.append(object())
+        raise ValueError("readonly database capacity evidence is incomplete")
+
+    authority = ReadonlyPreflightAuthority(
+        config=config,
+        service_uid=os.getuid(),
+        kubernetes_run=lambda _argv, _stdin: _Result(0, json.dumps(next(payloads))),
+        database_evidence=missing_capacity,
+        mutation_epoch_evidence=_mutation_epoch,
+        capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
+        kubeconfig_path=tmp_path / "readonly-kubeconfig",
+    )
+
+    evidence = authority.capabilities()
+
+    assert evidence.ready
+    assert database_calls == []
