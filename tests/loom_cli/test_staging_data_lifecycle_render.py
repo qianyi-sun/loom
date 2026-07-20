@@ -60,6 +60,7 @@ def test_staging_lifecycle_cronjob_is_staging_only_and_least_authority() -> None
         "-m",
         "loom.data_lifecycle_maintenance",
     ]
+    assert container["args"][:2] == ["--action", "auto"]
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},

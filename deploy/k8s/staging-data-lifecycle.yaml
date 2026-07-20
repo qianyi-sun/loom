@@ -32,6 +32,8 @@ spec:
               image: loom-control-plane:0.7
               command: ["python", "-I", "-B", "-m", "loom.data_lifecycle_maintenance"]
               args:
+                - --action
+                - auto
                 - --namespace
                 - loom
                 - --bucket

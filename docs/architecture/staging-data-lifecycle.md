@@ -378,6 +378,11 @@ measured; missing or duplicate filesystem authority fails closed. Development
 and production renders omit the CronJob entirely. Automatic policy authority
 does not weaken the manual digest-approved `apply` or exact failed-run `resume`
 paths.
+The same module also exposes an explicit `capacity` action for a reviewed,
+candidate-bound one-shot maintenance Job. That action publishes only the fresh
+capacity row and returns `gc: null`; it cannot inventory, mark, delete or resume
+GC. The CronJob always declares `--action auto`, so adding the narrower action
+does not silently change scheduled retention semantics.
 
 ## Rollout checkpoint versus disaster recovery
 

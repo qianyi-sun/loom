@@ -32,6 +32,8 @@ spec:
               image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-control-plane:{{ image_tag }}
               command: ["python", "-I", "-B", "-m", "loom.data_lifecycle_maintenance"]
               args:
+                - --action
+                - auto
                 - --namespace
                 - {{ namespace }}
                 - --bucket

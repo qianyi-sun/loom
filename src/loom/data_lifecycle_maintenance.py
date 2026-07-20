@@ -38,6 +38,7 @@ from loom.data_lifecycle_runtime import (
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--action", choices=("auto", "capacity"), default="auto")
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--bucket", action="append", required=True)
     parser.add_argument("--filesystem-path", action="append", type=Path, required=True)
@@ -61,27 +62,30 @@ def main(argv: list[str] | None = None) -> int:
             observed_at=now,
         )
         SqlAlchemyStagingCapacityStore(engine).publish(capacity)
-        document = run_lifecycle_operator(
-            request=LifecycleOperatorRequest(
-                action=OperatorAction.AUTO,
-                requested_by=args.requested_by,
-                now=now,
-                request_id=f"req-gc-auto-{uuid4().hex[:16]}",
-            ),
-            scope=GcScope(environment="staging", namespace=args.namespace),
-            inventory=ReconcilingLifecycleInventory(
-                SqlAlchemyLifecycleInventory(engine),
-                object_inventory,
-                buckets=args.bucket,
-            ),
-            journal=SqlAlchemyGcJournal(engine),
-            object_deleter=S3ExactObjectDeleter(client),
-            batch_size=1000,
-        )
+        document = None
+        if args.action == "auto":
+            document = run_lifecycle_operator(
+                request=LifecycleOperatorRequest(
+                    action=OperatorAction.AUTO,
+                    requested_by=args.requested_by,
+                    now=now,
+                    request_id=f"req-gc-auto-{uuid4().hex[:16]}",
+                ),
+                scope=GcScope(environment="staging", namespace=args.namespace),
+                inventory=ReconcilingLifecycleInventory(
+                    SqlAlchemyLifecycleInventory(engine),
+                    object_inventory,
+                    buckets=args.bucket,
+                ),
+                journal=SqlAlchemyGcJournal(engine),
+                object_deleter=S3ExactObjectDeleter(client),
+                batch_size=1000,
+            )
         print(
             json.dumps(
                 {
                     "schema_version": 1,
+                    "action": args.action,
                     "capacity": {
                         "admission_allowed": capacity.capacity.admission_allowed,
                         "bytes_used": capacity.capacity.bytes_used,
