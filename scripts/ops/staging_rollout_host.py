@@ -3446,8 +3446,15 @@ class HostSystem:
             **self._trust_command_kwargs(),
         )
 
-    def run_post_install_preflight(self) -> None:
-        self.runner.run(
+    def run_post_install_preflight(self) -> dict[str, object]:
+        """Run the requestless admission probe without conflating blockers with install failure.
+
+        A newly installed runner can legitimately lack a verified backup lease.  The
+        broker must keep that condition fail-closed, but the host installation is
+        already complete and must report the normalized blocker rather than raising
+        an opaque ``sudo`` error after publishing its ready record.
+        """
+        result = self.runner.run(
             [
                 "sudo",
                 "-n",
@@ -3456,8 +3463,43 @@ class HostSystem:
                 "--",
                 str(CLIENT_PATH),
                 "preflight",
-            ]
+            ],
+            check=False,
         )
+        if result.returncode not in {0, 1}:
+            raise InstallError("post-install preflight command failed safely")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise InstallError("post-install preflight result is invalid") from exc
+        if not isinstance(payload, dict) or type(payload.get("passed")) is not bool:
+            raise InstallError("post-install preflight result is invalid")
+        passed = payload["passed"]
+        if result.returncode != (0 if passed else 1):
+            raise InstallError("post-install preflight status is inconsistent")
+        assessment_digest = payload.get("assessment_digest")
+        blockers = payload.get("blockers")
+        if (
+            not isinstance(assessment_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", assessment_digest) is None
+            or not isinstance(blockers, list)
+        ):
+            raise InstallError("post-install preflight evidence is invalid")
+        blocker_codes: list[str] = []
+        for blocker in blockers:
+            if not isinstance(blocker, dict):
+                raise InstallError("post-install preflight blocker is invalid")
+            failure_code = blocker.get("failure_code")
+            if not isinstance(failure_code, str) or not failure_code:
+                raise InstallError("post-install preflight blocker is invalid")
+            blocker_codes.append(failure_code)
+        if passed != (not blocker_codes):
+            raise InstallError("post-install preflight blocker status is inconsistent")
+        return {
+            "assessment_digest": assessment_digest,
+            "blocker_codes": sorted(blocker_codes),
+            "status": "passed" if passed else "blocked",
+        }
 
     def check_runtime(
         self,
@@ -4883,13 +4925,21 @@ class HostInstaller:
             self.system.end_maintenance()
             maintenance_enabled = False
         trust_ready = self.system.gb10_trust_ready()
+        post_install_preflight: dict[str, object] | None = None
         if trust_ready and changes:
-            self.system.run_post_install_preflight()
+            post_install_preflight = self.system.run_post_install_preflight()
         return {
             "ok": True,
             "changed": changes,
             "service_key_fingerprint": fingerprint,
-            "post_install_check": "passed" if trust_ready else "awaiting-gb10-trust",
+            "post_install_check": (
+                str(post_install_preflight["status"])
+                if post_install_preflight is not None
+                else "not-run"
+                if trust_ready
+                else "awaiting-gb10-trust"
+            ),
+            "post_install_preflight": post_install_preflight,
         }
 
     def check(self, *, _lock_held: bool = False) -> dict[str, object]:

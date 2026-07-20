@@ -539,8 +539,13 @@ class FakeSystem:
     def gb10_trust_ready(self) -> bool:
         return self.trust_ready
 
-    def run_post_install_preflight(self) -> None:
+    def run_post_install_preflight(self) -> dict[str, object]:
         self.preflights += 1
+        return {
+            "assessment_digest": "d" * 64,
+            "blocker_codes": [],
+            "status": "passed",
+        }
 
     def check_runtime(
         self,
@@ -1862,19 +1867,57 @@ def test_install_runs_requestless_preflight_only_after_all_gb10_trust_is_ready(
     assert system.preflights == 1
 
 
+def test_install_reports_admission_blocker_after_publishing_ready_state(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    system.trust_ready = True
+    system.run_post_install_preflight = lambda: {  # type: ignore[method-assign]
+        "assessment_digest": "e" * 64,
+        "blocker_codes": ["backup.lease.ineligible"],
+        "status": "blocked",
+    }
+
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert result["post_install_check"] == "blocked"
+    assert result["post_install_preflight"] == {
+        "assessment_digest": "e" * 64,
+        "blocker_codes": ["backup.lease.ineligible"],
+        "status": "blocked",
+    }
+    assert installer.filesystem.load_install_record()["installation_state"] == "ready"  # type: ignore[index]
+
+
 def test_post_install_preflight_invokes_requestless_broker_command() -> None:
     class RecordingRunner:
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
 
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-            assert kwargs == {}
+            assert kwargs == {"check": False}
             self.calls.append(list(argv))
-            return host.CommandResult(0, "")
+            return host.CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "assessment_digest": "d" * 64,
+                        "blockers": [],
+                        "passed": True,
+                    }
+                ),
+            )
 
     runner = RecordingRunner()
 
-    host.HostSystem(runner).run_post_install_preflight()
+    result = host.HostSystem(runner).run_post_install_preflight()
+
+    assert result == {
+        "assessment_digest": "d" * 64,
+        "blocker_codes": [],
+        "status": "passed",
+    }
 
     assert runner.calls == [
         [
@@ -1887,6 +1930,30 @@ def test_post_install_preflight_invokes_requestless_broker_command() -> None:
             "preflight",
         ]
     ]
+
+
+def test_post_install_preflight_preserves_normalized_admission_blockers() -> None:
+    class BlockedRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs == {"check": False}
+            return host.CommandResult(
+                1,
+                json.dumps(
+                    {
+                        "assessment_digest": "e" * 64,
+                        "blockers": [
+                            {"failure_code": "backup.lease.ineligible"},
+                        ],
+                        "passed": False,
+                    }
+                ),
+            )
+
+    assert host.HostSystem(BlockedRunner()).run_post_install_preflight() == {
+        "assessment_digest": "e" * 64,
+        "blocker_codes": ["backup.lease.ineligible"],
+        "status": "blocked",
+    }
 
 
 def test_unchanged_reinstall_does_not_repeat_post_install_preflight(tmp_path: Path) -> None:
