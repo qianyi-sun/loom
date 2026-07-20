@@ -339,6 +339,198 @@ def _inspect_artifacts(
     return objects, absent_objects, blockers
 
 
+def _copy_rows(
+    connection: Connection,
+    statement: str,
+    rows: Iterable[tuple[object, ...]],
+) -> None:
+    """Stream trusted typed plan rows into one transaction-local PostgreSQL table."""
+    driver_connection = connection.connection.driver_connection
+    if driver_connection is None:
+        raise RuntimeError("PostgreSQL driver connection is unavailable")
+    with driver_connection.cursor().copy(statement) as copy:
+        for row in rows:
+            copy.write_row(row)
+
+
+def _stage_plan(connection: Connection, plan: LegacyClassificationPlan) -> None:
+    """Stage one digest-approved plan without millions of per-row round trips."""
+    connection.execute(
+        text(
+            "CREATE TEMP TABLE legacy_authority_plan ("
+            "id uuid PRIMARY KEY, team_id uuid, data_class text, owner_kind text, "
+            "owner_id text, created_at timestamptz, expires_at timestamptz, "
+            "pinned boolean, object_state text) ON COMMIT DROP"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE TEMP TABLE legacy_row_plan ("
+            "table_name text, row_id uuid, authority_id uuid, "
+            "PRIMARY KEY (table_name, row_id)) ON COMMIT DROP"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE TEMP TABLE legacy_object_plan ("
+            "authority_id uuid, bucket text, object_key text, version_id text, "
+            "content_sha256 text, size_bytes bigint, created_at timestamptz, "
+            "PRIMARY KEY (bucket, object_key, version_id)) ON COMMIT DROP"
+        )
+    )
+    absent_owner_ids = {str(item.row_id) for item in plan.absent_objects}
+    _copy_rows(
+        connection,
+        "COPY legacy_authority_plan "
+        "(id,team_id,data_class,owner_kind,owner_id,created_at,expires_at,pinned,object_state) "
+        "FROM STDIN",
+        (
+            (
+                authority.id,
+                authority.team_id,
+                authority.data_class.value,
+                authority.owner_kind.value,
+                authority.owner_id,
+                authority.created_at,
+                authority.expires_at,
+                authority.pinned,
+                (
+                    "verified_absent"
+                    if authority.owner_kind is OwnerKind.ARTIFACT
+                    and authority.owner_id in absent_owner_ids
+                    else "registered_or_not_applicable"
+                ),
+            )
+            for authority in plan.authorities
+        ),
+    )
+    authority_by_owner = {
+        (item.data_class, item.owner_kind, item.owner_id): item.id for item in plan.authorities
+    }
+    _copy_rows(
+        connection,
+        "COPY legacy_row_plan (table_name,row_id,authority_id) FROM STDIN",
+        (
+            (
+                row.table,
+                row.row_id,
+                authority_by_owner[(row.data_class, row.owner_kind, row.owner_id)],
+            )
+            for row in plan.rows
+        ),
+    )
+    artifact_authority = {
+        row.row_id: authority_by_owner[(row.data_class, row.owner_kind, row.owner_id)]
+        for row in plan.rows
+        if row.table == "artifacts"
+    }
+    _copy_rows(
+        connection,
+        "COPY legacy_object_plan "
+        "(authority_id,bucket,object_key,version_id,content_sha256,size_bytes,created_at) "
+        "FROM STDIN",
+        (
+            (
+                artifact_authority[item.row_id],
+                item.bucket,
+                item.object_key,
+                item.version_id or "",
+                item.content_sha256,
+                item.size_bytes,
+                item.created_at,
+            )
+            for item in plan.objects
+        ),
+    )
+
+
+def _apply_staged_plan(connection: Connection, plan: LegacyClassificationPlan) -> None:
+    """Install and validate every staged fact with set-based exact comparisons."""
+    connection.execute(
+        text(
+            "INSERT INTO data_lifecycle_authorities "
+            "(id,environment,namespace,team_id,data_class,owner_kind,owner_id,created_at,"
+            "expires_at,pinned,state,metadata) "
+            "SELECT id,:environment,:namespace,team_id,data_class,owner_kind,owner_id,"
+            "created_at,expires_at,pinned,'active',"
+            "jsonb_build_object('classification','legacy-staging-v1',"
+            "'inventory_digest',CAST(:digest AS text),'object_state',object_state) "
+            "FROM legacy_authority_plan ON CONFLICT DO NOTHING"
+        ),
+        {
+            "environment": plan.scope.environment,
+            "namespace": plan.scope.namespace,
+            "digest": plan.inventory_digest,
+        },
+    )
+    exact_authorities = connection.execute(
+        text(
+            "SELECT count(*) FROM legacy_authority_plan p "
+            "JOIN data_lifecycle_authorities a ON a.id=p.id "
+            "WHERE a.environment=:environment AND a.namespace=:namespace "
+            "AND a.team_id IS NOT DISTINCT FROM p.team_id AND a.data_class=p.data_class "
+            "AND a.owner_kind=p.owner_kind AND a.owner_id=p.owner_id "
+            "AND a.created_at=p.created_at AND a.expires_at IS NOT DISTINCT FROM p.expires_at "
+            "AND a.pinned=p.pinned AND a.state='active' "
+            "AND a.metadata=jsonb_build_object('classification','legacy-staging-v1',"
+            "'inventory_digest',CAST(:digest AS text),'object_state',p.object_state)"
+        ),
+        {
+            "environment": plan.scope.environment,
+            "namespace": plan.scope.namespace,
+            "digest": plan.inventory_digest,
+        },
+    ).scalar_one()
+    if exact_authorities != len(plan.authorities):
+        raise LegacyClassificationError("legacy authority identity conflicts")
+
+    for table in sorted({row.table for row in plan.rows}):
+        connection.execute(
+            text(
+                f"UPDATE {table} AS target SET lifecycle_authority_id=plan.authority_id "
+                "FROM legacy_row_plan AS plan WHERE plan.table_name=:table_name "
+                "AND target.id=plan.row_id AND target.lifecycle_authority_id IS NULL"
+            ),
+            {"table_name": table},
+        )
+        exact_rows = connection.execute(
+            text(
+                f"SELECT count(*) FROM {table} AS target JOIN legacy_row_plan AS plan "
+                "ON target.id=plan.row_id WHERE plan.table_name=:table_name "
+                "AND target.lifecycle_authority_id=plan.authority_id"
+            ),
+            {"table_name": table},
+        ).scalar_one()
+        expected_rows = sum(row.table == table for row in plan.rows)
+        if exact_rows != expected_rows:
+            raise LegacyClassificationError("legacy row binding raced")
+
+    connection.execute(
+        text(
+            "INSERT INTO data_lifecycle_objects "
+            "(authority_id,environment,namespace,bucket,object_key,version_id,"
+            "content_sha256,size_bytes,created_at,state) "
+            "SELECT authority_id,:environment,:namespace,bucket,object_key,"
+            "NULLIF(version_id,''),content_sha256,size_bytes,created_at,'active' "
+            "FROM legacy_object_plan ON CONFLICT DO NOTHING"
+        ),
+        {"environment": plan.scope.environment, "namespace": plan.scope.namespace},
+    )
+    exact_objects = connection.execute(
+        text(
+            "SELECT count(*) FROM legacy_object_plan p JOIN data_lifecycle_objects o "
+            "ON o.environment=:environment AND o.namespace=:namespace "
+            "AND o.bucket=p.bucket AND o.object_key=p.object_key "
+            "AND COALESCE(o.version_id,'')=p.version_id "
+            "WHERE o.authority_id=p.authority_id AND o.content_sha256=p.content_sha256 "
+            "AND o.size_bytes=p.size_bytes AND o.created_at=p.created_at AND o.state='active'"
+        ),
+        {"environment": plan.scope.environment, "namespace": plan.scope.namespace},
+    ).scalar_one()
+    if exact_objects != len(plan.objects):
+        raise LegacyClassificationError("legacy object registry identity conflicts")
+
+
 class SqlAlchemyLegacyClassifier:
     """Inventory and apply exact legacy classification without prefix authority."""
 
@@ -440,141 +632,8 @@ class SqlAlchemyLegacyClassifier:
             if live_map != planned_rows:
                 raise LegacyClassificationError("legacy classification row inventory drifted")
 
-            absent_owner_ids = {str(item.row_id) for item in plan.absent_objects}
-            for authority in plan.authorities:
-                connection.execute(
-                    text(
-                        "INSERT INTO data_lifecycle_authorities "
-                        "(id, environment, namespace, team_id, data_class, owner_kind, "
-                        "owner_id, created_at, expires_at, pinned, state, metadata) VALUES "
-                        "(:id,:environment,:namespace,:team_id,:data_class,:owner_kind,"
-                        ":owner_id,:created_at,:expires_at,:pinned,'active',"
-                        "CAST(:metadata AS jsonb)) ON CONFLICT DO NOTHING"
-                    ),
-                    {
-                        "id": authority.id,
-                        "environment": plan.scope.environment,
-                        "namespace": plan.scope.namespace,
-                        "team_id": authority.team_id,
-                        "data_class": authority.data_class.value,
-                        "owner_kind": authority.owner_kind.value,
-                        "owner_id": authority.owner_id,
-                        "created_at": authority.created_at,
-                        "expires_at": authority.expires_at,
-                        "pinned": authority.pinned,
-                        "metadata": json.dumps(
-                            {
-                                "classification": "legacy-staging-v1",
-                                "inventory_digest": plan.inventory_digest,
-                                "object_state": (
-                                    "verified_absent"
-                                    if authority.owner_kind is OwnerKind.ARTIFACT
-                                    and authority.owner_id in absent_owner_ids
-                                    else "registered_or_not_applicable"
-                                ),
-                            },
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                    },
-                )
-                existing = connection.execute(
-                    text(
-                        "SELECT environment, namespace, team_id, data_class, owner_kind, "
-                        "owner_id, created_at, expires_at, pinned, state FROM "
-                        "data_lifecycle_authorities WHERE id=:id"
-                    ),
-                    {"id": authority.id},
-                ).one_or_none()
-                expected_authority = (
-                    plan.scope.environment,
-                    plan.scope.namespace,
-                    authority.team_id,
-                    authority.data_class.value,
-                    authority.owner_kind.value,
-                    authority.owner_id,
-                    authority.created_at,
-                    authority.expires_at,
-                    authority.pinned,
-                    "active",
-                )
-                if existing is None or tuple(existing) != expected_authority:
-                    raise LegacyClassificationError("legacy authority identity conflicts")
-
-            authority_by_owner = {
-                (item.data_class, item.owner_kind, item.owner_id): item.id
-                for item in plan.authorities
-            }
-            for table in sorted({row.table for row in plan.rows}):
-                table_rows = [row for row in plan.rows if row.table == table]
-                for row in table_rows:
-                    authority_id = authority_by_owner[
-                        (row.data_class, row.owner_kind, row.owner_id)
-                    ]
-                    result = connection.execute(
-                        text(
-                            f"UPDATE {table} SET lifecycle_authority_id=:authority_id "
-                            "WHERE id=:row_id AND lifecycle_authority_id IS NULL"
-                        ),
-                        {"authority_id": authority_id, "row_id": row.row_id},
-                    )
-                    if result.rowcount != 1:
-                        raise LegacyClassificationError("legacy row binding raced")
-
-            artifact_authority = {
-                row.row_id: authority_by_owner[(row.data_class, row.owner_kind, row.owner_id)]
-                for row in plan.rows
-                if row.table == "artifacts"
-            }
-            for item in plan.objects:
-                connection.execute(
-                    text(
-                        "INSERT INTO data_lifecycle_objects "
-                        "(authority_id, environment, namespace, bucket, object_key, "
-                        "version_id, content_sha256, size_bytes, created_at, state) VALUES "
-                        "(:authority_id,:environment,:namespace,:bucket,:object_key,"
-                        ":version_id,:content_sha256,:size_bytes,:created_at,'active') "
-                        "ON CONFLICT DO NOTHING"
-                    ),
-                    {
-                        "authority_id": artifact_authority[item.row_id],
-                        "environment": plan.scope.environment,
-                        "namespace": plan.scope.namespace,
-                        "bucket": item.bucket,
-                        "object_key": item.object_key,
-                        "version_id": item.version_id,
-                        "content_sha256": item.content_sha256,
-                        "size_bytes": item.size_bytes,
-                        "created_at": item.created_at,
-                    },
-                )
-                version_clause = (
-                    "version_id IS NULL" if item.version_id is None else "version_id=:version_id"
-                )
-                existing = connection.execute(
-                    text(
-                        "SELECT authority_id, content_sha256, size_bytes, created_at, state "
-                        "FROM data_lifecycle_objects WHERE environment=:environment "
-                        "AND namespace=:namespace AND bucket=:bucket AND object_key=:object_key "
-                        f"AND {version_clause}"
-                    ),
-                    {
-                        "environment": plan.scope.environment,
-                        "namespace": plan.scope.namespace,
-                        "bucket": item.bucket,
-                        "object_key": item.object_key,
-                        "version_id": item.version_id,
-                    },
-                ).one_or_none()
-                expected_object = (
-                    artifact_authority[item.row_id],
-                    item.content_sha256,
-                    item.size_bytes,
-                    item.created_at,
-                    "active",
-                )
-                if existing is None or tuple(existing) != expected_object:
-                    raise LegacyClassificationError("legacy object registry identity conflicts")
+            _stage_plan(connection, plan)
+            _apply_staged_plan(connection, plan)
 
             return advance_mutation_epoch(
                 SqlAlchemyMutationEpochStore(connection),
