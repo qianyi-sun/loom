@@ -289,7 +289,7 @@ async def test_reconcile_clamps_scale_up_slots_to_max_slots(
                     "env_file": "/secure/.env.remote-worker",
                     "repo_dir": "/opt/loom",
                     "requested_cpus": 20,
-                    "requested_memory_mib": 80000,
+                    "requested_memory_mib": 115000,
                     "requested_concurrency": 10,
                     "cpu_per_slot": 2,
                     "memory_mib_per_slot": 8192,
@@ -310,10 +310,14 @@ async def test_reconcile_clamps_scale_up_slots_to_max_slots(
             await s.commit()
 
         assert results[0].action == "scale_up"
-        # A single 10-slot worker would overshoot the 4-slot budget.
+        # A single 10-slot worker would overshoot the 4-slot budget. When
+        # clamped to 4 slots, CPU/memory scale PROPORTIONALLY from the 10-slot
+        # request (staging GB10 profile: 20 CPU / 115000 MiB), not from the
+        # per-slot defaults. So memory = 115000 * 4 / 10 = 46000 MiB, NOT the
+        # 4 * 8192 = 32768 MiB that per-slot scaling would (wrongly) produce.
         assert runner.submitted_configs[0].requested_concurrency == 4
-        assert runner.submitted_configs[0].requested_cpus == 8
-        assert runner.submitted_configs[0].requested_memory_mib == 32768
+        assert runner.submitted_configs[0].requested_cpus == 8  # 20 * 4 / 10
+        assert runner.submitted_configs[0].requested_memory_mib == 46000  # 115000 * 4 / 10
         assert sum(c.requested_concurrency for c in runner.submitted_configs) <= 4
 
         async with session_factory() as s:

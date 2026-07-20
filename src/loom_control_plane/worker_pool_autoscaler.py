@@ -1268,11 +1268,23 @@ async def _apply_slurm_scale_up(
         if per_worker <= 0:
             break
         if per_worker < effective_concurrency:
+            # Scale CPU/memory proportionally from the effective pre-clamp
+            # request, NOT from the independent per-slot defaults: a
+            # 10-slot/115000 MiB worker clamped to 4 slots must request
+            # 46000 MiB (115000 * 4 / 10), not 4 * memory_mib_per_slot.
             node_config = replace(
                 node_config,
                 requested_concurrency=per_worker,
-                requested_cpus=max(1, per_worker * config.cpu_per_slot),
-                requested_memory_mib=max(1, per_worker * config.memory_mib_per_slot),
+                requested_cpus=max(
+                    1,
+                    round(node_config.requested_cpus * per_worker / effective_concurrency),
+                ),
+                requested_memory_mib=max(
+                    1,
+                    round(
+                        node_config.requested_memory_mib * per_worker / effective_concurrency
+                    ),
+                ),
             )
         remaining_budget -= per_worker
         try:
