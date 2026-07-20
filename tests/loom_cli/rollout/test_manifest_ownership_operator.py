@@ -234,6 +234,9 @@ def test_epoch_drift_and_force_failure_are_terminally_journaled() -> None:
         "inventory-approved",
         "failed",
     ]
+    assert harness.journal.events[-1]["evidence"]["failure_code"] == (
+        "manifest_ownership.epoch-claim.failed"
+    )
     assert "force-apply" not in harness.calls
 
     harness = _Harness(fail_force_apply=True)
@@ -249,6 +252,9 @@ def test_epoch_drift_and_force_failure_are_terminally_journaled() -> None:
         "epoch-claimed",
         "failed",
     ]
+    assert harness.journal.events[-1]["evidence"]["failure_code"] == (
+        "manifest_ownership.ownership-adoption.failed"
+    )
     assert not any(call.startswith("no-force") for call in harness.calls)
 
 
@@ -271,3 +277,6 @@ def test_post_apply_live_drift_fails_closed() -> None:
             approved_inventory_sha256=approved,
         )
     assert harness.journal.events[-1]["event"] == "failed"
+    assert harness.journal.events[-1]["evidence"]["failure_code"] == (
+        "manifest_ownership.live-state-verification.failed"
+    )

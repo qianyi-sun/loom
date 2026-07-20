@@ -20,6 +20,7 @@ class Runner:
 
     def capture_stdout(self, argv, *, env, timeout_seconds):
         self.calls.append(tuple(argv))
+        assert all("\n" not in item for item in argv)
         assert env == {"KUBECONFIG": "/exact"}
         assert timeout_seconds == 30.0
         if any("WITH bootstrapped AS" in item for item in argv):

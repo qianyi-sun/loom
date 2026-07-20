@@ -186,6 +186,7 @@ class ManifestOwnershipOperator:
                 "starting_epoch": inventory.plan.mutation_epoch,
             },
         )
+        stage = "epoch-claim"
         try:
             observed_epoch = self.claim_epoch(
                 inventory.plan.mutation_epoch,
@@ -196,6 +197,7 @@ class ManifestOwnershipOperator:
                 raise ManifestOwnershipAdoptionError("ownership mutation epoch claim drifted")
             self._record(request_id, "epoch-claimed", {"observed_epoch": observed_epoch})
 
+            stage = "ownership-adoption"
             adopted = tuple(self.force_apply(inventory.plan.overlay_yaml))
             adoption_sha256 = verify_ownership_adoption_dry_run(
                 inventory.plan,
@@ -208,6 +210,7 @@ class ManifestOwnershipOperator:
                 {"adoption_sha256": adoption_sha256},
             )
 
+            stage = "network-policy-convergence"
             network_yaml = _network_policy_yaml(inventory.plan)
             expected_network = tuple(self.no_force_dry_run(network_yaml))
             applied_network = tuple(self.no_force_apply(network_yaml))
@@ -221,6 +224,7 @@ class ManifestOwnershipOperator:
                 {"network_sha256": network_sha256},
             )
 
+            stage = "live-state-verification"
             live_after = tuple(self.load_live())
             post_apply_sha256 = _verify_post_apply_live(
                 inventory=inventory,
@@ -232,6 +236,7 @@ class ManifestOwnershipOperator:
                 {"post_apply_sha256": post_apply_sha256},
             )
 
+            stage = "final-no-force-dry-run"
             final_dry_run = tuple(self.no_force_dry_run(self.artifact.rendered_yaml))
             if len(final_dry_run) != self.artifact.resource_count:
                 raise ManifestOwnershipAdoptionError(
@@ -250,7 +255,10 @@ class ManifestOwnershipOperator:
             self._record(
                 request_id,
                 "failed",
-                {"failure_class": type(exc).__name__},
+                {
+                    "failure_class": type(exc).__name__,
+                    "failure_code": f"manifest_ownership.{stage}.failed",
+                },
             )
             raise
         return {

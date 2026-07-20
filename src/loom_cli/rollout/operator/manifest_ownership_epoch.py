@@ -7,12 +7,13 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .postgres_sql import single_line_sql
 from .protected_epoch_component import ProtectedEpochCommandRunner
 
 _REQUEST_RE = re.compile(r"^req-manifest-ownership-[a-z0-9]{8,32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TIMEOUT_SECONDS = 30.0
-_ADVANCE_SQL = """
+_ADVANCE_SQL = single_line_sql("""
 WITH advanced AS (
   UPDATE staging_mutation_epochs
   SET epoch = epoch + 1,
@@ -43,7 +44,7 @@ SELECT jsonb_build_object(
   'evidence_sha256', advanced.evidence_sha256
 )::text
 FROM advanced JOIN recorded USING (epoch);
-""".strip()
+""")
 
 
 @dataclass(frozen=True, slots=True)

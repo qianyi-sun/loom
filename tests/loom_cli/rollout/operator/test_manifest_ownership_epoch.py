@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Mapping, Sequence
 
 import pytest
 
 from loom_cli.rollout.operator.manifest_ownership_epoch import (
     ManifestOwnershipEpochClaimer,
+)
+from loom_cli.rollout.operator.protected_apply_executor import (
+    SubprocessProtectedApplyCommandRunner,
 )
 
 
@@ -54,6 +58,7 @@ def test_exact_epoch_claim_uses_cas_and_records_event() -> None:
     claimer = ManifestOwnershipEpochClaimer(runner=runner, environment={"KUBECONFIG": "/k"})
     assert claimer(2, "req-manifest-ownership-12345678", "a" * 64) == 3
     command, environment, timeout = runner.calls[0]
+    assert all("\n" not in item for item in command)
     sql = next(item for item in command if "UPDATE staging_mutation_epochs" in item)
     assert "INSERT INTO staging_mutation_epoch_events" in sql
     assert environment == {"KUBECONFIG": "/k"}
@@ -66,3 +71,39 @@ def test_epoch_claim_rejects_stale_or_unbounded_identity() -> None:
         claimer(2, "req-manifest-ownership-12345678", "a" * 64)
     with pytest.raises(ValueError, match="authority"):
         claimer(-1, "req-manifest-ownership-12345678", "a" * 64)
+
+
+def test_epoch_claim_passes_the_real_protected_argv_validator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = SubprocessProtectedApplyCommandRunner()
+
+    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
+        assert all("\n" not in item for item in command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "environment": "staging",
+                    "namespace": "loom-staging",
+                    "epoch": 3,
+                    "mutation_class": "rollout_apply",
+                    "request_id": "req-manifest-ownership-12345678",
+                    "evidence_sha256": "a" * 64,
+                }
+            ).encode(),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.run",
+        fake_run,
+    )
+    assert (
+        ManifestOwnershipEpochClaimer(
+            runner=runner,
+            environment=runner.environment,
+        )(2, "req-manifest-ownership-12345678", "a" * 64)
+        == 3
+    )

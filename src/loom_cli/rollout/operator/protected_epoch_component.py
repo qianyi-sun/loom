@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .final_gate_plan import FinalGatePlan
+from .postgres_sql import single_line_sql
 from .protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -18,7 +19,7 @@ from .protected_apply_journal import (
 
 _TIMEOUT_SECONDS = 30.0
 _REVISION_RE = re.compile(r"^(?P<number>[0-9]{4})(?:_[a-z0-9_]+)?$")
-_READ_SQL = """
+_READ_SQL = single_line_sql("""
 SELECT jsonb_build_object(
   'environment', environment,
   'namespace', namespace,
@@ -29,8 +30,8 @@ SELECT jsonb_build_object(
 )::text
 FROM staging_mutation_epochs
 WHERE environment = 'staging' AND namespace = 'loom-staging';
-""".strip()
-_ADVANCE_SQL = """
+""")
+_ADVANCE_SQL = single_line_sql("""
 WITH bootstrapped AS (
   INSERT INTO staging_mutation_epochs
     (environment, namespace, epoch, reason)
@@ -68,7 +69,7 @@ SELECT jsonb_build_object(
   'evidence_sha256', advanced.evidence_sha256
 )::text
 FROM advanced JOIN recorded USING (epoch);
-""".strip()
+""")
 _IMPLEMENTATION_DIGEST = hashlib.sha256(
     json.dumps(
         {"advance_sql": _ADVANCE_SQL, "read_sql": _READ_SQL, "version": "v1"},
