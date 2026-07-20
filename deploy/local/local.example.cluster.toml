@@ -11,9 +11,10 @@
 # deployed by the operator rollout. Shared `dev`/`staging`/`production`
 # live under deploy/environments/ and are the only real deploy targets.
 #
-# See docs/runbooks/local-dev-workflow.md for the full walkthrough
-# (kind/k3s bootstrap, Slurm submit credentials, the k8s_worker fallback,
-# and the `uv run` recipe for the API + backing services).
+# See docs/runbooks/local-dev-workflow.md for the full walkthrough (kind
+# bootstrap; the default in-cluster k8s_worker path; and the advanced-optional
+# external-Slurm path). The whole stack runs IN the cluster — do not also start
+# the control plane/service as local processes.
 #
 # Every value below with a <PLACEHOLDER> or a "CHANGE ME" note is
 # developer-specific. Localhost routing only — do NOT point this at

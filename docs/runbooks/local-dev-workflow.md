@@ -47,36 +47,55 @@ local-safe shape: single node, `host_path` storage, 1-replica Postgres,
 standalone MinIO, localhost routing, `pgbouncer` off, and **`k8s_worker`
 enabled** (the default in-cluster worker path).
 
-## 2. Create the cluster and load images
+## 2. Create the cluster, build and load images (kind)
+
+This walkthrough uses **kind** — `cluster load-images` loads via `kind load` and
+is kind-only. For **k3d**, replace the create and load steps with
+`k3d cluster create loom-local` and `k3d image import <tag> -c loom-local`.
 
 ```
 kind create cluster --name loom-local
-# or: k3d cluster create loom-local   (single server node)
+```
 
-# Build/load the loom images into the local cluster so it can pull them:
+Build the loom images your change needs — `loom-control-plane`, `loom-service`,
+`loom-worker`, `loom-web`, `loom-llm-gateway` — locally with `docker build`
+(the canonical per-image build is `.github/workflows/images.yml`), tagging them
+the tags the manifests reference. `cluster load-images` does NOT build; it only
+imports already-built local tags. Render the manifests, then load the local
+tags found in them into the kind node:
+
+```
+uv run python -m loom_cli cluster render \
+  --config deploy/local/local.cluster.toml > /tmp/loom-local-rendered.yaml
+
 uv run python -m loom_cli cluster load-images \
-  --cluster-name loom-local
+  --cluster-name loom-local \
+  --from-manifest /tmp/loom-local-rendered.yaml
 ```
 
-## 3. Bootstrap secrets, then bring the stack up
+## 3. Create the namespace, bootstrap secrets, then bring the stack up
 
-`loom cluster up` composes preflight → render → `kubectl apply` → wait-for-ready
-for the whole stack. Bootstrap the required Secrets first (local dev uses
-throwaway values; never real production secret refs):
+`bootstrap-secrets` **prints** `kubectl create secret` commands to stdout (it
+does not run them), and they target a namespace that must already exist. Create
+the namespace, `eval` the printed commands, then bring the stack up:
 
 ```
-# --smoke-defaults writes throwaway local secret values (never real prod refs):
-uv run python -m loom_cli cluster bootstrap-secrets \
-  --namespace loom-local --smoke-defaults --no-pgbouncer
+kubectl create namespace loom-local
 
-# up waits for readiness by default (pass --no-wait to skip):
+# --smoke-defaults = throwaway local secret values (never real prod refs).
+# eval runs the printed `kubectl create secret` commands:
+eval "$(uv run python -m loom_cli cluster bootstrap-secrets \
+  --namespace loom-local --smoke-defaults --no-pgbouncer)"
+
+# up re-renders identically, applies, and waits for readiness by default
+# (--no-wait to skip). Namespace is inferred from the config.
 uv run python -m loom_cli cluster up \
   --config deploy/local/local.cluster.toml
 ```
 
-`up` composes preflight → render → `kubectl apply` → wait, deploying the control
-plane, service, `loom-worker`, single-pod Postgres, and standalone MinIO into
-the cluster. There is no separate local process to start.
+`up` deploys the control plane, service, `loom-worker`, single-pod Postgres, and
+standalone MinIO into the cluster and waits until they report ready. There is no
+separate local process to start.
 
 ## 4. Reach the API and run a trial
 
