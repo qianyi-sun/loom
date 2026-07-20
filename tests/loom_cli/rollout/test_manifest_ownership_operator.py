@@ -36,7 +36,11 @@ def _desired() -> list[dict[str, object]]:
                 "spec": {
                     "podSelector": {"matchLabels": {"app": name.removeprefix("loom-")}},
                     "policyTypes": ["Ingress", "Egress"],
-                    "ingress": [{"from": [{"podSelector": {"matchLabels": {"app": "lifecycle"}}}]}],
+                    "ingress": (
+                        []
+                        if name == "loom-staging-data-lifecycle"
+                        else [{"from": [{"podSelector": {"matchLabels": {"app": "lifecycle"}}}]}]
+                    ),
                 },
             }
             for name in (
@@ -308,6 +312,38 @@ def test_post_apply_readback_retries_only_within_bounded_readonly_window() -> No
     assert isinstance(evidence, dict)
     assert evidence["attempts"] == 2
     assert harness.settle_calls == [0.25]
+
+
+def test_post_apply_readback_uses_the_adoption_semantic_contract() -> None:
+    harness = _Harness()
+
+    def api_normalized_apply(payload: str):
+        result = harness.no_force_apply(payload)
+        lifecycle = next(
+            item
+            for item in harness.live
+            if item["kind"] == "NetworkPolicy"
+            and item["metadata"]["name"] == "loom-staging-data-lifecycle"  # type: ignore[index]
+        )
+        spec = lifecycle["spec"]
+        metadata = lifecycle["metadata"]
+        assert isinstance(spec, dict)
+        assert isinstance(metadata, dict)
+        spec.pop("ingress")
+        metadata["annotations"] = {"kubectl.kubernetes.io/last-applied-configuration": "legacy"}
+        return result
+
+    operator = harness.operator()
+    operator.no_force_apply = api_normalized_apply
+    approved = operator.inventory().inventory_sha256
+
+    result = operator.apply(
+        request_id="req-manifest-ownership-12345678",
+        approved_inventory_sha256=approved,
+    )
+
+    assert result["mutation_epoch_after"] == 3
+    assert harness.settle_calls == []
 
 
 def test_post_apply_readback_fails_closed_after_bounded_stale_views() -> None:

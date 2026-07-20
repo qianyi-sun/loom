@@ -17,6 +17,7 @@ from loom_cli.rollout.manifest_ownership_adoption import (
     ManifestOwnershipAdoptionError,
     ManifestOwnershipAdoptionPlan,
     build_manifest_ownership_adoption_plan,
+    ownership_semantic_state,
     verify_ownership_adoption_dry_run,
 )
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
@@ -244,7 +245,7 @@ class ManifestOwnershipOperator:
                 raise ManifestOwnershipAdoptionError(
                     "final ownership dry-run resource count drifted"
                 )
-            final_sha256 = _hash_json([_semantic_state(item) for item in final_dry_run])
+            final_sha256 = _hash_json([ownership_semantic_state(item) for item in final_dry_run])
             self._record(
                 request_id,
                 "completed",
@@ -322,11 +323,11 @@ def _verify_post_apply_live(
     inventory: OwnershipInventory,
     live_resources: ResourceSet,
 ) -> str:
-    observed = {_identity(item): _semantic_state(item) for item in live_resources}
+    observed = {_identity(item): ownership_semantic_state(item) for item in live_resources}
     expected: dict[str, dict[str, object]] = {}
     for resource in inventory.plan.resources:
         if "|NetworkPolicy|" in resource.identity:
-            expected[resource.identity] = _semantic_state(resource.desired)
+            expected[resource.identity] = ownership_semantic_state(resource.desired)
         else:
             source = next(
                 (item for item in inventory.live_resources if _identity(item) == resource.identity),
@@ -336,7 +337,7 @@ def _verify_post_apply_live(
                 raise ManifestOwnershipAdoptionError(
                     "ownership post-apply CronJob prestate is absent"
                 )
-            expected[resource.identity] = _semantic_state(source)
+            expected[resource.identity] = ownership_semantic_state(source)
     if set(observed) != set(expected) or observed != expected:
         raise ManifestOwnershipAdoptionError("ownership post-apply live state drifted")
     return _hash_json(observed)
@@ -347,28 +348,11 @@ def _verify_network_convergence(
     expected_network: ResourceSet,
     applied_network: ResourceSet,
 ) -> str:
-    expected = sorted((_semantic_state(item) for item in expected_network), key=_identity)
-    applied = sorted((_semantic_state(item) for item in applied_network), key=_identity)
+    expected = sorted((ownership_semantic_state(item) for item in expected_network), key=_identity)
+    applied = sorted((ownership_semantic_state(item) for item in applied_network), key=_identity)
     if len(expected) != 3 or expected != applied:
         raise ManifestOwnershipAdoptionError("network policy convergence drifted")
     return _hash_json(expected)
-
-
-def _semantic_state(resource: Resource) -> dict[str, object]:
-    metadata = resource.get("metadata")
-    if not isinstance(metadata, dict):
-        raise ManifestOwnershipAdoptionError("ownership operation metadata is invalid")
-    return {
-        "apiVersion": resource.get("apiVersion"),
-        "kind": resource.get("kind"),
-        "metadata": {
-            "annotations": metadata.get("annotations", {}),
-            "labels": metadata.get("labels", {}),
-            "name": metadata.get("name"),
-            "namespace": metadata.get("namespace"),
-        },
-        "spec": resource.get("spec"),
-    }
 
 
 def _identity(resource: Mapping[str, object]) -> str:

@@ -239,12 +239,15 @@ def verify_ownership_adoption_dry_run(
             or _hash_json(metadata.get("managedFields")) != resource.managed_fields_sha256
         ):
             raise ManifestOwnershipAdoptionError("live ownership prestate drifted")
-        if _semantic_state(dry_run[resource.identity]) != _semantic_state(observed):
+        if ownership_semantic_state(dry_run[resource.identity]) != (
+            ownership_semantic_state(observed)
+        ):
             raise ManifestOwnershipAdoptionError("ownership adoption would change live state")
     return _hash_json(
         {
             "dry_run": {
-                identity: _semantic_state(dry_run[identity]) for identity in sorted(_TARGETS)
+                identity: ownership_semantic_state(dry_run[identity])
+                for identity in sorted(_TARGETS)
             },
             "plan_sha256": plan.plan_sha256,
             "version": "v1",
@@ -485,7 +488,8 @@ def _canonical_live(resource: Mapping[str, object]) -> dict[str, object]:
     return value
 
 
-def _semantic_state(resource: Mapping[str, object]) -> dict[str, object]:
+def ownership_semantic_state(resource: Mapping[str, object]) -> dict[str, object]:
+    """Return the single canonical semantic state for ownership convergence."""
     metadata = _mapping(resource.get("metadata"), label="semantic metadata")
     spec = copy.deepcopy(resource.get("spec"))
     if resource.get("kind") == "NetworkPolicy" and isinstance(spec, dict):
@@ -555,5 +559,6 @@ __all__ = [
     "ManifestOwnershipAdoptionPlan",
     "build_manifest_ownership_adoption_plan",
     "ownership_adoption_argv",
+    "ownership_semantic_state",
     "verify_ownership_adoption_dry_run",
 ]
