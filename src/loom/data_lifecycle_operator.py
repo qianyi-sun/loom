@@ -117,6 +117,7 @@ def run_lifecycle_operator(
     inventory: LifecycleInventoryLoader,
     journal: GcJournal,
     object_deleter: ExactObjectDeleter,
+    batch_size: int = 1,
 ) -> dict[str, object]:
     """Run one supported operation without broadening its mutation authority."""
     if request.action == OperatorAction.RESUME:
@@ -128,6 +129,7 @@ def run_lifecycle_operator(
             completed_at=request.now,
             journal=journal,
             object_deleter=object_deleter,
+            batch_size=batch_size,
         )
         return {
             "schema_version": 1,
@@ -159,6 +161,7 @@ def run_lifecycle_operator(
             dry_run=False,
             request_id=request.request_id,
             completed_at=request.now,
+            batch_size=batch_size,
         )
         return {
             **document,
@@ -178,6 +181,7 @@ def run_lifecycle_operator(
             dry_run=False,
             request_id=request.request_id,
             completed_at=request.now,
+            batch_size=batch_size,
         )
     else:
         result = execute_gc(

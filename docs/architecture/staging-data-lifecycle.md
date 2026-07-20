@@ -213,6 +213,13 @@ records its inventory digest but cannot call the object-store deleter.
 The S3/MinIO adapter checks exact size and version before delete, and streams an
 unversioned object to verify its registered SHA-256. Drift is detected before
 the delete call; absence verification uses the same exact version identity.
+Large plans retain those predicates but execute in bounded phases: up to 32
+object identities are verified concurrently, a fully verified group is sent
+through explicit S3 `DeleteObjects` requests of at most 1,000 keys, and the
+returned identities must match the requested set before the journal advances.
+Journal state transitions use transaction-local COPY tables rather than an
+unbounded SQL `IN` list. Each batch is then independently verified absent; a
+partial external delete remains resumable from its exact marked identities.
 After a failed apply, resume reconstructs the canonical epoch-bound plan from
 the journal, verifies one exact deletion token across every item, and claims
 the failed run with a compare-and-swap transition before doing more work. It

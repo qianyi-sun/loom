@@ -171,6 +171,10 @@ class ExactObjectDeleter(Protocol):
 
     def exact_absent(self, item: RegisteredObject) -> bool: ...
 
+    def delete_exact_many(self, items: Sequence[RegisteredObject]) -> None: ...
+
+    def exact_absent_many(self, items: Sequence[RegisteredObject]) -> Mapping[UUID, bool]: ...
+
 
 class GcJournal(Protocol):
     """Transactional DB adapter for the resumable two-phase protocol."""
@@ -193,11 +197,27 @@ class GcJournal(Protocol):
         deletion_token: UUID,
     ) -> None: ...
 
+    def record_objects_deleted(
+        self,
+        *,
+        run_id: UUID,
+        object_ids: Sequence[UUID],
+        deletion_token: UUID,
+    ) -> None: ...
+
     def record_object_verified(
         self,
         *,
         run_id: UUID,
         object_id: UUID,
+        deletion_token: UUID,
+    ) -> None: ...
+
+    def record_objects_verified(
+        self,
+        *,
+        run_id: UUID,
+        object_ids: Sequence[UUID],
         deletion_token: UUID,
     ) -> None: ...
 
@@ -520,11 +540,14 @@ def execute_gc(
     dry_run: bool,
     request_id: str | None = None,
     completed_at: datetime | None = None,
+    batch_size: int = 1,
 ) -> GcExecutionResult:
     """Execute exact object deletion, verification, metadata removal, and epoch bump."""
     plan.require_applicable()
     if not requested_by or requested_by != requested_by.strip():
         raise ValueError("requested_by must be non-empty and normalized")
+    if not 1 <= batch_size <= 1000:
+        raise ValueError("GC batch size must be in [1, 1000]")
     if dry_run:
         run_id = journal.record_dry_run(plan=plan, requested_by=requested_by)
         return GcExecutionResult(
@@ -538,6 +561,16 @@ def execute_gc(
         )
     if request_id is None or completed_at is None:
         raise ValueError("GC apply requires request and completion authority")
+    if batch_size > 1 and any(
+        not callable(getattr(target, method, None))
+        for target, method in (
+            (journal, "record_objects_deleted"),
+            (journal, "record_objects_verified"),
+            (object_deleter, "delete_exact_many"),
+            (object_deleter, "exact_absent_many"),
+        )
+    ):
+        raise TypeError("batched GC requires batch-capable journal and object deleter")
     mutation = MutationEpochAdvance(
         environment=plan.scope.environment,
         namespace=plan.scope.namespace,
@@ -555,23 +588,52 @@ def execute_gc(
         deletion_token=deletion_token,
     )
     try:
-        for item in plan.objects:
-            object_deleter.delete_exact(item)
-            journal.record_object_deleted(
-                run_id=run_id,
-                object_id=item.id,
-                deletion_token=deletion_token,
-            )
-        for item in plan.objects:
-            if not object_deleter.exact_absent(item):
-                raise LifecycleGcExecutionError(
-                    f"object still present after exact delete: {item.bucket}/{item.object_key}"
+        for offset in range(0, len(plan.objects), batch_size):
+            batch = plan.objects[offset : offset + batch_size]
+            if batch_size == 1:
+                item = batch[0]
+                object_deleter.delete_exact(item)
+                journal.record_object_deleted(
+                    run_id=run_id,
+                    object_id=item.id,
+                    deletion_token=deletion_token,
                 )
-            journal.record_object_verified(
-                run_id=run_id,
-                object_id=item.id,
-                deletion_token=deletion_token,
-            )
+            else:
+                object_deleter.delete_exact_many(batch)
+                journal.record_objects_deleted(
+                    run_id=run_id,
+                    object_ids=tuple(item.id for item in batch),
+                    deletion_token=deletion_token,
+                )
+        for offset in range(0, len(plan.objects), batch_size):
+            batch = plan.objects[offset : offset + batch_size]
+            if batch_size == 1:
+                item = batch[0]
+                absent = {item.id: object_deleter.exact_absent(item)}
+            else:
+                absent = dict(object_deleter.exact_absent_many(batch))
+            expected_ids = {item.id for item in batch}
+            if set(absent) != expected_ids or not all(absent.values()):
+                present = next(
+                    (item for item in batch if item.id not in absent or not absent[item.id]),
+                    batch[0],
+                )
+                raise LifecycleGcExecutionError(
+                    f"object still present after exact delete: "
+                    f"{present.bucket}/{present.object_key}"
+                )
+            if batch_size == 1:
+                journal.record_object_verified(
+                    run_id=run_id,
+                    object_id=batch[0].id,
+                    deletion_token=deletion_token,
+                )
+            else:
+                journal.record_objects_verified(
+                    run_id=run_id,
+                    object_ids=tuple(item.id for item in batch),
+                    deletion_token=deletion_token,
+                )
         journal.delete_business_metadata(
             run_id=run_id,
             authority_ids=plan.authority_ids,
@@ -609,6 +671,7 @@ def resume_gc(
     completed_at: datetime,
     journal: GcJournal,
     object_deleter: ExactObjectDeleter,
+    batch_size: int = 1,
 ) -> GcExecutionResult:
     """Resume the exact journaled phase without broadening or repeating metadata work."""
     snapshot = journal.load_resume(run_id)
@@ -616,6 +679,18 @@ def resume_gc(
         raise LifecycleGcExecutionError("GC resume journal returned another run")
     plan = snapshot.plan
     plan.require_applicable()
+    if not 1 <= batch_size <= 1000:
+        raise ValueError("GC batch size must be in [1, 1000]")
+    if batch_size > 1 and any(
+        not callable(getattr(target, method, None))
+        for target, method in (
+            (journal, "record_objects_deleted"),
+            (journal, "record_objects_verified"),
+            (object_deleter, "delete_exact_many"),
+            (object_deleter, "exact_absent_many"),
+        )
+    ):
+        raise TypeError("batched GC requires batch-capable journal and object deleter")
     journal.begin_resume(run_id=run_id, deletion_token=snapshot.deletion_token)
     mutation = MutationEpochAdvance(
         environment=plan.scope.environment,
@@ -628,26 +703,60 @@ def resume_gc(
     )
     states = dict(snapshot.item_states)
     try:
-        for item in plan.objects:
-            state = states[item.id]
-            if state == "marked":
-                object_deleter.delete_exact(item)
+        marked = [item for item in plan.objects if states[item.id] == "marked"]
+        for offset in range(0, len(marked), batch_size):
+            batch = marked[offset : offset + batch_size]
+            if batch_size == 1:
+                absent = {batch[0].id: object_deleter.exact_absent(batch[0])}
+            else:
+                absent = dict(object_deleter.exact_absent_many(batch))
+            if set(absent) != {item.id for item in batch}:
+                raise LifecycleGcExecutionError("GC resume absence evidence is incomplete")
+            remaining = [item for item in batch if not absent[item.id]]
+            if remaining:
+                if batch_size == 1:
+                    object_deleter.delete_exact(remaining[0])
+                else:
+                    object_deleter.delete_exact_many(remaining)
+            if batch_size == 1:
                 journal.record_object_deleted(
                     run_id=run_id,
-                    object_id=item.id,
+                    object_id=batch[0].id,
                     deletion_token=snapshot.deletion_token,
                 )
-                state = "object_deleted"
-            if state == "object_deleted":
-                if not object_deleter.exact_absent(item):
-                    raise LifecycleGcExecutionError(
-                        f"object still present during resume: {item.bucket}/{item.object_key}"
-                    )
+            else:
+                journal.record_objects_deleted(
+                    run_id=run_id,
+                    object_ids=tuple(item.id for item in batch),
+                    deletion_token=snapshot.deletion_token,
+                )
+            for item in batch:
+                states[item.id] = "object_deleted"
+        deleted = [item for item in plan.objects if states[item.id] == "object_deleted"]
+        for offset in range(0, len(deleted), batch_size):
+            batch = deleted[offset : offset + batch_size]
+            if batch_size == 1:
+                absent = {batch[0].id: object_deleter.exact_absent(batch[0])}
+            else:
+                absent = dict(object_deleter.exact_absent_many(batch))
+            if set(absent) != {item.id for item in batch} or not all(absent.values()):
+                present = next(item for item in batch if not absent.get(item.id, False))
+                raise LifecycleGcExecutionError(
+                    f"object still present during resume: {present.bucket}/{present.object_key}"
+                )
+            if batch_size == 1:
                 journal.record_object_verified(
                     run_id=run_id,
-                    object_id=item.id,
+                    object_id=batch[0].id,
                     deletion_token=snapshot.deletion_token,
                 )
+            else:
+                journal.record_objects_verified(
+                    run_id=run_id,
+                    object_ids=tuple(item.id for item in batch),
+                    deletion_token=snapshot.deletion_token,
+                )
+            for item in batch:
                 states[item.id] = "verified"
         phases = set(states.values())
         if phases == {"verified"}:

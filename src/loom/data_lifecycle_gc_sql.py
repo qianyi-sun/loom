@@ -183,9 +183,22 @@ class SqlAlchemyGcJournal:
         object_id: UUID,
         deletion_token: UUID,
     ) -> None:
-        self._transition_item(
+        self.record_objects_deleted(
             run_id=run_id,
-            object_id=object_id,
+            object_ids=(object_id,),
+            deletion_token=deletion_token,
+        )
+
+    def record_objects_deleted(
+        self,
+        *,
+        run_id: UUID,
+        object_ids: Sequence[UUID],
+        deletion_token: UUID,
+    ) -> None:
+        self._transition_items(
+            run_id=run_id,
+            object_ids=object_ids,
             deletion_token=deletion_token,
             expected="marked",
             target="object_deleted",
@@ -198,25 +211,54 @@ class SqlAlchemyGcJournal:
         object_id: UUID,
         deletion_token: UUID,
     ) -> None:
+        self.record_objects_verified(
+            run_id=run_id,
+            object_ids=(object_id,),
+            deletion_token=deletion_token,
+        )
+
+    def record_objects_verified(
+        self,
+        *,
+        run_id: UUID,
+        object_ids: Sequence[UUID],
+        deletion_token: UUID,
+    ) -> None:
+        ids = list(object_ids)
+        if not ids:
+            return
         with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TEMP TABLE gc_object_verify_plan "
+                    "(object_id uuid PRIMARY KEY) ON COMMIT DROP"
+                )
+            )
+            _copy_uuid_rows(
+                connection,
+                "COPY gc_object_verify_plan (object_id) FROM STDIN",
+                ids,
+            )
             item_result = connection.execute(
                 text(
-                    "UPDATE data_lifecycle_gc_items SET state='verified', updated_at=now() "
-                    "WHERE gc_run_id=:run_id AND object_id=:object_id "
+                    "UPDATE data_lifecycle_gc_items AS item "
+                    "SET state='verified', updated_at=now() FROM gc_object_verify_plan AS plan "
+                    "WHERE item.object_id=plan.object_id AND gc_run_id=:run_id "
                     "AND deletion_token=:token AND state='object_deleted'"
                 ),
-                {"run_id": run_id, "object_id": object_id, "token": deletion_token},
+                {"run_id": run_id, "token": deletion_token},
             )
             object_result = connection.execute(
                 text(
-                    "UPDATE data_lifecycle_objects "
+                    "UPDATE data_lifecycle_objects AS object "
                     "SET state='deleted', verified_deleted_at=now() "
-                    "WHERE id=:object_id AND deletion_token=:token "
+                    "FROM gc_object_verify_plan AS plan "
+                    "WHERE object.id=plan.object_id AND deletion_token=:token "
                     "AND state='delete_pending'"
                 ),
-                {"object_id": object_id, "token": deletion_token},
+                {"token": deletion_token},
             )
-            if item_result.rowcount != 1 or object_result.rowcount != 1:
+            if item_result.rowcount != len(ids) or object_result.rowcount != len(ids):
                 raise RuntimeError("GC object verification transition is stale")
 
     def delete_business_metadata(
@@ -424,32 +466,46 @@ class SqlAlchemyGcJournal:
             },
         )
 
-    def _transition_item(
+    def _transition_items(
         self,
         *,
         run_id: UUID,
-        object_id: UUID,
+        object_ids: Sequence[UUID],
         deletion_token: UUID,
         expected: str,
         target: str,
     ) -> None:
+        ids = list(object_ids)
+        if not ids:
+            return
         with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TEMP TABLE gc_object_transition_plan "
+                    "(object_id uuid PRIMARY KEY) ON COMMIT DROP"
+                )
+            )
+            _copy_uuid_rows(
+                connection,
+                "COPY gc_object_transition_plan (object_id) FROM STDIN",
+                ids,
+            )
             result = connection.execute(
                 text(
-                    "UPDATE data_lifecycle_gc_items "
+                    "UPDATE data_lifecycle_gc_items AS item "
                     "SET state=:target, updated_at=now() "
-                    "WHERE gc_run_id=:run_id AND object_id=:object_id "
+                    "FROM gc_object_transition_plan AS plan "
+                    "WHERE item.object_id=plan.object_id AND gc_run_id=:run_id "
                     "AND deletion_token=:token AND state=:expected"
                 ),
                 {
                     "target": target,
                     "run_id": run_id,
-                    "object_id": object_id,
                     "token": deletion_token,
                     "expected": expected,
                 },
             )
-            if result.rowcount != 1:
+            if result.rowcount != len(ids):
                 raise RuntimeError("GC item transition is stale")
 
 

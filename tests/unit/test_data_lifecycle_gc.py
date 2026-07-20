@@ -70,6 +70,17 @@ def _plan() -> GcPlan:
     )
 
 
+def _batch_plan() -> GcPlan:
+    authority = _authority()
+    return build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        now=NOW,
+        authorities=[authority],
+        objects=[_object(authority.id, object_key=f"batch/{index}.json") for index in range(3)],
+    )
+
+
 def test_gc_scope_is_staging_only() -> None:
     with pytest.raises(ValueError, match="staging-only"):
         GcScope(environment="production", namespace="loom-prod")
@@ -326,6 +337,55 @@ class _Deleter:
         return self.verify and item.id in self.deleted
 
 
+class _BatchJournal(_Journal):
+    def record_objects_deleted(
+        self,
+        *,
+        run_id: UUID,
+        object_ids: tuple[UUID, ...],
+        deletion_token: UUID,
+    ) -> None:
+        self.events.append(("deleted-many", (run_id, object_ids, deletion_token)))
+
+    def record_objects_verified(
+        self,
+        *,
+        run_id: UUID,
+        object_ids: tuple[UUID, ...],
+        deletion_token: UUID,
+    ) -> None:
+        self.events.append(("verified-many", (run_id, object_ids, deletion_token)))
+
+
+class _BatchDeleter(_Deleter):
+    def delete_exact_many(
+        self, items: tuple[RegisteredObject, ...] | list[RegisteredObject]
+    ) -> None:
+        self.deleted.extend(item.id for item in items)
+
+    def exact_absent_many(
+        self,
+        items: tuple[RegisteredObject, ...] | list[RegisteredObject],
+    ) -> dict[UUID, bool]:
+        return {item.id: self.exact_absent(item) for item in items}
+
+
+class _BatchResumeJournal(_BatchJournal):
+    def __init__(self, plan: GcPlan) -> None:
+        super().__init__()
+        self.plan = plan
+
+    def load_resume(self, run_id: UUID):
+        from loom.data_lifecycle_gc import GcResumeSnapshot
+
+        return GcResumeSnapshot(
+            run_id=run_id,
+            deletion_token=UUID(int=42),
+            plan=self.plan,
+            item_states=tuple((item.id, "marked") for item in self.plan.objects),
+        )
+
+
 def test_dry_run_never_calls_object_store_or_mutates_epoch() -> None:
     journal = _Journal()
     deleter = _Deleter()
@@ -361,6 +421,78 @@ def test_apply_orders_delete_verify_metadata_and_epoch() -> None:
         "begin",
         "deleted",
         "verified",
+        "metadata",
+        "complete",
+    ]
+
+
+def test_batched_apply_journals_bounded_exact_object_phases() -> None:
+    plan = _batch_plan()
+    journal = _BatchJournal()
+    result = execute_gc(
+        plan=plan,
+        requested_by="qianyi",
+        journal=journal,
+        object_deleter=_BatchDeleter(),
+        dry_run=False,
+        request_id="req-gcbatched00",
+        completed_at=NOW,
+        batch_size=2,
+    )
+
+    assert result.deleted_objects == 3
+    assert [event[0] for event in journal.events] == [
+        "begin",
+        "deleted-many",
+        "deleted-many",
+        "verified-many",
+        "verified-many",
+        "metadata",
+        "complete",
+    ]
+
+
+def test_batched_apply_requires_batch_capability_before_journal_mutation() -> None:
+    journal = _Journal()
+    with pytest.raises(TypeError, match="batch-capable"):
+        execute_gc(
+            plan=_plan(),
+            requested_by="qianyi",
+            journal=journal,
+            object_deleter=_Deleter(),
+            dry_run=False,
+            request_id="req-gcbatched01",
+            completed_at=NOW,
+            batch_size=2,
+        )
+    assert journal.events == []
+
+
+def test_batched_resume_accepts_only_journaled_partial_delete_absence() -> None:
+    plan = _batch_plan()
+    journal = _BatchResumeJournal(plan)
+    deleter = _BatchDeleter()
+    already_absent = plan.objects[0].id
+    deleter.deleted.append(already_absent)
+
+    result = resume_gc(
+        run_id=journal.run_id,
+        request_id="req-gcbatchresume",
+        completed_at=NOW,
+        journal=journal,
+        object_deleter=deleter,
+        batch_size=2,
+    )
+
+    assert result.deleted_objects == 3
+    assert deleter.deleted.count(already_absent) == 1
+    assert set(deleter.deleted) == {item.id for item in plan.objects}
+    assert [event[0] for event in journal.events] == [
+        "resume",
+        "deleted-many",
+        "deleted-many",
+        "verified-many",
+        "verified-many",
         "metadata",
         "complete",
     ]

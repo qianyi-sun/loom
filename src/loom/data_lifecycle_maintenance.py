@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             journal=SqlAlchemyGcJournal(engine),
             object_deleter=S3ExactObjectDeleter(client),
+            batch_size=1000,
         )
         print(
             json.dumps(
@@ -120,4 +121,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - exercised through console execution
     raise SystemExit(main())
-

@@ -99,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             journal=SqlAlchemyGcJournal(engine),
             object_deleter=S3ExactObjectDeleter(client),
+            batch_size=1000,
         )
         _write_document(document, args.output)
     finally:

@@ -44,6 +44,41 @@ class _Client:
         return {}
 
 
+class _BatchClient:
+    def __init__(self, objects: dict[tuple[str, str], bytes]) -> None:
+        self.objects = dict(objects)
+        self.calls: list[tuple[str, object]] = []
+
+    def head_object(self, **kwargs: str):
+        bucket = kwargs["Bucket"]
+        key = kwargs["Key"]
+        body = self.objects.get((bucket, key))
+        if body is None:
+            raise ClientError(
+                {"Error": {"Code": "NoSuchKey", "Message": "missing"}},
+                "HeadObject",
+            )
+        return {"ContentLength": len(body)}
+
+    def get_object(self, **kwargs: str):
+        return {"Body": _Body(self.objects[(kwargs["Bucket"], kwargs["Key"])])}
+
+    def delete_objects(self, **kwargs: object):
+        bucket = str(kwargs["Bucket"])
+        delete = kwargs["Delete"]
+        assert isinstance(delete, dict)
+        requested = delete["Objects"]
+        assert isinstance(requested, list)
+        self.calls.append(("delete_objects", (bucket, requested)))
+        deleted: list[dict[str, str]] = []
+        for item in requested:
+            assert isinstance(item, dict)
+            key = str(item["Key"])
+            self.objects.pop((bucket, key), None)
+            deleted.append({"Key": key})
+        return {"Deleted": deleted}
+
+
 def _item(body: bytes, **overrides: object) -> RegisteredObject:
     values: dict[str, object] = {
         "id": uuid4(),
@@ -103,3 +138,67 @@ def test_version_drift_fails_closed() -> None:
     with pytest.raises(LifecycleGcExecutionError, match="version drifted"):
         S3ExactObjectDeleter(client).delete_exact(_item(body, version_id="v1", content_sha256=None))
     assert not client.deleted
+
+
+def test_batch_delete_verifies_all_bytes_and_binds_exact_returned_identities() -> None:
+    first_body = b"first"
+    second_body = b"second"
+    first = _item(first_body, object_key="first.json")
+    second = _item(second_body, object_key="second.json")
+    client = _BatchClient(
+        {
+            (first.bucket, first.object_key): first_body,
+            (second.bucket, second.object_key): second_body,
+        }
+    )
+    deleter = S3ExactObjectDeleter(client, workers=2)
+
+    deleter.delete_exact_many((first, second))
+
+    assert len(client.calls) == 1
+    assert deleter.exact_absent_many((first, second)) == {
+        first.id: True,
+        second.id: True,
+    }
+
+
+def test_batch_delete_rejects_incomplete_identity_evidence() -> None:
+    body = b"registered"
+    item = _item(body)
+
+    class Client(_BatchClient):
+        def delete_objects(self, **kwargs: object):
+            super().delete_objects(**kwargs)
+            return {"Deleted": []}
+
+    with pytest.raises(LifecycleGcExecutionError, match="identity drifted"):
+        S3ExactObjectDeleter(
+            Client({(item.bucket, item.object_key): body}),
+        ).delete_exact_many((item,))
+
+
+def test_batch_delete_verifies_entire_batch_before_first_mutation() -> None:
+    body = b"registered"
+    first = _item(body, object_key="first.json")
+    drifted = _item(body, object_key="drifted.json", content_sha256="0" * 64)
+    client = _BatchClient(
+        {
+            (first.bucket, first.object_key): body,
+            (drifted.bucket, drifted.object_key): body,
+        }
+    )
+
+    with pytest.raises(LifecycleGcExecutionError, match="digest drifted"):
+        S3ExactObjectDeleter(client, workers=2).delete_exact_many((first, drifted))
+
+    assert client.calls == []
+    assert set(client.objects) == {
+        (first.bucket, first.object_key),
+        (drifted.bucket, drifted.object_key),
+    }
+
+
+@pytest.mark.parametrize("workers", (0, 65))
+def test_batch_delete_rejects_unbounded_workers(workers: int) -> None:
+    with pytest.raises(ValueError, match="workers"):
+        S3ExactObjectDeleter(_BatchClient({}), workers=workers)
