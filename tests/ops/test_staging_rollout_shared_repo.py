@@ -237,15 +237,33 @@ def test_service_ensure_never_precreates_sha_and_reports_target(
     assert report["candidate_target"] == "/shared_work/loom/candidates/staging/" + "a" * 40
 
 
+def _renameat2_available() -> bool:
+    import ctypes
+
+    try:
+        ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError):
+        return False
+    return True
+
+
 def test_atomic_publish_fails_closed_on_existing_target(tmp_path: Path) -> None:
     # rename-no-replace is what makes publication all-or-nothing: an existing
     # final target must fail closed rather than overwrite or expose partial data.
+    # Portable across platforms: where renameat2 exists (Linux) the existing
+    # target raises FileExistsError; where it does not (e.g. macOS) atomic
+    # publication is simply unavailable -- itself fail-closed (it never falls
+    # back to a clobbering rename).
     parent = tmp_path
     (parent / "src").mkdir()
     (parent / "dest").mkdir()  # target already exists
     parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with pytest.raises(FileExistsError):
-            helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
+        if _renameat2_available():
+            with pytest.raises(FileExistsError):
+                helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
+        else:
+            with pytest.raises(helper.AuthorityError):
+                helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
     finally:
         os.close(parent_fd)
