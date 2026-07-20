@@ -10,14 +10,15 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import create_engine
-
 from loom.data_lifecycle_gc import GcScope
 from loom.data_lifecycle_legacy import classification_plan_summary
 from loom.data_lifecycle_legacy_s3 import S3LegacyObjectInspector
 from loom.data_lifecycle_legacy_sql import SqlAlchemyLegacyClassifier
-from loom.storage_credentials import build_s3_client
-from loom_control_plane.config import ControlPlaneSettings
+from loom.data_lifecycle_runtime import (
+    build_lifecycle_engine,
+    build_lifecycle_object_store_client,
+    load_lifecycle_runtime,
+)
 
 
 def _aware_datetime(value: str) -> datetime:
@@ -68,18 +69,9 @@ def main(argv: list[str] | None = None) -> int:
     ):
         raise SystemExit("inventory does not accept mutation authority")
 
-    settings = ControlPlaneSettings()
-    engine = create_engine(
-        settings.db_engine_url,
-        connect_args=settings.db_engine_connect_args,
-    )
-    client = build_s3_client(
-        endpoint_url=settings.minio_endpoint,
-        auth_kind=settings.storage_auth_kind,
-        access_key=settings.minio_access_key.get_secret_value(),
-        secret_key=settings.minio_secret_key.get_secret_value(),
-        region=settings.minio_region,
-    )
+    runtime = load_lifecycle_runtime()
+    engine = build_lifecycle_engine(runtime.database)
+    client = build_lifecycle_object_store_client(runtime.object_store)
     try:
         now = datetime.now(UTC)
         classifier = SqlAlchemyLegacyClassifier(

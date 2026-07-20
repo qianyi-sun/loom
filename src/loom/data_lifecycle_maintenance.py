@@ -10,12 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
-
-from sqlalchemy import create_engine
 
 from loom.data_lifecycle_capacity import collect_staging_capacity
 from loom.data_lifecycle_capacity_sql import SqlAlchemyStagingCapacityStore
@@ -32,16 +29,11 @@ from loom.data_lifecycle_operator import (
     OperatorAction,
     run_lifecycle_operator,
 )
-from loom.storage_credentials import build_s3_client
-
-_ENV_PREFIX = "LOOM_LIFECYCLE_"
-
-
-def _required_env(name: str) -> str:
-    value = os.environ.get(f"{_ENV_PREFIX}{name}", "")
-    if not value or value != value.strip() or "\x00" in value:
-        raise RuntimeError(f"required lifecycle environment {name} is unavailable")
-    return value
+from loom.data_lifecycle_runtime import (
+    build_lifecycle_engine,
+    build_lifecycle_object_store_client,
+    load_lifecycle_runtime,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -55,14 +47,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    engine = create_engine(_required_env("DB_URL"))
-    client = build_s3_client(
-        endpoint_url=_required_env("MINIO_ENDPOINT"),
-        auth_kind=os.environ.get(f"{_ENV_PREFIX}STORAGE_AUTH_KIND", "static_keys"),
-        access_key=os.environ.get(f"{_ENV_PREFIX}MINIO_ACCESS_KEY"),
-        secret_key=os.environ.get(f"{_ENV_PREFIX}MINIO_SECRET_KEY"),
-        region=os.environ.get(f"{_ENV_PREFIX}MINIO_REGION", "us-east-1"),
-    )
+    runtime = load_lifecycle_runtime()
+    engine = build_lifecycle_engine(runtime.database)
+    client = build_lifecycle_object_store_client(runtime.object_store)
     try:
         now = datetime.now(UTC)
         object_inventory = S3ObservedObjectInventory(client)

@@ -88,6 +88,16 @@ lazy binding of an already admitted pre-migration batch does not retroactively
 reject its in-flight children. Non-staging environments retain their pinned,
 non-destructive policy.
 
+All lifecycle maintenance entry points share the dedicated
+`loom.data_lifecycle_runtime` environment contract. Database-only bootstrap
+requires only `LOOM_LIFECYCLE_DB_URL`; capacity, classification, GC, and the
+scheduled maintenance worker additionally require the exact
+`LOOM_LIFECYCLE_MINIO_*` endpoint and credentials. They never instantiate the
+control-plane settings or require JWT/provider/application secrets. Secret
+values are excluded from representations, output evidence, and validation
+errors. The direct database URL is intentional: these transactional authority
+operations do not run through transaction-pooling PgBouncer.
+
 ```bash
 python scripts/ops/staging_data_lifecycle_capacity.py \
   --namespace loom-staging \
@@ -246,8 +256,8 @@ An active, dry-run, completed, mixed-token, or tampered-inventory run cannot be
 resumed. A second resumer loses the claim and fails closed.
 
 The supported operator entrypoint is
-`scripts/ops/staging_data_lifecycle_gc.py`. It loads the normal control-plane
-database and object-store settings from their existing secret-bearing
+`scripts/ops/staging_data_lifecycle_gc.py`. It loads the dedicated lifecycle
+database and object-store settings from the least-authority secret-bearing
 environment, never accepts secret values on argv, and supports four explicit
 actions: `inventory`, `dry-run`, `apply`, and `resume`. `inventory` is purely
 read-only and returns every blocker together. `apply` additionally requires the

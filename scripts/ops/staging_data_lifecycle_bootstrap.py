@@ -10,14 +10,15 @@ import re
 import sys
 from pathlib import Path
 
-from sqlalchemy import create_engine
-
 from loom.data_lifecycle_bootstrap import (
     SqlAlchemyLifecycleBootstrap,
     lifecycle_bootstrap_plan_document,
 )
 from loom.data_lifecycle_gc import GcScope
-from loom_control_plane.config import ControlPlaneSettings
+from loom.data_lifecycle_runtime import (
+    build_lifecycle_engine,
+    load_lifecycle_database_runtime,
+)
 
 _REQUEST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 
@@ -64,8 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         raise SystemExit("apply mutation identity is invalid")
 
-    settings = ControlPlaneSettings()
-    engine = create_engine(settings.db_engine_url, connect_args=settings.db_engine_connect_args)
+    engine = build_lifecycle_engine(load_lifecycle_database_runtime())
     try:
         scope = GcScope(environment="staging", namespace=args.namespace)
         bootstrap = SqlAlchemyLifecycleBootstrap(engine)

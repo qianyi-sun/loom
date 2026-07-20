@@ -11,8 +11,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from sqlalchemy import create_engine
-
 from loom.data_lifecycle_gc import GcScope
 from loom.data_lifecycle_gc_s3 import S3ExactObjectDeleter
 from loom.data_lifecycle_gc_sql import SqlAlchemyGcJournal
@@ -26,8 +24,11 @@ from loom.data_lifecycle_operator import (
     OperatorAction,
     run_lifecycle_operator,
 )
-from loom.storage_credentials import build_s3_client
-from loom_control_plane.config import ControlPlaneSettings
+from loom.data_lifecycle_runtime import (
+    build_lifecycle_engine,
+    build_lifecycle_object_store_client,
+    load_lifecycle_runtime,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -69,18 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     request_id = args.request_id
     if args.action == OperatorAction.AUTO and request_id is None:
         request_id = f"req-gc-auto-{uuid4().hex[:16]}"
-    settings = ControlPlaneSettings()
-    engine = create_engine(
-        settings.db_engine_url,
-        connect_args=settings.db_engine_connect_args,
-    )
-    client = build_s3_client(
-        endpoint_url=settings.minio_endpoint,
-        auth_kind=settings.storage_auth_kind,
-        access_key=settings.minio_access_key.get_secret_value(),
-        secret_key=settings.minio_secret_key.get_secret_value(),
-        region=settings.minio_region,
-    )
+    runtime = load_lifecycle_runtime()
+    engine = build_lifecycle_engine(runtime.database)
+    client = build_lifecycle_object_store_client(runtime.object_store)
     try:
         document = run_lifecycle_operator(
             request=LifecycleOperatorRequest(
