@@ -129,6 +129,52 @@ def test_current_database_binds_sorted_immutable_inventory_in_same_snapshot() ->
     assert any("FROM data_lifecycle_objects" in sql for sql in query.calls)
 
 
+def test_current_database_binds_unversioned_legacy_pinned_inventory() -> None:
+    row = {
+        "authoritative_source": None,
+        "authority_id": "11111111-1111-4111-8111-111111111111",
+        "bucket": "loom-staging-artifacts",
+        "content_sha256": "a" * 64,
+        "data_class": "catalog",
+        "object_key": "catalog/exact.json",
+        "owner_id": "catalog:legacy",
+        "owner_kind": "system",
+        "size_bytes": 42,
+        "version_id": None,
+    }
+    query = Query(revision="0066", inventory=(row,))
+
+    evidence = probe_readonly_database(query)
+
+    assert evidence.immutable_objects[0].version_id == "content-sha256:" + "a" * 64
+    assert evidence.immutable_objects[0].authoritative_source.startswith(
+        "lifecycle-authority:sha256:"
+    )
+
+
+def test_current_database_rejects_unversioned_inventory_without_exact_digest() -> None:
+    row = {
+        "authoritative_source": None,
+        "authority_id": "11111111-1111-4111-8111-111111111111",
+        "bucket": "loom-staging-artifacts",
+        "content_sha256": None,
+        "data_class": "catalog",
+        "object_key": "catalog/exact.json",
+        "owner_id": "catalog:legacy",
+        "owner_kind": "system",
+        "size_bytes": 42,
+        "version_id": None,
+    }
+
+    with pytest.raises(ValueError, match="immutable inventory is invalid"):
+        probe_readonly_database(Query(revision="0066", inventory=(row,)))
+
+
+def test_immutable_inventory_query_binds_legacy_authority_identity() -> None:
+    assert "auth.id::text AS authority_id" in readonly_database_authority._INVENTORY_SQL
+    assert "auth.owner_kind, auth.owner_id" in readonly_database_authority._INVENTORY_SQL
+
+
 def test_current_database_pages_immutable_inventory_in_same_snapshot() -> None:
     inventory = tuple(
         {

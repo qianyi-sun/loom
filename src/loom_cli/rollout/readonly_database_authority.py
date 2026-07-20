@@ -76,7 +76,8 @@ WHERE environment = 'staging' AND namespace = 'loom-staging'
 _INVENTORY_SQL = """
 SELECT obj.bucket, obj.object_key, obj.version_id, obj.content_sha256,
        obj.size_bytes, auth.data_class,
-       auth.metadata ->> 'authoritative_source' AS authoritative_source
+       auth.metadata ->> 'authoritative_source' AS authoritative_source,
+       auth.id::text AS authority_id, auth.owner_kind, auth.owner_id
 FROM data_lifecycle_objects AS obj
 JOIN data_lifecycle_authorities AS auth ON auth.id = obj.authority_id
 WHERE obj.environment = 'staging'
@@ -228,6 +229,48 @@ def _immutable_inventory_rows(query: DatabaseQuery) -> tuple[Mapping[str, object
         if len(page) < _INVENTORY_PAGE_SIZE:
             return tuple(rows)
         offset += _INVENTORY_PAGE_SIZE
+
+
+def _immutable_reference(row: Mapping[str, object]) -> ImmutableObjectReference:
+    """Normalize an exact legacy pinned identity without inventing mutable state.
+
+    MinIO returns no version ID when bucket versioning is disabled.  The
+    lifecycle registry nevertheless records a verified content digest, so that
+    digest is the exact immutable version authority.  Legacy pinned rows also
+    predate the optional ``authoritative_source`` metadata; bind those rows to
+    the immutable lifecycle authority identity instead of treating an absent
+    display field as an unreadable checkpoint.  Restore verification still has
+    to prove the exact object bytes before a lease can be promoted.
+    """
+    value = dict(row)
+    expected = {
+        "authoritative_source",
+        "bucket",
+        "content_sha256",
+        "data_class",
+        "object_key",
+        "size_bytes",
+        "version_id",
+    }
+    legacy_binding = {"authority_id", "owner_kind", "owner_id"}
+    if frozenset(value) not in {frozenset(expected), frozenset(expected | legacy_binding)}:
+        raise ValueError("readonly database immutable inventory schema is invalid")
+    content_sha256 = value.get("content_sha256")
+    if not isinstance(content_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", content_sha256) is None:
+        raise ValueError("readonly database immutable inventory digest is invalid")
+    if value.get("version_id") is None:
+        value["version_id"] = f"content-sha256:{content_sha256}"
+    if value.get("authoritative_source") is None:
+        binding = {name: value.get(name) for name in sorted(legacy_binding)}
+        if any(not isinstance(item, str) or not item for item in binding.values()):
+            raise ValueError("readonly database immutable source authority is invalid")
+        binding_sha256 = hashlib.sha256(
+            json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        value["authoritative_source"] = f"lifecycle-authority:sha256:{binding_sha256}"
+    for name in legacy_binding:
+        value.pop(name, None)
+    return ImmutableObjectReference.from_dict(value)
 
 
 def _expected_role_authority() -> dict[str, object]:
@@ -388,9 +431,7 @@ def _probe_readonly_database(
     if include_immutable_inventory and revision_number >= _EPOCH_FIRST_REVISION:
         inventory_rows = _immutable_inventory_rows(query)
         try:
-            immutable_objects = tuple(
-                ImmutableObjectReference.from_dict(dict(row)) for row in inventory_rows
-            )
+            immutable_objects = tuple(_immutable_reference(row) for row in inventory_rows)
         except (TypeError, ValueError) as exc:
             raise ValueError("readonly database immutable inventory is invalid") from exc
         identities = [item.identity for item in immutable_objects]
