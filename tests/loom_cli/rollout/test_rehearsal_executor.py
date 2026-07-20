@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -93,6 +94,10 @@ def _plan() -> RehearsalPlan:
         ),
         gb10_authority=gb10_rehearsal_authority(),
     )
+
+
+def _runtime_images(plan: RehearsalPlan, names: Sequence[str]) -> dict[str, str]:
+    return {name: plan.image_digests[name] for name in names}
 
 
 def _release_artifact(plan: RehearsalPlan) -> RehearsalReleaseArtifact:
@@ -333,9 +338,11 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
         restored = True
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    outcome = IsolatedRehearsalExecutor(run=run, stream_run=stream).execute(
-        "rehearsal.db-clone", plan
-    )
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        stream_run=stream,
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.db-clone", plan)
 
     assert outcome.passed
     assert outcome.details == {
@@ -382,7 +389,10 @@ def test_database_rejects_unclassified_server_default_drift() -> None:
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
         raise AssertionError("drifted apply response must stop before restore")
 
-    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.db-clone", plan)
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.db-clone", plan)
     assert outcome.blockers == {"database": "pod-apply-failed"}
 
 
@@ -395,6 +405,92 @@ def test_plan_rejects_missing_exact_image_before_executor() -> None:
                 "image_digests": {"loom-service": "sha256:" + "1" * 64},
             }
         )
+
+
+def test_runtime_image_binding_resolves_exact_index_platform_config() -> None:
+    plan = _plan()
+    name = "loom-control-plane"
+    expected = plan.image_digests[name]
+    reference = f"docker.io/library/{name}:{plan.image_tag}"
+    manifest_digest = "sha256:" + "c" * 64
+    config_digest = "sha256:" + "d" * 64
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if "images" in command and "list" in command:
+            value = (
+                "REF TYPE DIGEST SIZE PLATFORMS LABELS\n"
+                f"{reference} application/vnd.oci.image.index.v1+json "
+                f"{expected} 1MiB linux/amd64 managed\n"
+            )
+        elif "content" in command and command[-1] == expected:
+            value = json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.index.v1+json",
+                    "manifests": [
+                        {
+                            "digest": manifest_digest,
+                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "platform": {"architecture": "amd64", "os": "linux"},
+                        },
+                        {
+                            "digest": "sha256:" + "e" * 64,
+                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "platform": {"architecture": "unknown", "os": "unknown"},
+                        },
+                    ],
+                }
+            )
+        elif "content" in command and command[-1] == manifest_digest:
+            value = json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "config": {
+                        "digest": config_digest,
+                        "mediaType": "application/vnd.oci.image.config.v1+json",
+                    },
+                }
+            )
+        elif "crictl" in command:
+            value = json.dumps(
+                {
+                    "status": {"id": config_digest, "repoTags": [reference]},
+                    "info": {
+                        "imageSpec": {
+                            "architecture": "amd64",
+                            "os": "linux",
+                            "config": {
+                                "Labels": {"org.opencontainers.image.revision": plan.candidate_sha}
+                            },
+                        }
+                    },
+                }
+            )
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(argv, 0, value, "")
+
+    resolved = IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,))
+
+    assert resolved == {name: config_digest}
+
+
+def test_runtime_image_binding_rejects_kind_tag_drift() -> None:
+    plan = _plan()
+    name = "loom-control-plane"
+    reference = f"docker.io/library/{name}:{plan.image_tag}"
+
+    def run(argv, _payload, _timeout):
+        value = (
+            "REF TYPE DIGEST SIZE PLATFORMS LABELS\n"
+            f"{reference} application/vnd.oci.image.index.v1+json "
+            f"sha256:{'0' * 64} 1MiB linux/amd64 managed\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, value, "")
+
+    assert IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,)) is None
 
 
 def test_migration_runs_exact_candidate_against_restored_database() -> None:
@@ -541,6 +637,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         run=run,
         release_artifacts=lambda _plan: release,
         secret_artifacts=lambda _plan: secrets,
+        runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.release", plan)
 
     assert outcome.passed
@@ -575,6 +672,7 @@ def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
     outcome = IsolatedRehearsalExecutor(
         run=run,
         release_artifacts=lambda _plan: release,
+        runtime_image_resolver=_runtime_images,
         secret_artifacts=lambda _plan: secrets,
     ).execute("rehearsal.release", plan)
 
@@ -644,6 +742,7 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
     outcome = IsolatedRehearsalExecutor(
         run=run,
         release_artifacts=lambda _plan: release,
+        runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.api-smoke", plan)
 
     assert outcome.passed
@@ -754,6 +853,7 @@ def test_production_defaults_streams_exact_artifact_to_candidate_probe(tmp_path:
     outcome = IsolatedRehearsalExecutor(
         run=run,
         release_artifacts=lambda _plan: release,
+        runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.production-defaults", plan)
 
     assert outcome.passed
@@ -806,6 +906,7 @@ def test_api_smoke_rejects_pod_or_probe_identity_drift() -> None:
     outcome = IsolatedRehearsalExecutor(
         run=drifted_pod,
         release_artifacts=lambda _plan: release,
+        runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.api-smoke", plan)
     assert outcome.blockers == {"api-smoke": "service-pod-readback-drift"}
 
@@ -1170,6 +1271,7 @@ def test_browser_executes_exact_isolated_job_and_validates_report() -> None:
     outcome = IsolatedRehearsalExecutor(
         run=run,
         browser_artifacts=lambda _plan, _ip: artifact,
+        runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.browser", plan)
 
     assert outcome.passed

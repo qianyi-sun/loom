@@ -10,7 +10,7 @@ import stat
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -84,6 +84,7 @@ StreamCommandRunner = Callable[[Sequence[str], Path, int], CommandResult]
 ReleaseArtifactBuilder = Callable[[RehearsalPlan], RehearsalReleaseArtifact]
 SecretArtifactBuilder = Callable[[RehearsalPlan], RehearsalSecretArtifact]
 BrowserArtifactBuilder = Callable[[RehearsalPlan, str], RehearsalBrowserArtifact]
+RuntimeImageResolver = Callable[[RehearsalPlan, Sequence[str]], Mapping[str, str] | None]
 
 
 class GB10RehearsalTransport(Protocol):
@@ -223,6 +224,7 @@ class IsolatedRehearsalExecutor:
     kubeconfig: Path = REHEARSAL_KUBECONFIG
     monotonic: Callable[[], float] = time.monotonic
     gb10_transport_factory: GB10TransportFactory | None = None
+    runtime_image_resolver: RuntimeImageResolver | None = None
 
     def __post_init__(self) -> None:
         if not self.kubeconfig.is_absolute() or ".." in self.kubeconfig.parts:
@@ -281,8 +283,12 @@ class IsolatedRehearsalExecutor:
             artifact = self.browser_artifacts(plan, ingress_ip)
         except (OSError, RuntimeError, ValueError):
             return _blocked("browser", "artifact-validation-failed")
-        if not self._load_images(plan, ("loom-staging-admin-browser-smoke",)):
+        image_names = ("loom-staging-admin-browser-smoke",)
+        if not self._load_images(plan, image_names):
             return _blocked("browser", "image-load-failed")
+        runtime_images = self._runtime_image_ids(plan, image_names)
+        if runtime_images is None:
+            return _blocked("browser", "runtime-image-binding-failed")
         if not self._status_with_payload(
             (
                 "kubectl",
@@ -390,6 +396,7 @@ class IsolatedRehearsalExecutor:
             pods,
             artifact=artifact,
             plan=plan,
+            runtime_image_digest=runtime_images["loom-staging-admin-browser-smoke"],
         ):
             return _blocked("browser", "pod-image-readback-drift")
         report = self._command(
@@ -578,7 +585,15 @@ class IsolatedRehearsalExecutor:
             None,
             timeout=20,
         )
-        return _exact_service_pod_name(pods, release=release, plan=plan)
+        runtime_images = self._runtime_image_ids(plan, ("loom-service",))
+        if runtime_images is None:
+            return None
+        return _exact_service_pod_name(
+            pods,
+            release=release,
+            plan=plan,
+            runtime_image_digest=runtime_images["loom-service"],
+        )
 
     def _namespace(self, plan: RehearsalPlan) -> RehearsalStepOutcome:
         manifest = _namespace_manifest(plan)
@@ -714,8 +729,12 @@ class IsolatedRehearsalExecutor:
             for name in (REHEARSAL_POSTGRES_IMAGE, "loom-control-plane")
         ):
             return _blocked("database", "image-authority-missing")
-        if not self._load_images(plan, (REHEARSAL_POSTGRES_IMAGE, "loom-control-plane")):
+        image_names = (REHEARSAL_POSTGRES_IMAGE, "loom-control-plane")
+        if not self._load_images(plan, image_names):
             return _blocked("database", "image-load-failed")
+        runtime_images = self._runtime_image_ids(plan, image_names)
+        if runtime_images is None:
+            return _blocked("database", "runtime-image-binding-failed")
         manifest = _database_pod_manifest(plan)
         applied = self._command(
             (
@@ -736,7 +755,12 @@ class IsolatedRehearsalExecutor:
             _json_bytes(manifest),
             timeout=45,
         )
-        if applied is None or not _database_pod_matches(applied, plan, require_ready=False):
+        if applied is None or not _database_pod_matches(
+            applied,
+            plan,
+            require_ready=False,
+            runtime_image_digests=runtime_images,
+        ):
             return _blocked("database", "pod-apply-failed")
         if not self._status(
             (
@@ -770,7 +794,12 @@ class IsolatedRehearsalExecutor:
             None,
             timeout=20,
         )
-        if observed is None or not _database_pod_matches(observed, plan, require_ready=True):
+        if observed is None or not _database_pod_matches(
+            observed,
+            plan,
+            require_ready=True,
+            runtime_image_digests=runtime_images,
+        ):
             return _blocked("database", "pod-readback-drift")
         existing = self._database_identity(plan)
         if existing is not None and existing.get("restored") is True:
@@ -888,6 +917,9 @@ class IsolatedRehearsalExecutor:
             ("loom-service", "loom-web"),
         ):
             return _blocked("release", "image-load-failed")
+        runtime_images = self._runtime_image_ids(plan, image_names)
+        if runtime_images is None:
+            return _blocked("release", "runtime-image-binding-failed")
         if not self._status_with_payload(
             (
                 "kubectl",
@@ -988,6 +1020,7 @@ class IsolatedRehearsalExecutor:
                 pods,
                 artifact=release,
                 deployment_name=name,
+                runtime_image_digest=runtime_images[name],
             ):
                 return _blocked("release", "pod-image-readback-drift")
         for name in ("loom-control-plane", "loom-postgres", "loom-service", "loom-web"):
@@ -1078,6 +1111,136 @@ class IsolatedRehearsalExecutor:
             return None
         image_id = value.strip()
         return image_id if re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) else None
+
+    def _runtime_image_ids(
+        self,
+        plan: RehearsalPlan,
+        names: Sequence[str],
+    ) -> dict[str, str] | None:
+        if self.runtime_image_resolver is not None:
+            resolved = self.runtime_image_resolver(plan, names)
+            values = {} if resolved is None else dict(resolved)
+            if (
+                len(set(names)) != len(names)
+                or set(values) != set(names)
+                or any(
+                    re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in values.values()
+                )
+            ):
+                return None
+            return values
+        result: dict[str, str] = {}
+        for name in names:
+            image_id = self._kind_runtime_image_id(plan, name)
+            if image_id is None:
+                return None
+            result[name] = image_id
+        return result
+
+    def _kind_runtime_image_id(self, plan: RehearsalPlan, name: str) -> str | None:
+        expected = plan.image_digests.get(name)
+        if expected is None:
+            return None
+        node = f"{plan.cluster_name}-control-plane"
+        reference = f"docker.io/library/{name}:{plan.image_tag}"
+        listing = self._text_command(
+            (
+                "docker",
+                "exec",
+                node,
+                "ctr",
+                "-n",
+                "k8s.io",
+                "images",
+                "list",
+                f"name=={reference}",
+            ),
+            timeout=30,
+            max_bytes=4096,
+        )
+        lines = listing.splitlines() if listing is not None else []
+        fields = lines[1].split(maxsplit=5) if len(lines) == 2 else []
+        if len(fields) < 5 or fields[0] != reference or fields[2] != expected:
+            return None
+        descriptor = self._containerd_content(node, expected)
+        if descriptor is None:
+            return None
+        media_type = descriptor.get("mediaType")
+        manifest = descriptor
+        if media_type == "application/vnd.oci.image.index.v1+json":
+            manifests = descriptor.get("manifests")
+            matches = (
+                [
+                    item
+                    for item in manifests
+                    if isinstance(item, dict)
+                    and item.get("mediaType") == "application/vnd.oci.image.manifest.v1+json"
+                    and item.get("platform") == {"architecture": "amd64", "os": "linux"}
+                ]
+                if isinstance(manifests, list)
+                else []
+            )
+            if len(matches) != 1:
+                return None
+            manifest_digest = matches[0].get("digest")
+            if not isinstance(manifest_digest, str):
+                return None
+            resolved_manifest = self._containerd_content(node, manifest_digest)
+            if resolved_manifest is None:
+                return None
+            manifest = resolved_manifest
+        if manifest.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
+            return None
+        config = manifest.get("config")
+        config_digest = config.get("digest") if isinstance(config, dict) else None
+        if (
+            not isinstance(config_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", config_digest) is None
+        ):
+            return None
+        inspected = self._text_command(
+            ("docker", "exec", node, "crictl", "inspecti", reference),
+            timeout=30,
+            max_bytes=_MAX_OUTPUT_BYTES,
+        )
+        try:
+            payload = json.loads(inspected) if inspected is not None else None
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        status = payload.get("status")
+        info = payload.get("info")
+        image_spec = info.get("imageSpec") if isinstance(info, dict) else None
+        image_config = image_spec.get("config") if isinstance(image_spec, dict) else None
+        labels = image_config.get("Labels") if isinstance(image_config, dict) else None
+        if not (
+            isinstance(status, dict)
+            and status.get("id") == config_digest
+            and isinstance(status.get("repoTags"), list)
+            and reference in status["repoTags"]
+            and isinstance(image_spec, dict)
+            and image_spec.get("architecture") == "amd64"
+            and image_spec.get("os") == "linux"
+            and isinstance(labels, dict)
+            and labels.get("org.opencontainers.image.revision") == plan.candidate_sha
+        ):
+            return None
+        return config_digest
+
+    def _containerd_content(self, node: str, digest: str) -> dict[str, object] | None:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            return None
+        value = self._text_command(
+            ("docker", "exec", node, "ctr", "-n", "k8s.io", "content", "get", digest),
+            timeout=30,
+            max_bytes=_MAX_OUTPUT_BYTES,
+        )
+        try:
+            payload = json.loads(value) if value is not None else None
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def _secret_plan_digest(self, plan: RehearsalPlan, name: str) -> str | None:
         value = self._text_command(
@@ -1598,7 +1761,11 @@ def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
 
 
 def _database_pod_matches(
-    value: dict[str, object], plan: RehearsalPlan, *, require_ready: bool
+    value: dict[str, object],
+    plan: RehearsalPlan,
+    *,
+    require_ready: bool,
+    runtime_image_digests: Mapping[str, str],
 ) -> bool:
     expected = _database_pod_manifest(plan)
     metadata = value.get("metadata")
@@ -1668,8 +1835,8 @@ def _database_pod_matches(
     conditions = status.get("conditions")
     statuses = status.get("containerStatuses")
     expected_digests = {
-        "migration": plan.image_digests["loom-control-plane"],
-        "postgres": plan.image_digests[REHEARSAL_POSTGRES_IMAGE],
+        "migration": runtime_image_digests.get("loom-control-plane"),
+        "postgres": runtime_image_digests.get(REHEARSAL_POSTGRES_IMAGE),
     }
     return bool(
         isinstance(conditions, list)
@@ -1683,12 +1850,22 @@ def _database_pod_matches(
         and len(statuses) == 2
         and all(isinstance(status, dict) for status in statuses)
         and {str(status["name"]) for status in statuses} == set(expected_digests)
-        and all(
-            isinstance(status.get("imageID"), str)
-            and str(status["imageID"]).endswith(expected_digests[str(status["name"])])
-            and status.get("ready") is True
-            for status in statuses
-        )
+        and all(_runtime_container_ready(status, expected_digests) for status in statuses)
+    )
+
+
+def _runtime_container_ready(
+    status: dict[str, object],
+    expected_digests: Mapping[str, str | None],
+) -> bool:
+    name = status.get("name")
+    image_id = status.get("imageID")
+    expected = expected_digests.get(name) if isinstance(name, str) else None
+    return bool(
+        isinstance(image_id, str)
+        and isinstance(expected, str)
+        and image_id.endswith(expected)
+        and status.get("ready") is True
     )
 
 
@@ -1793,11 +1970,13 @@ def _exact_service_pod_name(
     *,
     release: RehearsalReleaseArtifact,
     plan: RehearsalPlan,
+    runtime_image_digest: str,
 ) -> str | None:
     if value is None or not rehearsal_pods_ready(
         value,
         artifact=release,
         deployment_name="loom-service",
+        runtime_image_digest=runtime_image_digest,
     ):
         return None
     items = value.get("items")

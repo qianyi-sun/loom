@@ -529,6 +529,7 @@ def rehearsal_pods_ready(
     *,
     artifact: RehearsalReleaseArtifact,
     deployment_name: str,
+    runtime_image_digest: str | None = None,
 ) -> bool:
     expected = _artifact_resource(artifact, kind="Deployment", name=deployment_name)
     expected_container = _deployment_container(expected)
@@ -573,7 +574,7 @@ def rehearsal_pods_ready(
     return bool(
         container_statuses[0].get("name") == expected_container["name"]
         and container_statuses[0].get("ready") is True
-        and image_digest == artifact.deployment_images[deployment_name]
+        and image_digest == (runtime_image_digest or artifact.deployment_images[deployment_name])
     )
 
 

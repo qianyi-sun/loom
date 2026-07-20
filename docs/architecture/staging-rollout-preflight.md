@@ -492,8 +492,14 @@ the exact post-start unit properties, not by the mere presence of bounded
 systemd warning text. This preserves fail-closed identity and cleanup checks
 without misclassifying a non-root firewall warning after the unit has actually
 started and converged. Kubernetes rehearsal manifests likewise match the exact
-declared pod fields plus the fixed API-server termination-message defaults;
-unknown defaulting or desired-state drift still fails before restore.
+declared pod fields plus the fixed API-server termination-message and
+readiness-success defaults; unknown defaulting or desired-state drift still
+fails before restore. After each exact image is loaded, rehearsal resolves the
+Kind/containerd tag back to the attested OCI index, selects the single
+`linux/amd64` manifest, and binds the resulting config digest and exact
+candidate revision label. Kubernetes `imageID` readback is compared with that
+runtime config digest rather than incorrectly comparing it with the parent OCI
+index digest.
 
 `RehearsalActionSource` is the sole plan and resource-name authority for these
 actions. Its identity factory and action factory consume the same checkpoint,

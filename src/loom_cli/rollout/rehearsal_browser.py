@@ -157,6 +157,7 @@ def rehearsal_browser_pod_complete(
     *,
     artifact: RehearsalBrowserArtifact,
     plan: RehearsalPlan,
+    runtime_image_digest: str | None = None,
 ) -> bool:
     items = observed.get("items")
     if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], Mapping):
@@ -182,9 +183,10 @@ def rehearsal_browser_pod_complete(
         or not isinstance(init_containers[0], Mapping)
     ):
         return False
-    return _terminated_success(
-        containers[0], artifact.browser_image_digest
-    ) and _terminated_success(init_containers[0], artifact.browser_image_digest)
+    expected_digest = runtime_image_digest or artifact.browser_image_digest
+    return _terminated_success(containers[0], expected_digest) and _terminated_success(
+        init_containers[0], expected_digest
+    )
 
 
 def rehearsal_browser_report_ready(payload: object, *, plan: RehearsalPlan) -> bool:
