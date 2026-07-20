@@ -241,7 +241,7 @@ def _renameat2_available() -> bool:
     import ctypes
 
     try:
-        ctypes.CDLL(None, use_errno=True).renameat2
+        _ = ctypes.CDLL(None, use_errno=True).renameat2
     except (AttributeError, OSError):
         return False
     return True
