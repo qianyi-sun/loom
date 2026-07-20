@@ -356,8 +356,8 @@ def begin_candidate(
     """Reserve the sole transient candidate without replacing the active lease."""
     if state.candidate is not None:
         raise BackupRotationError("a backup payload candidate is already reserved")
-    if state.retirements:
-        raise BackupRotationError("backup payload retirement must complete before admission")
+    if state.payload_count >= 2:
+        raise BackupRotationError("backup payload storage is already at the transient limit")
     candidate = BackupPayloadRecord(
         payload_id=payload_id,
         request_id=request_id,

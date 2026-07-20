@@ -8,7 +8,11 @@ import pytest
 
 from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope
-from loom_cli.rollout.operator.backup_rotation import BackupRetirementRecord, begin_candidate
+from loom_cli.rollout.operator.backup_rotation import (
+    BackupRetirementRecord,
+    begin_candidate,
+    fail_candidate,
+)
 from loom_cli.rollout.operator.checkpoint_coordinator import (
     CheckpointCoordinatorError,
     DetachedCheckpointCoordinator,
@@ -284,6 +288,108 @@ def test_successful_replacement_acknowledges_persisted_old_payload_retirement(
     assert state.retirements == ()
     assert state.payload_count == 1
     assert [record.payload_id for record in retired] == [job.payload_id]
+
+
+def test_failed_latest_retirement_is_kept_until_replacement_activates(
+    tmp_path: Path,
+) -> None:
+    coordinator, _creator, store, job = _coordinator(tmp_path)
+    current = store.read_backup_rotation()
+    old = begin_candidate(
+        current,
+        payload_id="payload-failed00",
+        request_id="req-failed000",
+        bundle_name="20260719T200000Z-req-failed000",
+        created_at=NOW - timedelta(hours=1),
+    ).state
+    store.replace_backup_rotation(old, expected_generation=current.generation)
+    old = fail_candidate(
+        old,
+        payload_id="payload-failed00",
+        failure_code="rehearsal_failed",
+    ).state
+    store.replace_backup_rotation(old, expected_generation=old.generation - 1)
+    reserved = begin_candidate(
+        old,
+        payload_id=job.payload_id,
+        request_id=job.request_id,
+        bundle_name=job.bundle_name,
+        created_at=job.created_at,
+    ).state
+    store.replace_backup_rotation(reserved, expected_generation=old.generation)
+    activated: list[str] = []
+    retired: list[str] = []
+
+    def retire(record: BackupRetirementRecord) -> None:
+        if not activated:
+            raise RuntimeError("legacy latest is still protected")
+        retired.append(record.payload_id)
+
+    coordinator.retire_payload = retire
+    coordinator.activate_payload = lambda record: activated.append(record.payload_id)
+
+    coordinator(_request(), job, lambda: False)
+
+    state = store.read_backup_rotation()
+    assert activated == [job.payload_id]
+    assert retired == ["payload-failed00"]
+    assert state.active is not None
+    assert state.active.payload_id == job.payload_id
+    assert state.payload_count == 1
+    assert state.retirements == ()
+
+
+def test_replacement_failure_compacts_only_the_nonlatest_candidate(
+    tmp_path: Path,
+) -> None:
+    def fail_restore(*_args: object) -> RestoreVerificationEvidence:
+        raise CheckpointCoordinatorError("isolated restore failed")
+
+    coordinator, _creator, store, job = _coordinator(
+        tmp_path,
+        verify_restore=fail_restore,
+    )
+    current = store.read_backup_rotation()
+    old = begin_candidate(
+        current,
+        payload_id="payload-failed00",
+        request_id="req-failed000",
+        bundle_name="20260719T200000Z-req-failed000",
+        created_at=NOW - timedelta(hours=1),
+    ).state
+    store.replace_backup_rotation(old, expected_generation=current.generation)
+    old = fail_candidate(
+        old,
+        payload_id="payload-failed00",
+        failure_code="rehearsal_failed",
+    ).state
+    store.replace_backup_rotation(old, expected_generation=old.generation - 1)
+    reserved = begin_candidate(
+        old,
+        payload_id=job.payload_id,
+        request_id=job.request_id,
+        bundle_name=job.bundle_name,
+        created_at=job.created_at,
+    ).state
+    store.replace_backup_rotation(reserved, expected_generation=old.generation)
+    retired: list[str] = []
+
+    def retire(record: BackupRetirementRecord) -> None:
+        if record.payload_id == "payload-failed00":
+            raise RuntimeError("legacy latest is still protected")
+        retired.append(record.payload_id)
+
+    coordinator.retire_payload = retire
+
+    with pytest.raises(CheckpointCoordinatorError, match="isolated restore"):
+        coordinator(_request(), job, lambda: False)
+
+    state = store.read_backup_rotation()
+    assert retired == [job.payload_id]
+    assert state.active is None
+    assert state.candidate is None
+    assert state.payload_count == 1
+    assert tuple(record.payload_id for record in state.retirements) == ("payload-failed00",)
 
 
 def test_binding_drift_and_early_cancel_do_not_reserve_payload(tmp_path: Path) -> None:

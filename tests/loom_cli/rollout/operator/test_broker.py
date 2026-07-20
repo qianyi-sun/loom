@@ -19,6 +19,7 @@ from loom_cli.rollout.operator.backup import (
     BackupPolicyLimitError,
     VerifiedBackup,
 )
+from loom_cli.rollout.operator.backup_rotation import begin_candidate, fail_candidate
 from loom_cli.rollout.operator.broker import BrokerDependencies
 from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -758,6 +759,27 @@ def test_start_reserves_before_launch_and_returns_detached_request(tmp_path: Pat
 def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     store = RequestStore(tmp_path / "staged-state")
+    initial_rotation = store.read_backup_rotation()
+    reserved_failed = begin_candidate(
+        initial_rotation,
+        payload_id="payload-failed00",
+        request_id="req-failed000",
+        bundle_name="20260714T110000Z-req-failed000",
+        created_at=NOW,
+    ).state
+    store.replace_backup_rotation(
+        reserved_failed,
+        expected_generation=initial_rotation.generation,
+    )
+    failed_rotation = fail_candidate(
+        reserved_failed,
+        payload_id="payload-failed00",
+        failure_code="rehearsal_failed",
+    ).state
+    store.replace_backup_rotation(
+        failed_rotation,
+        expected_generation=reserved_failed.generation,
+    )
     registry = pipeline_registry()
     pipeline = PreflightPipeline(
         registry=registry,
@@ -832,6 +854,8 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
     rotation = store.read_backup_rotation()
     assert rotation.candidate is not None
     assert rotation.candidate.payload_id == job.payload_id
+    assert tuple(record.payload_id for record in rotation.retirements) == ("payload-failed00",)
+    assert rotation.payload_count == 2
     assert deps.backup.create_count == 0
     assert deps.systemd.backup_starts == [
         (

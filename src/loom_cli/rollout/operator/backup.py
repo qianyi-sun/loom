@@ -2119,6 +2119,7 @@ class BackupCreator:
         capacity_provider: CapacityProvider = _capacity_snapshot,
         traversal_limits: BackupTraversalLimits | None = None,
         object_inventory_provider: Callable[[datetime], ImmutableObjectInventory] | None = None,
+        publish_latest: bool = True,
     ) -> None:
         self.config = config
         if service_uid is None:
@@ -2162,6 +2163,27 @@ class BackupCreator:
             max_total_bytes=max_total_bytes,
         )
         self._object_inventory_provider = object_inventory_provider
+        self._publish_latest = publish_latest
+
+    def activate(self, backup: VerifiedBackup) -> None:
+        """Atomically publish one restore-verified payload as legacy ``latest``.
+
+        Critical-checkpoint creation deliberately defers this compatibility
+        pointer until the detached restore rehearsal has passed and the
+        rotation state has promoted the payload.  Legacy callers keep the
+        historical create-time publication behavior by default.
+        """
+        self.revalidate(backup, enforce_freshness=True)
+        resources = _BackupResourceBudget(
+            self.config.rollout_root,
+            max_postgres_bytes=self._max_postgres_bytes,
+            max_total_bytes=self._max_total_bytes,
+            disk_reserve_bytes=self._disk_reserve_bytes,
+            inode_reserve=self._inode_reserve,
+            capacity_provider=self._capacity_provider,
+            max_entries=self._traversal_limits.max_entries,
+        )
+        _publish_latest_stage(backup.manifest_path.parent, resources=resources)
 
     def _bundle_root(
         self,
@@ -2899,7 +2921,8 @@ class BackupCreator:
                     resources=resources,
                 ),
             )
-            _publish_latest_stage(bundle_root, resources=resources)
+            if self._publish_latest:
+                _publish_latest_stage(bundle_root, resources=resources)
         except _LatestStageError as exc:
             if exc.rollback_confirmed:
                 _remove_failed_manifests(pending_manifest_path, manifest_path)

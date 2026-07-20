@@ -372,6 +372,37 @@ def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
     assert runner.timeouts == [600.0, 30.0, 30.0, 30.0]
 
 
+def test_critical_checkpoint_defers_latest_until_explicit_activation(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runner = RecordingRunner()
+
+    def inventory(created_at: datetime):
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-staging",
+            mutation_epoch=6,
+            schema_revision="0066",
+            created_at=created_at,
+            objects=[],
+        )
+
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=FailingMinioMirror(),
+        now=lambda: FIXED_NOW,
+        object_inventory_provider=inventory,
+        publish_latest=False,
+    )
+    backup = creator.create(make_request())
+    latest = config.rollout_root / "backups" / "latest"
+
+    assert not latest.exists()
+    creator.activate(backup)
+    assert latest.readlink() == Path(backup.manifest_path.parent.name)
+
+
 def test_oversized_postgres_dump_stops_before_crossing_component_cap(
     tmp_path: Path,
 ) -> None:

@@ -499,9 +499,9 @@ def _start_staged(
                 {"reason": "mutation_epoch_drift"},
             )
         rotation = dependencies.store.read_backup_rotation()
-        if rotation.candidate is not None or rotation.retirements:
+        if rotation.candidate is not None or rotation.payload_count >= 2:
             raise LifecycleBusyError(
-                "a detached backup or retirement is already pending",
+                "detached backup storage is already at the transient limit",
                 {"reason": "backup_lifecycle_busy"},
             )
         dependencies.store.create_preflight_request(request)

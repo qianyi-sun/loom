@@ -190,7 +190,7 @@ def test_promotion_state_is_crash_safe_before_old_payload_deletion() -> None:
         "payload-old00000",
     )
 
-    with pytest.raises(BackupRotationError, match="retirement"):
+    with pytest.raises(BackupRotationError, match="transient limit"):
         begin_candidate(
             promoted.state,
             payload_id="payload-third000",
@@ -205,6 +205,34 @@ def test_promotion_state_is_crash_safe_before_old_payload_deletion() -> None:
     ).state
     assert acknowledged.payload_count == 1
     assert acknowledged.retirements == ()
+
+
+def test_one_failed_retirement_can_share_the_transient_window_with_candidate() -> None:
+    state = begin_candidate(
+        BackupRotationState(),
+        payload_id="payload-failed00",
+        request_id="req-failed000",
+        bundle_name="20260719T200000Z-req-failed000",
+        created_at=NOW,
+    ).state
+    state = fail_candidate(
+        state,
+        payload_id="payload-failed00",
+        failure_code="restore_failed",
+    ).state
+
+    result = begin_candidate(
+        state,
+        payload_id="payload-replace0",
+        request_id="req-replace000",
+        bundle_name="20260719T210000Z-req-replace000",
+        created_at=NOW + timedelta(hours=1),
+    )
+
+    assert result.state.payload_count == 2
+    assert result.state.candidate is not None
+    assert result.state.candidate.payload_id == "payload-replace0"
+    assert tuple(record.payload_id for record in result.state.retirements) == ("payload-failed00",)
 
 
 def test_three_replacements_stay_at_one_steady_and_two_transient_payloads() -> None:

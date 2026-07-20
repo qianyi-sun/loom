@@ -12,6 +12,7 @@ from .backup_job import PreflightBackupJobEnvelope
 from .backup_lease import BackupLease
 from .backup_rotation import (
     BackupPayloadPhase,
+    BackupPayloadRecord,
     BackupRetirementRecord,
     BackupRotationResult,
     BackupRotationState,
@@ -81,6 +82,7 @@ class DetachedCheckpointCoordinator:
     lease_ttl: timedelta
     referenced_payload_ids: Callable[[], frozenset[str]] = frozenset
     retire_payload: Callable[[BackupRetirementRecord], None] | None = None
+    activate_payload: Callable[[BackupPayloadRecord], None] | None = None
 
     def __post_init__(self) -> None:
         if self.lease_ttl <= timedelta(0):
@@ -131,7 +133,7 @@ class DetachedCheckpointCoordinator:
                     raise CheckpointCoordinatorError(
                         "backup payload retirement did not complete"
                     ) from exc
-                return
+                continue
         remaining = self.store.read_backup_rotation().retirements
         if strict and remaining:
             raise CheckpointCoordinatorError("backup payload retirement is still referenced")
@@ -164,10 +166,11 @@ class DetachedCheckpointCoordinator:
         self._validate_binding(request, envelope)
         if cancelled():
             raise CheckpointCoordinatorError("backup cancelled before reservation")
-        self._drain_retirements(strict=True)
         state = self.store.read_backup_rotation()
         candidate = state.candidate
         if candidate is None:
+            self._drain_retirements(strict=False)
+            state = self.store.read_backup_rotation()
             reservation = begin_candidate(
                 state,
                 payload_id=envelope.payload_id,
@@ -235,7 +238,12 @@ class DetachedCheckpointCoordinator:
                 referenced_payload_ids=self.referenced_payload_ids(),
             )
             self._publish_rotation(current, promoted)
-            self._drain_retirements(strict=False)
+            active = self.store.read_backup_rotation().active
+            if active is None:
+                raise CheckpointCoordinatorError("promoted backup payload is unavailable")
+            if self.activate_payload is not None:
+                self.activate_payload(active)
+            self._drain_retirements(strict=True)
             return VerifiedBackupJob(
                 manifest_path=checkpoint.manifest_path,
                 manifest_sha256=checkpoint.manifest_sha256,

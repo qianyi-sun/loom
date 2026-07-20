@@ -422,11 +422,17 @@ private request store. The remover revalidates the non-`latest` root, request,
 manifest digest, service ownership, modes, link counts, filesystem boundary and
 bounded no-follow traversal immediately before removal. The installed worker
 also resolves the sole active attempt back to its exact payload; it may not
-retire a referenced rollback point. A pending or referenced retirement
-blocks admission of another candidate, so repeated process crashes cannot lose
-the payload identity or accumulate more generations. Immediately after a
-promotion the physical bound is transiently two payloads; after retirement
-acknowledgement it is one.
+retire a referenced rollback point. Critical-checkpoint creation does not move
+the compatibility `latest` symlink. Only a restore-verified, atomically promoted
+candidate may publish that pointer; the worker then retires the former payload.
+One unresolved failed retirement may coexist with one replacement candidate,
+but admission fails closed when the physical count is already two. A failed
+replacement is compacted back to that single protected retirement, while a
+successful replacement moves `latest` before deleting and acknowledging the
+old payload. Repeated crashes therefore cannot lose identity, deadlock on a
+failed `latest`, or accumulate more generations. Immediately after promotion
+the physical bound is transiently two payloads; after retirement acknowledgement
+it is one.
 The persisted state distinguishes manifest verification from restore
 verification: the former carries only the exact manifest digest, while the
 latter is the first phase allowed to carry a complete lease.

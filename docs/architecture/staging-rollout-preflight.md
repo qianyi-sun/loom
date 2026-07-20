@@ -85,8 +85,11 @@ The broker performs the expensive Tier 0-2 assessment before acquiring
 epoch, publishes the preliminary request, complete assessment, immutable backup
 job, and exact payload reservation, then launches one fixed transient backup
 unit. It releases the lock immediately after `systemd-run`; neither checkpoint
-I/O nor rehearsal runs inside it. An epoch change refuses publication, and an
-existing candidate or unacknowledged retirement blocks concurrent admission.
+I/O nor rehearsal runs inside it. An epoch change refuses publication. An
+existing candidate or a rotation already holding two physical payloads blocks
+concurrent admission; one failed retirement may share the bounded transient
+window with its replacement so a protected legacy `latest` pointer cannot
+deadlock recovery.
 Tier 3 therefore binds `checkpoint.evidence.sha256`, not a lease digest: asking
 the DB-clone rehearsal to depend on a lease would be circular because the lease
 is intentionally issued only after that rehearsal succeeds. Tier 0 may still
