@@ -14,6 +14,7 @@ MANIFEST_APPLY_CONTRACT_DIGEST = hashlib.sha256(
             "apply": {
                 "field_manager": MANIFEST_FIELD_MANAGER,
                 "force_conflicts": False,
+                "machine_readable_output": True,
                 "request_timeout": MANIFEST_REQUEST_TIMEOUT,
                 "server_side": True,
                 "validate": "strict",
@@ -32,7 +33,7 @@ MANIFEST_APPLY_CONTRACT_DIGEST = hashlib.sha256(
                 "server_side": True,
                 "validate": "strict",
             },
-            "version": "v2",
+            "version": "v3",
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -45,6 +46,7 @@ def server_side_apply_argv(
     *,
     kubeconfig: Path | None = None,
     dry_run: bool = False,
+    output_json: bool = False,
 ) -> tuple[str, ...]:
     """Return the exact protected apply command, optionally as a server dry-run."""
     _validate_namespace(namespace)
@@ -64,6 +66,8 @@ def server_side_apply_argv(
     )
     if dry_run:
         argv.append("--dry-run=server")
+    if output_json:
+        argv.extend(("--output", "json"))
     argv.extend(
         (
             "--validate=strict",

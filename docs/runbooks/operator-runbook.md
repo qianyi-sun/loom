@@ -1476,6 +1476,57 @@ a mutable `backups/latest` pointer. `resume` uses the original request's exact
 SHA, image tag, backup manifest and digest, rollout ID, and config binding even
 if `dev` has advanced.
 
+When `manifests.field-ownership` reports only the recognized legacy lifecycle
+resources, keep rollout admission disabled with the root-owned maintenance
+marker and keep the lifecycle CronJob suspended. From the exact installed
+sealed candidate, first produce a requestless review document:
+
+```bash
+sudo /usr/bin/python3 \
+  /opt/loom-staging-runner/source/scripts/ops/staging_rollout_host.py \
+  maintenance-enable
+loom-staging-rollout manifest-ownership inventory
+```
+
+The root helper validates the exact ready install record/source, publishes the
+marker under the broker launch lock, and proves there is no active pointer or
+rollout unit. It does not remove broker sudo authority: the marker itself makes
+ordinary `start` fail closed while the bounded maintenance subcommand remains
+available. A normal host `check` reports `maintenance-marker` until the window
+is explicitly closed.
+
+Review its candidate/tree, epoch, four UID/resourceVersion/generation records,
+live/managed-fields/desired/overlay digests, and `inventory_sha256`. Only then
+use a new bounded maintenance request ID and repeat that exact digest:
+
+```bash
+loom-staging-rollout manifest-ownership apply \
+  --request-id req-manifest-ownership-EXACTSUFFIX \
+  --approved-inventory-sha256 EXACT_64_HEX_DIGEST
+```
+
+The broker recomputes the inventory before mutation, publishes it once under
+`/var/lib/loom-staging-rollout/maintenance/manifest-ownership/`, claims the
+protected mutation epoch, adopts the four existing field sets without semantic
+change, and applies only the three exact NetworkPolicies through the normal
+no-force manager. Any inventory, UID/resourceVersion, epoch, journal, apply or
+post-readback drift stops the request. Never invoke `kubectl --force-conflicts`
+directly, reuse a maintenance request ID, or unsuspend the CronJob as part of
+ownership adoption.
+
+After the exact post-readback and final no-force dry-run succeed, close the
+window through the same installed source; the command refuses if any rollout
+pointer or unit is active:
+
+```bash
+sudo /usr/bin/python3 \
+  /opt/loom-staging-runner/source/scripts/ops/staging_rollout_host.py \
+  maintenance-disable
+sudo /usr/bin/python3 \
+  /opt/loom-staging-runner/source/scripts/ops/staging_rollout_host.py \
+  check
+```
+
 The staging sizing policy is based on an aggregate-only live inventory taken
 on 2026-07-15; no keys, credential values, or payloads were emitted. It measured
 579,714 objects and 12,517,813,079 bytes across

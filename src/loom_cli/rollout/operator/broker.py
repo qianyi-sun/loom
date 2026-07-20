@@ -35,6 +35,7 @@ from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
+from .installed_manifest_ownership import InstalledManifestOwnershipService
 from .lifecycle import LifecycleBusyError, LifecycleCoordinator, LifecycleError
 from .model import (
     CallerIdentity,
@@ -113,6 +114,13 @@ def _parser() -> argparse.ArgumentParser:
 
     cleanup_backup = commands.add_parser("cleanup-incomplete-backup")
     cleanup_backup.add_argument("request_id")
+
+    ownership = commands.add_parser("manifest-ownership")
+    ownership_commands = ownership.add_subparsers(dest="ownership_action", required=True)
+    ownership_commands.add_parser("inventory")
+    ownership_apply = ownership_commands.add_parser("apply")
+    ownership_apply.add_argument("--request-id", required=True)
+    ownership_apply.add_argument("--approved-inventory-sha256", required=True)
     return parser
 
 
@@ -139,6 +147,7 @@ class BrokerDependencies:
     read_mutation_epoch: Callable[[], int] | None = None
     new_backup_job_id: Callable[[], str] | None = None
     new_payload_id: Callable[[], str] | None = None
+    manifest_ownership: Any | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -348,6 +357,44 @@ def _preflight_only(
             "status": "passed",
         },
     )
+    return 0
+
+
+def _manifest_ownership(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    action: str,
+    request_id: str | None,
+    approved_inventory_sha256: str | None,
+) -> int:
+    if caller.username != "qianyi":
+        return _safe_error(
+            dependencies,
+            "manifest ownership maintenance requires coordinator authority",
+        )
+    if (
+        dependencies.config.source_mode != "sealed-cumulative"
+        or dependencies.manifest_ownership is None
+    ):
+        return _safe_error(
+            dependencies,
+            "manifest ownership maintenance is not configured",
+        )
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_maintenance_idle()
+        candidate = dependencies.bind_candidate()
+        if action == "inventory":
+            result = dependencies.manifest_ownership.inventory(candidate)
+        elif action == "apply" and request_id is not None and approved_inventory_sha256 is not None:
+            result = dependencies.manifest_ownership.apply(
+                candidate,
+                request_id=request_id,
+                approved_inventory_sha256=approved_inventory_sha256,
+            )
+        else:
+            return 2
+    _write_json(dependencies.stdout, result)
     return 0
 
 
@@ -1326,6 +1373,11 @@ def _default_dependencies() -> BrokerDependencies:
         store=store,
         now=clock,
     ).authority()
+    manifest_ownership = InstalledManifestOwnershipService(
+        config=config,
+        service_uid=service_uid,
+        read_mutation_epoch=deep_preflight.current_mutation_epoch,
+    )
     return BrokerDependencies(
         config=config,
         authenticate=lambda: caller_from_sudo(
@@ -1360,6 +1412,7 @@ def _default_dependencies() -> BrokerDependencies:
         ),
         assess_preflight=deep_preflight.assess,
         read_mutation_epoch=deep_preflight.current_mutation_epoch,
+        manifest_ownership=manifest_ownership,
     )
 
 
@@ -1403,6 +1456,18 @@ def _main(
             return _cancel(deps, caller, args.request_id, args.reason)
         if args.command == "cleanup-incomplete-backup":
             return _cleanup_backup(deps, caller, args.request_id)
+        if args.command == "manifest-ownership":
+            return _manifest_ownership(
+                deps,
+                caller,
+                action=args.ownership_action,
+                request_id=getattr(args, "request_id", None),
+                approved_inventory_sha256=getattr(
+                    args,
+                    "approved_inventory_sha256",
+                    None,
+                ),
+            )
         return 2
     except (ValueError, PolicyError):
         if deps is None:

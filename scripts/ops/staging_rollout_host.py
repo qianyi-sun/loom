@@ -3706,6 +3706,23 @@ class HostSystem:
             enabled=False,
         )
 
+    def maintenance_marker_status(self) -> str:
+        """Return disabled/enabled or reject unsafe root maintenance authority."""
+        try:
+            metadata = os.lstat(MAINTENANCE_MARKER)
+        except FileNotFoundError:
+            return "disabled"
+        except OSError as exc:
+            raise InstallError("maintenance admission marker is unavailable") from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise InstallError("maintenance admission marker is unsafe")
+        return "enabled"
+
     def remove_operator_membership(self, username: str) -> None:
         groups = self.runner.run(["id", "-nG", username]).stdout.split()
         if OPERATOR_GROUP in groups:
@@ -4934,6 +4951,8 @@ class HostInstaller:
             for path, payload, mode in expected
             if not self.filesystem.file_matches(path, payload, mode)
         ]
+        if self.system.maintenance_marker_status() != "disabled":
+            failures.append("maintenance-marker")
         config_payload: bytes | None = None
         if not self.filesystem.exists(CONFIG_PATH):
             failures.append(str(CONFIG_PATH))
@@ -5046,6 +5065,70 @@ class HostInstaller:
             if self.system.acl_adjustment_state(adjustment) != "after":
                 failures.append(f"acl-snapshot:access:{grant.path}")
         return {"ok": not failures, "failures": failures}
+
+    def maintenance(
+        self,
+        *,
+        enabled: bool,
+        _lock_held: bool = False,
+    ) -> dict[str, object]:
+        """Enter or leave a bounded root-owned maintenance admission freeze."""
+        if not _lock_held:
+            if self.euid != 0:
+                raise InstallError("maintenance transition requires root")
+            with self.system.trust_lifecycle_lock():
+                return self.maintenance(enabled=enabled, _lock_held=True)
+        if self.euid != 0:
+            raise InstallError("maintenance transition requires root")
+        self.system.validate_install_record_authority(allow_absent=False)
+        record = self.filesystem.load_install_record()
+        if record is None:
+            raise InstallError("maintenance transition requires a valid install record")
+        if (
+            record.get("installation_state") != "ready"
+            or not self._record_flag(record, "admission_enabled")
+            or self._record_flag(record, "maintenance_enabled")
+        ):
+            raise InstallError("maintenance transition requires a ready installation")
+        self._bind_existing_source(record)
+        previous = self.system.maintenance_marker_status()
+        if enabled:
+            self.system.begin_maintenance()
+            status = self.system.active_status()
+            if status != "idle":
+                if previous == "disabled":
+                    self.system.end_maintenance()
+                if status == "unknown":
+                    raise InstallError("cannot prove staging rollout is inactive")
+                raise InstallError("refusing maintenance while a staging rollout is active")
+            return {
+                "ok": True,
+                "changed": previous == "disabled",
+                "maintenance": "enabled",
+                "rollout": "idle",
+                "source_sha": self.source_sha,
+            }
+        if previous == "disabled":
+            return {
+                "ok": True,
+                "changed": False,
+                "maintenance": "disabled",
+                "rollout": "idle",
+                "source_sha": self.source_sha,
+            }
+        status = self.system.active_status()
+        if status != "idle":
+            if status == "unknown":
+                raise InstallError("cannot prove staging rollout is inactive")
+            raise InstallError("refusing to leave maintenance while a rollout is active")
+        self.system.end_maintenance()
+        return {
+            "ok": True,
+            "changed": True,
+            "maintenance": "disabled",
+            "rollout": "idle",
+            "source_sha": self.source_sha,
+        }
 
     def uninstall(
         self,
@@ -5282,6 +5365,8 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--sealed-approved-base-sha")
     check = commands.add_parser("check", allow_abbrev=False)
     check.add_argument("--format", choices=("json", "text"), default="text")
+    commands.add_parser("maintenance-enable", allow_abbrev=False)
+    commands.add_parser("maintenance-disable", allow_abbrev=False)
     uninstall = commands.add_parser("uninstall", allow_abbrev=False)
     uninstall.add_argument("--retain-ledger", action="store_true", required=True)
     return parser
@@ -5326,6 +5411,10 @@ def main(
             )
         elif args.command == "check":
             result = active.check()
+        elif args.command == "maintenance-enable":
+            result = active.maintenance(enabled=True)
+        elif args.command == "maintenance-disable":
+            result = active.maintenance(enabled=False)
         elif args.command == "uninstall":
             result = active.uninstall(retain_ledger=bool(args.retain_ledger))
         else:  # pragma: no cover - argparse owns the command set

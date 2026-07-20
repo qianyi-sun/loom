@@ -367,6 +367,12 @@ lifecycle pod selector on ports 5432 and 9000. Tier 1 validates this
 bidirectional policy graph from the same rendered artifact, so applying only
 the source egress change to a candidate without its matching target ingress
 change cannot qualify as candidate evidence. The
+one-time legacy ownership migration is separately digest-approved and
+journaled: it transfers only already-live fields under UID/resourceVersion
+preconditions, then converges these three policies through the ordinary
+no-force rollout manager. It intentionally leaves the lifecycle CronJob
+suspended; inventory, purge authority and capacity publication remain separate
+maintenance decisions.
 capacity PVC mounts are read-only and all configured data filesystems must be
 measured; missing or duplicate filesystem authority fails closed. Development
 and production renders omit the CronJob entirely. Automatic policy authority

@@ -297,6 +297,19 @@ class FakeLifecycle:
                 {"status": "busy", "reason": "maintenance"},
             )
 
+    def assert_maintenance_active(self) -> None:
+        assert self.guard_depth > 0
+        if not self.maintenance:
+            raise RuntimeError("maintenance marker is unavailable")
+
+    def assert_maintenance_idle(self) -> None:
+        self.assert_maintenance_active()
+        if self.store.active is not None:
+            raise LifecycleBusyError(
+                "a staging rollout attempt is already pending or running",
+                {"request_id": self.store.active.request_id},
+            )
+
     def launch(self, envelope: DriverEnvelope) -> ActivePointer:
         pointer = ActivePointer(
             request_id=envelope.request_id,
@@ -393,6 +406,100 @@ def fakes(tmp_path: Path, *, backup: FakeBackup | None = None) -> FakeBundle:
 def test_public_surface_rejects_unapproved_arguments(tmp_path: Path, argv: list[str]) -> None:
     deps = fakes(tmp_path)
     assert broker_main(argv, dependencies=deps.dependencies) == 2
+    assert deps.order == []
+
+
+class _ManifestOwnership:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def inventory(self, candidate: CandidateBinding) -> dict[str, object]:
+        self.calls.append(("inventory", candidate.resolved_sha))
+        return {"action": "inventory", "inventory_sha256": "d" * 64}
+
+    def apply(
+        self,
+        candidate: CandidateBinding,
+        *,
+        request_id: str,
+        approved_inventory_sha256: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "apply",
+                candidate.resolved_sha,
+                request_id,
+                approved_inventory_sha256,
+            )
+        )
+        return {"action": "apply", "request_id": request_id}
+
+
+def test_manifest_ownership_requires_frozen_exact_coordinator_lane(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    service = _ManifestOwnership()
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    candidate = CandidateBinding(
+        remote_url="https://github.com/qianyi-sun/loom.git",
+        target_ref="origin/dev",
+        resolved_sha=SHA,
+        image_tag="staging-aaaaaaa",
+        fetched_at="2026-07-14T12:00:00Z",
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("qianyi", 2001),
+        bind_candidate=lambda: candidate,
+        config=sealed_config,
+        manifest_ownership=service,
+    )
+
+    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+    deps.lifecycle.maintenance = True
+    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 0
+    assert service.calls == [("inventory", SHA)]
+    assert _last_json(deps.stdout)["inventory_sha256"] == "d" * 64
+
+    assert (
+        broker_main(
+            [
+                "manifest-ownership",
+                "apply",
+                "--request-id",
+                "req-manifest-ownership-12345678",
+                "--approved-inventory-sha256",
+                "d" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    assert service.calls[-1] == (
+        "apply",
+        SHA,
+        "req-manifest-ownership-12345678",
+        "d" * 64,
+    )
+
+
+def test_manifest_ownership_rejects_non_coordinator_before_candidate_read(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    deps.lifecycle.maintenance = True
+    dependencies = replace(deps.dependencies, manifest_ownership=_ManifestOwnership())
+    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 1
     assert deps.order == []
 
 

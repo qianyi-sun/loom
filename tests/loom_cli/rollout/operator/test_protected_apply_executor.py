@@ -331,6 +331,17 @@ def test_subprocess_runner_has_fixed_environment_and_redacted_failure(
     assert calls[0][1]["input"] is None
 
     assert (
+        runner.capture_stdout_with_input(
+            ("kubectl", "apply", "-f", "-"),
+            env=runner.environment,
+            input_payload=b"manifest\n",
+            timeout_seconds=5,
+        )
+        == b"ok\n"
+    )
+    assert calls[1][1]["input"] == b"manifest\n"
+
+    assert (
         runner.run_status(
             ("kubectl", "diff", "-f", "-"),
             env=runner.environment,
@@ -339,8 +350,8 @@ def test_subprocess_runner_has_fixed_environment_and_redacted_failure(
         )
         == 0
     )
-    assert calls[1][1]["stdout"] is subprocess.DEVNULL
-    assert calls[1][1]["stderr"] is subprocess.DEVNULL
+    assert calls[2][1]["stdout"] is subprocess.DEVNULL
+    assert calls[2][1]["stderr"] is subprocess.DEVNULL
 
     with pytest.raises(ValueError, match="invocation is invalid"):
         runner.capture_stdout(

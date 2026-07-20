@@ -470,6 +470,45 @@ def test_admission_check_rejects_unsafe_maintenance_marker(tmp_path: Path) -> No
             coordinator.assert_admission_open()
 
 
+def test_protected_maintenance_requires_exact_marker_under_launch_guard(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    coordinator = make_coordinator(config)
+    with coordinator.launch_guard():
+        with pytest.raises(LifecycleError, match="marker is unavailable"):
+            coordinator.assert_maintenance_active()
+
+    marker = config.runtime_root / "maintenance"
+    marker.write_text("maintenance\n")
+    marker.chmod(0o600)
+    with coordinator.launch_guard():
+        coordinator.assert_maintenance_active()
+
+    marker.chmod(0o644)
+    with coordinator.launch_guard():
+        with pytest.raises(LifecycleError, match="marker is unsafe"):
+            coordinator.assert_maintenance_active()
+
+
+def test_protected_maintenance_idle_check_never_reconciles_active_pointer(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    marker = config.runtime_root / "maintenance"
+    marker.write_text("maintenance\n")
+    marker.chmod(0o600)
+    store = RequestStore(config.state_root)
+    active = pointer("req-alpha")
+    store.set_active(active)
+    coordinator = make_coordinator(config, store=store)
+
+    with coordinator.launch_guard():
+        with pytest.raises(LifecycleBusyError) as caught:
+            coordinator.assert_maintenance_idle()
+
+    assert caught.value.safe_status["request_id"] == "req-alpha"
+    assert store.read_active() == active
+
+
 def test_lifecycle_guard_never_follows_a_lock_symlink(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     target = tmp_path / "outside-lock"

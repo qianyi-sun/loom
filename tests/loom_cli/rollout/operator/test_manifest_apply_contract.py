@@ -67,3 +67,14 @@ def test_schema_validation_force_is_confined_to_mutation_free_server_dry_run() -
     assert f"--field-manager={MANIFEST_FIELD_MANAGER}" in schema
     assert "--force-conflicts" not in final
     assert "--dry-run=server" not in final
+
+
+def test_machine_readable_apply_output_does_not_change_no_force_contract() -> None:
+    command = server_side_apply_argv(
+        "loom-staging",
+        kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
+        dry_run=True,
+        output_json=True,
+    )
+    assert command[-6:-4] == ("--output", "json")
+    assert "--force-conflicts" not in command

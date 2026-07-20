@@ -119,6 +119,23 @@ class SubprocessProtectedApplyCommandRunner:
             timeout_seconds=timeout_seconds,
         )
 
+    def capture_stdout_with_input(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        input_payload: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        """Capture one bounded machine-readable mutation or dry-run result."""
+
+        return self._run(
+            argv,
+            env=env,
+            input_payload=input_payload,
+            timeout_seconds=timeout_seconds,
+        )
+
     def run_checked(
         self,
         argv: Sequence[str],

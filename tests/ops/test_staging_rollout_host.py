@@ -630,6 +630,9 @@ class FakeSystem:
         self.maintenance_ends += 1
         self.maintenance = False
 
+    def maintenance_marker_status(self) -> str:
+        return "enabled" if self.maintenance else "disabled"
+
     def revoke_gb10_trust(self) -> None:
         if self.revoke_error is not None:
             raise host.InstallError(self.revoke_error)
@@ -828,6 +831,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         host.SERVICE_GROUP,
         0o640,
     ) in system.install_owner_calls
+
     public_statement = json.loads(install_attestation.read_bytes())
     assert public_statement["schema_version"] == 1
     assert public_statement["source_mode"] == "merged-dev"
@@ -869,6 +873,67 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_explicit_maintenance_is_bounded_idempotent_and_visible_to_check(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+
+    enabled = installer.maintenance(enabled=True)
+    enabled_again = installer.maintenance(enabled=True)
+
+    assert enabled == {
+        "ok": True,
+        "changed": True,
+        "maintenance": "enabled",
+        "rollout": "idle",
+        "source_sha": "a" * 40,
+    }
+    assert enabled_again["changed"] is False
+    assert system.maintenance is True
+    assert "maintenance-marker" in installer.check()["failures"]
+
+    disabled = installer.maintenance(enabled=False)
+    disabled_again = installer.maintenance(enabled=False)
+    assert disabled["changed"] is True
+    assert disabled_again["changed"] is False
+    assert system.maintenance is False
+
+
+def test_explicit_maintenance_enable_rolls_back_new_marker_when_active(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.status = "busy"
+
+    with pytest.raises(host.InstallError, match="rollout is active"):
+        installer.maintenance(enabled=True)
+
+    assert system.maintenance is False
+
+
+def test_explicit_maintenance_disable_preserves_marker_when_active(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.maintenance(enabled=True)
+    system.status = "running"
+
+    with pytest.raises(host.InstallError, match="leave maintenance"):
+        installer.maintenance(enabled=False)
+
+    assert system.maintenance is True
+
+
+def test_explicit_maintenance_requires_root(tmp_path: Path) -> None:
+    installer, _system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.euid = 1000
+
+    with pytest.raises(host.InstallError, match="requires root"):
+        installer.maintenance(enabled=True)
 
 
 def test_install_publishes_attestation_and_ready_record_before_sudoers(

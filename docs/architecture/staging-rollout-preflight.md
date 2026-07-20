@@ -407,6 +407,29 @@ protected convergence. Ownership can therefore block protected apply without
 blocking immutable artifact publication or isolated rehearsal, and
 `--force-conflicts` cannot leak into the final apply command.
 
+Recognized legacy field ownership is converged only through the separate
+`manifest-ownership` maintenance protocol. It accepts exactly the lifecycle
+CronJob and its three NetworkPolicies, binds each live UID, resourceVersion,
+generation, managed-fields digest and semantic state, and builds an overlay
+from live values only. A force-conflicts server dry-run must prove that overlay
+is a semantic no-op before an operator can approve its inventory digest. Apply
+then requires the root-owned maintenance admission freeze, an idle rollout
+pointer, a no-replace private journal, and a compare-and-swap mutation-epoch
+claim. The force operation transfers only fields already present; the three
+NetworkPolicies subsequently converge through the normal no-force contract,
+while the suspended lifecycle CronJob remains suspended until lifecycle
+inventory and deletion authority are separately accepted. UID/resourceVersion
+preconditions, a post-apply live readback and a final full no-force dry-run
+make concurrent drift fail closed. This is a one-time ownership migration, not
+a general force flag or fallback apply path.
+
+The maintenance marker is entered and left only by the exact installed root
+host helper. Entry is serialized with broker launch admission and proves that
+the active pointer and rollout unit set are idle. The marker remains the
+authoritative admission freeze for the whole inventory/apply/readback window;
+ordinary host health reports it explicitly instead of treating maintenance as
+a normal ready state. Exit repeats the idle proof before removing the marker.
+
 `migration.plan` loads the exact candidate's Alembic graph without a database
 connection. The checked-in staging policy requires one closed linear chain,
 the declared head, expand/contract before destructive upgrades, revision-owned
