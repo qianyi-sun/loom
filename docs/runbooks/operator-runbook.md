@@ -1528,6 +1528,13 @@ exact desired value is `[]` and a recognized legacy manager still owns the
 matching managed-field path. Non-empty or unowned fields remain excluded, and
 the server dry-run must still prove the overlay is a semantic no-op.
 
+If a request claims the epoch and adopts only part of the four-resource set
+before failing, preserve that request and use a new request only after a new
+inventory. The inventory accepts each target when it is still held by a
+recognized legacy manager or is already held by `loom-staging-rollout`, which
+allows exact partial-state convergence. Unknown managers and controller-only
+ownership remain fail-closed.
+
 After the exact post-readback and final no-force dry-run succeed, close the
 window through the same installed source; the command refuses if any rollout
 pointer or unit is active:

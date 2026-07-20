@@ -415,8 +415,8 @@ def _validate_managed_fields(fields: list[object]) -> None:
         ):
             raise ManifestOwnershipAdoptionError("managed-field authority is unrecognized")
         managers.add(manager)
-    if not managers - {MANIFEST_FIELD_MANAGER, "kube-controller-manager"}:
-        raise ManifestOwnershipAdoptionError("legacy managed-field authority is absent")
+    if not managers - {"kube-controller-manager"}:
+        raise ManifestOwnershipAdoptionError("recognized managed-field authority is absent")
 
 
 def _documents_by_identity(rendered_yaml: str, *, namespace: str) -> dict[str, dict[str, object]]:

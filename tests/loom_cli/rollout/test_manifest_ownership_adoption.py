@@ -220,6 +220,39 @@ def test_plan_rejects_unknown_manager_target_and_prestate_drift() -> None:
             mutation_epoch=2,
         )
 
+
+def test_plan_accepts_exact_partially_adopted_state_for_new_request() -> None:
+    live = _live()
+    for item in live[1:3]:
+        metadata = item["metadata"]
+        assert isinstance(metadata, dict)
+        metadata["managedFields"] = _managed_fields("loom-staging-rollout")
+
+    plan = build_manifest_ownership_adoption_plan(
+        artifact=_artifact(),
+        live_resources=live,
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        mutation_epoch=3,
+    )
+
+    assert plan.mutation_epoch == 3
+    assert len(plan.resources) == 4
+
+
+def test_plan_rejects_controller_only_managed_state() -> None:
+    live = _live()
+    live[1]["metadata"]["managedFields"] = _managed_fields("kube-controller-manager")  # type: ignore[index]
+
+    with pytest.raises(ManifestOwnershipAdoptionError, match="recognized"):
+        build_manifest_ownership_adoption_plan(
+            artifact=_artifact(),
+            live_resources=live,
+            candidate_sha=_SHA,
+            candidate_tree=_TREE,
+            mutation_epoch=3,
+        )
+
     live = _live()
     live.append(
         {
