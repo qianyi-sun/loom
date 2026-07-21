@@ -119,7 +119,7 @@ python_type = "HttpUrl"
 default     = "http://loom-llm-gateway:9100"
 
 [service_config.control_plane_url]
-used_by     = ["loom-service", "worker"]
+used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "HttpUrl"
 default     = "http://loom-control-plane:8080"
 

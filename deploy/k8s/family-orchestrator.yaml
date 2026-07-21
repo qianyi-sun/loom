@@ -21,6 +21,8 @@ spec:
               value: "8080"
             - name: LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC
               value: "3600"
+            - name: LOOM_CP_CONTROL_PLANE_URL
+              value: "http://loom-control-plane:8080"
             - name: LOOM_CP_DB_MAX_OVERFLOW
               value: "40"
             - name: LOOM_CP_DB_POOL_SIZE
