@@ -23,10 +23,17 @@ _LABEL_KEY_RE = re.compile(
 _LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?\Z")
 _DEPLOYMENT_IMAGES = {
     "loom-control-plane": "loom-control-plane",
+    "loom-llm-gateway": "loom-llm-gateway",
     "loom-service": "loom-service",
     "loom-web": "loom-web",
 }
-_SERVICE_NAMES = ("loom-control-plane", "loom-postgres", "loom-service", "loom-web")
+_SERVICE_NAMES = (
+    "loom-control-plane",
+    "loom-llm-gateway",
+    "loom-postgres",
+    "loom-service",
+    "loom-web",
+)
 _EXPECTED_IDENTITIES = {
     *(("apps/v1", "Deployment", name) for name in _DEPLOYMENT_IMAGES),
     *(("v1", "Service", name) for name in _SERVICE_NAMES),

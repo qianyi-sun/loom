@@ -151,7 +151,7 @@ def _release_artifact(plan: RehearsalPlan) -> RehearsalReleaseArtifact:
     resources: list[dict[str, object]] = []
     selectors: dict[str, dict[str, str]] = {}
     images: dict[str, str] = {}
-    for name in ("loom-control-plane", "loom-service", "loom-web"):
+    for name in ("loom-control-plane", "loom-llm-gateway", "loom-service", "loom-web"):
         selector = {"app": name}
         selectors[name] = selector
         images[name] = plan.image_digests[name]
@@ -182,7 +182,13 @@ def _release_artifact(plan: RehearsalPlan) -> RehearsalReleaseArtifact:
                 },
             }
         )
-    for name in ("loom-control-plane", "loom-postgres", "loom-service", "loom-web"):
+    for name in (
+        "loom-control-plane",
+        "loom-llm-gateway",
+        "loom-postgres",
+        "loom-service",
+        "loom-web",
+    ):
         resources.append(
             {
                 "apiVersion": "v1",
@@ -852,6 +858,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     kind_load = next(command for command, _payload in calls if command[:2] == ("kind", "load"))
     assert kind_load[-2:] == ("--name", plan.cluster_name)
     assert set(kind_load[3:-2]) == {
+        "loom-llm-gateway:" + plan.image_tag,
         "loom-service:" + plan.image_tag,
         "loom-web:" + plan.image_tag,
     }

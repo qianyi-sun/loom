@@ -1270,7 +1270,7 @@ class IsolatedRehearsalExecutor:
         image_names = tuple(sorted(release.deployment_images))
         if not self._local_images_match(plan, image_names) or not self._load_images(
             plan,
-            ("loom-service", "loom-web"),
+            ("loom-llm-gateway", "loom-service", "loom-web"),
         ):
             return _blocked("release", "image-load-failed")
         runtime_images = self._runtime_image_ids(plan, image_names)
@@ -1379,7 +1379,13 @@ class IsolatedRehearsalExecutor:
                 runtime_image_digests=runtime_images[name],
             ):
                 return _blocked("release", "pod-image-readback-drift")
-        for name in ("loom-control-plane", "loom-postgres", "loom-service", "loom-web"):
+        for name in (
+            "loom-control-plane",
+            "loom-llm-gateway",
+            "loom-postgres",
+            "loom-service",
+            "loom-web",
+        ):
             service = self._command(
                 (
                     "kubectl",

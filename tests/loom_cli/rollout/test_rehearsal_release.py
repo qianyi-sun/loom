@@ -62,11 +62,18 @@ def _rendered(image_tag: str) -> str:
     resources: list[dict[str, object]] = []
     for name, image_name, secret in (
         ("loom-control-plane", "loom-control-plane", True),
+        ("loom-llm-gateway", "loom-llm-gateway", True),
         ("loom-service", "loom-service", True),
         ("loom-web", "loom-web", False),
     ):
         resources.append(_deployment(name, f"{image_name}:{image_tag}", with_admin_secret=secret))
-    for name in ("loom-control-plane", "loom-postgres", "loom-service", "loom-web"):
+    for name in (
+        "loom-control-plane",
+        "loom-llm-gateway",
+        "loom-postgres",
+        "loom-service",
+        "loom-web",
+    ):
         resources.append(
             {
                 "apiVersion": "v1",
@@ -142,7 +149,7 @@ def test_release_artifact_isolates_exact_candidate_subset(tmp_path: Path) -> Non
     artifact = build_rehearsal_release_artifact(plan, service_uid=os.geteuid())
     resources = list(yaml.safe_load_all(artifact.payload))
 
-    assert artifact.resource_count == 8
+    assert artifact.resource_count == 10
     assert all(
         resource["metadata"]["namespace"] == plan.resources.namespace for resource in resources
     )
@@ -151,7 +158,12 @@ def test_release_artifact_isolates_exact_candidate_subset(tmp_path: Path) -> Non
         for resource in resources
         if resource["kind"] == "Deployment"
     }
-    assert set(deployments) == {"loom-control-plane", "loom-service", "loom-web"}
+    assert set(deployments) == {
+        "loom-control-plane",
+        "loom-llm-gateway",
+        "loom-service",
+        "loom-web",
+    }
     for name, deployment in deployments.items():
         pod = deployment["spec"]["template"]["spec"]
         assert deployment["spec"]["replicas"] == 1
@@ -257,14 +269,32 @@ def test_release_artifact_accepts_real_staging_render(tmp_path: Path) -> None:
 
     artifact = build_rehearsal_release_artifact(RehearsalPlan.from_record(record))
 
-    assert artifact.resource_count == 8
+    assert artifact.resource_count == 10
     resources = list(yaml.safe_load_all(artifact.payload))
     assert {item["metadata"]["name"] for item in resources} == {
         "loom-control-plane",
+        "loom-llm-gateway",
         "loom-postgres",
         "loom-rehearsal-release",
         "loom-service",
         "loom-web",
+    }
+    gateway = next(
+        item
+        for item in resources
+        if item["kind"] == "Deployment" and item["metadata"]["name"] == "loom-llm-gateway"
+    )
+    gateway_env = {
+        item["name"]: item for item in gateway["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert gateway_env["LOOM_GW_DB_URL"]["valueFrom"]["secretKeyRef"] == {
+        "key": "gw-db-url",
+        "name": "loom-secrets",
+    }
+    assert gateway_env["LOOM_GW_DB_URL_POOL"]["valueFrom"]["secretKeyRef"] == {
+        "key": "gw-db-url-pool",
+        "name": "loom-secrets",
+        "optional": True,
     }
     assert not _contains_null_mapping_field(resources)
     for resource in resources:

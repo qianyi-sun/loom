@@ -588,6 +588,12 @@ derives one in-namespace `admin-token` key from the validated singleton admin
 TOML for the browser Job; the raw value stays inside the sensitive apply
 artifact and is never written to the rehearsal plan or evidence.
 
+The isolated release includes the exact candidate `loom-llm-gateway`
+deployment and service as well as the web, service, and control-plane
+workloads. This keeps the authenticated rate-card browser check inside the
+rehearsal namespace and cloned database instead of crossing into protected
+staging or failing against an absent upstream.
+
 Browser report schema v4 has two mutually exclusive bindings. Protected final
 acceptance retains the broker request/attempt/envelope binding; Tier 3 instead
 binds the rehearsal plan digest, isolation ID, and resolved candidate SHA. The
