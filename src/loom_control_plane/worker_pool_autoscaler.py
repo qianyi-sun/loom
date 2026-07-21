@@ -1241,9 +1241,13 @@ async def _apply_slurm_scale_up(
         )
     actor_config = dict(row.actuator_config or {})
     active_plus_pending = decision.actual_slots + decision.pending_slots
-    qos_boost_value = str(actor_config.get("qos_boost") or "")
+    # Strip like build_controller_config does, so operator-authored trailing
+    # whitespace never leaks into a submitted --qos=<value>.
+    qos_boost_value = str(actor_config.get("qos_boost") or "").strip()
     # Contract: qos_normal is primary; legacy slurm_qos is only the fallback.
-    qos_normal_value = str(actor_config.get("qos_normal") or actor_config.get("slurm_qos") or "")
+    qos_normal_value = str(
+        actor_config.get("qos_normal") or actor_config.get("slurm_qos") or "",
+    ).strip()
     # Stateful budget clamp + PER-SUBMISSION QoS. Submissions must never push the
     # pool's committed slot sum past ``max_slots``. QoS is chosen per submission
     # from the committed slot sum at the moment each job enters the pool, so a
