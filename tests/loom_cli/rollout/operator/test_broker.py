@@ -458,7 +458,7 @@ def test_manifest_ownership_requires_frozen_exact_coordinator_lane(tmp_path: Pat
     )
     dependencies = replace(
         deps.dependencies,
-        authenticate=lambda: CallerIdentity("qianyi", 2001),
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
         bind_candidate=lambda: candidate,
         config=sealed_config,
         manifest_ownership=service,
@@ -499,7 +499,11 @@ def test_manifest_ownership_rejects_non_coordinator_before_candidate_read(
 ) -> None:
     deps = fakes(tmp_path)
     deps.lifecycle.maintenance = True
-    dependencies = replace(deps.dependencies, manifest_ownership=_ManifestOwnership())
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        manifest_ownership=_ManifestOwnership(),
+    )
     assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 1
     assert deps.order == []
 
@@ -542,7 +546,7 @@ def test_lifecycle_capacity_uses_digest_approval_and_releases_launch_lock(
     service = _LifecycleCapacity(deps.lifecycle)
     dependencies = replace(
         deps.dependencies,
-        authenticate=lambda: CallerIdentity("qianyi", 2001),
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
         config=sealed_config,
         lifecycle_capacity=service,
     )
@@ -583,7 +587,11 @@ def test_lifecycle_capacity_uses_digest_approval_and_releases_launch_lock(
 def test_lifecycle_capacity_rejects_non_coordinator(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     service = _LifecycleCapacity(deps.lifecycle)
-    dependencies = replace(deps.dependencies, lifecycle_capacity=service)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        lifecycle_capacity=service,
+    )
 
     assert broker_main(["lifecycle-capacity", "inventory"], dependencies=dependencies) == 1
     assert service.calls == []
@@ -625,7 +633,7 @@ def test_backup_retention_requires_maintenance_and_digest_approval(tmp_path: Pat
     service = _BackupRetention(deps.lifecycle)
     dependencies = replace(
         deps.dependencies,
-        authenticate=lambda: CallerIdentity("qianyi", 2001),
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
         config=sealed_config,
         backup_retention=service,
     )
@@ -656,7 +664,11 @@ def test_backup_retention_requires_maintenance_and_digest_approval(tmp_path: Pat
 def test_backup_retention_rejects_non_coordinator(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     service = _BackupRetention(deps.lifecycle)
-    dependencies = replace(deps.dependencies, backup_retention=service)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        backup_retention=service,
+    )
 
     assert broker_main(["backup-retention", "inventory"], dependencies=dependencies) == 1
     assert service.calls == []
@@ -755,6 +767,7 @@ def test_sealed_cumulative_preflight_rejects_non_coordinator_without_side_effect
     deps = fakes(tmp_path)
     dependencies = replace(
         deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
         config=replace(
             deps.config,
             source_mode="sealed-cumulative",
@@ -794,6 +807,10 @@ def test_sealed_cumulative_start_rejects_non_coordinator_before_preflight_or_req
         source_base_sha="c" * 40,
     )
     dependencies = replace(deps.dependencies, config=sealed_config)
+    dependencies = replace(
+        dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+    )
 
     assert broker_main(["start", "--dry-run"], dependencies=dependencies) == 1
     assert deps.order == []
@@ -904,7 +921,7 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
             source_tree_sha="b" * 40,
             source_base_sha="c" * 40,
         ),
-        authenticate=lambda: CallerIdentity("qianyi", 501),
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
         store=store,
         lifecycle=StagedLifecycle(),
         bind_candidate=lambda: candidate,

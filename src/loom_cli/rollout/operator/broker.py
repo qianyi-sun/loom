@@ -75,10 +75,16 @@ from .systemd import (
 
 _MAX_CANCEL_REASON = 500
 _MAX_LOG_BYTES = 8 * 1024 * 1024
+_SEALED_CUMULATIVE_COORDINATORS = frozenset({"qianyi", "hongjian"})
 
 
 class _ArgumentError(ValueError):
     pass
+
+
+def _has_coordinator_authority(caller: CallerIdentity) -> bool:
+    """Return whether the authenticated operator may drive the sealed hotfix lane."""
+    return caller.username in _SEALED_CUMULATIVE_COORDINATORS
 
 
 class _Parser(argparse.ArgumentParser):
@@ -352,7 +358,9 @@ def _preflight_only(
     caller: CallerIdentity,
 ) -> int:
     """Assess the exact Tier 0-2 graph without publishing request authority."""
-    if dependencies.config.source_mode == "sealed-cumulative" and caller.username != "qianyi":
+    if dependencies.config.source_mode == "sealed-cumulative" and not _has_coordinator_authority(
+        caller
+    ):
         return _safe_error(
             dependencies,
             "sealed cumulative preflight requires coordinator authority",
@@ -394,7 +402,7 @@ def _manifest_ownership(
     request_id: str | None,
     approved_inventory_sha256: str | None,
 ) -> int:
-    if caller.username != "qianyi":
+    if not _has_coordinator_authority(caller):
         return _safe_error(
             dependencies,
             "manifest ownership maintenance requires coordinator authority",
@@ -431,7 +439,7 @@ def _lifecycle_capacity(
     action: str,
     approved_plan_sha256: str | None,
 ) -> int:
-    if caller.username != "qianyi":
+    if not _has_coordinator_authority(caller):
         return _safe_error(
             dependencies,
             "lifecycle capacity maintenance requires coordinator authority",
@@ -467,7 +475,7 @@ def _backup_retention(
     action: str,
     approved_plan_sha256: str | None,
 ) -> int:
-    if caller.username != "qianyi":
+    if not _has_coordinator_authority(caller):
         return _safe_error(
             dependencies,
             "backup retention maintenance requires coordinator authority",
@@ -693,7 +701,9 @@ def _start(
     *,
     dry_run: bool,
 ) -> int:
-    if dependencies.config.source_mode == "sealed-cumulative" and caller.username != "qianyi":
+    if dependencies.config.source_mode == "sealed-cumulative" and not _has_coordinator_authority(
+        caller
+    ):
         return _safe_error(dependencies, "sealed cumulative rollout requires coordinator authority")
     if dependencies.assess_preflight is not None or dependencies.read_mutation_epoch is not None:
         if dependencies.assess_preflight is None or dependencies.read_mutation_epoch is None:
@@ -924,7 +934,9 @@ def _resume(
     caller: CallerIdentity,
     request_id: str,
 ) -> int:
-    if dependencies.config.source_mode == "sealed-cumulative" and caller.username != "qianyi":
+    if dependencies.config.source_mode == "sealed-cumulative" and not _has_coordinator_authority(
+        caller
+    ):
         return _safe_error(dependencies, "sealed cumulative rollout requires coordinator authority")
     validate_safe_identifier(request_id, "request_id")
     with dependencies.lifecycle.launch_guard():
