@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import grp
 import hashlib
 import importlib
 import io
 import os
 import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -25,6 +27,7 @@ from .redaction import redact_rollout_text
 
 _CHECK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 _MAX_REMEDIATION_LENGTH = 240
+_MAX_EVIDENCE_LENGTH = 120
 _REQUIRED_EXECUTABLES = (
     "git",
     "docker",
@@ -56,6 +59,36 @@ ACTIVE_GB10_HOSTS = tuple(
     host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_GB10_HOSTS
 )
 EXPECTED_GB10_SSH_CONFIG_SHA256 = "7ac3cbe20670762590b9efe4daea46126caa823f192e060be109b96350e82b4e"
+_SHARED_REPOSITORY_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout/worker-repos")
+_GB10_KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
+_REMOTE_SHARED_REPOSITORY_PROBE = """
+import os
+import stat
+
+paths = (
+    "/shared_work/qianyi",
+    "/shared_work/qianyi/.loom-staging-rollout",
+    "/shared_work/qianyi/.loom-staging-rollout/worker-repos",
+)
+entries = [os.lstat(path) for path in paths]
+safe = all(stat.S_ISDIR(item.st_mode) and not stat.S_ISLNK(item.st_mode) for item in entries)
+safe = safe and os.access(paths[-1], os.R_OK | os.X_OK) and not os.access(paths[-1], os.W_OK)
+groups = set(os.getgroups())
+groups.add(os.getegid())
+fields = [str(os.getuid()), ",".join(str(value) for value in sorted(groups))]
+for item in entries:
+    fields.extend(
+        (
+            str(item.st_uid),
+            str(item.st_gid),
+            format(stat.S_IMODE(item.st_mode), "o"),
+            str(item.st_dev),
+            str(item.st_ino),
+        )
+    )
+print(";".join(fields))
+raise SystemExit(0 if safe else 1)
+""".strip()
 
 
 class CommandResult(Protocol):
@@ -79,6 +112,7 @@ class PreflightCheck:
     name: str
     passed: bool
     remediation: str | None
+    evidence: str | None = None
 
     def __post_init__(self) -> None:
         if _CHECK_NAME_RE.fullmatch(self.name) is None:
@@ -86,21 +120,31 @@ class PreflightCheck:
         if type(self.passed) is not bool:
             raise ValueError("preflight check passed must be a boolean")
         if self.remediation is None:
-            return
-        if (
+            pass
+        elif (
             not self.remediation.strip()
             or len(self.remediation) > _MAX_REMEDIATION_LENGTH
             or any(ord(char) < 32 for char in self.remediation)
             or redact_rollout_text(self.remediation) != self.remediation
         ):
             raise ValueError("preflight remediation must be short and safe")
+        if self.evidence is not None and (
+            not self.evidence.strip()
+            or len(self.evidence) > _MAX_EVIDENCE_LENGTH
+            or any(ord(char) < 32 for char in self.evidence)
+            or redact_rollout_text(self.evidence) != self.evidence
+        ):
+            raise ValueError("preflight evidence must be short and safe")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        rendered: dict[str, object] = {
             "name": self.name,
             "passed": self.passed,
             "remediation": self.remediation,
         }
+        if self.evidence is not None:
+            rendered["evidence"] = self.evidence
+        return rendered
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +253,7 @@ def _trusted_file_bytes(
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid not in allowed_owners
             or stat.S_IMODE(metadata.st_mode) & unsafe_mode
+            or metadata.st_nlink != 1
             or metadata.st_size > 1024 * 1024
         ):
             return None
@@ -390,6 +435,192 @@ def _gb10_inputs(
     if not identity.is_absolute() or ".." in identity.parts:
         return None
     return Path(os.path.normpath(ssh_config)), identity, ACTIVE_GB10_HOSTS
+
+
+def _shared_repository_binding(
+    *,
+    service_uid: int,
+    root: Path = _SHARED_REPOSITORY_ROOT,
+) -> dict[str, int] | None:
+    try:
+        service = pwd.getpwnam("loom-rollout")
+        service_group = grp.getgrnam("loom-rollout")
+        consumer = pwd.getpwnam("qianyi")
+        shared_group = grp.getgrnam("sharedwork")
+        service_groups = set(os.getgrouplist(service.pw_name, service.pw_gid))
+        consumer_groups = set(os.getgrouplist(consumer.pw_name, consumer.pw_gid))
+    except (KeyError, OSError):
+        return None
+    if (
+        service_uid < 0
+        or service.pw_uid != service_uid
+        or service.pw_gid != service_group.gr_gid
+        or shared_group.gr_gid in service_groups
+        or shared_group.gr_gid not in consumer_groups
+        or consumer.pw_uid <= 0
+        or shared_group.gr_gid <= 0
+        or not root.is_absolute()
+    ):
+        return None
+
+    directory_flags = (
+        getattr(os, "O_PATH", os.O_RDONLY)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptors: list[int] = []
+    try:
+        current_fd = os.open("/", directory_flags)
+        descriptors.append(current_fd)
+        selected: dict[Path, int] = {}
+        current_path = Path("/")
+        for component in root.parts[1:]:
+            next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            descriptors.append(next_fd)
+            current_fd = next_fd
+            current_path /= component
+            if current_path in {root.parent.parent, root.parent, root}:
+                selected[current_path] = current_fd
+        if set(selected) != {root.parent.parent, root.parent, root}:
+            return None
+
+        parent = os.fstat(selected[root.parent.parent])
+        authority = os.fstat(selected[root.parent])
+        repository = os.fstat(selected[root])
+        lexical_authority = os.stat(
+            root.parent.name,
+            dir_fd=selected[root.parent.parent],
+            follow_symlinks=False,
+        )
+        lexical_repository = os.stat(
+            root.name,
+            dir_fd=selected[root.parent],
+            follow_symlinks=False,
+        )
+        if (
+            not all(stat.S_ISDIR(item.st_mode) for item in (parent, authority, repository))
+            or (parent.st_uid, parent.st_gid, stat.S_IMODE(parent.st_mode))
+            != (consumer.pw_uid, shared_group.gr_gid, 0o2775)
+            or (authority.st_uid, authority.st_gid, stat.S_IMODE(authority.st_mode))
+            != (service_uid, shared_group.gr_gid, 0o2750)
+            or (repository.st_uid, repository.st_gid, stat.S_IMODE(repository.st_mode))
+            != (service_uid, shared_group.gr_gid, 0o2750)
+            or (lexical_authority.st_dev, lexical_authority.st_ino)
+            != (authority.st_dev, authority.st_ino)
+            or (lexical_repository.st_dev, lexical_repository.st_ino)
+            != (repository.st_dev, repository.st_ino)
+            or not os.access(
+                ".",
+                os.W_OK | os.X_OK,
+                dir_fd=selected[root],
+                effective_ids=True,
+            )
+            or os.access(
+                ".",
+                os.W_OK,
+                dir_fd=selected[root.parent.parent],
+                effective_ids=True,
+            )
+        ):
+            return None
+    except OSError:
+        return None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    return {
+        "service_uid": service_uid,
+        "service_primary_gid": service_group.gr_gid,
+        "consumer_uid": consumer.pw_uid,
+        "consumer_primary_gid": consumer.pw_gid,
+        "shared_gid": shared_group.gr_gid,
+        "parent_device": parent.st_dev,
+        "parent_inode": parent.st_ino,
+        "authority_device": authority.st_dev,
+        "authority_inode": authority.st_ino,
+        "repository_device": repository.st_dev,
+        "repository_inode": repository.st_ino,
+    }
+
+
+def _gb10_shared_repository_probe(
+    run: CommandRunner,
+    *,
+    ssh_config: Path,
+    identity: Path,
+    hosts: tuple[str, ...],
+    binding: dict[str, int],
+) -> str | None:
+    if hosts != ACTIVE_GB10_HOSTS:
+        return None
+    evidence = hashlib.sha256()
+    remote_command = f"python3 -c {shlex.quote(_REMOTE_SHARED_REPOSITORY_PROBE)}"
+    for host in hosts:
+        output = _command_stdout(
+            run,
+            [
+                "ssh",
+                "-F",
+                str(ssh_config),
+                "-i",
+                str(identity),
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                f"UserKnownHostsFile={_GB10_KNOWN_HOSTS}",
+                "-o",
+                "GlobalKnownHostsFile=/dev/null",
+                "-o",
+                "UpdateHostKeys=no",
+                host,
+                remote_command,
+            ],
+        )
+        if output is None:
+            return None
+        fields = output.strip().split(";")
+        if len(fields) != 17 or any(not field for field in fields):
+            return None
+        try:
+            remote_uid = int(fields[0])
+            remote_groups = {int(value) for value in fields[1].split(",")}
+            values: list[int] = []
+            for offset in range(2, 17, 5):
+                values.extend(
+                    (
+                        int(fields[offset]),
+                        int(fields[offset + 1]),
+                        int(fields[offset + 2], 8),
+                        int(fields[offset + 3]),
+                        int(fields[offset + 4]),
+                    )
+                )
+        except ValueError:
+            return None
+        parent = values[0:5]
+        authority = values[5:10]
+        repository = values[10:15]
+        if (
+            remote_uid != binding["consumer_uid"]
+            or binding["shared_gid"] not in remote_groups
+            or parent[:3] != [binding["consumer_uid"], binding["shared_gid"], int("2775", 8)]
+            or authority[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
+            or repository[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
+            or any(value <= 0 for value in (*parent[3:], *authority[3:], *repository[3:]))
+        ):
+            return None
+        evidence.update(host.encode("ascii"))
+        evidence.update(b"\0")
+        evidence.update(output.strip().encode("ascii"))
+        evidence.update(b"\0")
+    return f"sha256:{evidence.hexdigest()[:12]} hosts={len(hosts)}"
 
 
 def catalog_secret_values(
@@ -693,6 +924,30 @@ def collect_preflight(
         "gb10-batch-mode",
         gb10_ok,
         "restore service SSH trust for every configured GB10 host",
+    )
+    shared_binding = (
+        _shared_repository_binding(service_uid=service_uid) if service_uid >= 0 else None
+    )
+    shared_evidence = None
+    if gb10_ok and gb10 is not None and shared_binding is not None:
+        ssh_config, identity, hosts = gb10
+        shared_evidence = _gb10_shared_repository_probe(
+            child_run,
+            ssh_config=ssh_config,
+            identity=identity,
+            hosts=hosts,
+            binding=shared_binding,
+        )
+    shared_ready = shared_evidence is not None
+    checks.append(
+        PreflightCheck(
+            "gb10-shared-repository",
+            shared_ready,
+            None
+            if shared_ready
+            else "restore the fixed shared GB10 repository identity and access contract",
+            evidence=shared_evidence,
+        )
     )
     return PreflightReport(tuple(checks))
 

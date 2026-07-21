@@ -513,7 +513,8 @@ def test_convert_writes_verifier_shim(
     assert shim.stat().st_mode & 0o111  # executable
     body = shim.read_text()
     assert "$LOOM_VERIFIER_OUTPUT" in body
-    assert 'TEST_DIR="${TEST_DIR:-/app/environment/tb2-tests}"' in body
+    assert 'TASK_DIR="${LOOM_TASK_DIR:-/app}"' in body
+    assert 'TEST_DIR="${TEST_DIR:-${TASK_DIR%/}/environment/tb2-tests}"' in body
     assert "run-tests.sh" in body
     assert '"rewards":' in body
 

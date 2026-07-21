@@ -83,6 +83,12 @@ class RolloutContext:
             window required by the rollout backup step before the manifest
             reaches the protected backup max age. This keeps long GB10 prep
             runs from discovering backup expiry only at the mutation step.
+        backup_manifest_max_files: Optional explicit file traversal ceiling
+            carried by brokered rollouts from the reviewed operator config.
+        backup_manifest_max_entries: Optional explicit combined entry ceiling
+            carried with ``backup_manifest_max_files``.
+        backup_manifest_max_total_bytes: Optional explicit byte ceiling carried
+            with the other traversal limits.
         scope: Rollout scope classification.
             One of ``"current-gb10"``, ``"full-cluster"``. Full-cluster asks
             for release-critical acceptance evidence across every managed
@@ -107,6 +113,9 @@ class RolloutContext:
     rollout_root: Path
     backup_manifest_path: Path
     backup_manifest_min_remaining_hours: int = 2
+    backup_manifest_max_files: int | None = None
+    backup_manifest_max_entries: int | None = None
+    backup_manifest_max_total_bytes: int | None = None
     backup_manifest_sha256: str | None = None
     runner_config_sha256: str | None = None
     request_id: str | None = None
@@ -135,6 +144,31 @@ class RolloutContext:
 
     # Extra state — not hashed into inputs, just carried for convenience.
     metadata: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        values = (
+            self.backup_manifest_max_files,
+            self.backup_manifest_max_entries,
+            self.backup_manifest_max_total_bytes,
+        )
+        if any(value is not None for value in values) and not all(
+            value is not None for value in values
+        ):
+            raise ValueError("backup traversal limits must be provided together")
+        for value in values:
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError("backup traversal limits must be positive integers")
+
+    def backup_traversal_limits(self) -> tuple[int, int, int] | None:
+        if self.backup_manifest_max_files is None:
+            return None
+        assert self.backup_manifest_max_entries is not None
+        assert self.backup_manifest_max_total_bytes is not None
+        return (
+            self.backup_manifest_max_files,
+            self.backup_manifest_max_entries,
+            self.backup_manifest_max_total_bytes,
+        )
 
     def to_inputs_dict(self) -> dict[str, object]:
         """Return the dict written to ``inputs.json``.
@@ -171,6 +205,13 @@ class RolloutContext:
         }
         if self.request_id is None:
             return inputs
+        traversal_limits = self.backup_traversal_limits()
+        if traversal_limits is not None:
+            inputs["backup_manifest_traversal_limits"] = {
+                "max_files": traversal_limits[0],
+                "max_entries": traversal_limits[1],
+                "max_total_bytes": traversal_limits[2],
+            }
         inputs.update(
             {
                 "admin_token_source": _secret_source_identity(self.admin_token_source),

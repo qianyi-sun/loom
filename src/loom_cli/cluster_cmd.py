@@ -34,6 +34,7 @@ from typing import Any, cast
 from loom_cli.cluster_backup_guard import (
     DEFAULT_BACKUP_MAX_AGE_HOURS,
     PROTECTED_ENVIRONMENTS,
+    BackupTraversalLimits,
     infer_environment,
     is_protected_environment,
     validate_backup_manifest,
@@ -295,6 +296,64 @@ class _ClusterConfigSnapshotTomlError(ValueError):
     """The single cluster-config snapshot is not syntactically valid TOML."""
 
 
+def _positive_backup_limit(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("backup traversal limits must be integers") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("backup traversal limits must be positive")
+    return parsed
+
+
+def _add_backup_traversal_limit_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--backup-max-files",
+        type=_positive_backup_limit,
+        default=None,
+        help=(
+            "Explicit file traversal ceiling for backup validation. "
+            "Omit to keep the conservative default."
+        ),
+    )
+    parser.add_argument(
+        "--backup-max-entries",
+        type=_positive_backup_limit,
+        default=None,
+        help=(
+            "Explicit combined file/directory traversal ceiling for backup "
+            "validation. Omit to keep the conservative default."
+        ),
+    )
+    parser.add_argument(
+        "--backup-max-total-bytes",
+        type=_positive_backup_limit,
+        default=None,
+        help=(
+            "Explicit total byte traversal ceiling for backup validation. "
+            "Omit to keep the conservative default."
+        ),
+    )
+
+
+def _backup_traversal_limits_from_args(
+    args: argparse.Namespace,
+) -> BackupTraversalLimits | None:
+    max_files = getattr(args, "backup_max_files", None)
+    max_entries = getattr(args, "backup_max_entries", None)
+    max_total_bytes = getattr(args, "backup_max_total_bytes", None)
+    if max_files is None and max_entries is None and max_total_bytes is None:
+        return None
+    defaults = BackupTraversalLimits()
+    return BackupTraversalLimits(
+        max_files=max_files if max_files is not None else defaults.max_files,
+        max_entries=max_entries if max_entries is not None else defaults.max_entries,
+        max_total_bytes=(
+            max_total_bytes if max_total_bytes is not None else defaults.max_total_bytes
+        ),
+    )
+
+
 def _load_broker_rollout_envelope(path: Path) -> tuple[Any, Any]:
     from loom_cli.rollout.operator.config import OperatorConfig
     from loom_cli.rollout.operator.envelope import (
@@ -405,6 +464,12 @@ def _validate_broker_cluster_args(
         envelope.backup_manifest_path
     ):
         raise ValueError("backup manifest path does not match broker envelope")
+    from loom_cli.rollout.operator.backup_limits import (
+        operator_backup_traversal_limits,
+    )
+
+    if _backup_traversal_limits_from_args(args) != operator_backup_traversal_limits(config):
+        raise ValueError("backup traversal limits do not match fixed broker policy")
     if args.skip_preflight or args.no_wait:
         raise ValueError("protected rollout gates cannot be skipped in broker mode")
     if not args.recover_sandbox_deadlines or args.sandbox_deadline_max_pods != 4:
@@ -1739,9 +1804,9 @@ def _normalise_frontend_path(raw: str, field_name: str) -> str:
     if value in {"", "/"}:
         return ""
     if not value.startswith("/"):
-        raise ValueError(f"{field_name} must be empty, /, /prod, or /dev")
-    if value not in {"/prod", "/dev"}:
-        raise ValueError(f"{field_name} must be empty, /, /prod, or /dev")
+        raise ValueError(f"{field_name} must be empty, /, /prod, /staging, or /dev")
+    if value not in {"/prod", "/staging", "/dev"}:
+        raise ValueError(f"{field_name} must be empty, /, /prod, /staging, or /dev")
     return value
 
 
@@ -1774,7 +1839,7 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
         raise ValueError("non-production frontend_environment must not use /prod")
     if environment == "production" and "beta" in label.lower():
         raise ValueError("production frontend_environment_label must not contain beta")
-    if route_path in {"/prod", "/dev"} and config.ingress_host != "yylx.world":
+    if route_path in {"/prod", "/staging", "/dev"} and config.ingress_host != "yylx.world":
         raise ValueError(
             f"frontend_route_path={route_path!r} must use ingress_host='yylx.world'",
         )
@@ -3256,12 +3321,14 @@ def _check_backup_manifest(
     environment: str,
     namespace: str,
     max_age_hours: int,
+    limits: BackupTraversalLimits | None = None,
 ) -> PreflightCheck:
     problems = validate_backup_manifest(
         manifest_path,
         environment=environment,
         namespace=namespace,
         max_age_hours=max_age_hours,
+        limits=limits,
     )
     if problems:
         return PreflightCheck(
@@ -3398,6 +3465,7 @@ def collect_preflight(
     environment: str | None = None,
     backup_manifest: Path | None = None,
     backup_max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
+    backup_limits: BackupTraversalLimits | None = None,
     cluster_config: ClusterConfig | None = None,
     workload_contract_profile: object = None,
     kind_node_mounts: list[dict[str, Any]] | None = None,
@@ -3445,6 +3513,7 @@ def collect_preflight(
                 environment=env_name,
                 namespace=namespace,
                 max_age_hours=backup_max_age_hours,
+                limits=backup_limits,
             )
         )
 
@@ -3644,6 +3713,7 @@ def _preflight(args: argparse.Namespace) -> int:
                 Path(args.backup_manifest).resolve() if args.backup_manifest else None
             ),
             backup_max_age_hours=args.backup_max_age_hours,
+            backup_limits=_backup_traversal_limits_from_args(args),
             cluster_config=cluster_config,
             workload_contract_profile=workload_contract_profile,
             kind_node_mounts=kind_node_mounts,
@@ -3696,6 +3766,7 @@ def _backup_check(args: argparse.Namespace) -> int:
         namespace=args.namespace,
         max_age_hours=args.max_age_hours,
         min_remaining_hours=args.min_remaining_hours,
+        limits=_backup_traversal_limits_from_args(args),
     )
     if problems:
         for problem in problems:
@@ -4528,6 +4599,7 @@ def _up_impl(
                     Path(args.backup_manifest).resolve() if args.backup_manifest else None
                 ),
                 backup_max_age_hours=args.backup_max_age_hours,
+                backup_limits=_backup_traversal_limits_from_args(args),
                 cluster_config=config,
                 workload_contract_profile=workload_contract_profile,
                 kind_node_mounts=kind_node_mounts,
@@ -5453,6 +5525,7 @@ def dispatch(argv: list[str]) -> int:
             f"environments (default: {DEFAULT_BACKUP_MAX_AGE_HOURS})."
         ),
     )
+    _add_backup_traversal_limit_arguments(p_preflight)
     p_preflight.add_argument(
         "--format",
         choices=["table", "json"],
@@ -5512,6 +5585,7 @@ def dispatch(argv: list[str]) -> int:
             "rollouts that must not discover expiry at mutation time."
         ),
     )
+    _add_backup_traversal_limit_arguments(p_backup_check)
     p_backup_check.set_defaults(handler=_backup_check)
 
     p_up = sub.add_parser(
@@ -5562,6 +5636,7 @@ def dispatch(argv: list[str]) -> int:
             f"(default: {DEFAULT_BACKUP_MAX_AGE_HOURS})."
         ),
     )
+    _add_backup_traversal_limit_arguments(p_up)
     p_up.add_argument(
         "--config",
         default=None,

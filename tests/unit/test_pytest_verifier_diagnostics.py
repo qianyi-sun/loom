@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -42,7 +43,7 @@ async def test_missing_junit_includes_pytest_exec_diagnostics(
     tmp_path: Path,
 ) -> None:
     def _exec(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
-        if cmd == "mkdir -p /loom/verifier":
+        if cmd.startswith("mkdir -p "):
             return ExecResult(
                 return_code=0,
                 stdout=b"",
@@ -89,6 +90,98 @@ async def test_missing_junit_includes_pytest_exec_diagnostics(
     assert result.error.detail["duration_sec"] == pytest.approx(1.25)
     assert result.structured is not None
     assert result.structured["pytest_exec"]["phase"] == "pytest"
+    assert "loom_verifier_audit" in result.structured
+    assert result.structured["loom_verifier_audit"]["persisted"] is True
+    assert (
+        result.structured["loom_verifier_audit"]["artifacts"][0]["path"]
+        == ".loom/verifier/pytest.log"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pytest_verifier_clears_stale_junit_before_exec(
+    tmp_path: Path,
+) -> None:
+    class _StaleJunitDriver(FakeDriver):
+        async def exec(self, cmd, **kwargs):  # type: ignore[no-untyped-def]
+            if cmd == (
+                "mkdir -p /loom/verifier && "
+                "rm -f -- /loom/verifier/junit.xml"
+            ):
+                self.filesystem.pop(
+                    PurePosixPath("/loom/verifier/junit.xml"),
+                    None,
+                )
+            if cmd == build_pytest_install_command() or cmd.startswith("mkdir -p "):
+                return ExecResult(
+                    return_code=0,
+                    stdout=b"",
+                    stderr=b"",
+                    duration_sec=0.01,
+                )
+            if cmd.startswith("rm -f -- "):
+                return ExecResult(
+                    return_code=0,
+                    stdout=b"",
+                    stderr=b"",
+                    duration_sec=0.01,
+                )
+            assert "pytest --junitxml=/loom/verifier/junit.xml" in cmd
+            return ExecResult(
+                return_code=0,
+                stdout=b"pytest produced no report",
+                stderr=b"",
+                duration_sec=0.1,
+            )
+
+    driver = _StaleJunitDriver()
+    await driver.start(options=StartOptions())
+    driver.filesystem[PurePosixPath("/loom/verifier/junit.xml")] = (
+        b'<testsuite tests="1"><testcase name="stale"/></testsuite>'
+    )
+
+    result = await PytestVerifier().verify(
+        task=_task(),
+        env=driver,
+        artifacts_dir=PurePosixPath("/workspace"),
+        trajectory=_trajectory(tmp_path),
+    )
+
+    assert result.rewards == {}
+    assert result.error is not None
+    assert result.error.kind == "missing_tests"
+
+
+@pytest.mark.asyncio
+async def test_pytest_verifier_rejects_stale_junit_when_cleanup_fails(
+    tmp_path: Path,
+) -> None:
+    def _cleanup_failure(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        assert cmd.startswith("mkdir -p /loom/verifier && rm -f -- ")
+        return ExecResult(
+            return_code=1,
+            stdout=b"",
+            stderr=b"permission denied",
+            duration_sec=0.01,
+        )
+
+    driver = FakeDriver(exec_handler=_cleanup_failure)
+    await driver.start(options=StartOptions())
+    driver.filesystem[PurePosixPath("/loom/verifier/junit.xml")] = (
+        b'<testsuite tests="1"><testcase name="stale"/></testsuite>'
+    )
+
+    result = await PytestVerifier().verify(
+        task=_task(),
+        env=driver,
+        artifacts_dir=PurePosixPath("/workspace"),
+        trajectory=_trajectory(tmp_path),
+    )
+
+    assert result.rewards == {}
+    assert result.error is not None
+    assert result.error.kind == "exec_failure"
+    assert result.error.detail["return_code"] == 1
 
 
 @pytest.mark.asyncio
@@ -107,7 +200,7 @@ async def test_pytest_command_timeout_returns_scored_diagnostic(
             env=None,  # type: ignore[no-untyped-def]
             timeout_sec=None,  # type: ignore[no-untyped-def]
         ) -> ExecResult:
-            if cmd == "mkdir -p /loom/verifier":
+            if cmd.startswith("mkdir -p "):
                 return ExecResult(
                     return_code=0,
                     stdout=b"",
@@ -172,7 +265,7 @@ async def test_pytest_install_timeout_is_unscored_infrastructure_failure(
             env=None,  # type: ignore[no-untyped-def]
             timeout_sec=None,  # type: ignore[no-untyped-def]
         ) -> ExecResult:
-            if cmd == "mkdir -p /loom/verifier":
+            if cmd.startswith("mkdir -p "):
                 return ExecResult(
                     return_code=0,
                     stdout=b"",
@@ -202,3 +295,42 @@ async def test_pytest_install_timeout_is_unscored_infrastructure_failure(
         "timeout_sec": 7.0,
         "junit_xml_path": "/loom/verifier/junit.xml",
     }
+
+
+@pytest.mark.asyncio
+async def test_pytest_install_failure_retains_audit_pair(tmp_path: Path) -> None:
+    def _exec(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        if cmd.startswith("mkdir -p "):
+            return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0.01)
+        assert cmd == build_pytest_install_command()
+        return ExecResult(
+            return_code=2,
+            stdout=b"",
+            stderr=b"pip failed\n",
+            duration_sec=0.2,
+        )
+
+    driver = FakeDriver(exec_handler=_exec)
+    await driver.start(options=StartOptions())
+    result = await PytestVerifier().verify(
+        task=_task(),
+        env=driver,
+        artifacts_dir=PurePosixPath("/workspace"),
+        trajectory=_trajectory(tmp_path),
+    )
+
+    assert result.error is not None
+    assert result.error.kind == "exec_failure"
+    assert result.structured is not None
+    audit = result.structured["loom_verifier_audit"]
+    assert audit["persisted"] is True
+    assert audit["return_code"] == 2
+    assert PurePosixPath(
+        "/workspace/.loom/verifier/pytest-install.log"
+    ) in driver.filesystem
+    meta = json.loads(
+        driver.filesystem[
+            PurePosixPath("/workspace/.loom/verifier/pytest-install.log.meta.json")
+        ]
+    )
+    assert meta["script_path"] == "pytest-install"

@@ -333,7 +333,12 @@ def _no_gb10_hosts_error(
 _GB10_KNOWN_HOSTS = "/etc/loom/staging-rollout-gb10-known-hosts"
 
 
-def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
+def _ssh(
+    host: GB10Host,
+    remote_cmd: str,
+    *,
+    stdin_text: str | None = None,
+) -> SubprocessResult:
     """Run a remote command over SSH with reasonable options.
 
     ``BatchMode=yes`` disables password prompts (fails fast if key
@@ -364,7 +369,7 @@ def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
             remote_cmd,
         ]
     )
-    return run_captured(argv)
+    return run_captured(argv, stdin_text=stdin_text)
 
 
 def _parse_systemctl_properties(stdout: str) -> dict[str, str]:

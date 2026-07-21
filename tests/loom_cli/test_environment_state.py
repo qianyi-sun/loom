@@ -8,6 +8,7 @@ import pytest
 
 from loom_cli.environment_state import (
     EnvironmentStateProfileError,
+    _normalize_autoscaler_policy,
     apply_external_slurm_autoscaler_supervisors,
     diff_environment_state,
     diff_external_slurm_autoscaler_supervisors,
@@ -16,6 +17,35 @@ from loom_cli.environment_state import (
     render_external_slurm_autoscaler_service,
     render_external_slurm_autoscaler_timer,
 )
+
+
+def test_normalize_autoscaler_policy_passes_through_qos_and_slurm_scheduler_fields() -> None:
+    normalized = _normalize_autoscaler_policy(
+        {
+            "pool_name": "gb10-arm64",
+            "actuator": "slurm",
+            "max_slots": 10,
+            "actuator_config": {
+                "backend": "docker",
+                "qos_boost": "loom-boost",
+                "qos_normal": "loom-staging-normal",
+                "slurm_account": "loom-staging",
+                "slurm_qos": "loom-staging-normal",
+                "slurm_reservation": "loom-staging-min",
+            },
+        },
+        environment="staging",
+        index=0,
+    )
+
+    assert normalized["actuator_config"] == {
+        "backend": "docker",
+        "qos_boost": "loom-boost",
+        "qos_normal": "loom-staging-normal",
+        "slurm_account": "loom-staging",
+        "slurm_qos": "loom-staging-normal",
+        "slurm_reservation": "loom-staging-min",
+    }
 
 
 def _write_profile(path: Path, *, host1_intent: str = "active") -> None:

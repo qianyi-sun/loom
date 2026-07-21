@@ -1438,3 +1438,96 @@ def test_cli_backup_manifest_and_check_round_trip(tmp_path, capsys):
 
     assert rc == 0
     assert "backup manifest verified" in capsys.readouterr().out
+
+
+def test_cli_backup_check_accepts_explicit_reviewed_limit_above_100k(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+    observed: list[BackupTraversalLimits] = []
+
+    def validate_with_simulated_large_manifest(
+        *_args: object,
+        **kwargs: object,
+    ) -> list[str]:
+        limits = kwargs.get("limits")
+        effective = limits if isinstance(limits, BackupTraversalLimits) else BackupTraversalLimits()
+        observed.append(effective)
+        if effective.max_files <= 579_720:
+            return ["backup component 'k8s_secrets' traversal file count limit exceeded"]
+        return []
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.validate_backup_manifest",
+        validate_with_simulated_large_manifest,
+    )
+    base_argv = [
+        "cluster",
+        "backup",
+        "check",
+        "--environment",
+        "staging",
+        "--namespace",
+        "loom-staging",
+        "--manifest",
+        str(manifest),
+    ]
+
+    assert main(base_argv) == 1
+    assert "traversal file count limit exceeded" in capsys.readouterr().err
+
+    assert (
+        main(
+            [
+                *base_argv,
+                "--backup-max-files",
+                "1000004",
+                "--backup-max-entries",
+                "16000000",
+                "--backup-max-total-bytes",
+                str(16 * 1024**4),
+            ]
+        )
+        == 0
+    )
+    assert "backup manifest verified" in capsys.readouterr().out
+    assert [limits.max_files for limits in observed] == [100_000, 1_000_004]
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--backup-max-files", "0"),
+        ("--backup-max-entries", "-1"),
+        ("--backup-max-total-bytes", "not-an-integer"),
+    ],
+)
+def test_cli_backup_check_rejects_invalid_explicit_limits(
+    tmp_path: Path,
+    flag: str,
+    value: str,
+) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "cluster",
+                "backup",
+                "check",
+                "--environment",
+                "staging",
+                "--namespace",
+                "loom-staging",
+                "--manifest",
+                str(manifest),
+                flag,
+                value,
+            ]
+        )
+
+    assert excinfo.value.code == 2

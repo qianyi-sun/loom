@@ -301,6 +301,62 @@ def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
     assert "--exclusive" not in request.args
 
 
+def test_build_sbatch_request_emits_account_qos_reservation_when_set() -> None:
+    request = build_sbatch_request(
+        _config(
+            slurm_account="loom-staging",
+            slurm_qos="loom-boost",
+            slurm_reservation="loom-staging-min",
+        ),
+        node="oldlab-4",
+    )
+
+    assert "--account=loom-staging" in request.args
+    assert "--qos=loom-boost" in request.args
+    assert "--reservation=loom-staging-min" in request.args
+
+
+def test_build_sbatch_request_omits_account_qos_reservation_when_empty() -> None:
+    request = build_sbatch_request(_config(), node="oldlab-4")
+
+    assert not any(arg.startswith("--account=") for arg in request.args)
+    assert not any(arg.startswith("--qos=") for arg in request.args)
+    assert not any(arg.startswith("--reservation=") for arg in request.args)
+
+
+def test_build_controller_config_threads_account_qos_reservation() -> None:
+    config = build_controller_config(
+        enabled=True,
+        environment="staging",
+        pool_name="oldlab",
+        allowed_nodes_csv="oldlab-1",
+        env_file="/secure/staging.env",
+        repo_dir="/srv/loom",
+        partition="",
+        time_limit="2:00:00",
+        requested_cpus=12,
+        requested_memory_mib=58000,
+        requested_concurrency=6,
+        max_jobs=1,
+        pending_job_cap=1,
+        min_queued_trials=1,
+        stale_after_seconds=300,
+        sbatch_path="sbatch",
+        squeue_path="squeue",
+        sacct_path="sacct",
+        scancel_path="scancel",
+        command_timeout_seconds=20.0,
+        slurm_account="loom-staging",
+        slurm_qos="loom-staging-normal",
+        slurm_reservation="loom-staging-min",
+    )
+
+    assert config is not None
+    assert config.slurm_account == "loom-staging"
+    assert config.slurm_qos == "loom-staging-normal"
+    assert config.slurm_reservation == "loom-staging-min"
+
+
 def test_build_sbatch_request_cleans_up_compose_on_exit() -> None:
     request = build_sbatch_request(_config(), node="oldlab-4")
 

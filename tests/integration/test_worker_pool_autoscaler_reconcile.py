@@ -249,6 +249,298 @@ async def test_reconcile_submits_slurm_jobs_for_scale_up_deficit(
         await engine.dispose()
 
 
+async def test_reconcile_clamps_scale_up_slots_to_max_slots(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Team).values(id=team_id, name="team-a"))
+            await s.execute(insert(Task).values(id="task-a", checksum="0" * 64, config={}))
+            for idx in range(4):
+                await s.execute(insert(Trial).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    task_id="task-a",
+                    config={},
+                    requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
+                    state="queued",
+                    idempotency_key=f"clamp-queued-{idx}",
+                ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=4,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "allowed_nodes": ["oldlab-1", "oldlab-2"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 20,
+                    "requested_memory_mib": 115000,
+                    "requested_concurrency": 10,
+                    "cpu_per_slot": 2,
+                    "memory_mib_per_slot": 8192,
+                    "max_jobs": 2,
+                    "pending_job_cap": 2,
+                    "time_limit": "7-00:00:00",
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "scale_up"
+        # A single 10-slot worker would overshoot the 4-slot budget. When
+        # clamped to 4 slots, CPU/memory scale PROPORTIONALLY from the 10-slot
+        # request (staging GB10 profile: 20 CPU / 115000 MiB), not from the
+        # per-slot defaults. So memory = 115000 * 4 / 10 = 46000 MiB, NOT the
+        # 4 * 8192 = 32768 MiB that per-slot scaling would (wrongly) produce.
+        assert runner.submitted_configs[0].requested_concurrency == 4
+        assert runner.submitted_configs[0].requested_cpus == 8  # 20 * 4 / 10
+        assert runner.submitted_configs[0].requested_memory_mib == 46000  # 115000 * 4 / 10
+        assert sum(c.requested_concurrency for c in runner.submitted_configs) <= 4
+
+        async with session_factory() as s:
+            jobs = (await s.execute(select(SlurmWorkerJob))).scalars().all()
+        assert sum(job.requested_concurrency for job in jobs) <= 4
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_clamp_uses_ceiling_not_bankers_rounding(
+    postgres_url: str,
+) -> None:
+    # Odd ratio: 5 CPU / 2 slots clamped to 1 slot must ceil(2.5)=3, never
+    # round(2.5)=2 (banker's rounding would under-request Slurm resources).
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Team).values(id=team_id, name="team-ceil"))
+            await s.execute(insert(Task).values(id="task-ceil", checksum="0" * 64, config={}))
+            await s.execute(insert(Trial).values(
+                id=uuid4(),
+                team_id=team_id,
+                task_id="task-ceil",
+                config={},
+                requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
+                state="queued",
+                idempotency_key="clamp-ceil-0",
+            ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=1,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "allowed_nodes": ["oldlab-1"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 5,
+                    "requested_memory_mib": 5000,
+                    "requested_concurrency": 2,
+                    "cpu_per_slot": 2,
+                    "memory_mib_per_slot": 8192,
+                    "max_jobs": 1,
+                    "pending_job_cap": 1,
+                    "time_limit": "7-00:00:00",
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(s, now=now, slurm_runner=runner)
+            await s.commit()
+
+        assert results[0].action == "scale_up"
+        assert runner.submitted_configs[0].requested_concurrency == 1
+        assert runner.submitted_configs[0].requested_cpus == 3  # ceil(5 * 1 / 2), not round()==2
+        assert runner.submitted_configs[0].requested_memory_mib == 2500  # ceil(5000 * 1 / 2)
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_qos_is_per_submission_and_prefers_qos_normal(
+    postgres_url: str,
+) -> None:
+    # Two bugs in one regression: (1) QoS is chosen PER submission from committed
+    # slots, so a reconcile starting below min_slots and crossing it mid-loop
+    # gives boost only to the sub-floor jobs; (2) qos_normal wins over legacy
+    # slurm_qos. min_slots=2, 4 one-slot workers: committed 0,1 -> boost;
+    # committed 2,3 -> normal (=qos_normal "normal-qos", NOT slurm_qos "legacy").
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Team).values(id=team_id, name="team-qos"))
+            await s.execute(insert(Task).values(id="task-qos", checksum="0" * 64, config={}))
+            for idx in range(4):
+                await s.execute(insert(Trial).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    task_id="task-qos",
+                    config={},
+                    requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
+                    state="queued",
+                    idempotency_key=f"qos-queued-{idx}",
+                ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=2,
+                max_slots=4,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "allowed_nodes": ["oldlab-1", "oldlab-2", "oldlab-3", "oldlab-4"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 2,
+                    "requested_memory_mib": 8192,
+                    "requested_concurrency": 1,
+                    "max_jobs": 4,
+                    "pending_job_cap": 4,
+                    "time_limit": "7-00:00:00",
+                    "qos_boost": "boost-qos",
+                    "qos_normal": "normal-qos",
+                    "slurm_qos": "legacy-qos",
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(s, now=now, slurm_runner=runner)
+            await s.commit()
+
+        assert results[0].action == "scale_up"
+        qoses = [c.slurm_qos for c in runner.submitted_configs]
+        assert len(qoses) == 4
+        assert qoses[0] == "boost-qos"  # committed 0 < min_slots 2
+        assert qoses[1] == "boost-qos"  # committed 1 < 2
+        assert qoses[2] == "normal-qos"  # committed 2 >= 2 -> normal, and normal wins over legacy
+        assert qoses[3] == "normal-qos"  # committed 3 >= 2
+        assert "legacy-qos" not in qoses
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_clamps_resource_aware_scale_up_to_max_slots(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Team).values(id=team_id, name="team-a"))
+            await s.execute(insert(Task).values(id="task-a", checksum="0" * 64, config={}))
+            for idx in range(4):
+                await s.execute(insert(Trial).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    task_id="task-a",
+                    config={},
+                    requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
+                    state="queued",
+                    idempotency_key=f"clamp-ra-queued-{idx}",
+                ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=4,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "allowed_nodes": ["oldlab-1"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 2,
+                    "requested_memory_mib": 8192,
+                    "requested_concurrency": 1,
+                    "pending_job_cap": 1,
+                    "resource_aware": True,
+                    "cpu_per_slot": 2,
+                    "memory_mib_per_slot": 8192,
+                    "reserved_cpus": 4,
+                    "reserved_memory_mib": 24_576,
+                    "max_concurrency_per_node": 8,
+                    "time_limit": "7-00:00:00",
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.node_resources = {
+            "oldlab-1": SlurmNodeResource("oldlab-1", "mixed", 24, 120_000, 4.0),
+        }
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "scale_up"
+        # safe_slots would be 8 for this node; clamp to the 4-slot budget.
+        assert runner.submitted_configs[0].requested_concurrency == 4
+        assert runner.submitted_configs[0].requested_cpus == 8
+        assert sum(c.requested_concurrency for c in runner.submitted_configs) <= 4
+    finally:
+        await engine.dispose()
+
+
 async def test_reconcile_persists_no_safe_slurm_node_blocker(
     postgres_url: str,
 ) -> None:

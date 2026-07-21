@@ -73,6 +73,24 @@ class TestClusterUpStepArgv:
 
         assert argv[argv.index("--backup-manifest") + 1] == str(backup_manifest)
 
+    def test_passes_broker_bound_backup_traversal_limits(self, tmp_path: Path) -> None:
+        ctx = make_ctx(
+            tmp_path,
+            request_id="req-123",
+            backup_manifest_max_files=1_000_004,
+            backup_manifest_max_entries=16_000_000,
+            backup_manifest_max_total_bytes=16 * 1024**4,
+        )
+        ev = EvidenceDirectory(tmp_path, "test-rid")
+        ev.ensure()
+        step_dir = ev.step_dir(10, "cluster-up")
+
+        argv = list(ClusterUpStep().argv(ctx, step_dir))
+
+        assert argv[argv.index("--backup-max-files") + 1] == "1000004"
+        assert argv[argv.index("--backup-max-entries") + 1] == "16000000"
+        assert argv[argv.index("--backup-max-total-bytes") + 1] == str(16 * 1024**4)
+
     def test_broker_attempt_passes_only_the_private_request_envelope(
         self,
         tmp_path: Path,
