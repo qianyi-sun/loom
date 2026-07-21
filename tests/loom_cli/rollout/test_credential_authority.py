@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+import stat
 import struct
 from pathlib import Path
 
 import pytest
 
-from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.credential_authority import converge_new_private_file, read_trusted_file
 
 
 def _private(path: Path, payload: bytes = b"credential\n") -> None:
@@ -142,3 +143,51 @@ def test_private_authority_rejects_acl_drift_during_read(
 
     with pytest.raises(ValueError, match="changed while it was read"):
         read_trusted_file(path, service_uid=os.getuid(), private=True)
+
+
+def test_new_private_file_removes_inherited_acl_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "backup-secret"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    payloads = [b"inherited-acl", b""]
+    removals: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        "loom_cli.rollout.credential_authority._get_acl_xattr",
+        lambda _fd, _name: payloads.pop(0),
+    )
+    monkeypatch.setattr(
+        os,
+        "removexattr",
+        lambda actual_fd, name: removals.append((actual_fd, name)),
+        raising=False,
+    )
+    try:
+        converge_new_private_file(fd, service_uid=os.getuid())
+        os.write(fd, b"secret")
+    finally:
+        os.close(fd)
+
+    assert removals == [(fd, "system.posix_acl_access")]
+    assert path.read_bytes() == b"secret"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_new_private_file_fails_closed_when_acl_remains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "backup-secret"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    monkeypatch.setattr(
+        "loom_cli.rollout.credential_authority._get_acl_xattr",
+        lambda _fd, _name: b"inherited-acl",
+    )
+    monkeypatch.setattr(os, "removexattr", lambda _fd, _name: None, raising=False)
+    try:
+        with pytest.raises(ValueError, match="convergence is unsafe"):
+            converge_new_private_file(fd, service_uid=os.getuid())
+        assert os.fstat(fd).st_size == 0
+    finally:
+        os.close(fd)

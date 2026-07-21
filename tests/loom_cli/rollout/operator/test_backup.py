@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4133,6 +4134,36 @@ def test_existing_acl_managed_backups_parent_preserves_owner_and_mode(
     assert backups_root.stat().st_mode & 0o777 == 0o770
     assert backup.manifest_path.parent.stat().st_mode & 0o777 == 0o700
     assert backup.manifest_path.parent.stat().st_uid == os.getuid()
+
+
+def test_backup_converges_acl_for_every_private_file_before_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    calls: list[Path] = []
+
+    def record_convergence(fd: int, *, service_uid: int) -> None:
+        metadata = os.fstat(fd)
+        assert metadata.st_uid == service_uid == os.getuid()
+        assert metadata.st_size == 0
+        calls.append(Path(f"/dev/fd/{fd}"))
+
+    monkeypatch.setattr(backup_module, "converge_new_private_file", record_convergence)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    backup = creator.create(make_request())
+
+    expected_files = sum(
+        stat.S_ISREG(path.lstat().st_mode) for path in backup.manifest_path.parent.rglob("*")
+    )
+    assert len(calls) == expected_files
 
 
 def test_existing_world_writable_backups_parent_is_rejected_before_commands(

@@ -37,6 +37,7 @@ from loom_cli.cluster_backup_guard import (
     write_backup_manifest,
 )
 from loom_cli.cluster_config import load_cluster_config
+from loom_cli.rollout.credential_authority import converge_new_private_file
 
 from .backup_limits import (
     BACKUP_MAX_TOTAL_BYTES,
@@ -911,7 +912,7 @@ def _write_private_bytes(
         resources.release_entry(account)
         raise
     try:
-        os.fchmod(fd, _PRIVATE_FILE_MODE)
+        converge_new_private_file(fd, service_uid=os.geteuid())
         with os.fdopen(fd, "wb", closefd=False) as sink:
             guarded_sink = _BudgetedWriter(
                 sink,
@@ -1533,7 +1534,7 @@ def _stream_s3_object(
             resources.release_entry(temp_account)
             raise
         temp_exists = True
-        os.fchmod(fd, _PRIVATE_FILE_MODE)
+        converge_new_private_file(fd, service_uid=os.geteuid())
         total_size = 0
         with os.fdopen(fd, "wb", closefd=True) as sink:
             fd = None
@@ -2234,7 +2235,7 @@ class BackupCreator:
             resources.release_entry(account)
             raise
         try:
-            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            converge_new_private_file(fd, service_uid=self.service_uid)
             with os.fdopen(fd, "wb", closefd=False) as sink:
                 guarded_sink = _BudgetedWriter(
                     sink,

@@ -1479,6 +1479,13 @@ a mutable `backups/latest` pointer. `resume` uses the original request's exact
 SHA, image tag, backup manifest and digest, rollout ID, and config binding even
 if `dev` has advanced.
 
+Every private backup file is created with no-follow/exclusive semantics and is
+kept empty until its owner, link count, `0600` mode, and access ACL converge.
+The writer removes an inherited POSIX access ACL and proves that no ACL remains
+before writing PostgreSQL, object, secret, inventory, or manifest bytes. A
+missing removal primitive, metadata drift, or residual named reader fails the
+backup before publication; the later trusted reader remains equally strict.
+
 When `manifests.field-ownership` reports only the recognized legacy lifecycle
 resources, keep rollout admission disabled with the root-owned maintenance
 marker and keep the lifecycle CronJob suspended. From the exact installed

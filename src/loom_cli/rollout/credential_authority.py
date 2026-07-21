@@ -77,6 +77,50 @@ def _acl_payload(fd: int) -> bytes:
     return payload
 
 
+def converge_new_private_file(fd: int, *, service_uid: int) -> None:
+    """Converge a newly-created private file before publishing any payload."""
+    if fd < 0 or service_uid < 0:
+        raise ValueError("private rollout file authority is invalid")
+    before = os.fstat(fd)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != service_uid
+        or before.st_nlink != 1
+        or before.st_size != 0
+    ):
+        raise ValueError("private rollout file metadata is unsafe")
+    try:
+        os.fchmod(fd, 0o600)
+        acl_before = _acl_payload(fd)
+        if acl_before:
+            remover = getattr(os, "removexattr", None)
+            if remover is None:
+                raise ValueError("private rollout file ACL cannot be converged")
+            try:
+                remover(fd, _POSIX_ACL_XATTR)
+            except OSError as exc:
+                absent = {errno.ENODATA}
+                enoattr = getattr(errno, "ENOATTR", None)
+                if enoattr is not None:
+                    absent.add(enoattr)
+                if exc.errno not in absent:
+                    raise ValueError("private rollout file ACL cannot be converged") from exc
+        after = os.fstat(fd)
+        if (
+            after.st_dev != before.st_dev
+            or after.st_ino != before.st_ino
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_uid != service_uid
+            or stat.S_IMODE(after.st_mode) != 0o600
+            or after.st_nlink != 1
+            or after.st_size != 0
+            or _acl_payload(fd)
+        ):
+            raise ValueError("private rollout file ACL convergence is unsafe")
+    except OSError as exc:
+        raise ValueError("private rollout file ACL convergence failed") from exc
+
+
 def _service_gid(service_uid: int) -> int:
     try:
         return pwd.getpwuid(service_uid).pw_gid
@@ -259,4 +303,9 @@ def read_trusted_file(
         os.close(fd)
 
 
-__all__ = ["TrustedFileRead", "read_trusted_file", "safe_content_fingerprint"]
+__all__ = [
+    "TrustedFileRead",
+    "converge_new_private_file",
+    "read_trusted_file",
+    "safe_content_fingerprint",
+]
