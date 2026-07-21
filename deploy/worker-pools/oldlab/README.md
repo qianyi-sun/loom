@@ -97,6 +97,39 @@ while the MinIO tunnel restarted; keep that separate from the BFCL capacity
 smoke and track the in-flight retry/drain gap with the existing rollout-failure
 work. Full production capacity still uses the 12 CPU / 58000M plan above.
 
+## External autoscaler supervisor (systemd)
+
+Each environment's env-state profile carries an
+`external_slurm_autoscaler_supervisors` section. Every entry renders a
+`systemctl --user` service plus timer that periodically runs the repo
+entrypoint `scripts/ops/worker_pool_autoscaler_external_once.py` for one pool.
+`loom admin environment-state apply` writes the unit files under
+`~/.config/systemd/user`, and `check` reports drift when a unit is missing,
+points at a stale checkout, omits `--pool-name`, or is not enabled/active as
+declared.
+
+Each supervisor tunnels to the environment's Postgres on a reserved local port,
+so no two supervisors on one host collide. The `--db-local-port` scheme is:
+
+| pool   | development | staging | production |
+| ------ | ----------- | ------- | ---------- |
+| oldlab | 15447       | 15448   | 15449      |
+| gb10   | 15450       | 15451   | 15452      |
+
+Supporting layout, shared across environments:
+
+- Runner checkout and virtualenv: `/opt/loom-<environment>-runner/repo` and
+  `/opt/loom-<environment>-runner/venv`.
+- Kubeconfig: `/etc/loom/kubeconfig/<environment>.yaml`.
+- Health check: `systemctl --user is-active loom-autoscaler-oldlab-<env>.timer`.
+
+The development OLDLAB supervisor ships `enabled=false` and `active=false`
+(fail-closed): applying the profile writes the unit files but does not enable or
+start the timer. Activation follows the same #827 (external-Slurm acceptance)
+and #896 (container-isolation) gates that release the OLDLAB pool itself. There
+is no committed OLDLAB supervisor for staging or production yet; those are a
+tracked follow-up.
+
 To temporarily exclude a node, remove it from both `worker-plan.csv` and
 `LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES`, or lower
 `LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS` below the node count. To disable the
