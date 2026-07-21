@@ -146,9 +146,10 @@ def build_installed_deep_preflight_composition(
 
     route = readonly.route
     parsed_route = urlsplit(route)
-    route_origin = f"{parsed_route.scheme}://{parsed_route.netloc}"
-    if not parsed_route.path or route_origin + parsed_route.path != route:
+    canonical_origin = f"{parsed_route.scheme}://{parsed_route.netloc}"
+    if parsed_route.path != "/dev" or canonical_origin + parsed_route.path != route:
         raise ValueError("installed staging route is not canonical")
+    route_origin = route
     smoke_authority = staging_smoke_authority(config)
     rehearsal_root = config.state_root / "rehearsals"
     rehearsal_runner = InstalledRehearsalStepRunner(

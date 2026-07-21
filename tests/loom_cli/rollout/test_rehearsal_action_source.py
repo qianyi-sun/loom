@@ -186,8 +186,17 @@ def test_source_binds_identity_actions_and_isolated_resources(tmp_path: Path) ->
     assert resources.namespace != "loom-staging"
     assert resources.database.startswith("loom_rehearsal_")
     assert resources.object_prefix.startswith("rehearsal/")
-    assert "/rehearsal/" in resources.route
+    suffix = resources.namespace.removeprefix("loom-rehearsal-")
+    assert resources.route == f"https://staging.example.test/dev/rehearsal/{suffix}"
     assert resources.systemd_unit.startswith("loom-preflight-")
+
+
+def test_resource_authority_rejects_route_without_staging_prefix() -> None:
+    with pytest.raises(ValueError, match="resource identity is invalid"):
+        RehearsalResources.derive(
+            "rehearsal-" + "a" * 24,
+            route_origin="https://staging.example.test",
+        )
 
 
 def test_source_rejects_isolation_identity_drift(tmp_path: Path) -> None:
