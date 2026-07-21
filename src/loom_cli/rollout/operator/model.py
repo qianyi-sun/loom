@@ -50,6 +50,8 @@ BackupPublicReason = Literal[
     "backup_object_limit_exceeded",
     "backup_secrets_failed",
     "backup_manifest_failed",
+    "backup_cleanup_failed",
+    "backup_retirement_failed",
 ]
 BACKUP_PUBLIC_REASONS: frozenset[str] = frozenset(get_args(BackupPublicReason))
 

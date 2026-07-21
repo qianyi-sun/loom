@@ -197,6 +197,8 @@ _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
     "object_inventory_binding_failed": "backup_manifest_failed",
     "object_inventory_write_failed": "backup_manifest_failed",
     "latest_publish_failed": "backup_manifest_failed",
+    "backup_cleanup_failed": "backup_cleanup_failed",
+    "backup_retirement_failed": "backup_retirement_failed",
 }
 
 

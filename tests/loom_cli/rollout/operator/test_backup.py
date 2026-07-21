@@ -3675,8 +3675,9 @@ def test_cleanup_incomplete_refuses_manifest_backed_or_latest_bundle(tmp_path: P
     manifest.write_bytes(b"{}")
     manifest.chmod(0o600)
 
-    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+    with pytest.raises(BackupError, match="backup_cleanup_failed") as manifest_error:
         manifest_creator.cleanup_incomplete("stg-20260713-abcdef12")
+    assert manifest_error.value.public_reason == "backup_cleanup_failed"
     assert manifest_bundle.exists()
 
     latest_creator, latest_bundle = _incomplete_bundle(tmp_path / "latest")
@@ -3694,12 +3695,13 @@ def test_retire_payload_requires_exact_manifest_and_refuses_latest(tmp_path: Pat
     manifest.chmod(0o600)
     digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
 
-    with pytest.raises(BackupError, match="backup_retirement_failed"):
+    with pytest.raises(BackupError, match="backup_retirement_failed") as digest_error:
         creator.retire_payload(
             "stg-20260713-abcdef12",
             bundle_name=bundle.name,
             expected_manifest_sha256="f" * 64,
         )
+    assert digest_error.value.public_reason == "backup_retirement_failed"
     assert bundle.exists()
 
     (bundle.parent / "latest").symlink_to(bundle.name)
