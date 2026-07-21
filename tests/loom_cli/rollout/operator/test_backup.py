@@ -15,7 +15,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
@@ -37,7 +37,10 @@ from loom_cli.rollout.operator.model import (
     CandidateBinding,
     RolloutRequest,
 )
-from loom_cli.rollout.operator.rollout_checkpoint import build_immutable_inventory
+from loom_cli.rollout.operator.rollout_checkpoint import (
+    ImmutableObjectInventory,
+    build_immutable_inventory,
+)
 
 FIXED_NOW = datetime(2026, 7, 13, 20, 0, tzinfo=UTC)
 POSTGRES_BYTES = b"pg\x00dump\xffbytes"
@@ -371,6 +374,92 @@ def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
     assert all("port-forward" not in argv for argv in runner.argvs)
     assert not any(argv[-2:] == ["-o", "json"] for argv in runner.argvs)
     assert runner.timeouts == [600.0, 30.0, 30.0, 30.0]
+
+
+def test_critical_checkpoint_surfaces_inventory_provider_failure_without_detail(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+
+    def inventory(_created_at: datetime) -> ImmutableObjectInventory:
+        raise RuntimeError("secret-bearing inventory provider detail")
+
+    with pytest.raises(BackupError) as exc_info:
+        BackupCreator(
+            config,
+            service_uid=os.getuid(),
+            runner=RecordingRunner(),
+            minio=FailingMinioMirror(),
+            now=lambda: FIXED_NOW,
+            object_inventory_provider=inventory,
+        ).create(make_request())
+
+    assert exc_info.value.code == "object_inventory_failed"
+    assert exc_info.value.public_reason == "backup_manifest_failed"
+    assert "secret-bearing" not in str(exc_info.value)
+
+
+def test_critical_checkpoint_surfaces_inventory_binding_failure(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    def inventory(created_at: datetime):
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-other-staging",
+            mutation_epoch=6,
+            schema_revision="0066",
+            created_at=created_at,
+            objects=[],
+        )
+
+    with pytest.raises(BackupError) as exc_info:
+        BackupCreator(
+            config,
+            service_uid=os.getuid(),
+            runner=RecordingRunner(),
+            minio=FailingMinioMirror(),
+            now=lambda: FIXED_NOW,
+            object_inventory_provider=inventory,
+        ).create(make_request())
+
+    assert exc_info.value.code == "object_inventory_binding_failed"
+    assert exc_info.value.public_reason == "backup_manifest_failed"
+
+
+def test_creator_surfaces_missing_service_account_as_precondition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_service_account(_username: str) -> None:
+        raise KeyError("missing")
+
+    monkeypatch.setattr(backup_module.pwd, "getpwnam", missing_service_account)
+
+    with pytest.raises(BackupError) as exc_info:
+        BackupCreator(make_config(tmp_path))
+
+    assert exc_info.value.code == "service_account_unavailable"
+    assert exc_info.value.public_reason == "backup_precondition_failed"
+
+
+def test_creator_rejects_preview_request_as_precondition_without_commands(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingRunner()
+    creator = BackupCreator(
+        make_config(tmp_path),
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=FailingMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError) as exc_info:
+        creator.create(replace(make_request(), status="preview"))
+
+    assert exc_info.value.code == "backup_request_not_pending"
+    assert exc_info.value.public_reason == "backup_precondition_failed"
+    assert runner.argvs == []
 
 
 def test_critical_checkpoint_defers_latest_until_explicit_activation(tmp_path: Path) -> None:
@@ -1291,7 +1380,7 @@ def test_revalidate_detects_component_mutation_without_running_commands(
     object_path.chmod(0o600)
     runner = RecordingRunner()
 
-    with pytest.raises(BackupError, match="backup_revalidation_failed"):
+    with pytest.raises(BackupError, match="backup_revalidation_failed") as exc_info:
         BackupCreator(
             config,
             service_uid=os.getuid(),
@@ -1300,6 +1389,7 @@ def test_revalidate_detects_component_mutation_without_running_commands(
             now=lambda: FIXED_NOW,
         ).revalidate(backup, enforce_freshness=False)
 
+    assert exc_info.value.public_reason == "backup_manifest_failed"
     assert runner.argvs == []
 
 
@@ -1320,7 +1410,7 @@ def test_revalidate_rejects_supplied_manifest_digest_mismatch_without_commands(
     )
     runner = RecordingRunner()
 
-    with pytest.raises(BackupError, match="backup_manifest_digest_mismatch"):
+    with pytest.raises(BackupError, match="backup_manifest_digest_mismatch") as exc_info:
         BackupCreator(
             config,
             service_uid=os.getuid(),
@@ -1329,6 +1419,7 @@ def test_revalidate_rejects_supplied_manifest_digest_mismatch_without_commands(
             now=lambda: FIXED_NOW,
         ).revalidate(mismatched, enforce_freshness=False)
 
+    assert exc_info.value.public_reason == "backup_manifest_failed"
     assert runner.argvs == []
 
 
@@ -3541,7 +3632,7 @@ def test_stage_reraises_specific_backup_error_unchanged() -> None:
 
 def test_all_stage_public_reasons_are_approved() -> None:
     for reason in backup_module._STAGE_PUBLIC_REASONS.values():
-        assert reason in backup_module._BACKUP_PUBLIC_REASONS
+        assert reason in backup_module.BACKUP_PUBLIC_REASONS
 
 
 def test_backup_public_reason_literal_matches_approved_event_tokens() -> None:

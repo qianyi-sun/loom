@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, BinaryIO, Literal, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import boto3
@@ -49,7 +49,12 @@ from .config import (
     APPROVED_BACKUP_MAX_OBJECTS,
     OperatorConfig,
 )
-from .model import APPROVED_BACKUP_EVENT_REASONS, PreflightRequest, RolloutRequest
+from .model import (
+    BACKUP_PUBLIC_REASONS,
+    BackupPublicReason,
+    PreflightRequest,
+    RolloutRequest,
+)
 from .rollout_checkpoint import ImmutableObjectInventory
 
 logger = logging.getLogger(__name__)
@@ -157,33 +162,19 @@ DeadlineWaiter = Callable[[threading.Event, float], bool]
 
 
 Clock = Callable[[], datetime]
-BackupPublicReason = Literal[
-    "backup_failed",
-    "backup_precondition_failed",
-    "backup_capacity_exhausted",
-    "backup_config_invalid",
-    "backup_postgres_failed",
-    "backup_minio_failed",
-    "backup_transport_failed",
-    "backup_object_limit_exceeded",
-    "backup_secrets_failed",
-    "backup_manifest_failed",
-]
-# Imported from the model so the accepted event tokens and the reasons raised
-# here share one definition and cannot drift.
-_BACKUP_PUBLIC_REASONS = APPROVED_BACKUP_EVENT_REASONS
 
 # Map each internal stage code to a durable, secret-safe public reason so an
 # operator can see *which* backup stage failed via `status`, instead of every
 # failure collapsing to a generic `backup_failed`. Codes absent here default to
 # `backup_failed` (the safe, non-committal fallback).
 _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
+    "backup_launch_failed": "backup_precondition_failed",
     "backup_request_not_pending": "backup_precondition_failed",
     "backup_clock_invalid": "backup_precondition_failed",
     "service_account_unavailable": "backup_precondition_failed",
     "backup_path_not_approved": "backup_precondition_failed",
     "backup_cleanup_request_invalid": "backup_precondition_failed",
-    "backup_revalidation_failed": "backup_manifest_failed",
+    "object_inventory_provider_unavailable": "backup_precondition_failed",
     "backup_capacity_unavailable": "backup_capacity_exhausted",
     "backup_root_create_failed": "backup_capacity_exhausted",
     "component_sync_failed": "backup_capacity_exhausted",
@@ -200,15 +191,21 @@ _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
     "manifest_hash_failed": "backup_manifest_failed",
     "manifest_publish_failed": "backup_manifest_failed",
     "backup_manifest_digest_mismatch": "backup_manifest_failed",
+    "backup_revalidation_failed": "backup_manifest_failed",
+    "backup_retirement_manifest_invalid": "backup_manifest_failed",
+    "object_inventory_failed": "backup_manifest_failed",
+    "object_inventory_binding_failed": "backup_manifest_failed",
+    "object_inventory_write_failed": "backup_manifest_failed",
+    "latest_publish_failed": "backup_manifest_failed",
 }
 
 
-def _public_reason_for_code(code: str) -> BackupPublicReason:
+def backup_public_reason_for_code(code: str) -> BackupPublicReason:
     return _STAGE_PUBLIC_REASONS.get(code, "backup_failed")
 
 
 def normalize_backup_public_reason(value: object) -> BackupPublicReason:
-    if isinstance(value, str) and value in _BACKUP_PUBLIC_REASONS:
+    if isinstance(value, str) and value in BACKUP_PUBLIC_REASONS:
         return cast(BackupPublicReason, value)
     return "backup_failed"
 
@@ -457,17 +454,14 @@ class BackupError(RuntimeError):
         *,
         public_reason: BackupPublicReason | None = None,
     ) -> None:
-        # Derive the durable, secret-safe operator reason from the stage code
-        # unless a caller pins one explicitly (object-limit, transport). This
-        # keeps the failing stage diagnosable through `status` for every raise
-        # site — staged or direct — instead of collapsing to `backup_failed`.
-        if public_reason is None:
-            public_reason = _public_reason_for_code(code)
-        if public_reason not in _BACKUP_PUBLIC_REASONS:
+        resolved_reason = (
+            backup_public_reason_for_code(code) if public_reason is None else public_reason
+        )
+        if resolved_reason not in BACKUP_PUBLIC_REASONS:
             raise ValueError("backup public reason is not approved")
         super().__init__(code)
         self.code = code
-        self.public_reason = public_reason
+        self.public_reason = resolved_reason
 
 
 class BackupPolicyLimitError(BackupError, ValueError):
@@ -2949,5 +2943,6 @@ __all__ = [
     "PortForwardHandle",
     "SubprocessBackupCommandRunner",
     "VerifiedBackup",
+    "backup_public_reason_for_code",
     "normalize_backup_public_reason",
 ]

@@ -244,9 +244,12 @@ class FakeSystemd:
         self.terminate_error: Exception | None = None
         self.on_terminate = None
         self.backup_starts: list[tuple[Path, str]] = []
+        self.backup_start_error: Exception | None = None
 
     def start_backup(self, job_path: Path, unit_name: str) -> None:
         self.backup_starts.append((job_path, unit_name))
+        if self.backup_start_error is not None:
+            raise self.backup_start_error
 
     def terminate(self, unit_name: str) -> None:
         if self.on_terminate is not None:
@@ -955,6 +958,31 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
     ]
     assert '"status":"backup_pending"' in deps.stdout.getvalue()
 
+    failed_store = RequestStore(tmp_path / "failed-staged-state")
+    deps.systemd.backup_start_error = RuntimeError("secret-bearing systemd detail")
+    failed_staged = replace(
+        staged,
+        store=failed_store,
+        new_request_id=lambda: "req-staged0002",
+        new_backup_job_id=lambda: "job-staged0002",
+        new_payload_id=lambda: "payload-staged02",
+    )
+
+    assert broker_main(["start"], dependencies=failed_staged) == 1
+    failed_event = failed_store.read_events("req-staged0002")[-1]
+    assert failed_event.event == "backup_failed"
+    assert failed_event.reason == "backup_precondition_failed"
+    failed_job = failed_store.read_preflight_backup_job_state("req-staged0002")
+    assert failed_job.phase.value == "backup_failed"
+    assert failed_job.failure_code == "backup_launch_failed"
+    failed_rotation = failed_store.read_backup_rotation()
+    assert failed_rotation.candidate is None
+    assert tuple(record.payload_id for record in failed_rotation.retirements) == (
+        "payload-staged02",
+    )
+    assert failed_rotation.retirements[0].reason == "failed"
+    assert failed_store.read_active() is None
+
 
 def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) -> None:
     deps = fakes(tmp_path, backup=FailingBackup([]))
@@ -966,6 +994,21 @@ def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) 
     # FailingBackup fails the postgres stage; the durable reason names it end to
     # end through the broker instead of collapsing to a generic backup_failed.
     assert deps.store.read_events(REQUEST_ID)[-1].reason == "backup_postgres_failed"
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    status = _last_json(deps.stdout)
+    assert status["stage"] == "backup_failed"
+    assert status["reason"] == "backup_postgres_failed"
+
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", REQUEST_ID],
+            dependencies=deps.dependencies,
+        )
+        == 0
+    )
+    cleaned = deps.store.read_events(REQUEST_ID)[-1]
+    assert cleaned.event == "backup_cleanup_done"
+    assert cleaned.reason == "backup_postgres_failed"
 
 
 def test_object_limit_failure_has_stable_public_reason_and_supported_cleanup(

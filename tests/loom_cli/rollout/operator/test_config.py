@@ -15,6 +15,7 @@ from loom_cli.rollout.operator.config import (
     OperatorConfig,
 )
 from loom_cli.rollout.operator.model import (
+    BACKUP_PUBLIC_REASONS,
     ActivePointer,
     AttemptIdentity,
     CallerIdentity,
@@ -537,6 +538,21 @@ def test_backup_event_reason_is_limited_to_public_tokens() -> None:
             status="failed",
             reason="secret-bearing arbitrary failure",
         )
+
+
+@pytest.mark.parametrize("reason", sorted(BACKUP_PUBLIC_REASONS))
+def test_backup_event_accepts_every_public_token_round_trip(reason: str) -> None:
+    event = RequestEvent(
+        request_id="stg-20260713-abcdef12",
+        event="backup_failed",
+        occurred_at="2026-07-13T20:00:00Z",
+        operator="hongjian",
+        operator_uid=2002,
+        status="failed",
+        reason=reason,
+    )
+
+    assert RequestEvent.from_dict(event.to_dict()) == event
 
 
 def test_driver_envelope_keeps_attempt_actor_out_of_immutable_inputs() -> None:

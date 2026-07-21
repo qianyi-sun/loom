@@ -28,6 +28,7 @@ from .backup import (
     BackupError,
     SubprocessBackupCommandRunner,
     VerifiedBackup,
+    backup_public_reason_for_code,
     normalize_backup_public_reason,
 )
 from .backup_job import PreflightBackupJobEnvelope, transition_backup_job
@@ -650,6 +651,7 @@ def _start_staged(
         try:
             dependencies.systemd.start_backup(job_path, unit_name)
         except Exception:
+            public_reason = backup_public_reason_for_code("backup_launch_failed")
             current_job = dependencies.store.read_preflight_backup_job_state(request.request_id)
             failed_job = transition_backup_job(
                 current_job,
@@ -678,7 +680,7 @@ def _start_staged(
                     now=lambda: created_at,
                     event="backup_failed",
                     status="failed",
-                    reason="backup_launch_failed",
+                    reason=public_reason,
                 )
             )
             raise

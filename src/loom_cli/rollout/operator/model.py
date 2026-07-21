@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 APPROVED_REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
 APPROVED_FETCH_REF = "refs/heads/dev"
@@ -39,6 +39,19 @@ RequestEventType = Literal[
     "cancelled",
 ]
 EventStatus = Literal["pending", "preview", "running", "done", "failed", "cancelled"]
+BackupPublicReason = Literal[
+    "backup_failed",
+    "backup_precondition_failed",
+    "backup_capacity_exhausted",
+    "backup_config_invalid",
+    "backup_postgres_failed",
+    "backup_minio_failed",
+    "backup_transport_failed",
+    "backup_object_limit_exceeded",
+    "backup_secrets_failed",
+    "backup_manifest_failed",
+]
+BACKUP_PUBLIC_REASONS: frozenset[str] = frozenset(get_args(BackupPublicReason))
 
 _SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
@@ -72,25 +85,6 @@ _REQUEST_EVENTS = frozenset(
     }
 )
 _EVENT_STATUSES = frozenset({"pending", "preview", "running", "done", "failed", "cancelled"})
-
-# Single source of truth for the durable, secret-safe public reason tokens
-# permitted on backup lifecycle events. The backup module imports this so the
-# per-stage reasons it raises and the tokens accepted here can never drift.
-APPROVED_BACKUP_EVENT_REASONS = frozenset(
-    {
-        "backup_failed",
-        "backup_precondition_failed",
-        "backup_capacity_exhausted",
-        "backup_config_invalid",
-        "backup_postgres_failed",
-        "backup_minio_failed",
-        "backup_transport_failed",
-        "backup_object_limit_exceeded",
-        "backup_secrets_failed",
-        "backup_manifest_failed",
-    }
-)
-
 
 def validate_safe_identifier(value: object, field_name: str) -> str:
     """Return a path-safe request/rollout identifier or fail closed."""
@@ -874,7 +868,7 @@ class RequestEvent:
                     "backup_cleanup_done",
                     "backup_cleanup_failed",
                 }
-                and reason not in APPROVED_BACKUP_EVENT_REASONS
+                and reason not in BACKUP_PUBLIC_REASONS
             ):
                 raise ValueError("backup event reason is not an approved public token")
         if (
