@@ -149,6 +149,7 @@ loom-staging-rollout status [REQUEST_ID]
 loom-staging-rollout logs REQUEST_ID [--follow]
 loom-staging-rollout resume REQUEST_ID
 loom-staging-rollout cancel REQUEST_ID --reason TEXT
+loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
 `--dry-run` is the only `start` option. It performs caller, installation,
@@ -160,6 +161,8 @@ option. `resume` accepts only an existing request ID. `status` and `logs`
 return redacted broker, systemd, and rollout state. `cancel` requires a
 non-empty bounded reason and records both the original initiator and cancelling
 operator.
+`cleanup-incomplete-backup` is an explicit, audited recovery command for one
+failed pre-launch request; it accepts no path or retention selector.
 
 The root-owned client invokes one fixed broker command as `loom-rollout`
 through a `NOSETENV` sudoers rule. The broker derives caller username and UID
@@ -207,8 +210,12 @@ The broker runs `loom cluster backup check` with the driver's required
 remaining freshness window and passes that exact immutable manifest path into
 the rollout. A failed or incomplete component backup removes no previous
 backup, never advances the active pointer, and prevents all rollout mutation.
-Retention cleanup is a separate bounded policy and never runs on the failure
-path.
+Retention cleanup remains a separate bounded policy and never runs
+automatically on the failure path. The explicit
+`cleanup-incomplete-backup REQUEST_ID` recovery runs only after the broker has
+recorded (or safely recovered) a pre-launch backup failure, while the launch
+mutex proves no concurrent broker publication. It refuses any manifest-backed
+or `latest`-selected root and retains the request ledger.
 
 ### Full-lifecycle singleton
 
@@ -297,6 +304,9 @@ Hongjian or Devansh
 - Active request: reject with redacted owner/status; do not queue.
 - Backup component or freshness failure: record request failure and leave the
   last valid backup untouched; do not start the rollout.
+- Broker power loss after `backup_started`: with no envelope, attempt, active
+  pointer, or unit, recover a generic backup failure under the launch mutex and
+  allow only the request-bound incomplete-backup cleanup command.
 - Credential missing, too permissive, or fingerprint-mismatched: fail before
   the first network mutation.
 - Broker/unit restart: reconcile the active pointer, unit, PID/boot ID, and

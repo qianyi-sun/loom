@@ -119,7 +119,7 @@ python_type = "HttpUrl"
 default     = "http://loom-llm-gateway:9100"
 
 [service_config.control_plane_url]
-used_by     = ["loom-service", "worker"]
+used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "HttpUrl"
 default     = "http://loom-control-plane:8080"
 
@@ -1003,12 +1003,8 @@ generate    = "openssl rand -hex 16"
 description = "Base64 AES-256 key for LocalEncryptedSecretStore (LOOM_SECRET_STORE_MASTER_KEY)."
 generate    = "python -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip(\"=\"))'"
 
-[infra_secrets.family-orchestrator-team-id]
-description = "Optional family-run orchestrator gateway team id (LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TEAM_ID). Rendered as an optional secretKeyRef and owned by schema-doctor; omitted from bootstrap-secrets so new clusters do not install placeholder gateway credentials."
-bootstrap   = false
-
 [infra_secrets.family-orchestrator-token]
-description = "Optional family-run orchestrator gateway token (LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN). Rendered as an optional secretKeyRef and owned by schema-doctor; omitted from bootstrap-secrets so new clusters do not install placeholder gateway credentials."
+description = "Optional dedicated family-run orchestrator token (LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN). It carries only family:evolve and is exchanged at the Control Plane for trial/team/provider-bound step JWTs; omitted from bootstrap-secrets so new clusters do not install placeholder credentials."
 bootstrap   = false
 
 # ─── render_config ───
@@ -1166,7 +1162,7 @@ fields      = { enabled = false }
 
 [render_config.gb10_pool]
 python_type = "table"
-description = "GB10 hosts managed by protected rollout step 11. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners; each host entry is an inline TOML table with ssh_target, repo_path, env_file_path, optional repo_url, and optional node_agent_service."
+description = "GB10 hosts managed by protected rollout steps 11-12. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners; each host entry is an inline TOML table with ssh_target, repo_path, env_file_path, optional repo_url, and optional node_agent_service. node_agent_service must be a simple .service basename; step 12 derives the matching .timer, requires Linger=yes, installs both candidate units, starts the oneshot, enables the timer, and verifies both units fail closed."
 fields      = { ssh_config = "", ssh_identity_file = "", ssh_certificate_file = "", hosts = [] }
 
 [render_config.trial_cache_registry_repo]

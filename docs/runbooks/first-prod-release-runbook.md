@@ -291,6 +291,44 @@ Any nonzero production pending count, active count, or capacity shortfall stops
 new staging claims and returns idle staging slots to production in the desired-state
 artifact.
 
+The manifest command remains the candidate-bound audit artifact. Runtime
+enforcement is owned by the prod-pressure worker controller: it reads queued,
+active, and capacity-shortfall counts from the private production Control
+Plane, then posts the sanitized signal to staging. The staging CP immediately
+marks matching GB10 registry rows `draining`, which makes `/trials/claim`
+return no work before the asynchronous node-agent/Compose stop converges.
+
+The durable deployment is the root-installed
+`loom-prod-pressure-worker-control.timer` from `deploy/worker-capacity/`; the
+command below is an operator-visible foreground equivalent for bounded
+validation, not the automatic production activation path.
+
+`LIVE PROD + STAGING AUTHORITY REQUIRED`
+
+```bash
+uv run python scripts/ops/prod_pressure_worker_control.py \
+  --prod-cp-url http://127.0.0.1:28081 \
+  --prod-admin-token file:/path/to/prod-admin-token \
+  --staging-cp-url http://127.0.0.1:18081 \
+  --staging-admin-token file:/path/to/staging-admin-token \
+  --staging-environment staging \
+  --pool-name gb10-arm64 \
+  --preemptible \
+  --grace-period-seconds 600 \
+  --watch-interval-seconds 30 \
+  --evidence-out "$ROLLOUT_DIR/prod-pressure-worker-control.json"
+```
+
+If the production pressure endpoint is unavailable, the controller fails
+closed by posting a synthetic capacity shortfall and draining staging. It does
+not stop non-preemptible busy hosts: their registry is claim-fenced while the
+Compose worker finishes in-flight work. A preemptible busy host is stopped only
+after the configured grace period; affected trials carry the explicit
+`prod_capacity_pressure` retry diagnostic, and the crash detector returns them
+to `queued` with retry backoff after the worker heartbeat expires. When
+pressure clears, the previous bounded host intents are restored; claims remain
+fenced until each node-agent confirms its active Compose worker again.
+
 `DRY-RUN SAFE`
 
 ```bash
@@ -417,13 +455,13 @@ For release evidence against canonical public routes:
 ```bash
 uv run python scripts/ops/frontend_route_smoke.py \
   --route production=https://yylx.world/prod=https://yylx.world/prod/api \
-  --route development=https://yylx.world/dev=https://yylx.world/dev/api \
+  --route staging=https://yylx.world/staging=https://yylx.world/staging/api \
   --json \
   > "$ROLLOUT_DIR/frontend-route-smoke.json"
 
 uv run python scripts/ops/frontend_security_headers.py \
   --route production=https://yylx.world/prod \
-  --route development=https://yylx.world/dev \
+  --route staging=https://yylx.world/staging \
   --json \
   > "$ROLLOUT_DIR/frontend-security-headers.json"
 ```
@@ -439,7 +477,7 @@ Treat `www.yylx.world` as a redirect-only alias, not a second release route.
 The cluster profiles bind it to the same TLS secret through
 `ingress_redirect_hosts` and ingress-nginx `from-to-www-redirect` handling.
 Frontend route smoke and release-gate evidence should continue to use only the
-canonical `https://yylx.world/prod` and `https://yylx.world/dev` routes.
+canonical `https://yylx.world/prod` and `https://yylx.world/staging` routes.
 
 Expected success output:
 
@@ -466,7 +504,7 @@ Expected failure output:
     {
       "status": "fail",
       "errors": [
-        "apiRouteBase must be https://yylx.world/dev/api",
+        "apiRouteBase must be https://yylx.world/staging/api",
         "runtime config response must be no-store"
       ]
     }
@@ -593,7 +631,7 @@ manifest = {
     "candidate_sha": candidate,
     "image_tag": image_tag,
     "prod_tag": os.environ["PROD_TAG"],
-    "staging_url": "https://yylx.world/dev",
+    "staging_url": "https://yylx.world/staging",
     "image_digests": {
         "loom-control-plane": digest("loom-control-plane", "1"),
         "loom-llm-gateway": digest("loom-llm-gateway", "2"),
@@ -620,16 +658,16 @@ manifest = {
             "url": "https://example.invalid/smoke",
             "batch_id": "batch-release-smoke",
             "trial_id": "trial-release-smoke",
-            "artifact_url": "https://yylx.world/dev/api/v1/trials/trial-release-smoke/atif",
+            "artifact_url": "https://yylx.world/staging/api/v1/trials/trial-release-smoke/atif",
             "service_no_oom_restarts_row": "final service.no_oom_restarts row after route probes passed",
         },
         "frontend_route_evidence": {
             "status": "pass",
             "url": "https://example.invalid/frontend-route-smoke",
             "production_route": "https://yylx.world/prod",
-            "development_route": "https://yylx.world/dev",
+            "staging_route": "https://yylx.world/staging",
             "production_api_base": "https://yylx.world/prod/api",
-            "development_api_base": "https://yylx.world/dev/api",
+            "staging_api_base": "https://yylx.world/staging/api",
         },
         "secret_redaction": {"status": "pass", "url": "https://example.invalid/redaction"},
         "provider_smoke": {
@@ -748,8 +786,8 @@ manifest = {
                 },
                 "staging": {
                     "environment": "staging",
-                    "route": "https://yylx.world/dev",
-                    "api_base": "https://yylx.world/dev/api",
+                    "route": "https://yylx.world/staging",
+                    "api_base": "https://yylx.world/staging/api",
                     "environment_label": "Staging",
                 },
             },
@@ -765,7 +803,7 @@ manifest = {
                 },
                 "staging": {
                     "environment": "staging",
-                    "api_url": "https://yylx.world/dev/api",
+                    "api_url": "https://yylx.world/staging/api",
                     "image": "ghcr.io/qianyi-sun/loom-worker:staging-abcdef0",
                     "image_digest": digest("loom-worker", "6"),
                     "source_commit": os.environ["STAGING_RELEASE_SHA"],
@@ -861,24 +899,15 @@ The workflow commands below are not part of the no-secret dry run. They are
 listed here so the release owner can run the same command shape with real
 evidence after the dry run passes.
 
-`main` accepts only this production release promotion from `dev`. Qianyi
-(`@qianyi-sun`) personally reviews the fixed candidate and evidence and
-performs the manual squash merge. Never enable auto-merge for the promotion
-PR. The repository-wide `allow_auto_merge` capability cannot encode a
-`main`-only prohibition, so the release operator enforces it.
+`main` accepts only this same-repository production release promotion from
+`dev`. The trusted base-branch controller enables squash auto-merge after the
+fixed candidate evidence is attached. The four current-head CI gates are the
+only merge authority; author and reviewer identities do not affect eligibility.
 
-First-promotion bootstrap: GitHub evaluates the target branch's CODEOWNERS.
-Current `main` still contains invalid legacy `@carinrc` owners, so the first
-promotion carrying `* @qianyi-sun` has only `main`'s generic one-approval rule
-plus Qianyi's manual process. Prefer a non-Qianyi identity or future restricted
-bot as PR author because GitHub users cannot approve their own pull request.
-After that promotion lands, Qianyi CODEOWNER approval protects subsequent
-promotions.
-
-The release manifest's `release_owner_approval` records Qianyi's acceptance of
-the fixed candidate/evidence package. GitHub PR review authorizes the `main`
-merge, while Production Environment approval releases deployment secrets.
-These are distinct controls and are not interchangeable.
+The release manifest's `release_owner_approval` records acceptance of the fixed
+candidate/evidence package, while Production Environment approval releases
+deployment secrets. These are distinct from CI merge authority and are not
+interchangeable.
 
 `LIVE PROD AUTHORITY REQUIRED` for tag pushes and production deploys.
 `release-promotion-gate.yml` runs in the `staging` GitHub Environment, but it
@@ -902,9 +931,9 @@ Created workflow_dispatch event for release-promotion-gate.yml at dev
 
 Prepare the release PR from `dev` to `main`; attach the release-gate run,
 frontend route evidence, worker-capacity evidence, raw-delivery/user-E2E
-status, HF mirror/token-boundary evidence, and rollback plan. Confirm
-auto-merge is disabled, then have Qianyi perform the manual squash merge after
-the evidence review. A squash merge creates a different commit identity, so
+status, HF mirror/token-boundary evidence, and rollback plan. Confirm the
+trusted controller enabled squash auto-merge, then wait for all protected
+current-head CI gates. A squash merge creates a different commit identity, so
 production compares the candidate and merged release Git tree object IDs.
 Equal trees prove that the promoted source content is exact and does not
 require candidate commit ancestry. After merge, tag the merged `main` commit
@@ -1037,9 +1066,9 @@ Expected success output:
 
 For a workflow-driven rollback, first restore the exact previous validated tree
 on `dev` through its normal CI-only auto-merge path. Then create a new release
-manifest/tag and promote that exact `dev` candidate through a Qianyi-reviewed,
-manually squash-merged `dev` -> `main` PR. Do not open a direct rollback branch
--> `main` PR. The production workflow rejects a previous tag ref and also
+manifest/tag and promote that exact `dev` candidate through a CI-gated,
+auto-merged `dev` -> `main` PR. Do not open a direct rollback branch -> `main`
+PR. The production workflow rejects a previous tag ref and also
 rejects a previous candidate while `main` still has the newer tree. After the
 rollback promotion lands:
 
@@ -1083,17 +1112,16 @@ Before declaring the first production release ready:
   `"new_staging_claims_allowed": false`, and no active lease unless the release
   owner approved a documented override.
 - Frontend route smoke proves `https://yylx.world/prod` resolves production
-  metadata/API base and `https://yylx.world/dev` resolves staging metadata/API
+  metadata/API base and `https://yylx.world/staging` resolves staging metadata/API
   base.
 - Staging smoke evidence includes the final `service.no_oom_restarts` row
   after route probes and security scanning, not only the pre-route baseline.
 - The production deploy uses `main` only; immutable `vX.Y.Z` tags are release
   records, not deployment workflow entry points.
-- The promotion source is `dev`; Qianyi (`@qianyi-sun`) reviewed the fixed
-  candidate/evidence and performed the manual squash merge. Auto-merge was
-  never enabled for the `main` PR.
-- `release_owner_approval`, GitHub PR review, and Production Environment
-  approval are recorded separately and were not treated as interchangeable.
+- The promotion source is `dev`; the trusted controller enabled squash
+  auto-merge and the four protected current-head CI gates passed.
+- `release_owner_approval` evidence and Production Environment approval are
+  recorded separately and were not treated as interchangeable with CI.
 - Rollback prep records previous image/tag, previous release-gate run, DB
   recovery point, object-storage recovery point, and redacted secret evidence.
 - No live prod/staging workload, DB change, worker cancellation, tag push,

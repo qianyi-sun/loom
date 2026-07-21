@@ -49,15 +49,23 @@ request fresh-fetches and pins the current merged `refs/heads/dev`; an operator
 cannot select a commit, ref, image tag, host subset, env file, credential,
 concurrency, or force flag.
 
+Before the driver may mutate a host unit, the deploy identity must report
+`Linger=yes` from `loginctl show-user`. Bootstrap this once through the host's
+normal user/admin path with `loginctl enable-linger "$USER"`; a missing linger
+grant fails rollout step 12 closed.
+
 The driver preserves this order for every active host:
 
 1. apply the candidate-owned environment-state profile;
 2. validate the exact desired image, env version, and source SHA;
 3. prepare the host checkout and generated private env;
 4. retire the legacy direct-worker service;
-5. start the node-agent with bounded host concurrency;
-6. require all 14 declared active-host reports and fresh linked worker registrations;
-7. pass environment-state, release-gate, and smoke.
+5. install the candidate's node-agent service and timer, start the oneshot once,
+   then enable and restart the periodic timer with bounded host concurrency;
+6. verify the installed unit bytes, linger grant, successful oneshot result,
+   and enabled/active/waiting timer;
+7. require all 14 declared active-host reports and fresh linked worker registrations;
+8. pass environment-state, release-gate, and smoke.
 
 Use only the public broker interface:
 
@@ -68,6 +76,7 @@ loom-staging-rollout status REQUEST_ID
 loom-staging-rollout logs REQUEST_ID
 loom-staging-rollout resume REQUEST_ID
 loom-staging-rollout cancel REQUEST_ID --reason "bounded operational reason"
+loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
 A disconnected terminal does not stop the service unit. Do not run a personal
@@ -77,6 +86,9 @@ or substitute an arbitrary commit. A code rollback is a merged revert on
 `dev`, followed by another broker request. A host-runtime failure is repaired
 at its root cause and then continued with `resume REQUEST_ID` against the same
 immutable envelope and SHA.
+The cleanup command is not a retention or arbitrary delete surface: it accepts
+only a failed pre-launch request and refuses manifest-backed or `latest`
+backups.
 
 ## SSH Trust
 
@@ -157,7 +169,12 @@ fetches the approved repository, checks out the candidate SHA, prepares the
 image, drains the old worker, and starts the target worker. Temporary Compose
 env files are private and remain outside the checkout. A missing registry image
 may trigger a candidate-bound local build; it may not fall back to a different
-tree.
+tree. The periodic active/no-drift path reuses a container whose runtime image
+already matches the desired tag, including a worker that exited normally after
+its idle window; it does not pull or rebuild that image on every timer tick.
+No-container or runtime-image drift still performs the candidate-bound
+pull/build before Compose reconciliation. `draining` and `stopped` intents
+never pull, build, or start the worker.
 
 The node-agent user service is `Type=oneshot`; successful convergence may end
 as `ActiveState=inactive` / `SubState=dead` with `Result=success`. Release
@@ -172,6 +189,12 @@ not `is-active` alone. Every active host must report:
 The legacy `loom-gb10-worker.service` direct Compose path must remain disabled
 during release-managed operation. It can otherwise race the node-agent and
 recreate a worker outside desired-state control.
+
+Do not run a second environment's node-agent identity against the same local
+tunnel ports and Compose root. In particular, a legacy production timer must
+remain stopped or use an isolated tunnel/runtime while the staging compatibility
+pool is active; restoring shared connectivity can otherwise make both desired
+states reconcile the same host concurrently.
 
 ## Current Validated State
 
@@ -193,6 +216,39 @@ the candidate-bound release gate before use.
 See `inventory-2026-06-25.txt` and `smoke-evidence-2026-06-25.json` for the
 non-secret historical evidence.
 
+## External autoscaler supervisor (systemd)
+
+Each environment's env-state profile carries an
+`external_slurm_autoscaler_supervisors` section. Every entry renders a
+`systemctl --user` service plus timer that periodically runs the repo
+entrypoint `scripts/ops/worker_pool_autoscaler_external_once.py` for one pool.
+`loom admin environment-state apply` writes the unit files under
+`~/.config/systemd/user`, and `check` reports drift when a unit is missing,
+points at a stale checkout, omits `--pool-name`, or is not enabled/active as
+declared.
+
+Each supervisor tunnels to the environment's Postgres on a reserved local port,
+so no two supervisors on one host collide. The `--db-local-port` scheme is:
+
+| pool   | development | staging | production |
+| ------ | ----------- | ------- | ---------- |
+| oldlab | 15447       | 15448   | 15449      |
+| gb10   | 15450       | 15451   | 15452      |
+
+Supporting layout, shared across environments:
+
+- Runner checkout and virtualenv: `/opt/loom-<environment>-runner/repo` and
+  `/opt/loom-<environment>-runner/venv`.
+- Kubeconfig: `/etc/loom/kubeconfig/<environment>.yaml`.
+- Health check: `systemctl --user is-active loom-autoscaler-gb10-<env>.timer`.
+
+The staging GB10 supervisor ships `enabled=true` and `active=true`: applying the
+staging profile installs, enables (for boot), and starts the timer. The
+development GB10 supervisor ships `enabled=false` and `active=false`
+(fail-closed): applying the profile writes the unit files but does not enable or
+start the timer, mirroring the pool's own `enabled=false` gate pending #827
+(external-Slurm acceptance) and #896 (container isolation).
+
 ## Storage Policy
 
 Use each GB10 node's local ext4 root disk for Docker data and worker hot paths.
@@ -210,6 +266,10 @@ worker registrations. Node 7 must remain `stopped`/`unreachable` and absent
 from rollout targets. Tunnel health, Docker reachability, source cleanliness,
 image/env identity, capacity, and worker heartbeat failures on any active host
 remain red; a runtime skip or partially healthy active fleet is not accepted.
+After rollout, close the operator SSH session, wait longer than one timer
+period, stop the worker on one active canary, and require the timer to restore
+the candidate image plus a fresh heartbeat within the next period. Recheck that
+node 7 has no fresh active worker.
 
 GB10 workers must not claim legacy tasks that lack `environment.cpu_arch`;
 Loom treats those requirements as `x86_64`. Only tasks explicitly marked

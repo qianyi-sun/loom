@@ -36,9 +36,34 @@ ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
     ("loom-egress-xds", "deploy/Dockerfile.egress-xds"),
 )
 
+_SERVICE_IMAGE = "loom-service"
+_REVISION_LABEL = "org.opencontainers.image.revision"
+
 
 def image_tag(image_name: str, ctx: RolloutContext) -> str:
     return f"{image_name}:{ctx.image_tag}"
+
+
+def _inspect_image(
+    image: str,
+    tag: str,
+    resolved_sha: str,
+) -> tuple[bool, str]:
+    command = ["docker", "inspect", "--type=image"]
+    if image == _SERVICE_IMAGE:
+        command.extend(
+            [
+                "--format",
+                f'{{{{ index .Config.Labels "{_REVISION_LABEL}" }}}}',
+            ],
+        )
+    command.append(tag)
+    result = run_captured(command)
+    if result.returncode != 0:
+        return False, "missing"
+    if image == _SERVICE_IMAGE and result.stdout.strip() != resolved_sha:
+        return False, "revision-mismatch"
+    return True, "match"
 
 
 class BuildImagesStep(BaseStep):
@@ -60,10 +85,8 @@ class BuildImagesStep(BaseStep):
         missing: list[str] = []
         for image, _ in ROLLOUT_IMAGES:
             tag = image_tag(image, ctx)
-            result = run_captured(
-                ["docker", "inspect", "--type=image", tag],
-            )
-            if result.returncode != 0:
+            matched, _reason = _inspect_image(image, tag, ctx.resolved_sha)
+            if not matched:
                 missing.append(tag)
         if not missing:
             return VerifyOutcome.MATCH
@@ -84,27 +107,38 @@ class BuildImagesStep(BaseStep):
         stderr_lines: list[str] = []
         for image, dockerfile in ROLLOUT_IMAGES:
             tag = image_tag(image, ctx)
-            # If the tag already exists (recovery from a partial prior
-            # run), skip re-building — the tests verify() step catches
-            # this at resume, but re-running with make-safe deltas here
-            # too keeps the step idempotent under partial recovery.
-            inspect = run_captured(
-                ["docker", "inspect", "--type=image", tag],
+            # If the tag already matches (recovery from a partial prior
+            # run), skip re-building. The service image additionally has
+            # to carry the exact full-SHA revision label; tag existence is
+            # not candidate identity.
+            matched, mismatch_reason = _inspect_image(
+                image,
+                tag,
+                ctx.resolved_sha,
             )
-            if inspect.returncode == 0:
+            if matched:
                 stdout_lines.append(f"# {tag} already present; skipping")
                 continue
+            if mismatch_reason == "revision-mismatch":
+                stdout_lines.append(
+                    f"# {tag} has a stale image revision; rebuilding",
+                )
 
+            build_command = [
+                "docker",
+                "build",
+                "-f",
+                dockerfile,
+                "-t",
+                tag,
+            ]
+            if image == _SERVICE_IMAGE:
+                build_command.extend(
+                    ["--build-arg", f"LOOM_BUILD_SHA={ctx.resolved_sha}"],
+                )
+            build_command.append(".")
             result = run_captured(
-                [
-                    "docker",
-                    "build",
-                    "-f",
-                    dockerfile,
-                    "-t",
-                    tag,
-                    ".",
-                ],
+                build_command,
                 cwd=worktree,
             )
             stdout_lines.append(f"# docker build {tag}\n{result.stdout}")

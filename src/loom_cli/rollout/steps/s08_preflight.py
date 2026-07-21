@@ -7,6 +7,7 @@ from pathlib import Path
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.steps.backup_limits import backup_traversal_limit_argv
 from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_argv,
     candidate_loom_cwd,
@@ -21,7 +22,7 @@ class PreflightStep(SubcommandStep):
     name = "preflight"
 
     def argv(self, ctx: RolloutContext, step_dir: StepDir) -> Sequence[str]:
-        return candidate_loom_argv(
+        argv = candidate_loom_argv(
             "cluster",
             "preflight",
             "--namespace",
@@ -31,6 +32,8 @@ class PreflightStep(SubcommandStep):
             "--backup-manifest",
             str(ctx.backup_manifest_path),
         )
+        argv.extend(backup_traversal_limit_argv(ctx))
+        return argv
 
     def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
         return candidate_loom_cwd(step_dir)

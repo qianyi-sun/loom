@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { components } from "../../api/schema";
 import TrialDetail from "../../pages/TrialDetail";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const TRIAL_ID = "11111111-1111-1111-1111-111111111111";
@@ -117,7 +118,7 @@ const TRIAL_DIAGNOSIS = {
 };
 
 function expectSessionDownloadCall(
-  fetchMock: ReturnType<typeof vi.fn> | ReturnType<typeof vi.spyOn>,
+  fetchMock: FetchMock,
   url: string,
 ): void {
   const call = fetchMock.mock.calls.find(([input]) => String(input) === url);
@@ -133,7 +134,7 @@ function fetchSpy(
     | { ok: true; body: unknown }
     | { ok: false; status: number; body: unknown },
   trialBody: typeof TRIAL_BODY = TRIAL_BODY,
-): ReturnType<typeof vi.spyOn> {
+): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {

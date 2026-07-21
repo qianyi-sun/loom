@@ -31,7 +31,7 @@ function renderPage(conn: unknown, initialPath = "/providers/abc") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[initialPath]}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[initialPath]}>
         <Routes>
           <Route path="/providers/:id" element={<ProviderDetail />} />
           <Route path="/providers" element={<div>providers-list</div>} />
@@ -51,7 +51,17 @@ describe("ProviderDetail", () => {
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: /prod-anthropic/i })).toBeInTheDocument();
     });
-    expect(screen.getByRole("tab", { name: /overview/i })).toHaveAttribute("aria-selected", "true");
+    const overviewTab = screen.getByRole("tab", { name: /overview/i });
+    expect(
+      screen.getByRole("tablist", { name: "Provider sections" }),
+    ).toContainElement(overviewTab);
+    expect(overviewTab).toHaveAttribute("aria-selected", "true");
+    expect(overviewTab).toHaveAttribute("tabindex", "0");
+    expect(
+      document.getElementById(
+        overviewTab.getAttribute("aria-controls") ?? "missing",
+      ),
+    ).toHaveAttribute("aria-labelledby", overviewTab.id);
   });
 
   it("explains readiness and allowed-model policy in plain language", async () => {
@@ -89,7 +99,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/providers/abc"]}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -118,7 +128,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/providers/abc?tab=models"]}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=models"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -151,7 +161,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/providers/abc?tab=models&returnTo=/batches/new"]}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=models&returnTo=/batches/new"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
             <Route path="/batches/new" element={<div>new-batch-page</div>} />
@@ -182,7 +192,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/providers/missing"]}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/missing"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -208,7 +218,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/providers/abc"]}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -242,7 +252,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/providers/abc"]}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>

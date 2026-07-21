@@ -83,6 +83,65 @@ async def test_reclaim_expired_workers_moves_trials_to_queued(postgres_url: str)
     await engine.dispose()
 
 
+async def test_reclaim_preserves_prod_pressure_retry_diagnostic(postgres_url: str):
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    team_id = uuid4()
+    worker_id = uuid4()
+    trial_id = uuid4()
+    task_id = f"prod-pressure-{trial_id.hex}"
+    message = (
+        "preemptible staging trial selected for worker drain after production "
+        "capacity pressure grace period elapsed; crash reclaim returns it to "
+        "queued with retry backoff"
+    )
+
+    async with session_factory() as s:
+        await s.execute(insert(Team).values(id=team_id, name=f"pp-{team_id}"))
+        await s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="h-pressure",
+                version="v",
+                capabilities=[],
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC) - timedelta(seconds=60),
+                status="active",
+            )
+        )
+        await s.execute(insert(Task).values(id=task_id, checksum="0" * 64, config={}))
+        await s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                team_id=team_id,
+                task_id=task_id,
+                config={},
+                requires_caps={},
+                state="claimed",
+                worker_id=worker_id,
+                claimed_at=datetime.now(UTC) - timedelta(seconds=60),
+                failure_reason="prod_capacity_pressure",
+                failure_message=message,
+            )
+        )
+        await s.commit()
+
+    async with session_factory() as s:
+        assert await reclaim_expired_workers(s, expiry_sec=15) == 1
+        await s.commit()
+
+    async with session_factory() as s:
+        row = await s.get(Trial, trial_id)
+        assert row is not None
+        assert row.state == "queued"
+        assert row.worker_id is None
+        assert row.failure_reason == "prod_capacity_pressure"
+        assert row.failure_message == message
+        assert row.next_attempt_at is not None
+
+    await engine.dispose()
+
+
 async def test_reclaim_leaves_fresh_workers_alone(postgres_url: str):
     """A worker with a recent heartbeat is NOT reclaimed."""
     engine = create_async_engine(postgres_url)

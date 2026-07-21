@@ -394,7 +394,7 @@ def test_status_lists_fresh_worker_without_node_report_as_unlinked(
             "worker_last_seen_at": body["unlinked_workers"][0]["worker_last_seen_at"],
             "worker_fresh": True,
             "worker_backend_names": ["docker"],
-            "worker_drain_state": "active",
+            "worker_drain_state": "drained",
             "max_concurrent": 10,
         }
     ]
@@ -567,6 +567,86 @@ def test_stopped_host_intent_forces_worker_drain_regardless_of_apply_result(
     )
     assert worker_state["drain_owner"] == "gb10-lifecycle"
     assert "desired_intent=stopped" in (worker_state["drain_reason"] or "")
+
+
+def test_desired_draining_intent_immediately_fences_all_hostname_registrations(
+    app,
+    postgres_url: str,
+) -> None:
+    """Desired intent is the claim gate even before a node report arrives."""
+    worker_ids = {
+        _seed_worker(postgres_url, hostname="trt-gb10-15")
+        for _ in range(2)
+    }
+    with TestClient(app) as client:
+        response = client.put(
+            "/admin/gb10-worker-pools/staging/gb10-arm64/desired-state",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={
+                "image_tag": "staging-6b76a48",
+                "max_concurrent": 10,
+                "env_config_version": "staging-6b76a48",
+                "host_intents": {"trt-gb10-15": "draining"},
+                "target_slots": 0,
+            },
+        )
+        assert response.status_code == 200, response.text
+
+    states = {_fetch_worker(postgres_url, worker_id)["drain_state"] for worker_id in worker_ids}
+    assert states == {"draining"}
+    assert {
+        _fetch_worker(postgres_url, worker_id)["drain_owner"] for worker_id in worker_ids
+    } == {"gb10-lifecycle"}
+
+
+def test_active_node_report_recovers_lifecycle_owned_draining_registration(
+    app,
+    postgres_url: str,
+) -> None:
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-15")
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+    with TestClient(app) as client:
+        drain = client.put(
+            "/admin/gb10-worker-pools/staging/gb10-arm64/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "staging-6b76a48",
+                "max_concurrent": 10,
+                "env_config_version": "staging-6b76a48",
+                "host_intents": {"trt-gb10-15": "draining"},
+            },
+        )
+        assert drain.status_code == 200, drain.text
+        recover = client.put(
+            "/admin/gb10-worker-pools/staging/gb10-arm64/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "staging-6b76a48",
+                "max_concurrent": 10,
+                "env_config_version": "staging-6b76a48",
+                "host_intents": {"trt-gb10-15": "active"},
+            },
+        )
+        assert recover.status_code == 200, recover.text
+        assert _fetch_worker(postgres_url, worker_id)["drain_state"] == "draining"
+
+        report = client.post(
+            "/admin/gb10-worker-pools/staging/gb10-arm64/nodes/trt-gb10-15/report",
+            headers=headers,
+            json={
+                "current_image_tag": "staging-6b76a48",
+                "current_max_concurrent": 10,
+                "current_env_config_version": "staging-6b76a48",
+                "current_intent": "active",
+                "apply_state": "applied",
+                "last_apply_result": "docker compose worker reconciled",
+            },
+        )
+        assert report.status_code == 200, report.text
+
+    recovered = _fetch_worker(postgres_url, worker_id)
+    assert recovered["drain_state"] == "active"
+    assert recovered["drain_owner"] is None
 
 
 def test_stopped_intent_reconciliation_ignores_hosts_with_no_worker_id(

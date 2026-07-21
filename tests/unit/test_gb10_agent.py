@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from loom_cli import gb10_agent
 from loom_cli.gb10_agent import (
     DesiredState,
@@ -434,16 +436,15 @@ def test_apply_restarts_missing_active_worker_when_release_metadata_is_current(
         "_report_node",
         lambda _args, **kwargs: reports.append(kwargs),
     )
-    running_checks = iter([False, True])
-
-    def _service_running(_compose_base, _service):  # type: ignore[no-untyped-def]
-        return next(running_checks)
-
+    monkeypatch.setattr(
+        gb10_agent,
+        "_compose_service_observation",
+        lambda *_args, **_kwargs: gb10_agent.ComposeServiceObservation(),
+    )
     monkeypatch.setattr(
         gb10_agent,
         "_compose_service_is_running",
-        _service_running,
-        raising=False,
+        lambda _compose_base, _service: True,
     )
     monkeypatch.setattr(
         gb10_agent,
@@ -514,9 +515,13 @@ def test_apply_fails_when_active_worker_never_reaches_running_after_up(
     )
     monkeypatch.setattr(
         gb10_agent,
+        "_compose_service_observation",
+        lambda *_args, **_kwargs: gb10_agent.ComposeServiceObservation(),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
         "_compose_service_is_running",
         lambda _compose_base, _service: False,
-        raising=False,
     )
     monkeypatch.setattr(gb10_agent.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
@@ -553,7 +558,102 @@ def test_apply_fails_when_active_worker_never_reaches_running_after_up(
     assert "did not reach running state" in str(reports[-1]["error_message"])
 
 
-def test_apply_reconciles_running_active_worker_when_release_metadata_is_current(
+@pytest.mark.parametrize(
+    ("observation", "expected_result"),
+    [
+        (
+            gb10_agent.ComposeServiceObservation(
+                running=True,
+                target_image_reusable=True,
+            ),
+            "docker compose worker reconciled",
+        ),
+        (
+            gb10_agent.ComposeServiceObservation(
+                running=False,
+                target_image_reusable=True,
+            ),
+            "docker compose worker started",
+        ),
+    ],
+)
+def test_apply_reuses_current_image_for_running_or_idle_exit_active_worker(
+    tmp_path: Path,
+    monkeypatch,
+    observation: gb10_agent.ComposeServiceObservation,
+    expected_result: str,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
+        "LOOM_GB10_CAPACITY_INTENT=active\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    commands: list[list[str]] = []
+    reports: list[dict[str, object]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_report_node",
+        lambda _args, **kwargs: reports.append(kwargs),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_compose_service_observation",
+        lambda *_args, **_kwargs: observation,
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_wait_for_compose_service_running",
+        lambda _compose_base, _service: None,
+    )
+
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            worker_token=None,
+            environment="production",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        )
+    )
+
+    assert rc == 0
+    assert [command[-2:] for command in commands] == [["-d", "worker"]]
+    assert reports[-1]["apply_state"] == "applied"
+    assert reports[-1]["last_apply_result"] == expected_result
+
+
+def test_apply_running_wrong_image_pulls_builds_and_recreates_worker(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -588,15 +688,19 @@ def test_apply_reconciles_running_active_worker_when_release_metadata_is_current
     )
     monkeypatch.setattr(
         gb10_agent,
-        "_compose_service_is_running",
-        lambda _compose_base, _service: True,
-        raising=False,
+        "_compose_service_observation",
+        lambda *_args, **_kwargs: gb10_agent.ComposeServiceObservation(
+            running=True,
+            target_image_reusable=False,
+        ),
     )
-    monkeypatch.setattr(
-        gb10_agent,
-        "_run",
-        lambda argv, *, dry_run: commands.append(list(argv)),
-    )
+
+    def _run(argv, *, dry_run):  # type: ignore[no-untyped-def]
+        commands.append(list(argv))
+        if argv[-2:] == ["pull", "worker"]:
+            raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(gb10_agent, "_run", _run)
     monkeypatch.setattr(
         gb10_agent,
         "_wait_for_compose_service_running",
@@ -625,13 +729,14 @@ def test_apply_reconciles_running_active_worker_when_release_metadata_is_current
     assert rc == 0
     assert [command[-2:] for command in commands] == [
         ["pull", "worker"],
+        ["build", "worker"],
         ["-d", "worker"],
     ]
     assert reports[-1]["apply_state"] == "applied"
     assert reports[-1]["last_apply_result"] == "docker compose worker reconciled"
 
 
-def test_compose_service_running_accepts_project_scoped_container_name(
+def test_compose_service_observation_accepts_project_scoped_container_name(
     monkeypatch,
 ) -> None:
     captured: dict[str, list[str]] = {}
@@ -642,17 +747,86 @@ def test_compose_service_running_accepts_project_scoped_container_name(
             returncode=0,
             stdout=(
                 '{"Name":"loom-worker-build-staging-worker-1",'
+                '"Image":"loom-worker:current-image",'
                 '"State":"running","Status":"Up 2 minutes"}\n'
             ),
         )
 
     monkeypatch.setattr(gb10_agent.subprocess, "run", _fake_run)
 
-    assert gb10_agent._compose_service_is_running(
+    observation = gb10_agent._compose_service_observation(
         ["docker", "compose", "--env-file", ".env"],
         "worker",
+        target_image_tag="current-image",
     )
-    assert captured["argv"][-4:] == ["ps", "--format", "json", "worker"]
+
+    assert observation.running is True
+    assert observation.target_image_reusable is True
+    assert captured["argv"][-5:] == ["ps", "--all", "--format", "json", "worker"]
+
+
+def test_compose_service_observation_is_tolerant_but_state_verification_fails_closed(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        gb10_agent.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="compose unavailable",
+        ),
+    )
+    compose_base = ["docker", "compose", "--env-file", ".env"]
+
+    observation = gb10_agent._compose_service_observation(
+        compose_base,
+        "worker",
+        target_image_tag="current-image",
+    )
+
+    assert observation.running is False
+    assert observation.target_image_reusable is False
+    with pytest.raises(RuntimeError, match="compose unavailable"):
+        gb10_agent._compose_service_is_running(compose_base, "worker")
+
+
+@pytest.mark.parametrize(
+    ("image", "exit_code", "expected_reusable"),
+    [
+        ("loom-worker:current-image", 0, True),
+        ("loom-worker:current-image", 1, False),
+        ("loom-worker:previous-image", 0, False),
+    ],
+)
+def test_compose_service_observation_reuses_only_idle_exit_target_image(
+    monkeypatch,
+    image: str,
+    exit_code: int,
+    expected_reusable: bool,
+) -> None:
+    def _fake_run(_argv, **_kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"Service":"worker",'
+                f'"Image":"{image}",'
+                '"State":"exited",'
+                f'"Status":"Exited ({exit_code}) 2 hours ago",'
+                f'"ExitCode":{exit_code}}}\n'
+            ),
+        )
+
+    monkeypatch.setattr(gb10_agent.subprocess, "run", _fake_run)
+
+    observation = gb10_agent._compose_service_observation(
+        ["docker", "compose", "--env-file", ".env"],
+        "worker",
+        target_image_tag="current-image",
+    )
+
+    assert observation.running is False
+    assert observation.target_image_reusable is expected_reusable
 
 
 def test_apply_updates_source_checkout_before_compose(
@@ -812,10 +986,11 @@ def test_apply_cleans_legacy_repo_temp_env_files(
     assert not temp_env_path.exists()
 
 
-def test_apply_stopped_intent_stops_without_restart(
+def test_apply_stopped_intent_stops_without_pull_or_restart(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    desired_intent = "stopped"
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
@@ -836,7 +1011,7 @@ def test_apply_stopped_intent_stops_without_restart(
         rollout_policy={"mode": "all"},
         env={},
         target_slots=0,
-        host_intents={"trt-gb10-1": "stopped"},
+        host_intents={"trt-gb10-1": desired_intent},
     )
     commands: list[list[str]] = []
     reports: list[dict[str, object]] = []
@@ -851,6 +1026,11 @@ def test_apply_stopped_intent_stops_without_restart(
         gb10_agent,
         "_run",
         lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_wait_for_compose_service_stopped",
+        lambda _compose_base, _service: None,
     )
 
     rc = gb10_agent._apply(
@@ -873,10 +1053,286 @@ def test_apply_stopped_intent_stops_without_restart(
 
     assert rc == 0
     assert [command[-2:] for command in commands] == [["600", "worker"]]
+    assert all("pull" not in command for command in commands)
+    assert all("build" not in command for command in commands)
     assert all("up" not in command for command in commands)
-    assert reports[-1]["apply_state"] == "stopped"
+    assert reports[-1]["apply_state"] == desired_intent
     rendered = env_file.read_text(encoding="utf-8")
-    assert "LOOM_GB10_CAPACITY_INTENT=stopped" in rendered
+    assert f"LOOM_GB10_CAPACITY_INTENT={desired_intent}" in rendered
+
+
+def test_apply_new_draining_intent_updates_env_without_stopping_compose(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
+        "LOOM_GB10_CAPACITY_INTENT=active\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="staging",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+        target_slots=0,
+        host_intents={"trt-gb10-1": "draining"},
+    )
+    commands: list[list[str]] = []
+    reports: list[dict[str, object]] = []
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_report_node",
+        lambda _args, **kwargs: reports.append(kwargs),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            worker_token=None,
+            environment="staging",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        ),
+    )
+
+    assert rc == 0
+    assert commands == []
+    assert "LOOM_GB10_CAPACITY_INTENT=draining" in env_file.read_text(
+        encoding="utf-8",
+    )
+    assert reports[-1]["apply_state"] == "draining"
+
+
+def test_apply_draining_env_does_not_stop_in_flight_worker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
+        "LOOM_GB10_CAPACITY_INTENT=draining\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="staging",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+        target_slots=0,
+        host_intents={"trt-gb10-1": "draining"},
+    )
+    commands: list[list[str]] = []
+    reports: list[dict[str, object]] = []
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_report_node",
+        lambda _args, **kwargs: reports.append(kwargs),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            worker_token=None,
+            environment="staging",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        ),
+    )
+
+    assert rc == 0
+    assert commands == []
+    assert reports[-1]["apply_state"] == "draining"
+    assert reports[-1]["last_apply_result"] == (
+        "new claims fenced; waiting for in-flight trials to drain"
+    )
+
+
+def test_apply_stopped_env_still_stops_running_container(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """#368 regression: env parity must not make container enforcement a no-op."""
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
+        "LOOM_GB10_CAPACITY_INTENT=stopped\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="staging",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+        target_slots=0,
+        host_intents={"trt-gb10-1": "stopped"},
+    )
+    commands: list[list[str]] = []
+    reports: list[dict[str, object]] = []
+    running_checks = iter([True, False])
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_report_node",
+        lambda _args, **kwargs: reports.append(kwargs),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_compose_service_is_running",
+        lambda _compose_base, _service: next(running_checks),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            worker_token=None,
+            environment="staging",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        ),
+    )
+
+    assert rc == 0
+    assert [command[-4:] for command in commands] == [
+        ["stop", "--timeout", "600", "worker"],
+    ]
+    assert reports[-1]["apply_state"] == "stopped"
+    assert reports[-1]["last_apply_result"] == "docker compose worker stopped after drain"
+
+
+def test_apply_stopped_env_fails_if_container_remains_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
+        "LOOM_GB10_CAPACITY_INTENT=stopped\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="staging",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+        host_intents={"trt-gb10-1": "stopped"},
+    )
+    reports: list[dict[str, object]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_report_node",
+        lambda _args, **kwargs: reports.append(kwargs),
+    )
+    monkeypatch.setattr(gb10_agent, "_run", lambda _argv, *, dry_run: None)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_compose_service_is_running",
+        lambda _compose_base, _service: True,
+    )
+    monkeypatch.setattr(gb10_agent.time, "sleep", lambda _seconds: None)
+
+    rc = gb10_agent._apply(
+        SimpleNamespace(
+            cp_url="http://cp:8080",
+            admin_token="env:LOOM_ADMIN_TOKEN",
+            worker_token=None,
+            environment="staging",
+            pool_name="gb10-arm64",
+            hostname="trt-gb10-1",
+            env_file=env_file,
+            compose_file=[compose_file],
+            service="worker",
+            drain_timeout_sec=600,
+            dry_run=False,
+            rollback=False,
+            force=False,
+            format="text",
+        ),
+    )
+
+    assert rc == 1
+    assert reports[-1]["apply_state"] == "failed"
+    assert "remained running" in str(reports[-1]["error_message"])
 
 
 def test_apply_failure_leaves_env_file_retryable(

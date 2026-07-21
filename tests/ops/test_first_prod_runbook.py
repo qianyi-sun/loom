@@ -40,6 +40,8 @@ def test_first_prod_runbook_has_executable_command_coverage() -> None:
         "scripts/ops/worker_capacity_manifest.py lease-staging",
         "scripts/ops/worker_capacity_manifest.py release-staging",
         "scripts/ops/worker_capacity_manifest.py drain-staging",
+        "scripts/ops/prod_pressure_worker_control.py",
+        "loom-prod-pressure-worker-control.timer",
         "scripts/ops/release_gate.py validate",
         "scripts/ops/frontend_route_smoke.py",
         "scripts/ops/operator_free_user_e2e_gate.py",
@@ -122,18 +124,15 @@ def test_first_prod_runbook_dispatches_production_from_main_only() -> None:
     assert "uses `main` or an immutable `vX.Y.Z` tag" not in text
 
 
-def test_first_prod_runbook_requires_qianyi_manual_promotion_and_bootstrap() -> None:
+def test_first_prod_runbook_requires_ci_auto_merge_and_separate_release_approval() -> None:
     text = _runbook_text()
     normalized = " ".join(text.split()).lower()
 
-    assert "@qianyi-sun" in normalized
-    assert "never enable auto-merge" in normalized
-    assert "manual squash" in normalized
-    assert "target branch's codeowners" in normalized
-    assert "@carinrc" in normalized
-    assert "generic one-approval" in normalized
-    assert "cannot approve their own pull request" in normalized
-    assert "non-qianyi identity" in normalized
+    assert "trusted base-branch controller" in normalized
+    assert "squash auto-merge" in normalized
+    assert "only merge authority" in normalized
+    assert "manual squash" not in normalized
+    assert "never enable auto-merge" not in normalized
     assert "release_owner_approval" in normalized
     assert "production environment approval" in normalized
     assert "not interchangeable" in normalized

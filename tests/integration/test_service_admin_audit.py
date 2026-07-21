@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, insert, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.admin_secret import AdminSecretVerifier
+from loom.db.schema import AdminAuditEvent
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -146,8 +148,7 @@ async def test_registration_review_writes_safe_audit_events(
             actor="qianyi",
         )
         rejected = await client.post(
-            "/api/v1/admin/team-registrations/"
-            f"{rejected_registration_id}/reject",
+            f"/api/v1/admin/team-registrations/{rejected_registration_id}/reject",
             headers=_admin_headers("hongjian"),
             json={"reason": "operator denied during audit test"},
         )
@@ -162,9 +163,11 @@ async def test_registration_review_writes_safe_audit_events(
     body = audit.json()
     assert body["next_cursor"] is None
     events = [
-        event for event in body["items"]
+        event
+        for event in body["items"]
         if event["target_type"] == "team_registration"
-        and event["target_id"] in {
+        and event["target_id"]
+        in {
             approved_registration_id,
             rejected_registration_id,
         }
@@ -184,9 +187,7 @@ async def test_registration_review_writes_safe_audit_events(
     assert approve_event["metadata"]["team_id"] == approved_body["team"]["id"]
     assert approve_event["metadata"]["team_name"] == "Audit Review Team"
     assert approve_event["metadata"]["invite_role"] == "member"
-    assert approve_event["metadata"]["invite_prefix"] == (
-        approved_body["invite"]["code_prefix"]
-    )
+    assert approve_event["metadata"]["invite_prefix"] == (approved_body["invite"]["code_prefix"])
     assert raw_invite_code not in json.dumps(approve_event)
 
     reject_event = by_action["team_registration.reject"]
@@ -303,10 +304,7 @@ async def test_admin_token_mutations_require_actor_and_write_audit(
     assert "X-Loom-Admin-Actor" in missing_actor.json()["detail"]
     assert revoked.status_code == 204, revoked.text
     assert audit.status_code == 200, audit.text
-    token_events = [
-        event for event in audit.json()["items"]
-        if event["target_type"] == "token"
-    ]
+    token_events = [event for event in audit.json()["items"] if event["target_type"] == "token"]
     assert [event["action"] for event in token_events] == [
         "token.revoke",
         "token.create",
@@ -361,56 +359,95 @@ async def test_admin_audit_endpoint_rejects_team_tokens(
     assert audit.status_code == 403, audit.text
 
 
-async def test_admin_audit_endpoint_pages_with_cursor(
+async def test_admin_audit_uuid_cursor_is_stable_and_rolling_compatible(
     audit_app: FastAPI,
+    postgres_url: str,
 ) -> None:
+    tied_at = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+    rows: list[dict[str, object]] = []
+    expected: list[tuple[UUID, datetime]] = []
+    for index in range(53):
+        event_id = UUID(int=50_000 + index)
+        created_at = tied_at if index < 27 else tied_at - timedelta(minutes=index - 26)
+        expected.append((event_id, created_at))
+        rows.append(
+            {
+                "id": event_id,
+                "created_at": created_at,
+                "actor": "cursor-test-admin",
+                "action": "cursor.test",
+                "target_type": "cursor_fixture",
+                "target_id": f"row-{index:02d}",
+                "request_id": f"request-{index:02d}",
+                "source_ip_hash": None,
+                "user_agent_hash": None,
+                "event_metadata": {"fixture_index": index},
+            }
+        )
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(AdminAuditEvent), rows)
+    sync_engine.dispose()
+
+    expected_ids = [
+        str(event_id)
+        for event_id, _created_at in sorted(
+            expected,
+            key=lambda item: (item[1], item[0].int),
+            reverse=True,
+        )
+    ]
     transport = httpx.ASGITransport(app=audit_app)
+    ids: list[str] = []
+    page_sizes: list[int] = []
+    cursors: list[str | None] = []
+    cursor: str | None = None
+    first_page_last_created_at: datetime | None = None
+    first_page_last_id: UUID | None = None
+
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://svc",
     ) as client:
-        first_registration_id = await _register_team(client, name="page-one")
-        second_registration_id = await _register_team(client, name="page-two")
-        team_id = await _create_internal_team(
-            client,
-            name="Pagination Audit Team",
-            actor="qianyi",
-        )
-        first_approval = await _approve_registration(
-            client,
-            first_registration_id,
-            team_id=team_id,
-            actor="qianyi",
-        )
-        second_approval = await _approve_registration(
-            client,
-            second_registration_id,
-            team_id=team_id,
-            actor="qianyi",
-        )
-        first_page = await client.get(
-            "/api/v1/admin/audit-events?limit=1",
-            headers=_admin_headers(),
-        )
-        next_cursor = first_page.json()["next_cursor"]
-        second_page = await client.get(
-            f"/api/v1/admin/audit-events?limit=1&cursor={next_cursor}",
-            headers=_admin_headers(),
-        )
-        third_cursor = second_page.json()["next_cursor"]
-        third_page = await client.get(
-            f"/api/v1/admin/audit-events?limit=1&cursor={third_cursor}",
+        while True:
+            params = {"limit": "17"}
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = await client.get(
+                "/api/v1/admin/audit-events",
+                params=params,
+                headers=_admin_headers(),
+            )
+            assert response.status_code == 200, response.text
+            body = response.json()
+            page_ids = [item["id"] for item in body["items"]]
+            ids.extend(page_ids)
+            page_sizes.append(len(page_ids))
+            cursors.append(body["next_cursor"])
+            if len(page_sizes) == 1:
+                first_page_last_id = UUID(page_ids[-1])
+                first_page_last_created_at = datetime.fromisoformat(body["items"][-1]["created_at"])
+            cursor = body["next_cursor"]
+            if cursor is None:
+                break
+            assert len(cursors) < 10
+            if cursor is not None:
+                UUID(cursor)
+
+        invalid = await client.get(
+            "/api/v1/admin/audit-events",
+            params={"cursor": "not-a-uuid-cursor"},
             headers=_admin_headers(),
         )
 
-    assert first_approval.status_code == 200, first_approval.text
-    assert second_approval.status_code == 200, second_approval.text
-    assert first_page.status_code == 200, first_page.text
-    assert second_page.status_code == 200, second_page.text
-    assert third_page.status_code == 200, third_page.text
-    assert len(first_page.json()["items"]) == 1
-    assert len(second_page.json()["items"]) == 1
-    assert len(third_page.json()["items"]) == 1
-    assert first_page.json()["items"][0]["id"] != second_page.json()["items"][0]["id"]
-    assert second_page.json()["items"][0]["id"] != third_page.json()["items"][0]["id"]
-    assert third_page.json()["next_cursor"] is None
+    assert page_sizes == [17, 17, 17, 2]
+    assert cursors[-1] is None
+    assert ids == expected_ids
+    assert len(ids) == 53
+    assert len(set(ids)) == 53
+    assert first_page_last_id is not None
+    assert first_page_last_created_at is not None
+    assert UUID(cursors[0] or "") == first_page_last_id
+    assert invalid.status_code == 400
+    assert "invalid cursor" in invalid.json()["detail"]

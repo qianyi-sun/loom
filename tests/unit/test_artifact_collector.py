@@ -108,3 +108,55 @@ async def test_empty_match_is_not_an_error(
     assert collection.prefix == "s3://artifacts/t/r/main/"
     assert collection.artifacts == []
     assert not [k for k in store.objects if k[1].startswith("t/r/main/")]
+
+
+async def test_task_globs_cannot_collect_reserved_verifier_namespace(
+    tmp_path: Path,
+    store: FakeObjectStore,
+) -> None:
+    normal = PurePosixPath("/workspace/result.txt")
+    trusted = PurePosixPath("/workspace/.loom/verifier/script.log")
+    planted = PurePosixPath("/workspace/.loom/verifier/agent-planted.txt")
+
+    def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        if "/workspace/.loom/verifier/script.log" in cmd:
+            stdout = f"{trusted}\0{planted}\0".encode()
+        else:
+            stdout = f"{normal}\0{trusted}\0{planted}\0".encode()
+        return ExecResult(
+            return_code=0,
+            stdout=stdout,
+            stderr=b"",
+            duration_sec=0.01,
+        )
+
+    driver = FakeDriver(exec_handler=handler)
+    await driver.start(options=StartOptions())
+    driver.filesystem[normal] = b"normal"
+    driver.filesystem[trusted] = b"trusted verifier log"
+    driver.filesystem[planted] = b"agent planted"
+    collector = ArtifactCollector(
+        store=store,
+        bucket="artifacts",
+        team_id="t",
+        trial_id="r",
+        step_name="main",
+        local_root=tmp_path / "art",
+    )
+
+    collection = await collector.collect(
+        env=driver,
+        patterns=["*", ".loom/*"],
+        platform_patterns=[
+            ".loom/verifier/*",
+            ".loom/verifier/script.log",
+        ],
+    )
+
+    assert {artifact.key for artifact in collection.artifacts} == {
+        "t/r/main/result.txt",
+        "t/r/main/.loom/verifier/script.log",
+    }
+    assert ("artifacts", "t/r/main/.loom/verifier/agent-planted.txt") not in (
+        store.objects
+    )

@@ -9,6 +9,7 @@ import {
   AgentModelPicker,
   type AgentModelValue,
 } from "../../components/AgentModelPicker";
+import type { FetchMock } from "../../test-utils/fetchMock";
 
 const INITIAL_VALUE: AgentModelValue = {
   agentName: "litellm",
@@ -17,7 +18,9 @@ const INITIAL_VALUE: AgentModelValue = {
   modelName: "",
 };
 
-function mockPickerEndpoints(): ReturnType<typeof vi.spyOn> {
+function mockPickerEndpoints(
+  modelSources: string[] = ["api", "local-server", "hf"],
+): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
@@ -43,7 +46,7 @@ function mockPickerEndpoints(): ReturnType<typeof vi.spyOn> {
               kind: "builtin",
               description: "Multi-provider tool-loop agent.",
               supported_providers: ["*"],
-              supported_model_sources: ["api"],
+              supported_model_sources: modelSources,
             },
             {
               name: "terminus-2",
@@ -130,7 +133,7 @@ function renderPicker(): void {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Harness />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -166,6 +169,38 @@ describe("AgentModelPicker copy", () => {
     expect(
       screen.getByText(/Use this for a model ID that exists on the selected provider/i),
     ).toBeInTheDocument();
+  });
+
+  it("uses linked keyboard-operable tabs for model sources", async () => {
+    const user = userEvent.setup();
+    renderPicker();
+
+    const list = await screen.findByRole("tablist", { name: "Model source" });
+    const providerTab = screen.getByRole("tab", { name: "Provider API" });
+    const localTab = screen.getByRole("tab", { name: "Local server" });
+    const providerPanel = document.getElementById(
+      providerTab.getAttribute("aria-controls") ?? "missing",
+    );
+    expect(list).toContainElement(providerTab);
+    expect(providerPanel).toHaveAttribute("aria-labelledby", providerTab.id);
+    expect(providerTab).toHaveAttribute("tabindex", "0");
+
+    providerTab.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(localTab).toHaveFocus();
+    expect(localTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute(
+      "aria-labelledby",
+      localTab.id,
+    );
+    expect(screen.getByText(/No local servers are configured/i)).toBeInTheDocument();
+
+    await user.keyboard("{End}");
+    expect(screen.getByRole("tab", { name: "HuggingFace" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByText("HuggingFace model id")).toBeInTheDocument();
   });
 
   it("warns before submit when a selected provider model failed preflight", async () => {

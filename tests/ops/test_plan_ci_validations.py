@@ -6,6 +6,87 @@ from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_every_non_draft_pr_runs_full_protected_gate() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action="synchronize",
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
+
+
+def test_merge_ready_label_has_no_special_authority() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels={"ci:merge-ready"},
+        event_name="pull_request",
+        pull_request_action="labeled",
+        pull_request_action_label="ci:merge-ready",
+    )
+
+    assert plan.event_relevant is False
+    assert plan.full_gate is False
+    assert plan.gate_mode == "filtered"
+
+
+def test_draft_pr_is_filtered() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action="synchronize",
+        pull_request_draft=True,
+    )
+
+    assert plan.event_relevant is False
+    assert plan.full_gate is False
+    assert plan.gate_mode == "filtered"
+
+
+def test_converting_to_draft_filters_gate_until_ready_again() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action="converted_to_draft",
+        pull_request_draft=True,
+    )
+
+    assert plan.event_relevant is False
+    assert plan.full_gate is False
+    assert plan.gate_mode == "filtered"
+
+
+@pytest.mark.parametrize(
+    ("action", "action_label", "base_changed"),
+    [
+        ("labeled", "triage", False),
+        ("unlabeled", "triage", False),
+        ("edited", "", False),
+    ],
+)
+def test_irrelevant_pr_metadata_event_is_filtered(
+    action: str,
+    action_label: str,
+    base_changed: bool,
+) -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_action_label=action_label,
+        pull_request_base_changed=base_changed,
+    )
+
+    assert plan.event_relevant is False
+    assert plan.gate_mode == "filtered"
+
+
 def test_docs_only_selects_no_heavy_validation() -> None:
     plan = plan_validations(
         changed_paths=["docs/user-guide.md", "CONTRIBUTING.md"],
@@ -161,6 +242,8 @@ def test_kind_cluster_rollout_contract_selects_cluster_and_staging(path: str) ->
         "web/package.json",
         "web/scripts/frontend-route-browser-smoke.mjs",
         "web/scripts/frontend-route-browser-smoke.test.mjs",
+        "web/scripts/staging-admin-browser-smoke.mjs",
+        "web/scripts/staging-admin-browser-smoke.test.mjs",
         "web/src/main.tsx",
     ],
 )
@@ -172,6 +255,29 @@ def test_frontend_route_contract_selects_staging_smoke(path: str) -> None:
     )
 
     assert plan.staging_smoke is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "web/src/App.tsx",
+        "web/src/api/schema.d.ts",
+        "web/e2e/routes.spec.ts",
+        "web/playwright.config.ts",
+        "deploy/Dockerfile.web",
+        "deploy/nginx-spa.conf",
+        "deploy/nginx-spa-security-headers.conf",
+        "deploy/web-runtime-config.sh",
+        ".github/workflows/ci.yml",
+        "config/component-ownership.toml",
+        "scripts/component_ownership.py",
+    ],
+)
+def test_frontend_quality_contract_selects_web_checks(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+
+    assert plan.web_checks is True
+    assert f"path:{path}" in plan.reasons["web_checks"]
 
 
 @pytest.mark.parametrize(
@@ -216,12 +322,19 @@ def test_planner_change_selects_every_heavy_gate() -> None:
         "deploy/worker-pools/gb10/known_hosts",
         "deploy/worker-pools/gb10/ssh_config",
         "scripts/ops/staging_rollout_host.py",
+        "scripts/ops/staging_rollout_shared_repo.py",
+        "scripts/ops/staging_rollout_shared_repo_consumer.py",
         "scripts/ops/verify_staging_rollout_secret_boundary.py",
         "src/loom_cli/rollout/operator/broker.py",
+        "src/loom_cli/rollout/steps/s04_gb10_prep.py",
+        "src/loom_cli/rollout/steps/s10_env_state.py",
         "tests/loom_cli/rollout/operator/test_broker.py",
+        "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
         "tests/loom_cli/test_cluster_render.py",
         "tests/loom_cli/test_environment_state.py",
         "tests/ops/test_staging_rollout_host.py",
+        "tests/ops/test_staging_rollout_shared_repo.py",
+        "tests/ops/test_staging_rollout_shared_repo_consumer.py",
     ],
 )
 def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> None:
@@ -326,3 +439,4 @@ def test_merge_group_selects_every_heavy_gate() -> None:
         "cluster_smoke",
         "staging_smoke",
     }
+    assert plan.web_checks is True

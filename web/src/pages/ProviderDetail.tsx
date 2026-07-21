@@ -19,6 +19,7 @@ import ProviderForm, {
 } from "../components/providers/ProviderForm";
 import RotateKeyModal from "../components/providers/RotateKeyModal";
 import { StatusPill } from "../components/StatusPill";
+import { Tabs, type TabItem } from "../components/Tabs";
 import {
   useDeleteConnection,
   useEditConnection,
@@ -35,6 +36,10 @@ import { providerSmokeBatchCommand } from "../lib/quickstartSnippets";
 type TabName = "overview" | "models" | "settings";
 type TestResult = { status: "valid" | "invalid"; last_validation_error?: string | null };
 const TAB_NAMES: TabName[] = ["overview", "models", "settings"];
+const TAB_ITEMS: readonly TabItem<TabName>[] = TAB_NAMES.map((value) => ({
+  value,
+  label: value.charAt(0).toUpperCase() + value.slice(1),
+}));
 
 function parseTab(raw: string | null): TabName {
   return TAB_NAMES.includes(raw as TabName) ? (raw as TabName) : "overview";
@@ -108,57 +113,51 @@ export default function ProviderDetail(): JSX.Element {
         <h1 className="text-2xl font-bold text-slate-900">{conn.name}</h1>
         <p className="text-sm text-slate-500">{conn.type}</p>
       </header>
-      <div role="tablist" className="flex gap-2 border-b border-slate-200">
-        {TAB_NAMES.map((t) => (
-          <button
-            key={t}
-            id={`provider-tab-${t}`}
-            role="tab"
-            aria-selected={tab === t}
-            aria-controls={`provider-panel-${t}`}
-            onClick={() => setTab(t)}
-            className={
-              tab === t
-                ? "border-b-2 border-accent px-3 py-2 text-sm font-medium text-accent"
-                : "px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
-            }
-          >
-            {t.charAt(0).toUpperCase() + t.slice(1)}
-          </button>
-        ))}
-      </div>
-      {tab === "overview" && (
-        <div id="provider-panel-overview" role="tabpanel" aria-labelledby="provider-tab-overview">
-          <OverviewTab conn={conn} id={id} />
-        </div>
-      )}
-      {tab === "models" && (
-        <div id="provider-panel-models" role="tabpanel" aria-labelledby="provider-tab-models">
-          {returnTo ? (
-            <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-sm text-indigo-800">
-              <Link
-                to={returnTo}
-                className="font-medium text-accent hover:text-accent-hover"
-              >
-                Back to New Batch
-              </Link>
-              <span className="ml-2 text-indigo-700">
-                after refreshing, preflighting, or adding the missing model.
-              </span>
-            </div>
-          ) : null}
-          <ModelsTab id={id} connectionName={conn.name} />
-        </div>
-      )}
-      {tab === "settings" && (
-        <div id="provider-panel-settings" role="tabpanel" aria-labelledby="provider-tab-settings">
-          <SettingsTab
-            conn={conn}
-            id={id}
-            onDeleted={() => navigate("/providers")}
-          />
-        </div>
-      )}
+      <Tabs
+        items={TAB_ITEMS}
+        value={tab}
+        onValueChange={setTab}
+        ariaLabel="Provider sections"
+        className="space-y-4"
+        tabListClassName="flex gap-2 border-b border-slate-200"
+        tabClassName={({ selected }) =>
+          selected
+            ? "border-b-2 border-accent px-3 py-2 text-sm font-medium text-accent"
+            : "px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
+        }
+        renderPanel={(activeTab) => {
+          if (activeTab === "overview") {
+            return <OverviewTab conn={conn} id={id} />;
+          }
+          if (activeTab === "models") {
+            return (
+              <>
+                {returnTo ? (
+                  <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-sm text-indigo-800">
+                    <Link
+                      to={returnTo}
+                      className="font-medium text-accent hover:text-accent-hover"
+                    >
+                      Back to New Batch
+                    </Link>
+                    <span className="ml-2 text-indigo-700">
+                      after refreshing, preflighting, or adding the missing model.
+                    </span>
+                  </div>
+                ) : null}
+                <ModelsTab id={id} connectionName={conn.name} />
+              </>
+            );
+          }
+          return (
+            <SettingsTab
+              conn={conn}
+              id={id}
+              onDeleted={() => navigate("/providers")}
+            />
+          );
+        }}
+      />
     </div>
   );
 }

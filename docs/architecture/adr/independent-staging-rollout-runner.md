@@ -43,6 +43,7 @@ loom-staging-rollout status [REQUEST_ID]
 loom-staging-rollout logs REQUEST_ID [--follow]
 loom-staging-rollout resume REQUEST_ID
 loom-staging-rollout cancel REQUEST_ID --reason TEXT
+loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
 The broker derives the caller from the authenticated sudo context and records
@@ -61,6 +62,16 @@ image tag, backup, config digest, and rollout ID even when `dev` has advanced.
 
 Rollback of code is a merged revert on `dev` followed by a new request. Direct
 deployment of an older SHA is not an operational rollback mechanism.
+
+Candidate-bound authenticated staging browser acceptance follows the same
+authority. Only a broker-owned rollout step may exchange the singleton admin
+bearer, and its sanitized report must bind the request/attempt envelope's
+resolved SHA to the build SHA read from the running service. Pull-request kind
+CI remains credential-free and non-protected; its `development` runtime may
+only prove that the staging-only exchange returns `404`. A kind artifact,
+manual invocation, ambient checkout, or unmerged ref is never candidate
+evidence. Until the broker-owned positive browser step completes, this
+acceptance row remains unmet.
 
 ### Service authority and secrets
 
@@ -94,6 +105,52 @@ write bits removed only after its full tree has passed service ownership,
 ordinary-file/directory type, and contained symlink validation; any other drift
 fails closed. Readiness revalidates that complete tree before running Git or
 loading candidate configuration.
+
+The private generated-worker-env directory is not self-bootstrapping: the
+candidate env-state step can derive a new release file only from an existing
+complete template. During an inactive, admission-closed install transaction,
+the installer therefore migrates the newest fixed-name legacy staging GB10 env
+into one service-owned mode-`0600` bootstrap file when the private directory has
+no template. It opens only a bounded, single-link regular source that is not
+group- or world-writable,
+validates UTF-8 dotenv structure and all required control-plane, Gateway,
+worker-token, and MinIO keys, and copies atomically without reporting values.
+Existing private templates are preserved. Install readiness fails when neither
+a safe private template nor a safe legacy bootstrap source exists. Runtime
+materialization likewise rejects symlinked, hard-linked, non-regular, oversized,
+or non-`0600` private env sources before reading them.
+
+Shared GB10 worker checkouts use a separate authority instead of the
+operator-owned `/shared_work/qianyi` root. During an inactive,
+admission-closed transaction, the installer creates
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750` and records the resolved owner and
+consumer UID/GID values. It does not add the service to `sharedwork` or grant
+write on the operator parent. Runtime checks prove the service can write/search
+the dedicated root and the `qianyi` Slurm submitter can read/search but not
+write it.
+
+Candidate checkout publication is a single-writer lifecycle. Step 11 accepts
+only the exact image-tagged direct child, verifies every authority path with
+no-follow metadata, and clones with `--no-hardlinks` inside an unpredictable
+private temp directory that inherited sharedwork/setgid from the authority
+root. It permits tracked git symlinks but rejects authority symlinks, foreign
+ownership, group/other write, hard-linked or special files, and a non-exact
+resolved HEAD. After permission normalization it uses a same-root atomic
+Linux `renameat2(RENAME_NOREPLACE)`. The candidate path is immutable: an
+existing exact checkout is reused only after full index/physical-tree
+validation, while any different HEAD, mode/content drift, or extra directory
+fails without replacement. Materialization cleans only the unchanged inode it
+created for its own temp container and never removes or takes over an ambient
+path.
+
+The broker preflight verifies the fixed 14 active GB10 nodes can consume the
+shared root as `qianyi` without writing it. After publication and before
+environment-state mutation, step 11 streams verifier bytes from the trusted
+candidate worktree over the protected SSH stdin path. It does not execute code
+from the checkout under verification. Exact HEAD/status/index/mode/readability
+and non-write checks must agree on all nodes; per-node NFS device/inode evidence
+is retained without cross-node equality assumptions.
 
 The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the
 safe resolved target of `/usr/bin/python3`, which must be Python 3.11 or newer
@@ -138,6 +195,15 @@ make secrets inaccessible to the already
 root-equivalent administrators; a stronger boundary would require a separate
 runner host and credential rotation.
 
+The directory ACL is also the migration boundary for legacy environment-state
+profiles. A pre-existing operator-owned mode-`0600` leaf is not made readable
+to the service account. Candidate materialization treats an unreadable legacy
+leaf as stale and atomically replaces it with a service-owned mode-`0600`
+candidate copy, rather than widening the old leaf ACL or consuming its bytes.
+The destination is inspected with no-follow metadata first: a symlink or any
+other non-regular entry fails closed before read, chmod, or replacement, so an
+external referent cannot become part of the materialization authority.
+
 ACL convergence is fail-closed. The installer computes the smallest explicit
 mask expansion needed by the service entry and compares the complete effective
 ACL before and after. Only the declared human operators may gain permissions
@@ -154,7 +220,42 @@ than claiming that `st_mode` is unchanged.
 
 A non-dry `start` creates and verifies a new immutable backup manifest before
 the rollout can mutate staging. It never relies on a mutable `latest` pointer.
-A failed backup keeps the prior valid backup and prevents unit launch.
+A failed backup keeps the prior valid backup and prevents unit launch. An
+aggregate-only live inventory on 2026-07-15 (no keys, credential values, or
+payloads emitted) measured 579,714 protected objects and
+12,517,813,079 bytes. The root-owned config therefore fixes the reviewed
+staging policy at 1,000,000 MinIO objects (1,000,004 files across the complete
+bundle) and 16,000,000 conservative entries, while the byte, inode, page, depth,
+elapsed-time, path-safety, free-capacity, and immutable-publication bounds
+remain independent and fail closed. Object exhaustion has the stable public
+reason `backup_object_limit_exceeded`.
+
+The MinIO transport is broker-owned and collision-free. Before `pg_dump`, the
+broker launches a localhost-only `kubectl port-forward` with an ephemeral local
+port (`:9000`), accepts the port only from the exact child readiness record,
+and keeps that child alive through the mirror. Cleanup targets and waits for
+only that child; unrelated long-running or concurrent port-forwards, including
+anything bound to the historical port `19000`, are never reused or terminated.
+No manifest, request envelope, attempt, or rollout unit may be published unless
+the transport was ready and its bounded cleanup was confirmed. Transport
+startup/cleanup failures use the redacted public token
+`backup_transport_failed` while the immutable manifest, capacity limits,
+secret redaction, and supported incomplete-backup cleanup contracts remain
+unchanged.
+
+The measured conservative entry charge is 6,420,179, maximum mirror depth is
+18, and maximum direct fanout is 6,530. At 80% utilization (800,000 objects or
+12,800,000 entries), the platform owner must repeat the aggregate shape review
+in a merged PR; runtime auto-growth is forbidden.
+
+`cleanup-incomplete-backup` is the only supported incomplete-backup removal
+path. It runs under the same admission/launch lock, accepts only a failed
+request before any envelope or attempt, selects exactly that request's
+timestamped root, and performs bounded no-follow validation before removal. A
+manifest, `latest`
+target, symlink, hard link, special file, ownership/mode drift, or traversal
+limit causes refusal. The command is idempotent and the request remains failed
+in the append-only audit ledger.
 
 The broker launch mutex atomically arbitrates request admission. One separate
 full-lifecycle lock covers the detached driver from pending through terminal
@@ -235,6 +336,12 @@ Qianyi's checkout and linger, and permits stale or unbounded candidate inputs.
 
 Rejected. Child rollout steps acquire that lease themselves. The parent needs
 a separate lifecycle lock.
+
+The child CLI surfaces nevertheless share one security contract:
+`src/loom_cli/rollout_lock_cli.py` owns their rollout-lock argument tracking,
+broker-envelope loading, real-file checks, and fixed evidence-path validation.
+`loom cluster up` and `loom admin environment-state` import those helpers so
+their protected-step admission rules cannot drift independently.
 
 ## Consequences
 

@@ -21,6 +21,9 @@ RequestEventType = Literal[
     "preview",
     "backup_started",
     "backup_failed",
+    "backup_cleanup_done",
+    "backup_cleanup_failed",
+    "backup_cleanup_started",
     "envelope_published",
     "launch_pending",
     "launch_failed",
@@ -50,6 +53,9 @@ _REQUEST_EVENTS = frozenset(
         "preview",
         "backup_started",
         "backup_failed",
+        "backup_cleanup_done",
+        "backup_cleanup_failed",
+        "backup_cleanup_started",
         "envelope_published",
         "launch_pending",
         "launch_failed",
@@ -63,6 +69,24 @@ _REQUEST_EVENTS = frozenset(
     }
 )
 _EVENT_STATUSES = frozenset({"pending", "preview", "running", "done", "failed", "cancelled"})
+
+# Single source of truth for the durable, secret-safe public reason tokens
+# permitted on backup lifecycle events. The backup module imports this so the
+# per-stage reasons it raises and the tokens accepted here can never drift.
+APPROVED_BACKUP_EVENT_REASONS = frozenset(
+    {
+        "backup_failed",
+        "backup_precondition_failed",
+        "backup_capacity_exhausted",
+        "backup_config_invalid",
+        "backup_postgres_failed",
+        "backup_minio_failed",
+        "backup_transport_failed",
+        "backup_object_limit_exceeded",
+        "backup_secrets_failed",
+        "backup_manifest_failed",
+    }
+)
 
 
 def validate_safe_identifier(value: object, field_name: str) -> str:
@@ -605,6 +629,17 @@ class RequestEvent:
             reason = _require_string(self.reason, "reason")
             if len(reason) > 500 or any(ord(char) < 32 and char not in "\t" for char in reason):
                 raise ValueError("reason must be at most 500 characters without control bytes")
+            if (
+                self.event
+                in {
+                    "backup_failed",
+                    "backup_cleanup_started",
+                    "backup_cleanup_done",
+                    "backup_cleanup_failed",
+                }
+                and reason not in APPROVED_BACKUP_EVENT_REASONS
+            ):
+                raise ValueError("backup event reason is not an approved public token")
         if (
             self.current_step is not None
             and len(_require_string(self.current_step, "current_step")) > 128

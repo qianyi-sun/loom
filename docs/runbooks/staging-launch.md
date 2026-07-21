@@ -75,12 +75,32 @@ Attach these to the release issue or release PR:
   public LLM Gateway, no public Control Plane, and no public object store.
 - For first prod, `python scripts/ops/frontend_route_smoke.py --route ...`
   output proving `https://yylx.world/prod` exposes production identity and
-  `https://yylx.world/prod/api`, while `https://yylx.world/dev` exposes
-  staging identity and `https://yylx.world/dev/api`, with
+  `https://yylx.world/prod/api`, while `https://yylx.world/staging` exposes
+  staging identity and `https://yylx.world/staging/api`, with
   no-store runtime config responses.
 - `www.yylx.world` must not become a second staging/prod surface. It is only a
   TLS-bound redirect host via `ingress_redirect_hosts = ["www.yylx.world"]`;
   smoke and release evidence should use the canonical bare-domain routes.
+- Sanitized `loom-staging-admin-browser-smoke.json` evidence bound to the exact
+  build SHA reported by the running service and `https://yylx.world/staging`,
+  to be produced only by a candidate-bound brokered protected-staging rollout
+  after the logged-out route smoke. Until that broker step exists and succeeds,
+  this evidence item remains unmet. The ephemeral kind workflow remains
+  `runtime_environment = "development"` and only proves that this exchange is
+  hidden with a credential-free `404`; it must never pose as protected staging.
+  Archive the report with the broker request ID, attempt, resolved merged `dev`
+  SHA, and matching running-service build SHA; a PR artifact or manual command
+  is not candidate evidence. The rollout evidence must show the correlated
+  browser request ID and safe audit event, successful product APIs and visible
+  state for all six Admin Access tabs,
+  including Arrow/Home/End roving focus and exact ARIA tab-to-panel
+  relationships, Audit log, Rate cards, logout/revocation, and final
+  `/api/v1/auth/me` `401`. The brokered rollout may source the ephemeral
+  singleton admin bearer only through an owner-only (`0600`) file or
+  non-interactive stdin; it must upload no trace, screenshot, storage state,
+  cookie, or raw secret.
+  This staging-only admin evidence does not replace normal-user onboarding,
+  team-boundary, or submission evidence.
 - For first prod, the release-promotion manifest's `prod_staging_isolation` check
   must embed structured dry-run evidence for state profiles, object storage
   buckets/prefix policy, safe token/provider refs, frontend API bases, worker
@@ -195,6 +215,11 @@ Attach these to the release issue or release PR:
   produce `prod_pressure.cause=prod_capacity_pressure`,
   `new_staging_claims_allowed=false`, idle staging slots returned to prod, and running
   staging slots reported as draining rather than as staging rollout failure.
+  Runtime evidence must also include
+  `scripts/ops/prod_pressure_worker_control.py`: the production CP pressure
+  snapshot is consumed by staging desired state and `Worker.drain_state`, so a
+  fresh claim attempt is fenced before node-agent shutdown convergence. A
+  manifest-only status preview is not worker-control evidence.
 - `scripts/staging_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data. The report
   must include the final service restart/OOM row by passing `--k8s-namespace`;
@@ -572,6 +597,30 @@ failed autoscaler service results such as `status=203/EXEC`, and the active
 `gb10-arm64`/`oldlab` pool shapes; the node-agent check catches stale
 host-local checkouts, local-build fallback using an old tree, and env files
 that did not apply even when the pool still has healthy heartbeats.
+The installed runner's private generated directory must already contain a
+service-owned mode-`0600` GB10 env template. The host installer bootstraps that
+template once from a validated fixed legacy source when the directory is empty;
+the rollout step never falls back to an arbitrary path. A missing template or
+any symlink, hard link, wrong mode, oversized file, malformed dotenv entry, or
+missing required endpoint/credential key fails before environment-state apply.
+The same installer creates the external-runner checkout authority at
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750`, without granting the service write
+access to `/shared_work/qianyi`. Runtime readiness proves that `loom-rollout`
+can write/search the dedicated root and that the `qianyi` Slurm submitter can
+read/search but not write it. Step 11 publishes only the exact image-tagged
+direct child through a private setgid temp container and same-root rename;
+authority symlinks, wrong owner/group/mode, hardlinks, special files, or a
+non-exact resolved SHA fail closed. Publication is no-replace and immutable:
+an exact existing target is accepted only after full index/physical-tree
+validation, and drift is never replaced or implicitly cleaned during rollout
+or resume. Broker preflight verifies the fixed 14 active nodes can read/search
+but not write the root. After publish and before environment-state apply, step
+11 streams trusted verifier bytes over protected SSH stdin (never from the
+target) and requires all 14 nodes to agree on exact HEAD, clean status,
+index/modes, deterministic tracked-file readability, and content identity.
+Per-node NFS device/inode values are evidence only, not cross-node equality
+constraints.
 The external Slurm autoscaler also treats release-state drift as a fail-closed
 decision. This includes a pending/running job whose node is no longer in the
 policy's `allowed_nodes`; such jobs are neither healthy warm capacity nor part
@@ -616,6 +665,17 @@ the committed desired-state inputs and applied by a new merged broker rollout;
 do not run per-host `gb10-agent apply` as a staging-launch shortcut. The worker
 token is read from the protected service source and is never stored in Control
 Plane desired state or operator argv.
+
+Rollout step 12 also proves the boot-time recovery chain rather than only one
+successful apply: the deploy user must have `Linger=yes`, the candidate
+node-agent service and timer must match the installed units, and the timer must
+be enabled and active/waiting. After the rollout session disconnects, wait more
+than one timer period, stop one declared-active canary worker, and require the
+same candidate image and a fresh linked heartbeat to return within the next
+period. A stopped/excluded host, including the current node 7 exception, must
+not return. Do not leave a legacy production node-agent timer sharing the
+staging tunnel ports or Compose root; fence or isolate it before connectivity
+is restored.
 
 For OLDLAB 1-5, use the committed staged files in
 `deploy/worker-pools/oldlab/` as the source of truth for included nodes,

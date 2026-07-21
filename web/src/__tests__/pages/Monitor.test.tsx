@@ -2,6 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Monitor from "../../pages/Monitor";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const monitorSummaryPayload = {
@@ -117,7 +118,7 @@ const monitorSummaryPayload = {
   },
 };
 
-function mockMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
+function mockMonitorEndpoints(): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
@@ -183,7 +184,7 @@ function mockMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
     });
 }
 
-function mockFilteredMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
+function mockFilteredMonitorEndpoints(): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
@@ -271,7 +272,7 @@ function mockFilteredMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
     });
 }
 
-function mockFailureMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
+function mockFailureMonitorEndpoints(): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {

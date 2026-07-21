@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SubmitTrialModal } from "../../components/SubmitTrialModal";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const AGENTS_RESPONSE = {
@@ -64,9 +65,9 @@ const PROVIDER_CONNECTIONS_RESPONSE = {
   ],
 };
 
-function mockEndpoints(): ReturnType<typeof vi.spyOn> {
+function mockEndpoints(): FetchMock {
   return vi
-    .spyOn(global, "fetch")
+    .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
       if (url.includes("/api/v1/agents")) {
@@ -117,7 +118,7 @@ function mockEndpoints(): ReturnType<typeof vi.spyOn> {
 }
 
 function trialSubmitCall(
-  spy: ReturnType<typeof vi.spyOn>,
+  spy: FetchMock,
 ): { url: string; body: unknown } | null {
   const found = spy.mock.calls.find(([u]) =>
     String(u).includes("/api/v1/trials"),

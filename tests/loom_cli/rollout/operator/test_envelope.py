@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 
 from loom_cli.__main__ import main
-from loom_cli.cluster_backup_guard import write_backup_manifest
+from loom_cli.cluster_backup_guard import BackupTraversalLimits, write_backup_manifest
+from loom_cli.rollout.operator import envelope as envelope_module
+from loom_cli.rollout.operator.backup_limits import operator_backup_traversal_limits
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.envelope import EnvelopeValidationError, load_validated_envelope
 from loom_cli.rollout.operator.model import (
@@ -180,6 +182,44 @@ def test_load_validated_envelope_accepts_exact_private_binding(tmp_path: Path) -
     loaded = load_validated_envelope(path, config, effective_uid=os.geteuid())
 
     assert loaded == envelope
+
+
+def test_operator_backup_limits_follow_reviewed_config(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    limits = operator_backup_traversal_limits(config)
+
+    assert limits.max_files == config.backup_max_objects + 4
+    assert limits.max_entries == config.backup_max_entries
+    assert limits.max_total_bytes == 16 * 1024**4
+
+
+def test_envelope_revalidation_uses_operator_backup_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    envelope = _envelope(config)
+    path = _publish(config, envelope)
+    captured: list[BackupTraversalLimits] = []
+    original = envelope_module.validate_backup_manifest
+
+    def validating_with_capture(*args: object, **kwargs: object) -> list[str]:
+        limits = kwargs.get("limits")
+        assert isinstance(limits, BackupTraversalLimits)
+        captured.append(limits)
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        envelope_module,
+        "validate_backup_manifest",
+        validating_with_capture,
+    )
+
+    loaded = load_validated_envelope(path, config, effective_uid=os.geteuid())
+
+    assert loaded == envelope
+    assert captured == [operator_backup_traversal_limits(config)]
 
 
 @pytest.mark.parametrize("mode", [0o640, 0o660, 0o644])
@@ -1198,6 +1238,17 @@ def test_envelope_mode_constructs_context_without_git_or_evidence_discovery(
     assert ctx.attempt_operator == "hongjian"
     assert ctx.attempt_uid == 2002
     assert ctx.request_envelope_path == path
+    limits = operator_backup_traversal_limits(config)
+    assert ctx.backup_traversal_limits() == (
+        limits.max_files,
+        limits.max_entries,
+        limits.max_total_bytes,
+    )
+    assert ctx.to_inputs_dict()["backup_manifest_traversal_limits"] == {
+        "max_files": limits.max_files,
+        "max_entries": limits.max_entries,
+        "max_total_bytes": limits.max_total_bytes,
+    }
     assert captured["evidence"].rollout_id == envelope.rollout_id
 
 

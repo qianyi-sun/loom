@@ -64,13 +64,13 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
     assert build["permissions"] == {"contents": "read"}
     assert _normalized_expression(build["if"]) == (
         "github.event_name != 'push' && "
+        "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]'"
     )
     assert _checkout_steps(build)
     assert all(
-        step.get("with", {}).get("persist-credentials") is False
-        for step in _checkout_steps(build)
+        step.get("with", {}).get("persist-credentials") is False for step in _checkout_steps(build)
     )
 
     script = "\n".join(_run_blocks(build))
@@ -99,6 +99,7 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     assert _normalized_expression(publish["if"]) == (
         "github.event_name == 'push' && "
         "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]'"
     )
@@ -129,12 +130,8 @@ def test_images_manual_dispatch_is_build_only() -> None:
     publish = workflow["jobs"]["publish"]
 
     assert "workflow_dispatch" in on_config
-    assert _normalized_expression(build["if"]).startswith(
-        "github.event_name != 'push' &&"
-    )
-    assert _normalized_expression(publish["if"]).startswith(
-        "github.event_name == 'push' &&"
-    )
+    assert _normalized_expression(build["if"]).startswith("github.event_name != 'push' &&")
+    assert _normalized_expression(publish["if"]).startswith("github.event_name == 'push' &&")
 
 
 def test_images_permissions_are_an_exact_job_allowlist() -> None:
@@ -223,6 +220,36 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
         )
 
 
+def test_staging_kind_smoke_never_receives_admin_browser_credentials() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    smoke = workflow["jobs"]["smoke"]
+    bootstrap = _named_step(smoke, "Bootstrap namespace + Secrets")["run"]
+    deny_probe = _named_step(
+        smoke,
+        "Verify staging admin exchange stays hidden in kind",
+    )["run"]
+    step_names = [step.get("name") for step in smoke["steps"]]
+
+    assert 'ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"' in bootstrap
+    assert 'echo "::add-mask::${ADMIN_TOKEN}"' in bootstrap
+    assert "umask 077" in bootstrap
+    assert "trap cleanup_bootstrap_secret EXIT" in bootstrap
+    assert 'rm -f "$admin_toml"' in bootstrap
+    assert "GITHUB_ENV" not in bootstrap
+    assert "/tmp/loom-staging-admin-token" not in bootstrap
+    assert "--request POST" in deny_probe
+    assert "--data-binary '{'" in deny_probe
+    assert "Authorization:" not in deny_probe
+    assert "Bearer" not in deny_probe
+    assert "ADMIN_TOKEN" not in deny_probe
+    assert "--admin-token-source" not in deny_probe
+    assert "${{ secrets." not in str(smoke)
+    assert "Verify authenticated staging admin browser surfaces" not in step_names
+    assert "Upload sanitized staging admin browser report" not in step_names
+    assert "Cleanup staging admin browser secret files" not in step_names
+    assert "loom-staging-admin-browser-smoke.json" not in str(smoke)
+
+
 @pytest.mark.parametrize(
     ("event_name", "image_tag"),
     [
@@ -278,33 +305,60 @@ def test_untrusted_workflow_shell_receives_context_only_through_env(
 
 
 @pytest.mark.parametrize(
-    ("job_name", "field", "payload"),
+    ("job_name", "field", "payload", "error_marker"),
     [
-        ("build", "IMAGE_NAME", "worker$(id)"),
-        ("build", "DOCKERFILE", "../deploy/Dockerfile.worker"),
-        ("build", "EVENT_NAME", "pull_request\npush"),
-        ("build", "REF_NAME", "dev; id"),
-        ("build", "PR_NUMBER", "--help"),
-        ("build", "HEAD_SHA", "abc`id`"),
-        ("publish", "IMAGE_NAME", "worker; id"),
-        ("publish", "DOCKERFILE", "deploy/Dockerfile.worker\n--push"),
-        ("publish", "EVENT_NAME", "push$(id)"),
-        ("publish", "REF_NAME", "dev/../../main"),
-        ("publish", "REPOSITORY_OWNER", "owner`id`"),
-        ("publish", "GHCR_ACTOR", "--password-stdin"),
-        ("publish", "HEAD_SHA", "deadbeef$(id)"),
+        ("build", "IMAGE_NAME", "worker$(id)", "component ownership validation failed:"),
+        (
+            "build",
+            "IMAGE_DIGEST_NAME",
+            "loom-worker; id",
+            "component ownership validation failed:",
+        ),
+        (
+            "build",
+            "DOCKERFILE",
+            "../deploy/Dockerfile.worker",
+            "component ownership validation failed:",
+        ),
+        ("build", "BUILD_CONTEXT", "..", "component ownership validation failed:"),
+        ("build", "EVENT_NAME", "pull_request\npush", "FAIL:"),
+        ("build", "REF_NAME", "dev; id", "FAIL:"),
+        ("build", "PR_NUMBER", "--help", "FAIL:"),
+        ("build", "HEAD_SHA", "abc`id`", "FAIL:"),
+        ("publish", "IMAGE_NAME", "worker; id", "component ownership validation failed:"),
+        (
+            "publish",
+            "IMAGE_DIGEST_NAME",
+            "loom-worker$(id)",
+            "component ownership validation failed:",
+        ),
+        (
+            "publish",
+            "DOCKERFILE",
+            "deploy/Dockerfile.worker\n--push",
+            "component ownership validation failed:",
+        ),
+        ("publish", "BUILD_CONTEXT", "../.", "component ownership validation failed:"),
+        ("publish", "EVENT_NAME", "push$(id)", "FAIL:"),
+        ("publish", "REF_NAME", "dev/../../main", "FAIL:"),
+        ("publish", "REPOSITORY_OWNER", "owner`id`", "FAIL:"),
+        ("publish", "GHCR_ACTOR", "--password-stdin", "FAIL:"),
+        ("publish", "HEAD_SHA", "deadbeef$(id)", "FAIL:"),
     ],
 )
 def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_values(
     job_name: str,
     field: str,
     payload: str,
+    error_marker: str,
 ) -> None:
     workflow = _workflow(".github/workflows/images.yml")
     step = _named_step(workflow["jobs"][job_name], "Validate image build inputs")
     env = {
         "IMAGE_NAME": "worker",
+        "IMAGE_DIGEST_NAME": "loom-worker",
         "DOCKERFILE": "deploy/Dockerfile.worker",
+        "BUILD_CONTEXT": ".",
         "EVENT_NAME": "pull_request" if job_name == "build" else "push",
         "REF_NAME": "feature-safe" if job_name == "build" else "dev",
         "PR_NUMBER": "42" if job_name == "build" else "",
@@ -317,7 +371,7 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
     result = _run_validation_step(step, env=env)
 
     assert result.returncode != 0, (job_name, field, payload, result.stdout)
-    assert "FAIL:" in result.stderr
+    assert error_marker in result.stderr
 
 
 def test_image_input_validation_never_evaluates_command_substitution(
@@ -330,7 +384,9 @@ def test_image_input_validation_never_evaluates_command_substitution(
         step,
         env={
             "IMAGE_NAME": f"worker$(touch {sentinel})",
+            "IMAGE_DIGEST_NAME": "loom-worker",
             "DOCKERFILE": "deploy/Dockerfile.worker",
+            "BUILD_CONTEXT": ".",
             "EVENT_NAME": "pull_request",
             "REF_NAME": "42/merge",
             "PR_NUMBER": "42",
@@ -369,7 +425,9 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
         step,
         env={
             "IMAGE_NAME": "worker",
+            "IMAGE_DIGEST_NAME": "loom-worker",
             "DOCKERFILE": "deploy/Dockerfile.worker",
+            "BUILD_CONTEXT": ".",
             "EVENT_NAME": event_name,
             "REF_NAME": ref_name,
             "PR_NUMBER": pr_number,
@@ -382,12 +440,5 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
     assert result.returncode == 0, result.stderr
 
 
-def test_secret_isolation_contract_is_covered_by_advisory_catch_all() -> None:
-    codeowners = (REPO_ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
-    entries = {
-        line.strip()
-        for line in codeowners.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    assert entries == {"* @qianyi-sun"}
-    assert "not a `dev` merge gate" in codeowners
+def test_secret_isolation_contract_does_not_depend_on_one_reviewer() -> None:
+    assert not (REPO_ROOT / ".github/CODEOWNERS").exists()

@@ -141,7 +141,7 @@ class TerminalBench2Adapter:
                 "timeout_sec": verifier_timeout,
                 "args": {"script_path": "/app/verifier/run.sh"},
             },
-            "steps": [{"name": "main", "artifacts": ["tb2-verifier.json"]}],
+            "steps": [{"name": "main", "artifacts": ["tb2-verifier.json", ".loom/verifier/**"]}],
         }
         (out_dir / "task.toml").write_text(tomli_w.dumps(task_toml))
 

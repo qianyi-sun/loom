@@ -76,6 +76,9 @@ class ElasticSlurmWorkerControllerConfig:
     scancel_path: str
     command_timeout_seconds: float
     exclusive: bool = True
+    slurm_account: str = ""
+    slurm_qos: str = ""
+    slurm_reservation: str = ""
     sinfo_path: str = "sinfo"
     resource_aware: bool = False
     cpu_per_slot: int = 2
@@ -198,6 +201,9 @@ def build_controller_config(
     scancel_path: str,
     command_timeout_seconds: float,
     exclusive: bool = True,
+    slurm_account: str = "",
+    slurm_qos: str = "",
+    slurm_reservation: str = "",
     sinfo_path: str = "sinfo",
     resource_aware: bool = False,
     cpu_per_slot: int = 2,
@@ -272,6 +278,9 @@ def build_controller_config(
         scancel_path=scancel_path,
         command_timeout_seconds=command_timeout_seconds,
         exclusive=exclusive,
+        slurm_account=slurm_account.strip(),
+        slurm_qos=slurm_qos.strip(),
+        slurm_reservation=slurm_reservation.strip(),
         sinfo_path=sinfo_path,
         resource_aware=resource_aware,
         cpu_per_slot=cpu_per_slot,
@@ -517,6 +526,12 @@ def build_sbatch_request(
     args.append(f"--time={config.time_limit}")
     if config.partition:
         args.append(f"--partition={config.partition}")
+    if config.slurm_account:
+        args.append(f"--account={config.slurm_account}")
+    if config.slurm_qos:
+        args.append(f"--qos={config.slurm_qos}")
+    if config.slurm_reservation:
+        args.append(f"--reservation={config.slurm_reservation}")
     args.extend(
         (
             f"--cpus-per-task={config.requested_cpus}",

@@ -68,9 +68,15 @@ async def test_bridge_syncs_agent_steps(tmp_path: Path) -> None:
             {
                 "steps": [
                     {
+                        "step_id": 1,
+                        "source": "user",
+                        "message": "Analysis: ignore\nPlan: ignore",
+                    },
+                    {
                         "step_id": 2,
                         "source": "agent",
-                        "message": "done",
+                        "message": "Analysis: done\nPlan: finish",
+                        "reasoning_content": "think hard",
                         "metrics": {
                             "input_tokens": 10,
                             "output_tokens": 5,
@@ -102,13 +108,14 @@ async def test_bridge_syncs_agent_steps(tmp_path: Path) -> None:
         synced = await bridge.sync_trajectory_file(traj)
         await bridge.emit_artifact_refs(tmp_path)
 
-    assert synced == 1
+    assert synced == 2
     kinds = []
     for line in local.read_text().strip().splitlines():
         event = _adapter.validate_json(line)
         kinds.append(event.kind)
 
     assert EventKind.TERMINUS2_RUNTIME_PROVENANCE in kinds
+    assert EventKind.TERMINUS2_USER_PROMPT in kinds
     assert EventKind.LLM_CALL in kinds
     assert EventKind.TERMINUS2_TURN in kinds
     assert EventKind.TERMINUS2_COMMAND in kinds
@@ -117,8 +124,15 @@ async def test_bridge_syncs_agent_steps(tmp_path: Path) -> None:
 
     events = [_adapter.validate_json(line) for line in local.read_text().strip().splitlines()]
     turn = next(e for e in events if e.kind == EventKind.TERMINUS2_TURN)
+    user = next(e for e in events if e.kind == EventKind.TERMINUS2_USER_PROMPT)
     llm = next(e for e in events if e.kind == EventKind.LLM_CALL)
     assert turn.gateway_request_id == "gw-real-1"
+    assert turn.analysis == "done"
+    assert turn.plan == "finish"
+    assert turn.reasoning_content == "think hard"
+    assert turn.harbor_step_id == 2
+    assert user.is_initial is True
+    assert user.message.startswith("Analysis: ignore")
     assert llm.gateway_request_id == "gw-real-1"
 
 
@@ -161,7 +175,7 @@ async def test_bridge_fail_closed_without_cp_client(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bridge_skips_non_agent_steps(tmp_path: Path) -> None:
+async def test_bridge_syncs_user_prompt_steps(tmp_path: Path) -> None:
     writer = TrajectoryWriter(
         local_path=tmp_path / "events.jsonl",
         store=FakeObjectStore(),
@@ -181,7 +195,49 @@ async def test_bridge_skips_non_agent_steps(tmp_path: Path) -> None:
     )
     traj = tmp_path / "trajectory.json"
     traj.write_text(
-        json.dumps({"steps": [{"step_id": 1, "source": "user"}]}),
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "step_id": 1,
+                        "source": "user",
+                        "message": "You are an AI assistant. Task: explore.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    async with writer:
+        assert await bridge.sync_trajectory_file(traj) == 1
+    events = [_adapter.validate_json(line) for line in (tmp_path / "events.jsonl").read_text().strip().splitlines()]
+    user = next(e for e in events if e.kind == EventKind.TERMINUS2_USER_PROMPT)
+    assert user.is_initial is True
+    assert "Task: explore" in user.message
+
+
+@pytest.mark.asyncio
+async def test_bridge_skips_unknown_sources(tmp_path: Path) -> None:
+    writer = TrajectoryWriter(
+        local_path=tmp_path / "events.jsonl",
+        store=FakeObjectStore(),
+        bucket="trajectories",
+        key="t/events.jsonl",
+        flush_event_count=1000,
+        flush_bytes=10_000_000,
+        flush_sec=3600,
+        min_part_bytes=0,
+    )
+    bridge = HarborCheckpointBridge(
+        trajectory=writer,
+        trial_id=uuid4(),
+        step_id="agent",
+        model=ModelSpec(provider="openai", name="gpt-4"),
+        cp_client=_CpClient([_llm_row()]),
+    )
+    traj = tmp_path / "trajectory.json"
+    traj.write_text(
+        json.dumps({"steps": [{"step_id": 1, "source": "system"}]}),
         encoding="utf-8",
     )
     async with writer:

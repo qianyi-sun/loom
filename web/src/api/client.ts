@@ -166,7 +166,7 @@ export async function apiDownload(
 type TrialList = paths["/api/v1/trials"]["get"]["responses"][200]["content"]["application/json"];
 export type MonitorSummary =
   paths["/api/v1/monitor/summary"]["get"]["responses"][200]["content"]["application/json"];
-type TrialDetail =
+export type TrialDetail =
   paths["/api/v1/trials/{trial_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type DebugEvidence =
   paths["/api/v1/trials/{trial_id}/debug"]["get"]["responses"][200]["content"]["application/json"];
@@ -174,7 +174,8 @@ export type DiagnosisReport =
   paths["/api/v1/trials/{trial_id}/diagnosis"]["get"]["responses"][200]["content"]["application/json"];
 type TrajectoryPage =
   paths["/api/v1/trials/{trial_id}/trajectory"]["get"]["responses"][200]["content"]["application/json"];
-type TaskList = paths["/api/v1/tasks"]["get"]["responses"][200]["content"]["application/json"];
+export type TaskList = paths["/api/v1/tasks"]["get"]["responses"][200]["content"]["application/json"];
+export type TaskRow = TaskList["items"][number];
 type BenchmarkList =
   paths["/api/v1/benchmarks"]["get"]["responses"][200]["content"]["application/json"];
 type BatchList =

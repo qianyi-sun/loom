@@ -228,7 +228,7 @@ export default function Benchmarks(): JSX.Element {
                           {readinessMessage(b)}
                         </p>
                         {readinessCounts(b) ? (
-                          <p className="font-mono text-[11px] text-slate-400">
+                          <p className="font-mono text-[11px] text-slate-600">
                             {readinessCounts(b)}
                           </p>
                         ) : null}

@@ -53,7 +53,7 @@ describe("AdminAccess", () => {
 
   it("reviews registrations and reveals approved invite link once", async () => {
     window.localStorage.setItem("loom_token", "loom_admin_secret");
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -192,7 +192,7 @@ describe("AdminAccess", () => {
                 action: "team_registration.approve",
                 target_type: "team_registration",
                 target_id: "reg-1",
-                request_id: null,
+                request_id: "staging-admin-browser-request",
                 source_ip_hash: null,
                 user_agent_hash: null,
                 metadata: { team_id: "team-1" },
@@ -235,22 +235,45 @@ describe("AdminAccess", () => {
     renderWithProviders(<AdminAccess />);
 
     expect(await screen.findByRole("tablist", { name: "Team access sections" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Requests" })).toHaveAttribute("aria-selected", "true");
+    const requestsTab = screen.getByRole("tab", { name: "Requests" });
+    expect(requestsTab).toHaveAttribute("aria-selected", "true");
+    expect(requestsTab).toHaveAttribute("tabindex", "0");
+    expect(
+      document.getElementById(
+        requestsTab.getAttribute("aria-controls") ?? "missing",
+      ),
+    ).toHaveAttribute("aria-labelledby", requestsTab.id);
     expect(screen.getByRole("tab", { name: "Teams" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Invites" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "API tokens" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Audit" })).toBeInTheDocument();
     expect(await screen.findByText("Mark Li")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Account requests" }).closest(
+        '[data-loom-query="registration-requests"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     expect(screen.getAllByText("latent@example.com").length).toBeGreaterThan(0);
     expect(screen.getByText(
       "Approve older team-registration requests into an invite link. Username/password account approvals are listed above.",
     )).toBeInTheDocument();
+    expect(
+      fetchSpy.mock.calls.filter(
+        ([input]: [RequestInfo | URL, RequestInit?]) =>
+          String(input).includes("/api/v1/admin/audit-events"),
+      ),
+    ).toHaveLength(0);
 
     await userEvent.clear(screen.getByLabelText("Admin actor"));
     await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
     await userEvent.click(screen.getByRole("tab", { name: "Teams" }));
     expect(await screen.findByDisplayValue("research-platform")).toBeInTheDocument();
     expect(screen.getByText("Internal teams")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Internal teams" }).closest(
+        '[data-loom-query="admin-teams"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     await userEvent.type(screen.getByLabelText("New team name"), "Core AI");
     await userEvent.click(screen.getByRole("button", { name: "Create team" }));
     await userEvent.clear(screen.getByLabelText("Team name for research-platform"));
@@ -271,9 +294,26 @@ describe("AdminAccess", () => {
     )).toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: "Invites" }));
     expect(screen.getByText("Pending invites")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Pending invites" }).closest(
+        '[data-loom-query="invites"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     await userEvent.click(screen.getByRole("tab", { name: "Audit" }));
     expect(await screen.findByText("team_registration.approve")).toBeInTheDocument();
+    expect(screen.getByText("staging-admin-browser-request")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Audit log" }).closest(
+        '[data-loom-query="audit-events"]',
+      ),
+    ).toHaveAttribute("data-loom-query-status", "success");
     await waitFor(() => {
+      expect(
+        fetchSpy.mock.calls.filter(
+          ([input]: [RequestInfo | URL, RequestInit?]) =>
+            String(input).includes("/api/v1/admin/audit-events"),
+        ),
+      ).toHaveLength(1);
       const approveCall = fetchSpy.mock.calls.find(([input]) =>
         String(input).endsWith("/reg-1/approve"),
       );
@@ -290,7 +330,7 @@ describe("AdminAccess", () => {
   });
 
   it("shows pending username account approvals on the default requests tab", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(
+    vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -364,7 +404,7 @@ describe("AdminAccess", () => {
   });
 
   it("approves username accounts and password resets with manual links", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -495,7 +535,7 @@ describe("AdminAccess", () => {
 
   it("keeps invite links visible when multiple registrations are approved", async () => {
     window.localStorage.setItem("loom_token", "loom_admin_secret");
-    vi.spyOn(global, "fetch").mockImplementation(
+    vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -653,7 +693,7 @@ describe("AdminAccess", () => {
   });
 
   it("creates invites with a team selector instead of raw team ids", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -760,7 +800,7 @@ describe("AdminAccess", () => {
       apiBase: "/dev",
       apiRouteBase: `${window.location.origin}/dev/api`,
     });
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -907,7 +947,7 @@ describe("AdminAccess", () => {
   });
 
   it("lets team owners manage invites and tokens without platform-admin registration calls", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {

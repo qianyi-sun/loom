@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
+
+
+def _raw_cursor(timestamp: str, cursor_id: str) -> str:
+    body = json.dumps({"t": timestamp, "i": cursor_id}).encode()
+    return base64.urlsafe_b64encode(body).decode().rstrip("=")
 
 
 def test_round_trip() -> None:
@@ -45,6 +50,28 @@ def test_decode_wrong_shape_raises() -> None:
     body = base64.urlsafe_b64encode(b'{"other": "stuff"}').decode().rstrip("=")
     with pytest.raises(ValueError, match="invalid cursor"):
         decode_cursor(body)
+
+
+def test_decode_rejects_naive_timestamp_with_valid_uuid() -> None:
+    body = _raw_cursor("2026-06-06T12:00:00", str(uuid4()))
+
+    with pytest.raises(ValueError, match="timezone offset"):
+        decode_cursor(body)
+
+
+def test_decode_normalizes_timezone_offset_to_utc() -> None:
+    offset = timezone(timedelta(hours=5, minutes=30))
+    timestamp = datetime(2026, 6, 6, 17, 30, tzinfo=offset)
+
+    decoded = decode_cursor(_raw_cursor(timestamp.isoformat(), str(uuid4())))
+
+    assert decoded.submitted_at == datetime(2026, 6, 6, 12, 0, tzinfo=UTC)
+    assert decoded.submitted_at.tzinfo is UTC
+
+
+def test_encode_rejects_naive_timestamp() -> None:
+    with pytest.raises(ValueError, match="timezone offset"):
+        encode_cursor(Cursor(submitted_at=datetime(2026, 6, 6), id=uuid4()))
 
 
 def test_encoded_is_decodable_by_hand() -> None:

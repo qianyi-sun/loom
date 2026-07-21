@@ -180,12 +180,23 @@ async def test_get_with_tampered_ciphertext_raises_decrypt_error(
     store = LocalEncryptedSecretStore(session, master_key=_TEST_KEY)
     ref = await store.put(namespace="ns", value="omega")
 
-    # Tamper via direct UPDATE on the row.
+    before = (await session.execute(text(
+        "SELECT ciphertext FROM secrets WHERE ref = :r",
+    ), {"r": ref})).scalar_one()
+
+    # Flip the low bit of the first byte. Assigning a fixed byte can be a
+    # probabilistic no-op when the random ciphertext already has that value.
     await session.execute(text(
-        "UPDATE secrets SET ciphertext = decode('00', 'hex') || "
-        "substr(ciphertext, 2) WHERE ref = :r",
+        "UPDATE secrets SET ciphertext = set_byte("
+        "ciphertext, 0, get_byte(ciphertext, 0) # 1"
+        ") WHERE ref = :r",
     ), {"r": ref})
     await session.commit()
+    after = (await session.execute(text(
+        "SELECT ciphertext FROM secrets WHERE ref = :r",
+    ), {"r": ref})).scalar_one()
+
+    assert after != before
 
     with pytest.raises(DecryptError):
         await store.get(ref)

@@ -17,7 +17,7 @@ export default function EmptyState({
       )}
     >
       <p className="text-sm font-medium text-slate-600">{label}</p>
-      {hint ? <p className="text-xs text-slate-400">{hint}</p> : null}
+      {hint ? <p className="text-xs text-slate-600">{hint}</p> : null}
     </div>
   );
 }

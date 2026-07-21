@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setFrontendConfigForTests } from "../../lib/frontendConfig";
 import Benchmarks from "../../pages/Benchmarks";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const BENCHMARKS_RESPONSE = {
@@ -47,9 +48,9 @@ const BENCHMARKS_RESPONSE = {
   next_cursor: null,
 };
 
-function setupFetch(): ReturnType<typeof vi.spyOn> {
+function setupFetch(): FetchMock {
   return vi
-    .spyOn(global, "fetch")
+    .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
       if (url.includes("/api/v1/benchmarks")) {

@@ -31,6 +31,7 @@ from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
 from loom_cli.rollout.steps.s04_gb10_prep import (
     GB10Host,
     GB10PrepStep,
+    _node_agent_timer_name,
     _ssh,
     gb10_hosts_for,
 )
@@ -39,7 +40,11 @@ from loom_cli.rollout.steps.s06_audit import AuditStep
 from loom_cli.rollout.steps.s07_render import RenderStep
 from loom_cli.rollout.steps.s08_preflight import PreflightStep
 from loom_cli.rollout.steps.s09_migrate import MigrateStep
-from loom_cli.rollout.steps.s10_env_state import EnvStateStep, _profile_path_for
+from loom_cli.rollout.steps.s10_env_state import (
+    EnvStateStep,
+    _materialize_rollout_root_profile,
+    _profile_path_for,
+)
 from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
 from loom_cli.rollout.steps.s12_production_defaults import ProductionDefaultsStep
 from loom_cli.rollout.steps.s12_release_gate import (
@@ -499,6 +504,23 @@ def _write_dummy_identity(path: Path) -> Path:
     return path
 
 
+def _write_single_node_agent_gb10_config(
+    ctx: RolloutContext,
+    tmp_path: Path,
+) -> None:
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env", '
+        'node_agent_service = "loom-gb10-node-agent.service" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+
+
 def test_render_runs_loom_cli_from_candidate_worktree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -819,6 +841,112 @@ def test_env_state_materializes_current_profile_under_rollout_root(
     assert evidence["target_path"] == str(physical_profile)
     assert evidence["source_sha256"] == evidence["target_sha256"]
     assert evidence["mode"] == "0o600"
+
+
+def test_env_state_replaces_unreadable_operator_owned_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    step_dir = ev.step_dir(11, "env-state")
+    source_profile = tmp_path / "candidate" / "deploy" / "environment-state" / "staging.toml"
+    source_profile.parent.mkdir(parents=True)
+    source_profile.write_text(
+        'environment = "staging"\n\n[catalog_provisioning]\nrequired = false\n',
+        encoding="utf-8",
+    )
+    physical_profile = tmp_path / "environment-state" / "staging.toml"
+    physical_profile.parent.mkdir()
+    physical_profile.write_text('environment = "operator-owned"\n', encoding="utf-8")
+    physical_profile.chmod(0o000)
+
+    def fake_run(argv, **kwargs):
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=0,
+            stdout=json.dumps({"ok": True, "drift": []}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._candidate_profile_path",
+        lambda _ctx, _step_dir: Path(source_profile),
+    )
+    monkeypatch.setattr("loom_cli.rollout.steps.s10_env_state.run_captured", fake_run)
+
+    result = EnvStateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert physical_profile.read_bytes() == source_profile.read_bytes()
+    assert oct(physical_profile.stat().st_mode & 0o777) == "0o600"
+    evidence = json.loads(
+        step_dir.artifact_path("environment-state-profile-materialization.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert evidence["changed"] is True
+    assert evidence["existing_profile_readable"] is False
+    assert evidence["source_sha256"] == evidence["target_sha256"]
+
+
+def test_env_state_rejects_symlink_profile_without_mutating_referent(tmp_path: Path) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(11, "env-state")
+    source_profile = tmp_path / "candidate-staging.toml"
+    source_profile.write_text('environment = "staging"\n', encoding="utf-8")
+    target = tmp_path / "environment-state" / "staging.toml"
+    target.parent.mkdir()
+    referent = tmp_path / "outside.toml"
+    referent.write_bytes(source_profile.read_bytes())
+    referent.chmod(0o644)
+    target.symlink_to(referent)
+
+    with pytest.raises(
+        candidate_source.CandidateToolingError,
+        match="must be a regular file",
+    ):
+        _materialize_rollout_root_profile(
+            ctx,
+            source_profile=source_profile,
+            step_dir=step_dir,
+        )
+
+    assert target.is_symlink()
+    assert referent.read_bytes() == source_profile.read_bytes()
+    assert oct(referent.stat().st_mode & 0o777) == "0o644"
+    assert not step_dir.artifact_path("environment-state-profile-materialization.json").exists()
+
+
+def test_env_state_rejects_nonregular_profile_without_replacing_it(tmp_path: Path) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(11, "env-state")
+    source_profile = tmp_path / "candidate-staging.toml"
+    source_profile.write_text('environment = "staging"\n', encoding="utf-8")
+    target = tmp_path / "environment-state" / "staging.toml"
+    target.mkdir(parents=True)
+    marker = target / "preserved"
+    marker.write_text("do not replace\n", encoding="utf-8")
+
+    with pytest.raises(
+        candidate_source.CandidateToolingError,
+        match="must be a regular file",
+    ):
+        _materialize_rollout_root_profile(
+            ctx,
+            source_profile=source_profile,
+            step_dir=step_dir,
+        )
+
+    assert target.is_dir()
+    assert marker.read_text(encoding="utf-8") == "do not replace\n"
+    assert not step_dir.artifact_path("environment-state-profile-materialization.json").exists()
 
 
 def test_env_state_runs_catalog_provisioning_between_apply_and_check(
@@ -2130,8 +2258,9 @@ def test_gb10_prep_ssh_uses_declared_config(
     )
     captured: dict[str, Any] = {}
 
-    def fake_run(argv):
+    def fake_run(argv, *, stdin_text=None):
         captured["argv"] = list(argv)
+        captured["stdin_text"] = stdin_text
         return SubprocessResult(
             argv=list(argv),
             returncode=0,
@@ -2141,7 +2270,7 @@ def test_gb10_prep_ssh_uses_declared_config(
 
     monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep.run_captured", fake_run)
 
-    _ssh(host, "hostname >/dev/null")
+    _ssh(host, "hostname >/dev/null", stdin_text="trusted verifier\n")
 
     argv = captured["argv"]
     assert argv[:3] == ["/usr/bin/ssh", "-F", str(ssh_config)]
@@ -2156,6 +2285,7 @@ def test_gb10_prep_ssh_uses_declared_config(
     assert "GlobalKnownHostsFile=/dev/null" in argv
     assert "UpdateHostKeys=no" in argv
     assert argv[-2:] == ["trt-gb10-1", "hostname >/dev/null"]
+    assert captured["stdin_text"] == "trusted verifier\n"
 
 
 @pytest.fixture
@@ -2360,11 +2490,13 @@ def test_gb10_prep_verify_checks_checkout_env_version_and_node_agent(
                 argv=["ssh", host.ssh_target, remote_cmd],
                 returncode=0,
                 stdout=(
+                    "LoadState=loaded\n"
                     "Type=oneshot\n"
                     "Result=failed\n"
                     "ExecMainStatus=1\n"
                     "ActiveState=failed\n"
                     "SubState=failed\n"
+                    "NeedDaemonReload=no\n"
                 ),
                 stderr="",
             )
@@ -2380,13 +2512,24 @@ def test_gb10_prep_verify_checks_checkout_env_version_and_node_agent(
     outcome = GB10PrepStep().verify(ctx, ev.step_dir(12, "gb10-prep"))
 
     assert outcome is VerifyOutcome.MISMATCH
-    assert calls == [
+    assert calls[:3] == [
         'test "$(cd /srv/loom-staging && git rev-parse HEAD)" = dddddddddddddddddddddddddddddddddddddddd',
         "grep -q '^LOOM_IMAGE_TAG=staging-abc123$' /srv/loom-staging/.env",
         "grep -q '^LOOM_WORKER_ENV_CONFIG_VERSION=staging-abc123$' /srv/loom-staging/.env",
+    ]
+    assert "git cat-file -e" in calls[3]
+    assert "git diff --quiet" in calls[3]
+    assert "loginctl show-user" in calls[4]
+    assert calls[5].startswith(
+        "cmp -s /srv/loom-staging/deploy/worker-pools/gb10/loom-gb10-node-agent.service"
+    )
+    assert calls[6].startswith(
+        "cmp -s /srv/loom-staging/deploy/worker-pools/gb10/loom-gb10-node-agent.timer"
+    )
+    assert calls[7:] == [
         "systemctl --user is-enabled loom-gb10-worker.service",
         "systemctl --user show loom-gb10-worker.service -p ActiveState -p SubState",
-        "systemctl --user show loom-gb10-node-agent.service -p Type -p Result -p ExecMainStatus -p ActiveState -p SubState",
+        "systemctl --user show loom-gb10-node-agent.service -p LoadState -p Type -p Result -p ExecMainStatus -p ActiveState -p SubState -p NeedDaemonReload",
     ]
 
 
@@ -2417,22 +2560,44 @@ def test_gb10_prep_verify_accepts_successful_oneshot_node_agent(
 
     def fake_ssh(host, remote_cmd):
         calls.append(remote_cmd)
-        if "systemctl --user show" in remote_cmd:
+        if "systemctl --user show loom-gb10-node-agent.timer" in remote_cmd:
             return SubprocessResult(
                 argv=["ssh", host.ssh_target, remote_cmd],
                 returncode=0,
                 stdout=(
+                    "LoadState=loaded\n"
+                    "ActiveState=active\n"
+                    "SubState=waiting\n"
+                    "Unit=loom-gb10-node-agent.service\n"
+                    "NeedDaemonReload=no\n"
+                ),
+                stderr="",
+            )
+        if "systemctl --user show loom-gb10-node-agent.service" in remote_cmd:
+            return SubprocessResult(
+                argv=["ssh", host.ssh_target, remote_cmd],
+                returncode=0,
+                stdout=(
+                    "LoadState=loaded\n"
                     "Type=oneshot\n"
                     "Result=success\n"
                     "ExecMainStatus=0\n"
                     "ActiveState=inactive\n"
                     "SubState=dead\n"
+                    "NeedDaemonReload=no\n"
                 ),
+                stderr="",
+            )
+        if "systemctl --user is-enabled loom-gb10-node-agent.timer" in remote_cmd:
+            return SubprocessResult(
+                argv=["ssh", host.ssh_target, remote_cmd],
+                returncode=0,
+                stdout="enabled\n",
                 stderr="",
             )
         return SubprocessResult(
             argv=["ssh", host.ssh_target, remote_cmd],
-            returncode=3 if "systemctl --user is-active" in remote_cmd else 0,
+            returncode=0,
             stdout="",
             stderr="",
         )
@@ -2443,6 +2608,211 @@ def test_gb10_prep_verify_accepts_successful_oneshot_node_agent(
 
     assert outcome is VerifyOutcome.MATCH
     assert any("systemctl --user show" in call for call in calls)
+
+
+@pytest.mark.parametrize(
+    "service",
+    (
+        "../loom-gb10-node-agent.service",
+        "/tmp/loom-gb10-node-agent.service",
+        "loom gb10.service",
+        "loom-gb10-node-agent.timer",
+    ),
+)
+def test_gb10_prep_rejects_unsafe_node_agent_service_names(service: str) -> None:
+    with pytest.raises(
+        candidate_source.CandidateToolingError,
+        match=r"simple \.service basename",
+    ):
+        _node_agent_timer_name(service)
+
+
+def test_gb10_prep_refuses_dirty_candidate_units_before_unit_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
+) -> None:
+    ctx = make_ctx(tmp_path, resolved_sha="a" * 40)
+    _write_single_node_agent_gb10_config(ctx, tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    calls: list[str] = []
+
+    def fake_ssh(host, remote_cmd):
+        calls.append(remote_cmd)
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=1 if "git diff --quiet" in remote_cmd else 0,
+            stdout="",
+            stderr="dirty candidate unit" if "git diff --quiet" in remote_cmd else "",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    step = GB10PrepStep()
+    step.max_retries = 1
+    step_dir = ev.step_dir(12, "gb10-prep")
+
+    result = step.run(ctx, step_dir)
+
+    assert result.exit_code == 1
+    assert result.error is not None
+    assert "verify-node-agent-unit-source failed" in step_dir.stdout_path().read_text()
+    clean_check = next(call for call in calls if "git diff --quiet" in call)
+    assert "git cat-file -e" in clean_check
+    assert f"{'a' * 40}:deploy/worker-pools/gb10/loom-gb10-node-agent.service" in clean_check
+    assert f"{'a' * 40}:deploy/worker-pools/gb10/loom-gb10-node-agent.timer" in clean_check
+    assert not any("install -D" in call for call in calls)
+    assert not any("systemctl --user" in call for call in calls)
+
+
+def test_gb10_prep_verify_rejects_dirty_candidate_units_at_same_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
+) -> None:
+    ctx = make_ctx(tmp_path, resolved_sha="b" * 40)
+    _write_single_node_agent_gb10_config(ctx, tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    calls: list[str] = []
+
+    def fake_ssh(host, remote_cmd):
+        calls.append(remote_cmd)
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=1 if "git diff --quiet" in remote_cmd else 0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    step_dir = ev.step_dir(12, "gb10-prep")
+
+    outcome = GB10PrepStep().verify(ctx, step_dir)
+
+    assert outcome is VerifyOutcome.MISMATCH
+    assert "node-agent-unit-source mismatch" in step_dir.stderr_path().read_text()
+    assert any(f"git diff --quiet {'b' * 40}" in call for call in calls)
+    assert not any("cmp -s" in call for call in calls)
+
+
+def test_gb10_prep_verify_rejects_service_only_partial_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
+) -> None:
+    ctx = make_ctx(tmp_path, resolved_sha="c" * 40)
+    _write_single_node_agent_gb10_config(ctx, tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    calls: list[str] = []
+
+    def fake_ssh(host, remote_cmd):
+        calls.append(remote_cmd)
+        timer_missing = (
+            remote_cmd.startswith("cmp -s ") and "loom-gb10-node-agent.timer" in remote_cmd
+        )
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=1 if timer_missing else 0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    step_dir = ev.step_dir(12, "gb10-prep")
+
+    outcome = GB10PrepStep().verify(ctx, step_dir)
+
+    assert outcome is VerifyOutcome.MISMATCH
+    assert "node-agent-timer-unit mismatch" in step_dir.stderr_path().read_text()
+    assert any("loom-gb10-node-agent.service" in call for call in calls if "cmp -s" in call)
+    assert not any("systemctl --user" in call for call in calls)
+
+
+def test_gb10_prep_done_resume_requires_fresh_live_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step = GB10PrepStep()
+    seen: list[tuple[RolloutContext, object]] = []
+
+    def fake_verify(ctx_arg, step_dir_arg):
+        seen.append((ctx_arg, step_dir_arg))
+        return VerifyOutcome.MISMATCH
+
+    monkeypatch.setattr(step, "_verify_impl", fake_verify)
+    step_dir = ev.step_dir(12, "gb10-prep")
+
+    assert step.requires_strict_live_verification()
+    assert step.verify_done(ctx, step_dir) is VerifyOutcome.MISMATCH
+    assert seen == [(ctx, step_dir)]
+
+
+def test_gb10_prep_verify_retries_when_timer_needs_daemon_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        resolved_sha="f" * 40,
+    )
+    identity = _write_dummy_identity(tmp_path / "gb10-rollout-ed25519")
+    ctx.cluster_config_path.write_text(
+        "[gb10_pool]\n"
+        f'ssh_identity_file = "{identity}"\n'
+        "hosts = [\n"
+        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom-staging", '
+        'env_file_path = "/srv/loom-staging/.env", '
+        'node_agent_service = "loom-gb10-node-agent.service" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+
+    def fake_ssh(host, remote_cmd):
+        if "systemctl --user show loom-gb10-node-agent.timer" in remote_cmd:
+            stdout = (
+                "LoadState=loaded\n"
+                "ActiveState=active\n"
+                "SubState=waiting\n"
+                "Unit=loom-gb10-node-agent.service\n"
+                "NeedDaemonReload=yes\n"
+            )
+        elif "systemctl --user show loom-gb10-node-agent.service" in remote_cmd:
+            stdout = (
+                "LoadState=loaded\n"
+                "Type=oneshot\n"
+                "Result=success\n"
+                "ExecMainStatus=0\n"
+                "ActiveState=inactive\n"
+                "SubState=dead\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user is-enabled loom-gb10-node-agent.timer" in remote_cmd:
+            stdout = "enabled\n"
+        else:
+            stdout = ""
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    step_dir = ev.step_dir(12, "gb10-prep")
+
+    outcome = GB10PrepStep().verify(ctx, step_dir)
+
+    assert outcome is VerifyOutcome.MISMATCH
+    assert "NeedDaemonReload=yes" in step_dir.stderr_path().read_text()
 
 
 def test_gb10_prep_verify_retries_when_legacy_worker_unit_is_enabled(
@@ -2561,9 +2931,34 @@ def test_gb10_prep_clones_preserves_env_and_starts_node_agent(
     legacy_idx = next(
         idx for idx, call in enumerate(calls) if "disable --now loom-gb10-worker.service" in call
     )
+    source_clean_idx = next(idx for idx, call in enumerate(calls) if "git diff --quiet" in call)
+    linger_idx = next(idx for idx, call in enumerate(calls) if "loginctl show-user" in call)
+    service_install_idx = next(
+        idx
+        for idx, call in enumerate(calls)
+        if "install -D -m 0644" in call and call.endswith('node-agent.service"')
+    )
+    timer_install_idx = next(
+        idx
+        for idx, call in enumerate(calls)
+        if "install -D -m 0644" in call and call.endswith('node-agent.timer"')
+    )
+    daemon_reload_idx = calls.index("systemctl --user daemon-reload")
     node_agent_idx = calls.index("systemctl --user start loom-gb10-node-agent.service")
-    assert legacy_idx < node_agent_idx
-    assert calls[-1] == "systemctl --user start loom-gb10-node-agent.service"
+    timer_enable_idx = calls.index("systemctl --user enable --now loom-gb10-node-agent.timer")
+    timer_restart_idx = calls.index("systemctl --user restart loom-gb10-node-agent.timer")
+    assert (
+        source_clean_idx
+        < linger_idx
+        < service_install_idx
+        < timer_install_idx
+        < legacy_idx
+        < daemon_reload_idx
+        < node_agent_idx
+        < timer_enable_idx
+        < timer_restart_idx
+    )
+    assert calls[-1] == "systemctl --user restart loom-gb10-node-agent.timer"
 
 
 def test_gb10_prep_runs_hosts_with_bounded_parallelism(

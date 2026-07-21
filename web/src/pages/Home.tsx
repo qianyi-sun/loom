@@ -285,7 +285,7 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
             />
           </div>
           <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
               Backends
             </p>
             <p className="mt-1 text-slate-700">

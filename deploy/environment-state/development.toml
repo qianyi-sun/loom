@@ -1,0 +1,169 @@
+# Development DB-backed environment desired state (shared dev env, #857/#873).
+#
+# Shared dev runs trial execution on external Slurm (GB10 + OLDLAB), the same
+# model as staging/prod. BOTH worker rows ship enabled=false (fail-closed):
+# applying this profile does NOT activate any external Slurm worker. Activation
+# is gated on:
+#   - the dev cluster existing (k3d on platform-dev, post-#879 + #881 soak);
+#   - the per-env broker + publisher writing candidates to
+#     /shared_work/loom/candidates/development/ (#874 publisher, #877 broker);
+#   - GB10: the #827 external-Slurm acceptance matrix AND #896 container-isolation
+#     evidence (packed exclusive=false workers) -- see the GB10 row comment;
+#   - OLDLAB: #896 container-isolation evidence + double-duty headroom
+#     measurement, because OLDLAB nodes are k3s + MinIO + slurmd.
+#
+# Apply after image rollout with:
+#   loom admin environment-state apply \
+#     --environment development \
+#     --file deploy/environment-state/development.toml \
+#     --var IMAGE_TAG="$IMAGE_TAG" \
+#     --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION"
+
+environment = "development"
+
+# --- GB10 pool (ARM, Slurm-only nodes, shared across envs) -------------------
+# SHIPS DISABLED and fail-closed. Applying this profile must NOT activate GB10:
+#   - #827 requires external Slurm to stay disabled until its allocation-side
+#     acceptance matrix passes;
+#   - #896 requires container-isolation evidence before any non-exclusive
+#     (packed) worker runs.
+# So the checked-in state is enabled=false + exclusive=true (a single worker
+# owning a whole GB10 node is safe without the isolation gate). The intended
+# post-gate target is enabled=true + exclusive=false (pack multiple envs' workers
+# per node) -- flip both only after #827 AND #896 are satisfied.
+# min_slots=0 = scale to zero when idle, no warm floor. NOTE: with min_slots=0
+# the #877 QoS-boost trigger (count < min_slots) is unreachable, so it provides
+# NO dev-priority guarantee here; a priority mechanism is defined when the row
+# is activated, not via min_slots=0.
+[[worker_pool_autoscaler_policies]]
+pool_name = "gb10-arm64"
+actuator = "slurm"
+enabled = false
+disabled_reason = "gated on #827 acceptance matrix + #896 container isolation; activate as exclusive=false only after both"
+min_slots = 0
+max_slots = 5
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "arm64"
+partition = "gb10"
+allowed_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+# Candidate + env-file paths land under the service-owned publisher root
+# (#874). Not active until that publisher extension ships.
+env_file = "/shared_work/loom/candidates/development/env/development-gb10-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/loom/candidates/development/${IMAGE_TAG}"
+requested_cpus = 10
+requested_memory_mib = 57500
+requested_concurrency = 5
+max_jobs = 1
+pending_job_cap = 1
+time_limit = "2-00:00:00"
+# Fail-closed: exclusive=true (one worker per GB10 node) is the safe checked-in
+# value. The exclusive=false packing target is gated on #896 + #827 (see the
+# pool comment above); flip to false only after both are satisfied.
+exclusive = true
+external_runner = true
+
+# --- OLDLAB pool (x86_64, DOUBLE-DUTY nodes: k3s + MinIO + slurmd) ------------
+# GATED: enabled=false until #896 lands. OLDLAB nodes also run the k3s control
+# plane + MinIO/Longhorn, so workers must be non-exclusive (cannot claim a whole
+# node) and capped with headroom for k8s/MinIO. The resource values below are
+# PROVISIONAL placeholders reduced from the historical single-tenant profile
+# (12 CPU / 58000 MiB / concurrency 6); #896 must measure real double-duty
+# headroom and set the final values before flipping enabled=true.
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = false
+disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; exclusive=true is not viable on nodes shared with k3s/MinIO, so the disable IS the safety gate"
+min_slots = 0
+max_slots = 4
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "x86_64"
+# OLDLAB jobs target the default partition (addressed by --nodelist), matching
+# the validated 2026-06-24 dry-run which passed no --partition.
+partition = ""
+allowed_nodes = [
+  "trt-eai-oldlab-1",
+  "trt-eai-oldlab-2",
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
+env_file = "/shared_work/loom/candidates/development/env/development-oldlab-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/loom/candidates/development/${IMAGE_TAG}"
+# PROVISIONAL (pending #896 headroom measurement): leave CPU/mem for k3s+MinIO.
+requested_cpus = 4
+requested_memory_mib = 16000
+requested_concurrency = 2
+max_jobs = 2
+pending_job_cap = 1
+time_limit = "2-00:00:00"
+# Double-duty: cannot own the whole node — MinIO/k8s share it.
+exclusive = false
+external_runner = true
+
+# --- External autoscaler supervisors (systemd --user timers) -----------------
+# Each entry renders a `systemctl --user` service+timer that periodically runs
+# scripts/ops/worker_pool_autoscaler_external_once.py for one pool. The
+# --db-local-port values follow the reserved per-env/per-pool scheme so no two
+# supervisors on the same host collide:
+#   oldlab  dev/staging/prod = 15447 / 15448 / 15449
+#   gb10    dev/staging/prod = 15450 / 15451 / 15452
+# BOTH dev supervisors ship enabled=false + active=false (fail-closed): applying
+# this profile writes the unit files but does NOT enable or start any timer.
+# This mirrors the pools' own enabled=false gate above; activation follows the
+# same #827 (external-Slurm acceptance) + #896 (container-isolation) gates that
+# release the GB10 and OLDLAB pools.
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab-development"
+pool_name = "oldlab"
+service_name = "loom-autoscaler-oldlab-dev.service"
+timer_name = "loom-autoscaler-oldlab-dev.timer"
+working_directory = "/opt/loom-development-runner/repo"
+python_path = "/opt/loom-development-runner/venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "oldlab", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15447", "--freshness-sec", "120"]
+enabled = false
+active = false
+
+[[external_slurm_autoscaler_supervisors]]
+name = "gb10-arm64-development"
+pool_name = "gb10-arm64"
+service_name = "loom-autoscaler-gb10-dev.service"
+timer_name = "loom-autoscaler-gb10-dev.timer"
+working_directory = "/opt/loom-development-runner/repo"
+python_path = "/opt/loom-development-runner/venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "gb10-arm64", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15450", "--freshness-sec", "120"]
+enabled = false
+active = false

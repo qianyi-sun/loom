@@ -48,6 +48,8 @@ smoke_on_behalf_username = "devansh"
 smoke_on_behalf_team_id = "11111111-1111-4111-8111-111111111111"
 scope = "current-gb10"
 gb10_prep_concurrency = 8
+backup_max_objects = 1000000
+backup_max_entries = 16000000
 """
 
 
@@ -140,6 +142,8 @@ def test_config_loads_exact_schema_and_records_digest(tmp_path: Path) -> None:
     assert config.state_root == Path("/var/lib/loom-staging-rollout")
     assert config.runtime_root == Path("/run/loom-staging-rollout")
     assert config.cluster_config_path.is_absolute()
+    assert config.backup_max_objects == 1_000_000
+    assert config.backup_max_entries == 16_000_000
     assert config.config_path == path
     assert config.config_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -410,6 +414,29 @@ def test_config_rejects_unbounded_or_wrong_type_concurrency(
         OperatorConfig.load(path, expected_owner_uid=os.getuid())
 
 
+@pytest.mark.parametrize(
+    ("key", "rendered"),
+    [
+        ("backup_max_objects", "999999"),
+        ("backup_max_objects", "true"),
+        ("backup_max_entries", "15999999"),
+        ("backup_max_entries", "true"),
+    ],
+)
+def test_config_rejects_unreviewed_backup_policy(
+    tmp_path: Path,
+    key: str,
+    rendered: str,
+) -> None:
+    path = _write_config(
+        tmp_path / f"{key}.toml",
+        _replace_config_value(VALID_CONFIG, key, f"{key} = {rendered}"),
+    )
+
+    with pytest.raises(ConfigError, match=key):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+
 def test_config_rejects_non_redacted_expected_fingerprint(tmp_path: Path) -> None:
     path = _write_config(
         tmp_path / "fingerprint.toml",
@@ -421,6 +448,19 @@ def test_config_rejects_non_redacted_expected_fingerprint(tmp_path: Path) -> Non
     )
     with pytest.raises(ConfigError, match="expect_admin_token_fingerprint"):
         OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+
+def test_backup_event_reason_is_limited_to_public_tokens() -> None:
+    with pytest.raises(ValueError, match="approved public token"):
+        RequestEvent(
+            request_id="stg-20260713-abcdef12",
+            event="backup_failed",
+            occurred_at="2026-07-13T20:00:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            status="failed",
+            reason="secret-bearing arbitrary failure",
+        )
 
 
 def test_driver_envelope_keeps_attempt_actor_out_of_immutable_inputs() -> None:

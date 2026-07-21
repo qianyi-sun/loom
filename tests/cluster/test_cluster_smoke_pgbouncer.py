@@ -111,10 +111,9 @@ def _apply_and_verify(cluster_name: str, manifest: Path, namespace: str) -> None
     """Apply the rendered manifest and verify the pgbouncer Deployment."""
     kubeconfig_ctx = f"kind-{cluster_name}"
 
-    # Create the target namespace first; the rendered manifests include at
-    # least one namespaced resource (Grafana ConfigMap) that references the
-    # operator's configured namespace (default: "loom"), which does not exist
-    # on a fresh kind cluster.
+    # Create the target namespace first. Every namespaced rendered resource
+    # carries the operator's configured namespace (default: "loom"), which
+    # does not exist on a fresh kind cluster.
     subprocess.run(
         [
             "kubectl",
@@ -139,13 +138,9 @@ def _apply_and_verify(cluster_name: str, manifest: Path, namespace: str) -> None
         timeout=30,
     )
 
-    # Apply all manifests.  Most resources in the rendered YAML do not have
-    # an explicit namespace: the templates omit it so operators can apply to
-    # any namespace via ``kubectl --namespace``.  Resources without explicit
-    # namespace land in whatever namespace the kubeconfig context defaults to
-    # — ``default`` on a fresh kind cluster.  The Grafana ConfigMap is the
-    # one exception: it carries ``namespace: <cfg.namespace>`` (e.g. "loom"),
-    # which is why we pre-create that namespace above.
+    # Apply all manifests without ``--namespace`` to exercise the embedded
+    # metadata guard. Namespaced resources must land in ``namespace`` rather
+    # than the kubeconfig context's current namespace (``default`` on kind).
     apply_result = subprocess.run(
         [
             "kubectl",
@@ -164,11 +159,7 @@ def _apply_and_verify(cluster_name: str, manifest: Path, namespace: str) -> None
     if apply_result.stderr:
         _log(f"apply stderr: {apply_result.stderr[-1000:]}")
 
-    # The rendered templates do not include an explicit ``namespace:`` in
-    # most resource metadata, so ``kubectl apply`` places them in the
-    # kubeconfig context's current namespace — ``default`` on a fresh
-    # kind cluster.  Use ``-n default`` for get commands.
-    ns_arg = ["-n", "default"]
+    ns_arg = ["-n", namespace]
 
     # Verify the pgbouncer Deployment was created.
     result = subprocess.run(

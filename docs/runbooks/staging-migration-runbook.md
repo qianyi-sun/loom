@@ -118,6 +118,22 @@ loom cluster up --config deploy/environments/staging.cluster.toml \
   --image-tag ${IMAGE_TAG}
 ```
 
+Do not replace `cluster up` with a bare `kubectl apply -f` during restore or
+incident response. If an explicitly authorized recovery requires inspecting
+and manually applying the rendered YAML, preserve both namespace guards:
+
+```bash
+loom cluster render --config deploy/environments/staging.cluster.toml \
+  > /tmp/loom-staging-rendered.yaml
+yq -e 'select(.kind != "PersistentVolume") | .metadata.namespace == "loom-staging"' \
+  /tmp/loom-staging-rendered.yaml >/dev/null
+kubectl -n loom-staging apply -f /tmp/loom-staging-rendered.yaml
+```
+
+Every namespaced rendered object carries `metadata.namespace: loom-staging`;
+the explicit `-n loom-staging` is a second operator assertion. A mismatch is a
+hard stop, not a reason to strip namespace metadata or apply to `default`.
+
 ### 6. Restore Postgres + MinIO state
 
 Choose one restoration route:
@@ -190,7 +206,7 @@ loom cluster release-gate --format json \
 
 ### 10. Reopen submissions
 
-Restore the LLM-gateway rate-card. Send internal-teams the staging route (`https://yylx.world/dev`), the new evidence directory (`/data/loom-staging/rollouts`), and a summary of the rename.
+Restore the LLM-gateway rate-card. Send internal-teams the staging route (`https://yylx.world/staging`), the new evidence directory (`/data/loom-staging/rollouts`), and a summary of the rename.
 
 ### 11. Retire the old cluster
 

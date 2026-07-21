@@ -1,7 +1,0 @@
-# Advisory owner routing on `dev`: branch protection does not require
-# CODEOWNER approval, so this file is not a `dev` merge gate.
-#
-# `main` does require CODEOWNER review. After the first `dev` -> `main`
-# promotion carrying this file lands, this catch-all makes @qianyi-sun the
-# required owner for every subsequent `main` promotion.
-* @qianyi-sun

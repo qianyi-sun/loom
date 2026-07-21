@@ -14,7 +14,9 @@ import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { CreateBatchBody } from "../../api/client";
 import NewBatch from "../../pages/NewBatch";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const AGENTS_RESPONSE = {
@@ -302,7 +304,7 @@ function mockEndpoints(opts: {
    * issue-#28 tests to simulate "tag filter narrows to zero".
    */
   tasksCount?: number;
-} = {}): ReturnType<typeof vi.spyOn> {
+} = {}): FetchMock {
   const matching = opts.matchingTasks ?? 12;
   const benchmarkItems = opts.noBenchmarks
     ? []
@@ -399,20 +401,20 @@ function mockEndpoints(opts: {
 }
 
 function batchCall(
-  spy: ReturnType<typeof vi.spyOn>,
-): { url: string; body: Record<string, unknown> } | null {
+  spy: FetchMock,
+): { url: string; body: CreateBatchBody } | null {
   const found = spy.mock.calls.find((c) =>
     String(c[0]).includes("/api/v1/batches") && (c[1] as RequestInit | undefined)?.method === "POST",
   );
   if (!found) return null;
   return {
     url: String(found[0]),
-    body: JSON.parse((found[1] as RequestInit).body as string),
+    body: JSON.parse((found[1] as RequestInit).body as string) as CreateBatchBody,
   };
 }
 
 function manualModelCall(
-  spy: ReturnType<typeof vi.spyOn>,
+  spy: FetchMock,
 ): { url: string; body: Record<string, unknown> } | null {
   const found = spy.mock.calls.find((c) =>
     String(c[0]).includes("/api/v1/provider-connections/") &&
@@ -1244,9 +1246,9 @@ describe("NewBatch", () => {
     const body = batchCall(spy)!.body;
     expect(body.provider_connection_id).toBeUndefined();
     expect(body.provider_model_id).toBeUndefined();
-    expect(body.combinations[0].provider_connection_id).toBe(
+    expect(body.combinations?.[0].provider_connection_id).toBe(
       "11111111-1111-4111-8111-111111111111",
     );
-    expect(body.combinations[0].provider_model_id).toBe("manual-vllm-checkpoint");
+    expect(body.combinations?.[0].provider_model_id).toBe("manual-vllm-checkpoint");
   });
 });

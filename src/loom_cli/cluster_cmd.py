@@ -21,7 +21,7 @@ import hashlib
 import ipaddress
 import json
 import os
-import stat
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -33,6 +33,7 @@ from typing import Any, cast
 from loom_cli.cluster_backup_guard import (
     DEFAULT_BACKUP_MAX_AGE_HOURS,
     PROTECTED_ENVIRONMENTS,
+    BackupTraversalLimits,
     infer_environment,
     is_protected_environment,
     validate_backup_manifest,
@@ -94,6 +95,24 @@ from loom_cli.rollout_lock import (
     default_rollout_lock_dir,
     rollout_owner_id,
 )
+from loom_cli.rollout_lock_cli import (
+    BROKER_LOCK_OPTIONS as _BROKER_LOCK_OPTIONS,
+)
+from loom_cli.rollout_lock_cli import (
+    EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR as _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR,
+)
+from loom_cli.rollout_lock_cli import (
+    add_rollout_lock_args as _add_rollout_lock_args,
+)
+from loom_cli.rollout_lock_cli import (
+    fixed_rollout_lock_evidence_path as _fixed_rollout_lock_evidence_path,
+)
+from loom_cli.rollout_lock_cli import (
+    load_broker_rollout_envelope as _load_broker_rollout_envelope,
+)
+from loom_cli.rollout_lock_cli import (
+    require_real_file as _require_real_file,
+)
 from loom_cli.runtime_resources import load_bundled_schema, read_bundled_text
 from loom_config.doctor import (
     DoctorReport,
@@ -153,118 +172,6 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
     "minio": "Object store (trajectories + ATIF)",
 }
 
-_EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR = "_explicit_rollout_lock_options"
-_BROKER_LOCK_OPTIONS = frozenset(
-    {
-        "--rollout-id",
-        "--rollout-lock-dir",
-        "--rollout-lock-ttl-seconds",
-        "--rollout-lock-evidence",
-        "--force-rollout-lock",
-    }
-)
-
-
-def _record_explicit_rollout_lock_option(
-    namespace: argparse.Namespace,
-    option_string: str | None,
-) -> None:
-    options = set(getattr(namespace, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, ()))
-    if option_string is not None:
-        options.add(option_string)
-    setattr(namespace, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, options)
-
-
-class _ExplicitRolloutLockStore(argparse.Action):
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: object,
-        option_string: str | None = None,
-    ) -> None:
-        del parser
-        setattr(namespace, self.dest, values)
-        _record_explicit_rollout_lock_option(namespace, option_string)
-
-
-class _ExplicitRolloutLockStoreTrue(argparse.Action):
-    def __init__(
-        self,
-        option_strings: list[str],
-        dest: str,
-        default: object = False,
-        required: bool = False,
-        help: str | None = None,
-    ) -> None:
-        super().__init__(
-            option_strings=option_strings,
-            dest=dest,
-            nargs=0,
-            default=default,
-            required=required,
-            help=help,
-        )
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: object,
-        option_string: str | None = None,
-    ) -> None:
-        del parser, values
-        setattr(namespace, self.dest, True)
-        _record_explicit_rollout_lock_option(namespace, option_string)
-
-
-def _add_rollout_lock_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--rollout-id",
-        default=None,
-        action=_ExplicitRolloutLockStore,
-        help=(
-            "Operator-visible protected rollout owner id. Defaults to "
-            "environment-hostname-pid when a lock is required."
-        ),
-    )
-    parser.add_argument(
-        "--rollout-lock-dir",
-        type=Path,
-        default=None,
-        action=_ExplicitRolloutLockStore,
-        help=(
-            "Directory for per-environment rollout mutation leases. Defaults "
-            "to $LOOM_ROLLOUT_LOCK_DIR or ~/.loom/rollout-locks for protected "
-            "environments."
-        ),
-    )
-    parser.add_argument(
-        "--rollout-lock-ttl-seconds",
-        type=int,
-        default=DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
-        action=_ExplicitRolloutLockStore,
-        help=(
-            "Protected rollout mutation lease TTL in seconds "
-            f"(default: {DEFAULT_ROLLOUT_LOCK_TTL_SECONDS})."
-        ),
-    )
-    parser.add_argument(
-        "--rollout-lock-evidence",
-        type=Path,
-        default=None,
-        action=_ExplicitRolloutLockStore,
-        help="Optional JSON evidence path for rollout lock acquire/release events.",
-    )
-    parser.add_argument(
-        "--force-rollout-lock",
-        action=_ExplicitRolloutLockStoreTrue,
-        help=(
-            "Replace an active protected rollout mutation lease. Use only "
-            "after preserving evidence that the recorded owner is stale."
-        ),
-    )
-
 
 @dataclass(frozen=True, slots=True)
 class _BrokerRolloutLockBinding:
@@ -281,6 +188,7 @@ class _BrokerRolloutLockBinding:
 class _ClusterUpConfigSnapshot:
     path: Path | None
     config: ClusterConfig
+    raw_config: dict[str, Any]
     workload_contract_profile: object
     protected_target: str | None
 
@@ -293,86 +201,62 @@ class _ClusterConfigSnapshotTomlError(ValueError):
     """The single cluster-config snapshot is not syntactically valid TOML."""
 
 
-def _load_broker_rollout_envelope(path: Path) -> tuple[Any, Any]:
-    from loom_cli.rollout.operator.config import OperatorConfig
-    from loom_cli.rollout.operator.envelope import (
-        fixed_operator_config_path,
-        load_validated_envelope,
+def _positive_backup_limit(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("backup traversal limits must be integers") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("backup traversal limits must be positive")
+    return parsed
+
+
+def _add_backup_traversal_limit_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--backup-max-files",
+        type=_positive_backup_limit,
+        default=None,
+        help=(
+            "Explicit file traversal ceiling for backup validation. "
+            "Omit to keep the conservative default."
+        ),
+    )
+    parser.add_argument(
+        "--backup-max-entries",
+        type=_positive_backup_limit,
+        default=None,
+        help=(
+            "Explicit combined file/directory traversal ceiling for backup "
+            "validation. Omit to keep the conservative default."
+        ),
+    )
+    parser.add_argument(
+        "--backup-max-total-bytes",
+        type=_positive_backup_limit,
+        default=None,
+        help=(
+            "Explicit total byte traversal ceiling for backup validation. "
+            "Omit to keep the conservative default."
+        ),
     )
 
-    config = OperatorConfig.load(fixed_operator_config_path())
-    envelope = load_validated_envelope(
-        path,
-        config,
-        effective_uid=os.geteuid(),
+
+def _backup_traversal_limits_from_args(
+    args: argparse.Namespace,
+) -> BackupTraversalLimits | None:
+    max_files = getattr(args, "backup_max_files", None)
+    max_entries = getattr(args, "backup_max_entries", None)
+    max_total_bytes = getattr(args, "backup_max_total_bytes", None)
+    if max_files is None and max_entries is None and max_total_bytes is None:
+        return None
+    defaults = BackupTraversalLimits()
+    return BackupTraversalLimits(
+        max_files=max_files if max_files is not None else defaults.max_files,
+        max_entries=max_entries if max_entries is not None else defaults.max_entries,
+        max_total_bytes=(
+            max_total_bytes if max_total_bytes is not None else defaults.max_total_bytes
+        ),
     )
-    return config, envelope
-
-
-def _require_real_directory(
-    path: Path,
-    *,
-    label: str,
-    expected_owner_uid: int | None = None,
-) -> None:
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise ValueError(f"{label} is unavailable") from exc
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise ValueError(f"{label} must be a real directory, not a symlink")
-    if expected_owner_uid is not None and metadata.st_uid != expected_owner_uid:
-        raise ValueError(f"{label} must be service-owned")
-
-
-def _require_real_file(
-    path: Path,
-    *,
-    label: str,
-    expected_owner_uid: int | None = None,
-) -> None:
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise ValueError(f"{label} is unavailable") from exc
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError(f"{label} must be a regular file, not a symlink")
-    if expected_owner_uid is not None and metadata.st_uid != expected_owner_uid:
-        raise ValueError(f"{label} must be service-owned")
-
-
-def _fixed_rollout_lock_evidence_path(
-    config: Any,
-    envelope: Any,
-    *,
-    step_directory: str,
-) -> Path:
-    root = Path(config.rollout_root)
-    if not root.is_absolute() or ".." in root.parts:
-        raise ValueError("rollout lock evidence root must be an absolute fixed path")
-    rollout_parent = root / "rollouts"
-    rollout_dir = rollout_parent / str(envelope.rollout_id)
-    evidence_parent = rollout_dir / step_directory
-    service_uid = os.geteuid()
-    for path, label, owner_uid in (
-        (root, "rollout lock evidence root", None),
-        (rollout_parent, "rollout lock evidence rollouts directory", None),
-        (rollout_dir, "rollout lock evidence rollout directory", service_uid),
-        (evidence_parent, "rollout lock evidence parent", service_uid),
-    ):
-        _require_real_directory(path, label=label, expected_owner_uid=owner_uid)
-    evidence_path = evidence_parent / "rollout-lock.json"
-    try:
-        metadata = evidence_path.lstat()
-    except FileNotFoundError:
-        return evidence_path
-    except OSError as exc:
-        raise ValueError("rollout lock evidence path is unavailable") from exc
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("rollout lock evidence path must not be a symlink")
-    if metadata.st_uid != service_uid:
-        raise ValueError("rollout lock evidence path must be service-owned")
-    return evidence_path
 
 
 def _validate_broker_cluster_args(
@@ -403,6 +287,12 @@ def _validate_broker_cluster_args(
         envelope.backup_manifest_path
     ):
         raise ValueError("backup manifest path does not match broker envelope")
+    from loom_cli.rollout.operator.backup_limits import (
+        operator_backup_traversal_limits,
+    )
+
+    if _backup_traversal_limits_from_args(args) != operator_backup_traversal_limits(config):
+        raise ValueError("backup traversal limits do not match fixed broker policy")
     if args.skip_preflight or args.no_wait:
         raise ValueError("protected rollout gates cannot be skipped in broker mode")
     if not args.recover_sandbox_deadlines or args.sandbox_deadline_max_pods != 4:
@@ -528,6 +418,7 @@ def _load_cluster_up_config_snapshot(path: Path | None) -> _ClusterUpConfigSnaps
     return _ClusterUpConfigSnapshot(
         path=path,
         config=config,
+        raw_config=raw,
         workload_contract_profile=raw.get("workload_contract"),
         protected_target=_protected_cluster_config_target(raw),
     )
@@ -1479,6 +1370,186 @@ _RUNTIME_ENVIRONMENTS = frozenset(
     }
 )
 
+_KUBERNETES_NAMESPACE_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
+_CLUSTER_SCOPED_RENDER_KINDS = frozenset({"PersistentVolume"})
+_NAMESPACED_RENDER_KINDS = frozenset(
+    {
+        "Cluster",  # CloudNativePG custom resource
+        "ConfigMap",
+        "DaemonSet",
+        "Deployment",
+        "HorizontalPodAutoscaler",
+        "Ingress",
+        "NetworkPolicy",
+        "PersistentVolumeClaim",
+        "PodDisruptionBudget",
+        "Service",
+        "StatefulSet",
+    }
+)
+_TARGET_FLAG_UNSET = object()
+
+
+def _validate_kubernetes_namespace(namespace: str) -> str:
+    if (
+        not namespace
+        or len(namespace) > 63
+        or _KUBERNETES_NAMESPACE_RE.fullmatch(namespace) is None
+    ):
+        raise ValueError(
+            "namespace must be a valid Kubernetes DNS label: 1-63 lowercase "
+            "alphanumeric or '-' characters, starting and ending with alphanumeric"
+        )
+    return namespace
+
+
+def _resolve_config_target(
+    args: argparse.Namespace,
+    *,
+    defer_toml_errors: bool = False,
+) -> None:
+    """Resolve one command target from its config and explicit flags.
+
+    A supplied cluster config is authoritative for namespace and runtime
+    environment. Explicit flags remain useful as safety assertions, but may
+    not override that target. Commands without a config retain the historical
+    ``loom`` namespace default and namespace-based environment inference.
+    """
+
+    cfg_path = Path(args.config).resolve() if getattr(args, "config", None) else None
+    raw_config: dict[str, Any] | None = None
+    if cfg_path is not None:
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"cluster config not found: {cfg_path}")
+        try:
+            raw_config = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError:
+            if not defer_toml_errors:
+                raise
+            # Preflight/up/down already have command-specific config error
+            # handling (including protected workload-contract diagnostics).
+            # Preserve that richer path instead of replacing it here.
+            raw_config = None
+        if raw_config is not None and not defer_toml_errors:
+            # ``status`` has no later render/preflight config load, so keep it
+            # from accepting unknown or malformed schema fields merely because
+            # the target keys themselves parsed.
+            load_cluster_config(cfg_path)
+
+    _apply_config_target_fields(args, raw_config)
+
+
+def _apply_config_target_fields(
+    args: argparse.Namespace,
+    raw_config: dict[str, Any] | None,
+    *,
+    explicit_namespace: str | None | object = _TARGET_FLAG_UNSET,
+    explicit_environment: str | None | object = _TARGET_FLAG_UNSET,
+) -> None:
+    """Apply already-read target fields without taking a second snapshot."""
+
+    if explicit_namespace is _TARGET_FLAG_UNSET:
+        explicit_namespace = getattr(args, "namespace", None)
+    assert explicit_namespace is None or isinstance(explicit_namespace, str)
+    config_namespace = raw_config.get("namespace") if raw_config is not None else None
+    if config_namespace is not None:
+        if not isinstance(config_namespace, str):
+            raise ValueError("cluster config namespace must be a string")
+        if config_namespace != config_namespace.strip():
+            raise ValueError("cluster config namespace must not contain surrounding whitespace")
+        _validate_kubernetes_namespace(config_namespace)
+        if explicit_namespace is not None and explicit_namespace != config_namespace:
+            raise ValueError(
+                f"--namespace {explicit_namespace!r} conflicts with cluster config "
+                f"namespace {config_namespace!r}"
+            )
+        namespace = config_namespace
+    else:
+        namespace = explicit_namespace or "loom"
+        _validate_kubernetes_namespace(namespace)
+    args.namespace = namespace
+
+    if hasattr(args, "environment") and raw_config is not None:
+        config_environment = raw_config.get("runtime_environment")
+        if config_environment is None:
+            return
+        if not isinstance(config_environment, str):
+            raise ValueError("cluster config runtime_environment must be a string")
+        if config_environment != config_environment.strip() or not config_environment:
+            raise ValueError(
+                "cluster config runtime_environment must be non-empty and must not "
+                "contain surrounding whitespace"
+            )
+        if explicit_environment is _TARGET_FLAG_UNSET:
+            explicit_environment = args.environment
+        assert explicit_environment is None or isinstance(explicit_environment, str)
+        if explicit_environment is not None and explicit_environment != config_environment:
+            raise ValueError(
+                f"--environment {explicit_environment!r} conflicts with cluster config "
+                f"runtime_environment {config_environment!r}"
+            )
+        args.environment = config_environment
+        # A protected namespace remains authoritative even when the config is
+        # internally inconsistent (for example loom-staging + production).
+        infer_environment(
+            environment=config_environment,
+            namespace=namespace,
+        )
+
+
+def _add_rendered_namespace_metadata(yaml_text: str, *, namespace: str) -> str:
+    """Embed the configured namespace in every namespaced rendered object.
+
+    Templates intentionally remain readable source YAML. This final render
+    guard parses every document, preserves its text/comments, and inserts the
+    namespace only when it is absent. Future cluster-scoped template kinds
+    must be added to ``_CLUSTER_SCOPED_RENDER_KINDS`` explicitly, keeping this
+    safety boundary fail-closed for manual ``kubectl apply -f`` workflows.
+    """
+
+    import yaml  # type: ignore[import-untyped]
+
+    chunks = yaml_text.split("\n---\n")
+    namespaced_chunks: list[str] = []
+    for chunk in chunks:
+        document = yaml.safe_load(chunk)
+        if not isinstance(document, dict):
+            namespaced_chunks.append(chunk)
+            continue
+        kind = str(document.get("kind") or "")
+        metadata = document.get("metadata")
+        if not isinstance(metadata, dict):
+            raise ValueError(f"rendered {kind or '<unknown>'} object is missing metadata")
+        rendered_namespace = metadata.get("namespace")
+        if rendered_namespace is not None:
+            if rendered_namespace != namespace:
+                raise ValueError(
+                    f"rendered {kind} object namespace {rendered_namespace!r} "
+                    f"does not match cluster config namespace {namespace!r}"
+                )
+            namespaced_chunks.append(chunk)
+            continue
+        if kind in _CLUSTER_SCOPED_RENDER_KINDS:
+            namespaced_chunks.append(chunk)
+            continue
+        if kind not in _NAMESPACED_RENDER_KINDS:
+            raise ValueError(
+                f"rendered {kind or '<unknown>'} object has unknown namespace scope; "
+                "classify the kind before adding it to cluster render"
+            )
+        updated, substitutions = re.subn(
+            r"(?m)^metadata:\n",
+            f"metadata:\n  namespace: {namespace}\n",
+            chunk,
+            count=1,
+        )
+        if substitutions != 1:
+            raise ValueError(
+                f"rendered {kind or '<unknown>'} object has no top-level metadata block"
+            )
+        namespaced_chunks.append(updated)
+    return "\n---\n".join(namespaced_chunks)
+
 
 def _normalise_static_host_path_root(config: ClusterConfig) -> str | None:
     backend = config.persistent_storage_backend
@@ -1556,9 +1627,9 @@ def _normalise_frontend_path(raw: str, field_name: str) -> str:
     if value in {"", "/"}:
         return ""
     if not value.startswith("/"):
-        raise ValueError(f"{field_name} must be empty, /, /prod, or /dev")
-    if value not in {"/prod", "/dev"}:
-        raise ValueError(f"{field_name} must be empty, /, /prod, or /dev")
+        raise ValueError(f"{field_name} must be empty, /, /prod, /staging, or /dev")
+    if value not in {"/prod", "/staging", "/dev"}:
+        raise ValueError(f"{field_name} must be empty, /, /prod, /staging, or /dev")
     return value
 
 
@@ -1591,7 +1662,7 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
         raise ValueError("non-production frontend_environment must not use /prod")
     if environment == "production" and "beta" in label.lower():
         raise ValueError("production frontend_environment_label must not contain beta")
-    if route_path in {"/prod", "/dev"} and config.ingress_host != "yylx.world":
+    if route_path in {"/prod", "/staging", "/dev"} and config.ingress_host != "yylx.world":
         raise ValueError(
             f"frontend_route_path={route_path!r} must use ingress_host='yylx.world'",
         )
@@ -1776,6 +1847,7 @@ def render_manifests(config: ClusterConfig) -> str:
             "(or `pip install -e .`) to pick up dependencies.",
         ) from exc
 
+    namespace = _validate_kubernetes_namespace(config.namespace)
     pkg_path = resources.files("loom_cli.templates.k8s")
     env = Environment(
         # FileSystemLoader is required so that `{% import "_env.j2" %}`
@@ -1831,12 +1903,15 @@ def render_manifests(config: ClusterConfig) -> str:
         # trailing newline merge cleanly; the join trims any
         # double-blank-line drift.
         chunks.append(rendered.rstrip() + "\n")
-    return "\n---\n".join(chunks)
+    return _add_rendered_namespace_metadata(
+        "\n---\n".join(chunks),
+        namespace=namespace,
+    )
 
 
 def _rendered_deployment_images(yaml_text: str) -> dict[str, dict[str, str]]:
     try:
-        import yaml  # type: ignore[import-untyped]
+        import yaml
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "the 'PyYAML' package is required for deployment image drift checks.",
@@ -2301,6 +2376,22 @@ def _audit(args: argparse.Namespace) -> int:
 
 
 def _status(args: argparse.Namespace) -> int:
+    try:
+        _resolve_config_target(args)
+        environment, target_environment_failure = _resolve_target_environment(
+            environment=args.environment,
+            namespace=args.namespace,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: target config invalid: {exc}\n")
+        return 2
+    if target_environment_failure is not None:
+        sys.stderr.write(
+            "error: protected-target-environment conflict — refusing to inspect "
+            "a different target than the cluster config.\n"
+        )
+        return 2
+    assert environment is not None
     try:
         apps_v1, net_v1, core_v1, _storage_v1 = _load_clients(args.context)
     except RuntimeError as exc:
@@ -3053,12 +3144,14 @@ def _check_backup_manifest(
     environment: str,
     namespace: str,
     max_age_hours: int,
+    limits: BackupTraversalLimits | None = None,
 ) -> PreflightCheck:
     problems = validate_backup_manifest(
         manifest_path,
         environment=environment,
         namespace=namespace,
         max_age_hours=max_age_hours,
+        limits=limits,
     )
     if problems:
         return PreflightCheck(
@@ -3195,6 +3288,7 @@ def collect_preflight(
     environment: str | None = None,
     backup_manifest: Path | None = None,
     backup_max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
+    backup_limits: BackupTraversalLimits | None = None,
     cluster_config: ClusterConfig | None = None,
     workload_contract_profile: object = None,
     kind_node_mounts: list[dict[str, Any]] | None = None,
@@ -3242,6 +3336,7 @@ def collect_preflight(
                 environment=env_name,
                 namespace=namespace,
                 max_age_hours=backup_max_age_hours,
+                limits=backup_limits,
             )
         )
 
@@ -3374,6 +3469,11 @@ def _resolve_target_environment(
 
 
 def _preflight(args: argparse.Namespace) -> int:
+    try:
+        _resolve_config_target(args, defer_toml_errors=True)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: target config invalid: {exc}\n")
+        return 2
     environment, target_environment_failure = _resolve_target_environment(
         environment=args.environment,
         namespace=args.namespace,
@@ -3436,6 +3536,7 @@ def _preflight(args: argparse.Namespace) -> int:
                 Path(args.backup_manifest).resolve() if args.backup_manifest else None
             ),
             backup_max_age_hours=args.backup_max_age_hours,
+            backup_limits=_backup_traversal_limits_from_args(args),
             cluster_config=cluster_config,
             workload_contract_profile=workload_contract_profile,
             kind_node_mounts=kind_node_mounts,
@@ -3488,6 +3589,7 @@ def _backup_check(args: argparse.Namespace) -> int:
         namespace=args.namespace,
         max_age_hours=args.max_age_hours,
         min_remaining_hours=args.min_remaining_hours,
+        limits=_backup_traversal_limits_from_args(args),
     )
     if problems:
         for problem in problems:
@@ -4100,6 +4202,18 @@ def recover_sandbox_deadline_pods(
 
 
 def _up(args: argparse.Namespace) -> int:
+    explicit_namespace = args.namespace
+    explicit_environment = args.environment
+    try:
+        _apply_config_target_fields(
+            args,
+            None,
+            explicit_namespace=explicit_namespace,
+            explicit_environment=explicit_environment,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"error: target config invalid: {exc}\n")
+        return 2
     environment, target_environment_failure = _resolve_target_environment(
         environment=args.environment,
         namespace=args.namespace,
@@ -4175,7 +4289,10 @@ def _up(args: argparse.Namespace) -> int:
         except ValueError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
-    if snapshot.protected_target == "production" and environment != "production":
+    if (
+        snapshot.protected_target == "production"
+        and explicit_environment not in (None, "production")
+    ):
         sys.stderr.write(
             "error: protected cluster config target production conflicts with "
             f"command target {environment}\n"
@@ -4187,6 +4304,26 @@ def _up(args: argparse.Namespace) -> int:
         except ValueError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
+    try:
+        _apply_config_target_fields(
+            args,
+            snapshot.raw_config,
+            explicit_namespace=explicit_namespace,
+            explicit_environment=explicit_environment,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"error: target config invalid: {exc}\n")
+        return 2
+    environment, target_environment_failure = _resolve_target_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    )
+    if target_environment_failure is not None:
+        sys.stderr.write(
+            "error: protected-target-environment preflight failed — refusing to apply.\n"
+        )
+        return 1
+    assert environment is not None
     effective_environment = snapshot.protected_target or environment
     workload_contract_check = _protected_workload_trust_contract_check(
         environment=effective_environment,
@@ -4285,6 +4422,7 @@ def _up_impl(
                     Path(args.backup_manifest).resolve() if args.backup_manifest else None
                 ),
                 backup_max_age_hours=args.backup_max_age_hours,
+                backup_limits=_backup_traversal_limits_from_args(args),
                 cluster_config=config,
                 workload_contract_profile=workload_contract_profile,
                 kind_node_mounts=kind_node_mounts,
@@ -4623,6 +4761,19 @@ def _guard_protected_destructive_down(args: argparse.Namespace) -> int | None:
 
 
 def _down(args: argparse.Namespace) -> int:
+    try:
+        _resolve_config_target(args, defer_toml_errors=True)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: render failed: target config invalid: {exc}\n")
+        return 2
+    environment, target_environment_failure = _resolve_target_environment(
+        environment=args.environment,
+        namespace=args.namespace,
+    )
+    if target_environment_failure is not None:
+        sys.stderr.write("error: protected-target-environment conflict — refusing teardown.\n")
+        return 1
+    assert environment is not None
     guard_result = _guard_protected_destructive_down(args)
     if guard_result is not None:
         return guard_result
@@ -5041,8 +5192,24 @@ def dispatch(argv: list[str]) -> int:
     )
     p_status.add_argument(
         "--namespace",
-        default="loom",
-        help="Kubernetes namespace (default: loom).",
+        default=None,
+        help=(
+            "Kubernetes namespace. With --config, inferred from the config and "
+            "an explicit value must match; otherwise defaults to loom."
+        ),
+    )
+    p_status.add_argument(
+        "--environment",
+        default=None,
+        help=(
+            "Logical environment assertion. With --config, an explicit value "
+            "must match runtime_environment."
+        ),
+    )
+    p_status.add_argument(
+        "--config",
+        default=None,
+        help=("Path to cluster-config.toml used to infer and validate namespace and environment."),
     )
     p_status.add_argument(
         "--format",
@@ -5140,8 +5307,11 @@ def dispatch(argv: list[str]) -> int:
     )
     p_preflight.add_argument(
         "--namespace",
-        default="loom",
-        help="Kubernetes namespace (default: loom).",
+        default=None,
+        help=(
+            "Kubernetes namespace. With --config, inferred from the config and "
+            "an explicit value must match; otherwise defaults to loom."
+        ),
     )
     p_preflight.add_argument(
         "--environment",
@@ -5149,7 +5319,8 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Logical environment name. Protected environments "
             "(staging/production) get storage and backup "
-            "guard checks. If omitted, inferred from namespace when possible."
+            "guard checks. With --config, inferred from runtime_environment "
+            "and an explicit value must match; otherwise inferred from namespace."
         ),
     )
     p_preflight.add_argument(
@@ -5177,6 +5348,7 @@ def dispatch(argv: list[str]) -> int:
             f"environments (default: {DEFAULT_BACKUP_MAX_AGE_HOURS})."
         ),
     )
+    _add_backup_traversal_limit_arguments(p_preflight)
     p_preflight.add_argument(
         "--format",
         choices=["table", "json"],
@@ -5236,6 +5408,7 @@ def dispatch(argv: list[str]) -> int:
             "rollouts that must not discover expiry at mutation time."
         ),
     )
+    _add_backup_traversal_limit_arguments(p_backup_check)
     p_backup_check.set_defaults(handler=_backup_check)
 
     p_up = sub.add_parser(
@@ -5254,15 +5427,19 @@ def dispatch(argv: list[str]) -> int:
     )
     p_up.add_argument(
         "--namespace",
-        default="loom",
-        help="Kubernetes namespace (default: loom).",
+        default=None,
+        help=(
+            "Kubernetes namespace. With --config, inferred from the config and "
+            "an explicit value must match; otherwise defaults to loom."
+        ),
     )
     p_up.add_argument(
         "--environment",
         default=None,
         help=(
             "Logical environment name passed through to preflight. "
-            "Protected environments can require backup manifest checks."
+            "With --config, inferred from runtime_environment and an explicit "
+            "value must match. Protected environments can require backup checks."
         ),
     )
     p_up.add_argument(
@@ -5282,6 +5459,7 @@ def dispatch(argv: list[str]) -> int:
             f"(default: {DEFAULT_BACKUP_MAX_AGE_HOURS})."
         ),
     )
+    _add_backup_traversal_limit_arguments(p_up)
     p_up.add_argument(
         "--config",
         default=None,
@@ -5367,8 +5545,11 @@ def dispatch(argv: list[str]) -> int:
     )
     p_down.add_argument(
         "--namespace",
-        default="loom",
-        help="Kubernetes namespace (default: loom).",
+        default=None,
+        help=(
+            "Kubernetes namespace. With --config, inferred from the config and "
+            "an explicit value must match; otherwise defaults to loom."
+        ),
     )
     p_down.add_argument(
         "--environment",
@@ -5377,7 +5558,8 @@ def dispatch(argv: list[str]) -> int:
             "Logical environment name. Protected environments "
             "(staging/production) require a recent backup "
             "manifest and acknowledgement before --with-volumes or "
-            "--delete-namespace."
+            "--delete-namespace. With --config, inferred from "
+            "runtime_environment and an explicit value must match."
         ),
     )
     p_down.add_argument(

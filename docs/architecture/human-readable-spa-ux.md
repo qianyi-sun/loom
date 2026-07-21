@@ -312,6 +312,9 @@ uv run pytest -q tests/ops/test_frontend_accessibility_contract.py
 - Disclosures must use native `details` / `summary` or equivalent accessible
   button state.
 - Status explanations must be available to keyboard users and screen readers.
+- Tabbed navigation must use the shared `Tabs` primitive so selected state,
+  tab/panel relationships, roving tabindex, and Left/Right/Home/End navigation
+  remain consistent as visible or disabled choices change.
 - Long IDs and model names must wrap without overlapping adjacent controls.
 - Buttons must have clear visible labels; destructive buttons need action
   verbs and confirmation where appropriate.

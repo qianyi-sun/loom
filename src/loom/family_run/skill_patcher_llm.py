@@ -28,6 +28,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import UUID
 
 from loom.family_run.protocols import FamilyStateLike, StateBackend, TrialLike
 from loom.family_run.spec import ResolvedFamilyRunSpec
@@ -74,6 +75,8 @@ class _GatewayClient(Protocol):
         dialect: str,
         max_tokens: int,
         timeout_sec: float,
+        team_id: str,
+        trial_id: str,
         provider_connection_id: str | None = None,
     ) -> dict[str, Any]: ...
 
@@ -179,7 +182,26 @@ class SkillPatcherLLMAdapter:
         # gateway falls back to the legacy path.
         provider_connection_id = params.get("provider_connection_id")
         if provider_connection_id is not None:
-            provider_connection_id = str(provider_connection_id)
+            raw_provider_connection_id = str(provider_connection_id).strip()
+            if not raw_provider_connection_id:
+                raise ValueError(
+                    "skill_patcher_llm.evolve: provider_connection_id must not be empty",
+                )
+            try:
+                provider_connection_id = str(UUID(raw_provider_connection_id))
+            except ValueError as exc:
+                raise ValueError(
+                    "skill_patcher_llm.evolve: provider_connection_id must be a UUID",
+                ) from exc
+        raw_team_id = params.get("team_id") or getattr(trial, "team_id", None)
+        if raw_team_id is None:
+            raise ValueError("skill_patcher_llm.evolve: params['team_id'] is required")
+        try:
+            team_id = str(UUID(str(raw_team_id)))
+        except ValueError as exc:
+            raise ValueError(
+                "skill_patcher_llm.evolve: params['team_id'] must be a UUID",
+            ) from exc
 
         scratch = Path(tempfile.mkdtemp(prefix=f"skill-evolve-{family.family_key}-"))
         try:
@@ -205,6 +227,8 @@ class SkillPatcherLLMAdapter:
                 dialect="family_evolver",
                 max_tokens=max_tokens,
                 timeout_sec=timeout_sec,
+                team_id=team_id,
+                trial_id=str(trial.id),
                 provider_connection_id=provider_connection_id,
             )
             raw = _extract_content(response)

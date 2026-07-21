@@ -37,27 +37,18 @@ governance:
   `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate` on the current head SHA, with no human approval, no
   CODEOWNER approval, and no conversation resolution;
-- `main` branch protection retaining those four strict checks, code-owner
-  review, one generic approval, conversation resolution, admin enforcement,
-  and linear history;
+- `main` branch protection retaining those four strict checks, admin
+  enforcement, and linear history, with no human, CODEOWNER, or conversation
+  resolution gate;
 - repo labels copied from `carinrc/loom`;
 - repo milestones copied from `carinrc/loom`.
 
-Normal `dev` PRs use squash auto-merge, and the four checks above are their
-only merge authority. CODEOWNERS is advisory on `dev`. `main` accepts only a
-production release promotion from `dev`; Qianyi (`@qianyi-sun`) personally
-reviews the fixed candidate and evidence and performs the manual squash merge.
-Never enable auto-merge on a promotion PR. GitHub exposes
-`allow_auto_merge` repository-wide rather than per branch, so that `main`
-prohibition is an operator-enforced release rule.
-
-Bootstrap caveat: GitHub evaluates the target branch's CODEOWNERS. Current
-`main` still carries invalid legacy `@carinrc` owners, so the first promotion
-that introduces `* @qianyi-sun` can rely only on `main`'s generic one-approval
-rule plus Qianyi's manual process. Prefer a non-Qianyi identity or future
-restricted bot to open that PR because GitHub users cannot approve their own
-pull requests. Once merged, the catch-all requires Qianyi's CODEOWNER approval
-for every subsequent promotion.
+Every relevant non-draft PR emits the four protected checks above. The trusted
+base-branch controller enables squash auto-merge for all eligible PRs without
+using author or reviewer identity; the protected checks remain the only merge
+authority. `main` still accepts only a same-repository production release
+promotion from `dev`, with complete release evidence and the same current-head
+CI gates.
 
 `Hongjian-Gu` and `Devansh8321` currently have collaborator write access;
 `qianyi-sun` is the personal-repository owner and administrator.

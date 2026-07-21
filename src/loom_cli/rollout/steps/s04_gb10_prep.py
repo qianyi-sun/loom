@@ -20,12 +20,13 @@ reasons; step imports the Python wrapper).
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import stat
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
@@ -48,6 +49,8 @@ from loom_cli.rollout.steps.subprocess_util import (
 )
 
 _LEGACY_GB10_WORKER_SERVICE = "loom-gb10-worker.service"
+_SIMPLE_SYSTEMD_SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*\.service\Z")
+_GB10_NODE_AGENT_UNIT_DIR = PurePosixPath("deploy/worker-pools/gb10")
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,7 +333,12 @@ def _no_gb10_hosts_error(
 _GB10_KNOWN_HOSTS = "/etc/loom/staging-rollout-gb10-known-hosts"
 
 
-def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
+def _ssh(
+    host: GB10Host,
+    remote_cmd: str,
+    *,
+    stdin_text: str | None = None,
+) -> SubprocessResult:
     """Run a remote command over SSH with reasonable options.
 
     ``BatchMode=yes`` disables password prompts (fails fast if key
@@ -361,7 +369,7 @@ def _ssh(host: GB10Host, remote_cmd: str) -> SubprocessResult:
             remote_cmd,
         ]
     )
-    return run_captured(argv)
+    return run_captured(argv, stdin_text=stdin_text)
 
 
 def _parse_systemctl_properties(stdout: str) -> dict[str, str]:
@@ -374,17 +382,120 @@ def _parse_systemctl_properties(stdout: str) -> dict[str, str]:
 
 
 def _node_agent_service_is_prepared(props: dict[str, str]) -> bool:
-    if props.get("ActiveState") == "active":
-        return True
     return (
-        props.get("Type") == "oneshot"
+        props.get("LoadState") == "loaded"
+        and props.get("Type") == "oneshot"
         and props.get("Result") == "success"
         and props.get("ExecMainStatus") == "0"
+        and props.get("NeedDaemonReload") == "no"
     )
 
 
 def _node_agent_status_summary(props: dict[str, str]) -> str:
-    keys = ("Type", "Result", "ExecMainStatus", "ActiveState", "SubState")
+    keys = (
+        "LoadState",
+        "Type",
+        "Result",
+        "ExecMainStatus",
+        "ActiveState",
+        "SubState",
+        "NeedDaemonReload",
+    )
+    return " ".join(f"{key}={props.get(key, '<missing>')}" for key in keys)
+
+
+def _node_agent_timer_name(service: str) -> str:
+    """Derive the paired timer from one simple, non-path service basename."""
+    if not _SIMPLE_SYSTEMD_SERVICE_RE.fullmatch(service):
+        raise CandidateToolingError(
+            f"GB10 node_agent_service must be a simple .service basename: {service!r}"
+        )
+    return f"{service.removesuffix('.service')}.timer"
+
+
+def _validate_node_agent_services(hosts: list[GB10Host]) -> None:
+    for host in hosts:
+        if host.node_agent_service:
+            _node_agent_timer_name(host.node_agent_service)
+
+
+def _node_agent_unit_relative_path(unit: str) -> str:
+    return str(_GB10_NODE_AGENT_UNIT_DIR / unit)
+
+
+def _node_agent_unit_source(host: GB10Host, unit: str) -> str:
+    repo = PurePosixPath(host.repo_path)
+    return shlex.quote(str(repo / _node_agent_unit_relative_path(unit)))
+
+
+def _node_agent_unit_destination(unit: str) -> str:
+    # ``unit`` is validated by ``_node_agent_timer_name`` before this helper
+    # is used, so it cannot escape the per-user systemd directory.
+    return f'"$HOME/.config/systemd/user/{unit}"'
+
+
+def _node_agent_linger_command() -> str:
+    return 'test "$(loginctl show-user "$(id -u)" --property=Linger --value)" = yes'
+
+
+def _node_agent_units_clean_command(
+    ctx: RolloutContext,
+    host: GB10Host,
+    *,
+    service: str,
+    timer: str,
+) -> str:
+    """Prove both unit sources are tracked and clean at the rollout SHA."""
+    paths = (
+        _node_agent_unit_relative_path(service),
+        _node_agent_unit_relative_path(timer),
+    )
+    expected_objects = " && ".join(
+        f"git cat-file -e {shlex.quote(f'{ctx.resolved_sha}:{path}')}" for path in paths
+    )
+    quoted_paths = " ".join(shlex.quote(path) for path in paths)
+    return (
+        f"cd {shlex.quote(host.repo_path)} && {expected_objects} "
+        f"&& git diff --quiet {shlex.quote(ctx.resolved_sha)} -- {quoted_paths}"
+    )
+
+
+def _node_agent_unit_install_command(host: GB10Host, unit: str) -> str:
+    return (
+        "install -D -m 0644 "
+        f"{_node_agent_unit_source(host, unit)} "
+        f"{_node_agent_unit_destination(unit)}"
+    )
+
+
+def _node_agent_unit_matches_candidate_command(host: GB10Host, unit: str) -> str:
+    source = _node_agent_unit_source(host, unit)
+    destination = _node_agent_unit_destination(unit)
+    return f'cmp -s {source} {destination} && test "$(stat -c %a {destination})" = 644'
+
+
+def _node_agent_timer_is_prepared(
+    props: dict[str, str],
+    *,
+    service: str,
+) -> bool:
+    return (
+        props.get("LoadState") == "loaded"
+        and props.get("ActiveState") == "active"
+        and props.get("SubState") == "waiting"
+        and props.get("Unit") == service
+        and props.get("NeedDaemonReload") == "no"
+    )
+
+
+def _node_agent_timer_status_summary(props: dict[str, str]) -> str:
+    keys = (
+        "LoadState",
+        "ActiveState",
+        "SubState",
+        "Unit",
+        "NeedDaemonReload",
+    )
     return " ".join(f"{key}={props.get(key, '<missing>')}" for key in keys)
 
 
@@ -523,9 +634,46 @@ def _prep_one_host(
         ),
     ]
     if host.node_agent_service:
+        timer = _node_agent_timer_name(host.node_agent_service)
+        steps.extend(
+            [
+                (
+                    "verify-node-agent-unit-source",
+                    _node_agent_units_clean_command(
+                        ctx,
+                        host,
+                        service=host.node_agent_service,
+                        timer=timer,
+                    ),
+                ),
+                ("node-agent-linger", _node_agent_linger_command()),
+                (
+                    "install-node-agent-service",
+                    _node_agent_unit_install_command(host, host.node_agent_service),
+                ),
+                (
+                    "install-node-agent-timer",
+                    _node_agent_unit_install_command(host, timer),
+                ),
+            ]
+        )
         steps.append(("legacy-worker-unit", _legacy_worker_unit_retire_command()))
         service = shlex.quote(host.node_agent_service)
-        steps.append(("node-agent", f"systemctl --user start {service}"))
+        timer_quoted = shlex.quote(timer)
+        steps.extend(
+            [
+                ("node-agent-daemon-reload", "systemctl --user daemon-reload"),
+                ("node-agent", f"systemctl --user start {service}"),
+                (
+                    "node-agent-timer-enable",
+                    f"systemctl --user enable --now {timer_quoted}",
+                ),
+                (
+                    "node-agent-timer-restart",
+                    f"systemctl --user restart {timer_quoted}",
+                ),
+            ]
+        )
     log_lines: list[str] = []
     for label, cmd in steps:
         result = _ssh(host, cmd)
@@ -609,6 +757,18 @@ class GB10PrepStep(BaseStep):
             "scope": ctx.scope,
         }
 
+    def verify_done(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> VerifyOutcome:
+        """Freshly revalidate host reconciliation before skipping DONE."""
+        return self._verify_impl(ctx, step_dir)
+
+    def requires_strict_live_verification(self) -> bool:
+        """Do not finalize prep when the post-mutation host state is unknown."""
+        return True
+
     def _verify_impl(
         self,
         ctx: RolloutContext,
@@ -617,6 +777,7 @@ class GB10PrepStep(BaseStep):
         try:
             candidate_config, materialized_config = _gb10_prep_config_paths(ctx, step_dir)
             hosts = gb10_hosts_for(ctx, config_path=materialized_config)
+            _validate_node_agent_services(hosts)
             no_hosts_error = (
                 _no_gb10_hosts_error(ctx, config_path=candidate_config) if not hosts else None
             )
@@ -662,6 +823,36 @@ class GB10PrepStep(BaseStep):
                     # the previous prep did not finish and resume should rerun.
                     return VerifyOutcome.MISMATCH
             if host.node_agent_service:
+                timer = _node_agent_timer_name(host.node_agent_service)
+                unit_checks = [
+                    (
+                        "node-agent-unit-source",
+                        _node_agent_units_clean_command(
+                            ctx,
+                            host,
+                            service=host.node_agent_service,
+                            timer=timer,
+                        ),
+                    ),
+                    ("node-agent-linger", _node_agent_linger_command()),
+                    (
+                        "node-agent-service-unit",
+                        _node_agent_unit_matches_candidate_command(host, host.node_agent_service),
+                    ),
+                    (
+                        "node-agent-timer-unit",
+                        _node_agent_unit_matches_candidate_command(host, timer),
+                    ),
+                ]
+                for label, cmd in unit_checks:
+                    r = _ssh(host, cmd)
+                    if r.returncode != 0:
+                        if r.returncode == 255:
+                            return VerifyOutcome.UNKNOWN
+                        step_dir.stderr_path().write_text(
+                            f"{label} mismatch on {host.ssh_target}: rc={r.returncode}\n",
+                        )
+                        return VerifyOutcome.MISMATCH
                 legacy_outcome = _legacy_worker_unit_mismatch(host, step_dir)
                 if legacy_outcome is not None:
                     return legacy_outcome
@@ -670,11 +861,13 @@ class GB10PrepStep(BaseStep):
                     host,
                     "systemctl --user show "
                     f"{service} "
+                    "-p LoadState "
                     "-p Type "
                     "-p Result "
                     "-p ExecMainStatus "
                     "-p ActiveState "
-                    "-p SubState",
+                    "-p SubState "
+                    "-p NeedDaemonReload",
                 )
                 if r.returncode != 0:
                     if r.returncode == 255:
@@ -690,12 +883,53 @@ class GB10PrepStep(BaseStep):
                         f"{host.ssh_target}: {_node_agent_status_summary(props)}\n",
                     )
                     return VerifyOutcome.MISMATCH
+                timer_quoted = shlex.quote(timer)
+                enabled = _ssh(host, f"systemctl --user is-enabled {timer_quoted}")
+                if enabled.returncode == 255:
+                    return VerifyOutcome.UNKNOWN
+                if enabled.returncode != 0 or enabled.stdout.strip() != "enabled":
+                    step_dir.stderr_path().write_text(
+                        "node-agent-timer-enable mismatch on "
+                        f"{host.ssh_target}: rc={enabled.returncode} "
+                        f"state={enabled.stdout.strip() or '<missing>'}\n",
+                    )
+                    return VerifyOutcome.MISMATCH
+                timer_status = _ssh(
+                    host,
+                    "systemctl --user show "
+                    f"{timer_quoted} "
+                    "-p LoadState "
+                    "-p ActiveState "
+                    "-p SubState "
+                    "-p Unit "
+                    "-p NeedDaemonReload",
+                )
+                if timer_status.returncode != 0:
+                    if timer_status.returncode == 255:
+                        return VerifyOutcome.UNKNOWN
+                    step_dir.stderr_path().write_text(
+                        "node-agent-timer-status failed on "
+                        f"{host.ssh_target}: rc={timer_status.returncode}\n",
+                    )
+                    return VerifyOutcome.MISMATCH
+                timer_props = _parse_systemctl_properties(timer_status.stdout)
+                if not _node_agent_timer_is_prepared(
+                    timer_props,
+                    service=host.node_agent_service,
+                ):
+                    step_dir.stderr_path().write_text(
+                        "node-agent-timer-status mismatch on "
+                        f"{host.ssh_target}: "
+                        f"{_node_agent_timer_status_summary(timer_props)}\n",
+                    )
+                    return VerifyOutcome.MISMATCH
         return VerifyOutcome.MATCH
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         try:
             candidate_config, materialized_config = _gb10_prep_config_paths(ctx, step_dir)
             hosts = gb10_hosts_for(ctx, config_path=materialized_config)
+            _validate_node_agent_services(hosts)
             no_hosts_error = (
                 _no_gb10_hosts_error(ctx, config_path=candidate_config) if not hosts else None
             )

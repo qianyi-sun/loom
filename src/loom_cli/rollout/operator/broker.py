@@ -19,7 +19,12 @@ from uuid import uuid4
 
 from loom_cli.rollout.evidence import new_rollout_id
 
-from .backup import BackupCreator, BackupError, VerifiedBackup
+from .backup import (
+    BackupCreator,
+    BackupError,
+    VerifiedBackup,
+    normalize_backup_public_reason,
+)
 from .candidate import CandidateBindingError, bind_fresh_origin_dev
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
@@ -94,6 +99,9 @@ def _parser() -> argparse.ArgumentParser:
     cancel = commands.add_parser("cancel")
     cancel.add_argument("request_id")
     cancel.add_argument("--reason", required=True, type=_cancel_reason)
+
+    cleanup_backup = commands.add_parser("cleanup-incomplete-backup")
+    cleanup_backup.add_argument("request_id")
     return parser
 
 
@@ -135,6 +143,7 @@ def _event(
     status: EventStatus | None = None,
     reason: str | None = None,
     known_secrets: Iterable[str] = (),
+    current_step: str | None = None,
 ) -> RequestEvent:
     return RequestEvent(
         request_id=request_id,
@@ -154,6 +163,7 @@ def _event(
                 limit=_MAX_CANCEL_REASON,
             )
         ),
+        current_step=current_step,
     )
 
 
@@ -288,17 +298,39 @@ def _start(
             )
             return 0
 
+        backup_created_at = dependencies.now()
+        if (
+            not isinstance(backup_created_at, datetime)
+            or backup_created_at.tzinfo is None
+            or backup_created_at.utcoffset() is None
+        ):
+            raise ValueError("broker clock must return a timezone-aware datetime")
+        backup_created_at = backup_created_at.astimezone(UTC)
+        bundle_name = BackupCreator.bundle_name(request.request_id, backup_created_at)
         dependencies.store.append_event(
             _event(
                 request.request_id,
                 caller,
-                now=dependencies.now,
+                now=lambda: backup_created_at,
                 event="backup_started",
                 status="pending",
+                current_step=bundle_name,
             )
         )
         try:
-            backup = dependencies.backup.create(request)
+            backup = dependencies.backup.create(request, created_at=backup_created_at)
+        except BackupError as exc:
+            dependencies.store.append_event(
+                _event(
+                    request.request_id,
+                    caller,
+                    now=dependencies.now,
+                    event="backup_failed",
+                    status="failed",
+                    reason=exc.public_reason,
+                )
+            )
+            return _safe_error(dependencies, "staging backup failed safely")
         except Exception:
             dependencies.store.append_event(
                 _event(
@@ -559,6 +591,7 @@ def _request_status(dependencies: BrokerDependencies, request: RolloutRequest) -
         "status": request.status if latest is None or latest.status is None else latest.status,
     }
     if latest is not None:
+        payload["stage"] = latest.event
         if latest.attempt_number is not None:
             payload["attempt_number"] = latest.attempt_number
         if latest.unit_name is not None:
@@ -607,6 +640,115 @@ def _status(
     elif reconciled.safe_status.get("request_id") == request.request_id:
         payload.update(reconciled.safe_status)
     _write_json(dependencies.stdout, payload)
+    return 0
+
+
+def _cleanup_backup(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    request_id: str,
+) -> int:
+    validate_safe_identifier(request_id, "request_id")
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_admission_open()
+        _assert_available(dependencies)
+        try:
+            request = dependencies.store.read_request(request_id)
+            events = dependencies.store.read_events(request_id)
+        except Exception:
+            return _safe_error(dependencies, "request does not exist")
+        if request.status != "pending":
+            return _safe_error(dependencies, "request has no cleanable backup")
+        backup_failures = [event for event in events if event.event == "backup_failed"]
+        backup_starts = [event for event in events if event.event == "backup_started"]
+        forbidden_events = {
+            "envelope_published",
+            "launch_pending",
+            "launch_failed",
+            "attempt_pending",
+            "attempt_running",
+            "attempt_done",
+            "attempt_failed",
+            "cancel_requested",
+            "cancel_failed",
+            "cancelled",
+        }
+        if any(event.event in forbidden_events for event in events):
+            return _safe_error(dependencies, "request has no cleanable backup")
+        if dependencies.store.next_attempt_number(request_id) != 1:
+            return _safe_error(dependencies, "request has no cleanable backup")
+        if not backup_failures:
+            if len(backup_starts) != 1:
+                return _safe_error(dependencies, "request has no cleanable backup")
+            failure_reason = "backup_failed"
+            dependencies.store.append_event(
+                _event(
+                    request_id,
+                    caller,
+                    now=dependencies.now,
+                    event="backup_failed",
+                    status="failed",
+                    reason=failure_reason,
+                )
+            )
+        else:
+            failure_reason = normalize_backup_public_reason(backup_failures[-1].reason)
+        planned_roots = [
+            event.current_step
+            for event in backup_starts
+            if event.event == "backup_started" and event.current_step is not None
+        ]
+        if len(planned_roots) > 1:
+            return _safe_error(dependencies, "request has no cleanable backup")
+        bundle_name = planned_roots[0] if planned_roots else None
+        dependencies.store.append_event(
+            _event(
+                request_id,
+                caller,
+                now=dependencies.now,
+                event="backup_cleanup_started",
+                status="failed",
+                reason=failure_reason,
+            )
+        )
+        try:
+            removed = bool(
+                dependencies.backup.cleanup_incomplete(
+                    request_id,
+                    bundle_name=bundle_name,
+                )
+            )
+        except Exception:
+            dependencies.store.append_event(
+                _event(
+                    request_id,
+                    caller,
+                    now=dependencies.now,
+                    event="backup_cleanup_failed",
+                    status="failed",
+                    reason=failure_reason,
+                )
+            )
+            return _safe_error(dependencies, "incomplete backup cleanup failed safely")
+        dependencies.store.append_event(
+            _event(
+                request_id,
+                caller,
+                now=dependencies.now,
+                event="backup_cleanup_done",
+                status="failed",
+                reason=failure_reason,
+            )
+        )
+    _write_json(
+        dependencies.stdout,
+        {
+            "request_id": request_id,
+            "status": "failed",
+            "reason": failure_reason,
+            "cleanup": "removed" if removed else "already_absent",
+        },
+    )
     return 0
 
 
@@ -908,6 +1050,8 @@ def _main(
             return _resume(deps, caller, args.request_id)
         if args.command == "cancel":
             return _cancel(deps, caller, args.request_id, args.reason)
+        if args.command == "cleanup-incomplete-backup":
+            return _cleanup_backup(deps, caller, args.request_id)
         return 2
     except (ValueError, PolicyError):
         if deps is None:

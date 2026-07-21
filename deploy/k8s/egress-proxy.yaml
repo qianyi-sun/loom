@@ -1,6 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  namespace: loom
   name: loom-egress-proxy-bootstrap
 data:
   envoy.yaml: |
@@ -115,6 +116,7 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  namespace: loom
   name: loom-egress-proxy
 spec:
   replicas: 0
@@ -163,6 +165,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  namespace: loom
   name: loom-egress-proxy
 spec:
   selector:

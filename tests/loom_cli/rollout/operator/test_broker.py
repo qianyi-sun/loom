@@ -14,7 +14,11 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.operator import broker as broker_module
-from loom_cli.rollout.operator.backup import BackupError, VerifiedBackup
+from loom_cli.rollout.operator.backup import (
+    BackupError,
+    BackupPolicyLimitError,
+    VerifiedBackup,
+)
 from loom_cli.rollout.operator.broker import BrokerDependencies
 from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -134,20 +138,93 @@ class FakeBackup:
     def __init__(self, order: list[str]) -> None:
         self.order = order
         self.create_count = 0
+        self.cleanup_count = 0
 
-    def create(self, request: RolloutRequest) -> VerifiedBackup:
+    def create(
+        self,
+        request: RolloutRequest,
+        *,
+        created_at: datetime | None = None,
+    ) -> VerifiedBackup:
+        assert created_at == NOW
         self.order.append("backup-create")
         self.create_count += 1
         return VerifiedBackup(
             Path("/data/loom-staging/backups/fixed/backup-manifest.json"), "2" * 64
         )
 
+    def cleanup_incomplete(self, request_id: str, *, bundle_name: str | None = None) -> bool:
+        assert request_id == REQUEST_ID
+        assert bundle_name == "20260714T120000Z-req-alpha"
+        self.cleanup_count += 1
+        return self.cleanup_count == 1
+
 
 class FailingBackup(FakeBackup):
-    def create(self, request: RolloutRequest) -> VerifiedBackup:
+    def create(
+        self,
+        request: RolloutRequest,
+        *,
+        created_at: datetime | None = None,
+    ) -> VerifiedBackup:
+        assert created_at == NOW
         self.order.append("backup-create")
         self.create_count += 1
         raise BackupError("postgres_dump_failed")
+
+
+class ObjectLimitBackup(FailingBackup):
+    def create(
+        self,
+        request: RolloutRequest,
+        *,
+        created_at: datetime | None = None,
+    ) -> VerifiedBackup:
+        assert created_at == NOW
+        self.order.append("backup-create")
+        self.create_count += 1
+        raise BackupPolicyLimitError(
+            "minio_object_limit_exceeded",
+            public_reason="backup_object_limit_exceeded",
+            message="MinIO mirror exceeded object limit",
+        )
+
+
+class TransportFailingBackup(FailingBackup):
+    def create(
+        self,
+        request: RolloutRequest,
+        *,
+        created_at: datetime | None = None,
+    ) -> VerifiedBackup:
+        assert created_at == NOW
+        self.order.append("backup-create")
+        self.create_count += 1
+        raise BackupError(
+            "minio_transport_failed",
+            public_reason="backup_transport_failed",
+        )
+
+
+class CrashingBackup(FakeBackup):
+    def create(
+        self,
+        request: RolloutRequest,
+        *,
+        created_at: datetime | None = None,
+    ) -> VerifiedBackup:
+        assert created_at == NOW
+        self.order.append("backup-create")
+        self.create_count += 1
+        raise KeyboardInterrupt
+
+
+class CleanupFailingBackup(ObjectLimitBackup):
+    def cleanup_incomplete(self, request_id: str, *, bundle_name: str | None = None) -> bool:
+        assert request_id == REQUEST_ID
+        assert bundle_name == "20260714T120000Z-req-alpha"
+        self.cleanup_count += 1
+        raise BackupError("backup_cleanup_failed")
 
 
 class FakeSystemd:
@@ -358,6 +435,132 @@ def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) 
     assert deps.store.read_active() is None
     assert deps.store.envelopes == {}
     assert deps.store.read_events(REQUEST_ID)[-1].event == "backup_failed"
+    # FailingBackup fails the postgres stage; the durable reason names it end to
+    # end through the broker instead of collapsing to a generic backup_failed.
+    assert deps.store.read_events(REQUEST_ID)[-1].reason == "backup_postgres_failed"
+
+
+def test_object_limit_failure_has_stable_public_reason_and_supported_cleanup(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path, backup=ObjectLimitBackup([]))
+
+    assert broker_main(["start"], dependencies=deps.dependencies) == 1
+    failed = deps.store.read_events(REQUEST_ID)[-1]
+    assert failed.event == "backup_failed"
+    assert failed.reason == "backup_object_limit_exceeded"
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    status = _last_json(deps.stdout)
+    assert status["stage"] == "backup_failed"
+    assert status["reason"] == "backup_object_limit_exceeded"
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate(0)
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", REQUEST_ID],
+            dependencies=deps.dependencies,
+        )
+        == 0
+    )
+    cleaned = deps.store.read_events(REQUEST_ID)[-1]
+    assert cleaned.event == "backup_cleanup_done"
+    assert cleaned.status == "failed"
+    assert cleaned.reason == "backup_object_limit_exceeded"
+    assert '"cleanup":"removed"' in deps.stdout.getvalue()
+    assert '"status":"failed"' in deps.stdout.getvalue()
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate(0)
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", REQUEST_ID],
+            dependencies=deps.dependencies,
+        )
+        == 0
+    )
+    assert '"cleanup":"already_absent"' in deps.stdout.getvalue()
+
+
+def test_transport_failure_has_stable_public_reason_and_no_launch(tmp_path: Path) -> None:
+    deps = fakes(tmp_path, backup=TransportFailingBackup([]))
+
+    assert broker_main(["start"], dependencies=deps.dependencies) == 1
+    failed = deps.store.read_events(REQUEST_ID)[-1]
+    assert failed.event == "backup_failed"
+    assert failed.reason == "backup_transport_failed"
+    assert deps.systemd.start_count == 0
+    assert deps.store.read_active() is None
+    assert deps.store.envelopes == {}
+
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    status = _last_json(deps.stdout)
+    assert status["stage"] == "backup_failed"
+    assert status["reason"] == "backup_transport_failed"
+
+
+def test_cleanup_refuses_envelope_crash_window_without_deleting_backup(tmp_path: Path) -> None:
+    deps = fakes(tmp_path, backup=ObjectLimitBackup([]))
+    assert broker_main(["start"], dependencies=deps.dependencies) == 1
+    deps.store.envelopes[(REQUEST_ID, 1)] = object()  # type: ignore[assignment]
+
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", REQUEST_ID],
+            dependencies=deps.dependencies,
+        )
+        == 1
+    )
+
+    assert deps.backup.cleanup_count == 0
+    assert deps.store.read_events(REQUEST_ID)[-1].event == "backup_failed"
+
+
+def test_cleanup_recovers_backup_started_power_loss_without_envelope(tmp_path: Path) -> None:
+    deps = fakes(tmp_path, backup=CrashingBackup([]))
+    with pytest.raises(KeyboardInterrupt):
+        broker_main(["start"], dependencies=deps.dependencies)
+    assert deps.store.read_events(REQUEST_ID)[-1].event == "backup_started"
+
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", REQUEST_ID],
+            dependencies=deps.dependencies,
+        )
+        == 0
+    )
+
+    events = deps.store.read_events(REQUEST_ID)
+    assert [event.event for event in events[-3:]] == [
+        "backup_failed",
+        "backup_cleanup_started",
+        "backup_cleanup_done",
+    ]
+    assert all(event.reason == "backup_failed" for event in events[-3:])
+
+
+def test_cleanup_failure_is_audited_and_preserves_public_backup_reason(tmp_path: Path) -> None:
+    deps = fakes(tmp_path, backup=CleanupFailingBackup([]))
+    assert broker_main(["start"], dependencies=deps.dependencies) == 1
+
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", REQUEST_ID],
+            dependencies=deps.dependencies,
+        )
+        == 1
+    )
+
+    events = deps.store.read_events(REQUEST_ID)
+    assert [event.event for event in events[-2:]] == [
+        "backup_cleanup_started",
+        "backup_cleanup_failed",
+    ]
+    assert all(event.reason == "backup_object_limit_exceeded" for event in events[-2:])
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    status = _last_json(deps.stdout)
+    assert status["stage"] == "backup_cleanup_failed"
+    assert status["reason"] == "backup_object_limit_exceeded"
 
 
 def test_start_refuses_when_another_request_is_active(tmp_path: Path) -> None:

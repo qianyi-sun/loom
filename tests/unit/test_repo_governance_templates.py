@@ -20,17 +20,22 @@ def test_contributing_and_pr_template_accept_issue_scoped_external_prs() -> None
     assert "pull request code must not rely on protected secrets" in pr_template
 
 
-def test_normal_dev_prs_use_ci_only_squash_auto_merge() -> None:
+def test_all_non_draft_prs_use_author_neutral_ci_only_auto_merge() -> None:
     contributing = _read("CONTRIBUTING.md")
     quickstart = _read("docs/contributing/contributor-quickstart.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
-    assert "Every\n> normal `dev` PR uses GitHub squash auto-merge" in contributing
-    assert "Every normal `dev` PR uses squash auto-merge" in quickstart
+    assert "current `dev` queue head" not in contributing
+    assert "current `dev` queue head" not in quickstart
     assert "For this normal `dev` PR" in pr_template
 
     for document in (contributing, quickstart, pr_template):
         normalized_document = " ".join(document.split()).lower()
+        assert "ci:merge-ready" not in normalized_document
+        assert (
+            "every non-draft" in normalized_document
+            or "every relevant non-draft" in normalized_document
+        )
         for gate in (
             "repository-checks",
             "images-gate",
@@ -64,21 +69,23 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
         assert gate in quickstart
 
     assert "Labels may add validation but cannot remove path-inferred validation" in contributing
-    assert "GitHub squash auto-merge was enabled" in pr_template
+    assert "squash auto-merge" in pr_template
+    assert "only while it is the queue head" not in pr_template
 
     for document in (contributing, quickstart):
         normalized_document = " ".join(document.split())
         assert "visible and successful on the current head SHA" in normalized_document
         assert "main` accepts only" in normalized_document.lower()
-        assert "manual squash merge" in normalized_document.lower()
-        assert "never enable auto-merge" in normalized_document.lower()
+        assert "manual squash merge" not in normalized_document.lower()
+        assert "never enable auto-merge" not in normalized_document.lower()
 
-    assert "succeed on the current head SHA" in pr_template
-    assert "Qianyi (`@qianyi-sun`) reviews" in pr_template
-    assert "manual squash merge" in pr_template
+    normalized_template = " ".join(pr_template.split())
+    assert "succeed on the current head SHA" in normalized_template
+    assert "author or reviewer" in normalized_template
+    assert "only merge authority" in normalized_template
 
 
-def test_main_promotion_requires_qianyi_manual_squash_and_separates_approvals() -> None:
+def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> None:
     contributing = _read("CONTRIBUTING.md")
     quickstart = _read("docs/contributing/contributor-quickstart.md")
     operator_runbook = _read("docs/runbooks/operator-runbook.md")
@@ -95,9 +102,9 @@ def test_main_promotion_requires_qianyi_manual_squash_and_separates_approvals() 
         release_template,
     ):
         normalized_document = " ".join(document.split()).lower()
-        assert "@qianyi-sun" in normalized_document
-        assert "manual squash" in normalized_document
-        assert "never enable auto-merge" in normalized_document
+        assert "manual squash" not in normalized_document
+        assert "never enable auto-merge" not in normalized_document
+        assert "auto-merge" in normalized_document
 
     for document in (contributing, operator_runbook, first_prod_runbook, pr_template):
         normalized_document = " ".join(document.split()).lower()
@@ -105,8 +112,8 @@ def test_main_promotion_requires_qianyi_manual_squash_and_separates_approvals() 
         assert "production environment approval" in normalized_document
         assert "not interchangeable" in normalized_document
 
-    assert "allow_auto_merge" in contributing
-    assert "repository-wide" in contributing
+    assert ".github/workflows/auto-merge.yml" in contributing
+    assert "author-neutral" in contributing
 
 
 def test_release_promotion_template_requires_first_prod_evidence() -> None:
@@ -149,20 +156,8 @@ def test_issue_templates_use_current_loom_language() -> None:
     assert "vX.Y.Z` tag exists on the merged `main` commit" in template_text
 
 
-def test_codeowners_routes_all_paths_to_qianyi_but_is_advisory_on_dev() -> None:
-    codeowners = _read(".github/CODEOWNERS")
-    entries = {
-        line.strip()
-        for line in codeowners.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-
-    assert entries == {"* @qianyi-sun"}
-    assert "@carinrc" not in codeowners
-    normalized = " ".join(codeowners.split()).lower()
-    assert "advisory" in normalized
-    assert "not a `dev` merge gate" in normalized
-    assert "subsequent `main` promotion" in normalized
+def test_codeowners_does_not_route_every_change_to_one_reviewer() -> None:
+    assert not (ROOT / ".github/CODEOWNERS").exists()
 
 
 def test_ci_docs_only_fast_path_includes_repo_metadata_not_workflows() -> None:
