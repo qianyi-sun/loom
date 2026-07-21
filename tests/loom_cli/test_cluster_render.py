@@ -1685,6 +1685,11 @@ def test_local_example_template_renders() -> None:
     cfg = load_cluster_config(_REPO_ROOT / "deploy/local/local.example.cluster.toml")
     docs = _load_docs(render_manifests(cfg))
     assert docs  # rendered manifests without raising
+    assert cfg.runtime_environment == "local"
+    assert cfg.frontend_environment == "local"
+    for deployment in ("loom-control-plane", "loom-service", "loom-llm-gateway"):
+        assert _deployment_env_value(docs, deployment, "LOOM_ENV") == "local"
+    assert _deployment_env_value(docs, "loom-web", "LOOM_FRONTEND_ENVIRONMENT") == "local"
     assert cfg.k8s_worker.enabled is True  # default local worker path
 
 
