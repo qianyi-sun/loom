@@ -2211,7 +2211,7 @@ def build_manifest_preflight_checks(
             input_keys=common_inputs,
             evidence_schema=common_evidence,
             timeout_seconds=120,
-            freshness_ttl_seconds=300,
+            freshness_ttl_seconds=3600,
             remediation=("restore API-valid exact rendered resources before another rollout"),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
@@ -2233,7 +2233,7 @@ def build_manifest_preflight_checks(
                 EvidenceField("apply-contract-digest", "sha256"),
             ),
             timeout_seconds=120,
-            freshness_ttl_seconds=300,
+            freshness_ttl_seconds=3600,
             remediation=(
                 "converge recognized legacy field ownership through the reviewed protected "
                 "manager before another rollout"
@@ -2533,7 +2533,7 @@ def build_browser_runtime_check(
                 EvidenceField("launch-ready", "boolean"),
             ),
             timeout_seconds=60,
-            freshness_ttl_seconds=300,
+            freshness_ttl_seconds=3600,
             remediation="restore exact browser image, private token authority and launch sandbox",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),

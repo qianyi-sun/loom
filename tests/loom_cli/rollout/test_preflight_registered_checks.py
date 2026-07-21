@@ -1783,6 +1783,8 @@ def test_registered_manifest_checks_render_once_then_server_validate() -> None:
     assert by_id["manifests.server-schema"].evidence["server-valid"] is True
     assert by_id["manifests.field-ownership"].passed
     assert by_id["manifests.field-ownership"].evidence["ownership-ready"] is True
+    assert server_schema.spec.freshness_ttl_seconds == 3600
+    assert field_ownership.spec.freshness_ttl_seconds == 3600
     assert len(render_calls) == 1
     assert server_payloads == [_rendered_image_manifest(), _rendered_image_manifest()]
 
@@ -1842,6 +1844,7 @@ def test_registered_browser_runtime_binds_exact_image_token_and_schema(tmp_path:
     assert result.passed
     assert result.evidence["image-id"] == browser.image_id
     assert result.evidence["report-schema-digest"] == browser_report_schema_digest()
+    assert check.spec.freshness_ttl_seconds == 3600
     assert "--network=none" in calls[0]
 
 

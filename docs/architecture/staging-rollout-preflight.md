@@ -63,7 +63,10 @@ an authority input fingerprint changed. The one declared exception is
 fresh-checkpoint sentinel to the newly restore-verified checkpoint. Volatile
 latency, transient-unit and host observations may produce a new evidence hash;
 the fresh passing evidence becomes the attestation authority and is rechecked
-again at final admission. This removes the previous circular dependency in
+again at final admission. Candidate-static server-schema, field-ownership and
+browser-runtime evidence uses the same one-hour freshness budget as the other
+immutable Tier 1 artifacts, so the bounded cleanup wait cannot expire it while
+the current DAG is still running. This removes the previous circular dependency in
 which clone rehearsal needed a verified lease while the broker demanded the
 rehearsal attestation before it could create that lease.
 
