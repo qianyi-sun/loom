@@ -47,7 +47,7 @@ from .config import (
     APPROVED_BACKUP_MAX_OBJECTS,
     OperatorConfig,
 )
-from .model import RolloutRequest
+from .model import APPROVED_BACKUP_EVENT_REASONS, RolloutRequest
 
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIRECTORY_MODE = 0o700
@@ -164,20 +164,9 @@ BackupPublicReason = Literal[
     "backup_secrets_failed",
     "backup_manifest_failed",
 ]
-_BACKUP_PUBLIC_REASONS = frozenset(
-    {
-        "backup_failed",
-        "backup_precondition_failed",
-        "backup_capacity_exhausted",
-        "backup_config_invalid",
-        "backup_postgres_failed",
-        "backup_minio_failed",
-        "backup_transport_failed",
-        "backup_object_limit_exceeded",
-        "backup_secrets_failed",
-        "backup_manifest_failed",
-    }
-)
+# Imported from the model so the accepted event tokens and the reasons raised
+# here share one definition and cannot drift.
+_BACKUP_PUBLIC_REASONS = APPROVED_BACKUP_EVENT_REASONS
 
 # Map each internal stage code to a durable, secret-safe public reason so an
 # operator can see *which* backup stage failed via `status`, instead of every
@@ -187,6 +176,9 @@ _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
     "backup_request_not_pending": "backup_precondition_failed",
     "backup_clock_invalid": "backup_precondition_failed",
     "service_account_unavailable": "backup_precondition_failed",
+    "backup_path_not_approved": "backup_precondition_failed",
+    "backup_cleanup_request_invalid": "backup_precondition_failed",
+    "backup_revalidation_failed": "backup_manifest_failed",
     "backup_capacity_unavailable": "backup_capacity_exhausted",
     "backup_root_create_failed": "backup_capacity_exhausted",
     "component_sync_failed": "backup_capacity_exhausted",
@@ -458,8 +450,14 @@ class BackupError(RuntimeError):
         self,
         code: str,
         *,
-        public_reason: BackupPublicReason = "backup_failed",
+        public_reason: BackupPublicReason | None = None,
     ) -> None:
+        # Derive the durable, secret-safe operator reason from the stage code
+        # unless a caller pins one explicitly (object-limit, transport). This
+        # keeps the failing stage diagnosable through `status` for every raise
+        # site — staged or direct — instead of collapsing to `backup_failed`.
+        if public_reason is None:
+            public_reason = _public_reason_for_code(code)
         if public_reason not in _BACKUP_PUBLIC_REASONS:
             raise ValueError("backup public reason is not approved")
         super().__init__(code)
@@ -683,7 +681,7 @@ def _stage(code: str, operation: Callable[[], _T]) -> _T:
         pass
     else:
         return result
-    raise BackupError(code, public_reason=_public_reason_for_code(code))
+    raise BackupError(code)
 
 
 def _command_environment(config: OperatorConfig) -> dict[str, str]:
