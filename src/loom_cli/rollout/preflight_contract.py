@@ -11,14 +11,18 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, fields, replace
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from threading import Barrier, BrokenBarrierError, Event
+from time import monotonic
 from types import MappingProxyType
-from typing import TypeAlias, cast
+from typing import NoReturn, TypeAlias, cast
 
 from loom_cli.rollout.operator.redaction import redact_rollout_mapping, redact_rollout_text
 
@@ -32,6 +36,26 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SECRET_KEY_RE = re.compile(
     r"(?:^|[._-])(secret|token|password|credential|private[_-]?key)(?:$|[._-])"
 )
+_FATAL_TIMEOUT_EXIT_CODE = 70
+_DEFAULT_CANCELLATION_GRACE_SECONDS = 5.0
+
+
+def _terminate_runner_for_timeout(
+    check_id: str,
+    failure_code: str,
+    discovered_stage: str,
+) -> NoReturn:
+    try:
+        os.write(
+            2,
+            (
+                "fatal: preflight.runner.cancel-timeout "
+                f"check_id={check_id} failure_code={failure_code} "
+                f"discovered_stage={discovered_stage}\n"
+            ).encode(),
+        )
+    finally:
+        os._exit(_FATAL_TIMEOUT_EXIT_CODE)
 
 
 class StageCapability(StrEnum):
@@ -197,12 +221,53 @@ class CheckSpec:
         return _hash_json(payload)
 
 
+class _CheckCancellation:
+    def __init__(self, timeout_seconds: int) -> None:
+        self._timeout_seconds = timeout_seconds
+        self._cancelled = Event()
+        self._deadline: float | None = None
+
+    def mark_started(self) -> None:
+        self._deadline = monotonic() + self._timeout_seconds
+
+    @property
+    def deadline(self) -> float | None:
+        return self._deadline
+
+    @property
+    def requested(self) -> bool:
+        return self._cancelled.is_set()
+
+    def request(self) -> None:
+        self._cancelled.set()
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckCompletion:
+    result: CheckExecution | None
+    error: BaseException | None
+    finished_monotonic: float
+    started_at: datetime
+    finished_at: datetime
+
+
 @dataclass(frozen=True, slots=True)
 class CheckContext:
     bindings: Mapping[str, SafeValue]
+    _cancellation: _CheckCancellation | None = dataclass_field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bindings", MappingProxyType(dict(self.bindings)))
+
+    @property
+    def cancellation_requested(self) -> bool:
+        """Return true after this check's execution deadline is exceeded."""
+
+        return self._cancellation is not None and self._cancellation.requested
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,9 +576,13 @@ class PreflightDag:
         *,
         max_concurrency: int = 8,
         attested_dependencies: frozenset[str] = frozenset(),
+        cancellation_grace_seconds: float = _DEFAULT_CANCELLATION_GRACE_SECONDS,
+        fatal_timeout: Callable[[str, str, str], NoReturn] = _terminate_runner_for_timeout,
     ) -> None:
         if not 1 <= max_concurrency <= 32:
             raise ValueError("max_concurrency is outside the supported range")
+        if not 0.1 <= cancellation_grace_seconds <= 30 or not callable(fatal_timeout):
+            raise ValueError("preflight cancellation authority is invalid")
         self._checks = {check.spec.check_id: check for check in checks}
         if len(self._checks) != len(checks) or not checks:
             raise ValueError("preflight checks must be non-empty and unique")
@@ -530,6 +599,8 @@ class PreflightDag:
                 raise ValueError(f"check has unknown dependencies: {sorted(missing)}")
         self._assert_acyclic()
         self._max_concurrency = max_concurrency
+        self._cancellation_grace_seconds = cancellation_grace_seconds
+        self._fatal_timeout = fatal_timeout
 
     def _assert_acyclic(self) -> None:
         pending = {name: set(check.spec.dependencies) for name, check in self._checks.items()}
@@ -619,48 +690,269 @@ class PreflightDag:
                         on_execution(results[check.spec.check_id])
                 else:
                     runnable.append(check)
-            executor = ThreadPoolExecutor(
-                max_workers=min(self._max_concurrency, max(1, len(runnable))),
-                thread_name_prefix="loom-preflight",
+            wave_results = self._run_wave(
+                runnable,
+                context=context,
+                operations=operations,
+                clock=clock,
             )
-            try:
-                futures = {
-                    check.spec.check_id: executor.submit(
-                        self._run_one,
-                        check,
-                        context,
-                        operations[check.spec.check_id],
-                        clock,
-                    )
-                    for check in runnable
-                }
-                for check in runnable:
-                    future = futures[check.spec.check_id]
-                    try:
-                        result = future.result(timeout=check.spec.timeout_seconds)
-                    except TimeoutError:
-                        future.cancel()
-                        at = clock()
-                        result = self._failure_execution(
-                            check,
-                            context=context,
-                            operation=operations[check.spec.check_id],
-                            outcome=CheckOutcome.TIMEOUT,
-                            evidence={
-                                field.name: _empty_value(field)
-                                for field in check.spec.evidence_schema
-                            },
-                            started_at=at,
-                            finished_at=at,
-                        )
-                    results[check.spec.check_id] = result
-                    if on_execution is not None:
-                        on_execution(result)
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+            for check in runnable:
+                result = wave_results[check.spec.check_id]
+                results[check.spec.check_id] = result
+                if on_execution is not None:
+                    on_execution(result)
             for check in ready:
                 pending.pop(check.spec.check_id)
         return tuple(sorted(results.values(), key=lambda result: (result.tier, result.check_id)))
+
+    def _run_wave(
+        self,
+        runnable: Sequence[RegisteredCheck],
+        *,
+        context: CheckContext,
+        operations: Mapping[str, CheckOperation],
+        clock: Callable[[], datetime],
+    ) -> dict[str, CheckExecution]:
+        if not runnable:
+            return {}
+        checks = {check.spec.check_id: check for check in runnable}
+        cancellations = {
+            check.spec.check_id: _CheckCancellation(check.spec.timeout_seconds)
+            for check in runnable
+        }
+        worker_count = min(self._max_concurrency, len(runnable))
+        executor = ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="loom-preflight",
+        )
+        futures: dict[str, Future[_CheckCompletion]] = {}
+        try:
+            self._prewarm_executor(
+                executor,
+                worker_count=worker_count,
+                fatal_check=runnable[0],
+            )
+            try:
+                for check in runnable:
+                    check_id = check.spec.check_id
+                    futures[check_id] = executor.submit(
+                        self._run_one_cancellable,
+                        check,
+                        context,
+                        operations[check_id],
+                        clock,
+                        cancellations[check_id],
+                    )
+            except BaseException:
+                self._cancel_and_quiesce_submitted(
+                    checks=checks,
+                    cancellations=cancellations,
+                    futures=futures,
+                )
+                raise
+            active = set(futures)
+            timed_out: set[str] = set()
+            cancellation_deadlines: dict[str, float] = {}
+            wave_results: dict[str, CheckExecution] = {}
+            errors: list[BaseException] = []
+            while active:
+                for check_id in tuple(active):
+                    future = futures[check_id]
+                    if not future.done():
+                        continue
+                    try:
+                        completion = future.result()
+                    except BaseException as exc:
+                        errors.append(exc)
+                        active.remove(check_id)
+                        cancellation_deadlines.pop(check_id, None)
+                        continue
+                    deadline = cancellations[check_id].deadline
+                    if deadline is None:
+                        errors.append(RuntimeError("preflight check omitted its start deadline"))
+                    elif completion.finished_monotonic > deadline:
+                        cancellations[check_id].request()
+                        wave_results[check_id] = self._timeout_execution(
+                            checks[check_id],
+                            context=context,
+                            operation=operations[check_id],
+                            started_at=completion.started_at,
+                            finished_at=completion.finished_at,
+                        )
+                    elif completion.error is not None:
+                        errors.append(completion.error)
+                    elif completion.result is None:
+                        errors.append(RuntimeError("preflight check completed without a result"))
+                    else:
+                        wave_results[check_id] = completion.result
+                    active.remove(check_id)
+                    cancellation_deadlines.pop(check_id, None)
+
+                now_monotonic = monotonic()
+                for check_id in tuple(active - timed_out):
+                    deadline = cancellations[check_id].deadline
+                    if deadline is not None and now_monotonic >= deadline:
+                        cancellations[check_id].request()
+                        timed_out.add(check_id)
+                        cancellation_deadlines[check_id] = (
+                            now_monotonic + self._cancellation_grace_seconds
+                        )
+
+                now_monotonic = monotonic()
+                for check_id in tuple(active & timed_out):
+                    if now_monotonic >= cancellation_deadlines[check_id]:
+                        check = checks[check_id]
+                        self._fatal_timeout(
+                            check_id,
+                            check.spec.failure_code,
+                            check.spec.stage.value,
+                        )
+
+                if active:
+                    next_deadlines = [
+                        cancellation_deadlines[check_id]
+                        if check_id in timed_out
+                        else cancellations[check_id].deadline
+                        for check_id in active
+                    ]
+                    known_deadlines = [value for value in next_deadlines if value is not None]
+                    poll_seconds = 0.05
+                    if known_deadlines:
+                        poll_seconds = min(
+                            poll_seconds,
+                            max(0.0, min(known_deadlines) - monotonic()),
+                        )
+                    wait(
+                        [futures[check_id] for check_id in active],
+                        timeout=poll_seconds,
+                        return_when=FIRST_COMPLETED,
+                    )
+            if errors:
+                raise errors[0]
+            return wave_results
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    def _prewarm_executor(
+        self,
+        executor: ThreadPoolExecutor,
+        *,
+        worker_count: int,
+        fatal_check: RegisteredCheck,
+    ) -> None:
+        barrier = Barrier(worker_count + 1)
+
+        def worker_ready() -> None:
+            try:
+                barrier.wait()
+            except BrokenBarrierError:
+                return
+
+        futures: list[Future[None]] = []
+        try:
+            for _ in range(worker_count):
+                futures.append(executor.submit(worker_ready))
+            barrier.wait(timeout=self._cancellation_grace_seconds)
+        except BaseException:
+            barrier.abort()
+            for future in futures:
+                future.cancel()
+            _, not_done = wait(
+                tuple(futures),
+                timeout=self._cancellation_grace_seconds,
+            )
+            if not_done:
+                self._fatal_timeout(
+                    fatal_check.spec.check_id,
+                    fatal_check.spec.failure_code,
+                    fatal_check.spec.stage.value,
+                )
+            raise
+        _, not_done = wait(
+            tuple(futures),
+            timeout=self._cancellation_grace_seconds,
+        )
+        if not_done:
+            self._fatal_timeout(
+                fatal_check.spec.check_id,
+                fatal_check.spec.failure_code,
+                fatal_check.spec.stage.value,
+            )
+        for future in futures:
+            future.result()
+
+    def _cancel_and_quiesce_submitted(
+        self,
+        *,
+        checks: Mapping[str, RegisteredCheck],
+        cancellations: Mapping[str, _CheckCancellation],
+        futures: Mapping[str, Future[_CheckCompletion]],
+    ) -> None:
+        for check_id, future in futures.items():
+            cancellations[check_id].request()
+            future.cancel()
+        if not futures:
+            return
+        _, not_done = wait(
+            tuple(futures.values()),
+            timeout=self._cancellation_grace_seconds,
+        )
+        if not_done:
+            check_id = next(check_id for check_id, future in futures.items() if future in not_done)
+            check = checks[check_id]
+            self._fatal_timeout(
+                check_id,
+                check.spec.failure_code,
+                check.spec.stage.value,
+            )
+
+    def _run_one_cancellable(
+        self,
+        check: RegisteredCheck,
+        context: CheckContext,
+        operation: CheckOperation,
+        clock: Callable[[], datetime],
+        cancellation: _CheckCancellation,
+    ) -> _CheckCompletion:
+        cancellation.mark_started()
+        started_at = clock()
+        cancellable_context = replace(context, _cancellation=cancellation)
+        try:
+            result = self._run_one(check, cancellable_context, operation, clock)
+        except BaseException as exc:
+            return _CheckCompletion(
+                result=None,
+                error=exc,
+                finished_monotonic=monotonic(),
+                started_at=started_at,
+                finished_at=clock(),
+            )
+        return _CheckCompletion(
+            result=result,
+            error=None,
+            finished_monotonic=monotonic(),
+            started_at=result.started_at,
+            finished_at=result.finished_at,
+        )
+
+    def _timeout_execution(
+        self,
+        check: RegisteredCheck,
+        *,
+        context: CheckContext,
+        operation: CheckOperation,
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> CheckExecution:
+        return self._failure_execution(
+            check,
+            context=context,
+            operation=operation,
+            outcome=CheckOutcome.TIMEOUT,
+            evidence={field.name: _empty_value(field) for field in check.spec.evidence_schema},
+            started_at=started_at,
+            finished_at=finished_at,
+        )
 
     def _run_one(
         self,

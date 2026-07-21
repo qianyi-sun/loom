@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from threading import Event, Thread, current_thread
 
 import pytest
 
+import loom_cli.rollout.preflight_contract as preflight_contract
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
     CheckContext,
+    CheckExecution,
     CheckOperation,
     CheckOutcome,
     CheckProbe,
@@ -34,6 +40,7 @@ def _spec(
     final_only_justification: str | None = None,
     run_after_failed_dependencies: bool = False,
     freshness_ttl_seconds: int = 600,
+    timeout_seconds: int = 5,
 ) -> CheckSpec:
     return CheckSpec(
         check_id=check_id,
@@ -44,7 +51,7 @@ def _spec(
         mutation_class=mutation_class,
         input_keys=("candidate.sha",),
         evidence_schema=(EvidenceField("status.value", "string"),),
-        timeout_seconds=5,
+        timeout_seconds=timeout_seconds,
         freshness_ttl_seconds=freshness_ttl_seconds,
         remediation=f"repair {check_id}",
         secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
@@ -181,6 +188,230 @@ def test_dag_executes_independent_wave_concurrently() -> None:
     elapsed = time.monotonic() - started
     assert all(result.passed for result in results)
     assert elapsed < 0.14
+
+
+def test_dag_times_each_started_check_and_quiesces_mutations_before_reporting() -> None:
+    finished = {
+        "slow.first": Event(),
+        "slow.second": Event(),
+        "slow.invalid": Event(),
+    }
+    mutation_ticks: list[float] = []
+
+    def timed_check(
+        check_id: str,
+        probe: Callable[[CheckContext], CheckProbe],
+    ) -> RegisteredCheck:
+        return RegisteredCheck(
+            spec=_spec(
+                check_id,
+                tier=3,
+                stage=StageCapability.ISOLATED_REHEARSAL,
+                mutation_class=MutationClass.ISOLATED,
+                timeout_seconds=1,
+            ),
+            implementation_version="v1",
+            operations={CheckOperation.PROBE: probe},
+        )
+
+    def finishes_late(_context: CheckContext) -> CheckProbe:
+        time.sleep(1.2)
+        finished["slow.first"].set()
+        return CheckProbe(passed=True, evidence={"status.value": "ready"})
+
+    def stops_only_after_cancellation(context: CheckContext) -> CheckProbe:
+        while not context.cancellation_requested:
+            mutation_ticks.append(time.monotonic())
+            time.sleep(0.01)
+        finished["slow.second"].set()
+        return CheckProbe(passed=False, evidence={"status.value": "cancelled"})
+
+    def returns_invalid_evidence_after_deadline(_context: CheckContext) -> CheckProbe:
+        time.sleep(1.05)
+        finished["slow.invalid"].set()
+        return CheckProbe(passed=True, evidence={"status.value": 123})
+
+    reported: list[str] = []
+
+    def on_execution(execution: CheckExecution) -> None:
+        assert finished[execution.check_id].is_set()
+        reported.append(execution.check_id)
+
+    results = PreflightDag(
+        (
+            timed_check("slow.first", finishes_late),
+            timed_check("slow.second", stops_only_after_cancellation),
+            timed_check("slow.invalid", returns_invalid_evidence_after_deadline),
+        ),
+        max_concurrency=3,
+        cancellation_grace_seconds=0.5,
+    ).run(_context(), through_tier=3, on_execution=on_execution)
+
+    assert {result.check_id: result.outcome for result in results} == {
+        "slow.first": CheckOutcome.TIMEOUT,
+        "slow.second": CheckOutcome.TIMEOUT,
+        "slow.invalid": CheckOutcome.TIMEOUT,
+    }
+    assert reported == ["slow.first", "slow.second", "slow.invalid"]
+    ticks_after_return = len(mutation_ticks)
+    time.sleep(0.05)
+    assert len(mutation_ticks) == ticks_after_return
+
+
+def test_dag_keeps_on_time_completion_when_observed_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+    completion_stamped = Event()
+    worker_monotonic_calls = 0
+
+    def controlled_monotonic() -> float:
+        nonlocal worker_monotonic_calls
+        if current_thread().name.startswith("loom-preflight"):
+            worker_monotonic_calls += 1
+            if worker_monotonic_calls == 1:
+                return 0.0
+            completion_stamped.set()
+            return 0.9
+        assert started.wait(timeout=1)
+        release.set()
+        assert completion_stamped.wait(timeout=1)
+        return 1.1
+
+    def completes_before_deadline(_context: CheckContext) -> CheckProbe:
+        started.set()
+        assert release.wait(timeout=1)
+        return CheckProbe(passed=True, evidence={"status.value": "ready"})
+
+    monkeypatch.setattr(preflight_contract, "monotonic", controlled_monotonic)
+    check = RegisteredCheck(
+        spec=_spec("on-time.check", timeout_seconds=1),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: completes_before_deadline},
+    )
+
+    result = PreflightDag((check,), cancellation_grace_seconds=0.5).run(_context())[0]
+
+    assert result.outcome is CheckOutcome.PASS
+
+
+def test_dag_prewarms_workers_before_any_mutation_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mutation_started = Event()
+    original_start = Thread.start
+    preflight_starts = 0
+
+    def fail_second_preflight_thread_start(thread: Thread) -> None:
+        nonlocal preflight_starts
+        if thread.name.startswith("loom-preflight"):
+            preflight_starts += 1
+            if preflight_starts == 2:
+                raise RuntimeError("synthetic thread start failure after enqueue")
+        original_start(thread)
+
+    def mutation(_context: CheckContext) -> CheckProbe:
+        mutation_started.set()
+        return CheckProbe(passed=True, evidence={"status.value": "mutated"})
+
+    monkeypatch.setattr(Thread, "start", fail_second_preflight_thread_start)
+    checks = (
+        RegisteredCheck(
+            spec=_spec(
+                "first.mutation",
+                tier=3,
+                stage=StageCapability.ISOLATED_REHEARSAL,
+                mutation_class=MutationClass.ISOLATED,
+            ),
+            implementation_version="v1",
+            operations={CheckOperation.PROBE: mutation},
+        ),
+        _check("second.check"),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic thread start failure after enqueue"):
+        PreflightDag(checks, cancellation_grace_seconds=0.5).run(
+            _context(),
+            through_tier=3,
+        )
+
+    assert not mutation_started.is_set()
+
+
+@pytest.mark.parametrize(
+    ("close_stderr", "expected_stderr"),
+    (
+        (
+            False,
+            "fatal: preflight.runner.cancel-timeout check_id=hung.mutation "
+            "failure_code=hung.mutation.failed discovered_stage=isolated-rehearsal\n",
+        ),
+        (True, ""),
+    ),
+    ids=("diagnostic-written", "stderr-unavailable"),
+)
+def test_dag_fatally_terminates_runner_when_cancellation_cannot_quiesce(
+    close_stderr: bool,
+    expected_stderr: str,
+) -> None:
+    script = """
+import os
+import time
+
+from loom_cli.rollout.preflight_contract import (
+    CheckContext,
+    CheckOperation,
+    CheckProbe,
+    CheckSpec,
+    EvidenceField,
+    MutationClass,
+    PreflightDag,
+    RegisteredCheck,
+    SecretRedactionPolicy,
+    StageCapability,
+)
+
+def never_returns(_context):
+    while True:
+        time.sleep(0.05)
+
+check = RegisteredCheck(
+    spec=CheckSpec(
+        check_id="hung.mutation",
+        failure_code="hung.mutation.failed",
+        tier=3,
+        stage=StageCapability.ISOLATED_REHEARSAL,
+        dependencies=(),
+        mutation_class=MutationClass.ISOLATED,
+        input_keys=("candidate.sha",),
+        evidence_schema=(EvidenceField("status.value", "string"),),
+        timeout_seconds=1,
+        freshness_ttl_seconds=60,
+        remediation="repair the hung isolated mutation",
+        secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+    ),
+    implementation_version="v1",
+    operations={CheckOperation.PROBE: never_returns},
+)
+CLOSE_STDERR
+PreflightDag((check,), cancellation_grace_seconds=0.1).run(
+    CheckContext({"candidate.sha": "a" * 40}),
+    through_tier=3,
+)
+""".replace("CLOSE_STDERR", "os.close(2)" if close_stderr else "")
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 70
+    assert result.stdout == ""
+    assert result.stderr == expected_stderr
 
 
 def test_dag_rejects_cycles_and_missing_dependencies() -> None:
