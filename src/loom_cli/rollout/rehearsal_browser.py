@@ -167,12 +167,14 @@ def rehearsal_browser_pod_complete(
     status = pod.get("status")
     if not isinstance(metadata, Mapping) or not isinstance(status, Mapping):
         return False
+    annotations = metadata.get("annotations")
     labels = metadata.get("labels")
     containers = status.get("containerStatuses")
     init_containers = status.get("initContainerStatuses")
     if (
         not isinstance(labels, Mapping)
-        or labels.get("loom.openai.dev/plan-sha256") != plan.plan_digest
+        or not isinstance(annotations, Mapping)
+        or annotations.get("loom.openai.dev/plan-sha256") != plan.plan_digest
         or labels.get("job-name") != BROWSER_JOB_NAME
         or status.get("phase") != "Succeeded"
         or not isinstance(containers, list)
@@ -230,14 +232,14 @@ def _ingress(plan: RehearsalPlan) -> dict[str, object]:
                                 "backend": {
                                     "service": {"name": "loom-service", "port": {"number": 8090}}
                                 },
-                                "path": f"^{escaped}(/|$)(api(?:/|$).*)",
+                                "path": f"{escaped}(/|$)(api(?:/|$).*)",
                                 "pathType": "ImplementationSpecific",
                             },
                             {
                                 "backend": {
                                     "service": {"name": "loom-web", "port": {"number": 80}}
                                 },
-                                "path": f"^{escaped}(/|$)(.*)",
+                                "path": f"{escaped}(/|$)(.*)",
                                 "pathType": "ImplementationSpecific",
                             },
                         ]
@@ -255,7 +257,6 @@ def _browser_job(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str, object]:
     labels = {
         "app": BROWSER_JOB_NAME,
         "loom.openai.dev/candidate-sha": plan.candidate_sha,
-        "loom.openai.dev/plan-sha256": plan.plan_digest,
     }
     locked_container = {
         "allowPrivilegeEscalation": False,
@@ -280,7 +281,10 @@ def _browser_job(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str, object]:
             "completions": 1,
             "parallelism": 1,
             "template": {
-                "metadata": {"labels": labels},
+                "metadata": {
+                    "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+                    "labels": labels,
+                },
                 "spec": {
                     "automountServiceAccountToken": False,
                     "containers": [

@@ -1891,10 +1891,12 @@ def test_browser_executes_exact_isolated_job_and_validates_report() -> None:
         "items": [
             {
                 "metadata": {
+                    "annotations": {
+                        "loom.openai.dev/plan-sha256": plan.plan_digest,
+                    },
                     "labels": {
                         "job-name": BROWSER_JOB_NAME,
-                        "loom.openai.dev/plan-sha256": plan.plan_digest,
-                    }
+                    },
                 },
                 "status": {
                     "containerStatuses": [{"name": "browser", **image_status}],

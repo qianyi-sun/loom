@@ -102,11 +102,20 @@ def test_browser_artifact_is_exact_restricted_and_candidate_bound(tmp_path: Path
     }
     ingress = resources[("Ingress", BROWSER_INGRESS_NAME)]
     assert ingress["spec"]["rules"][0]["host"] == "yylx.world"
+    assert all(
+        item["path"].startswith("/dev/rehearsal/")
+        for item in ingress["spec"]["rules"][0]["http"]["paths"]
+    )
     assert [
         item["backend"]["service"]["name"] for item in ingress["spec"]["rules"][0]["http"]["paths"]
     ] == ["loom-service", "loom-web"]
     job = resources[("Job", BROWSER_JOB_NAME)]
     pod = job["spec"]["template"]["spec"]
+    assert "loom.openai.dev/plan-sha256" not in job["metadata"]["labels"]
+    assert (
+        job["spec"]["template"]["metadata"]["annotations"]["loom.openai.dev/plan-sha256"]
+        == plan.plan_digest
+    )
     assert pod["automountServiceAccountToken"] is False
     assert pod["hostAliases"] == [{"hostnames": ["yylx.world"], "ip": "10.96.12.34"}]
     assert pod["securityContext"]["runAsNonRoot"] is True
@@ -185,10 +194,10 @@ def test_browser_resource_job_and_pod_readback_are_exact(tmp_path: Path) -> None
         "items": [
             {
                 "metadata": {
+                    "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
                     "labels": {
                         "job-name": BROWSER_JOB_NAME,
-                        "loom.openai.dev/plan-sha256": plan.plan_digest,
-                    }
+                    },
                 },
                 "status": {
                     "containerStatuses": [{"name": "browser", **status}],

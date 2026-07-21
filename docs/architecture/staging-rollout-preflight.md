@@ -654,6 +654,10 @@ The browser rehearsal binds its restricted egress and host alias to the exact
 IPv4 ClusterIP of the fixed ingress-nginx controller Service. Both ClusterIP
 and NodePort exposure are accepted because NodePort retains that same in-cluster
 service identity; LoadBalancer, ExternalName and identity drift fail closed.
+Ingress regex paths remain absolute Kubernetes paths (the ingress controller
+adds regex anchoring), and the 64-byte rehearsal plan digest is carried in a
+pod annotation rather than an overlong label. Candidate and workload selector
+labels remain bounded and exact.
 An HTTP rejection from the admission probe is normalized to an allowlisted
 request identity and reason code. The terminal blocker retains those values
 and the response SHA-256, but never the response body, token or free-form server
