@@ -1777,11 +1777,14 @@ globally enabled desktop or snap unit failed, even while the D-Bus connection
 and Loom transient-unit boundary are healthy. Loom's own runtime units remain
 subject to the installer check and broker status gates below.
 
-Tier 0 checks Docker with the same two fixed read-only probes used by the
-compatibility preflight: `docker info` and `docker buildx version`. Both probes
-always run so the report exposes daemon and plugin blockers together. Their
-raw output is discarded; restore service-account Docker access or the installed
-buildx plugin rather than retrying a failed rollout request.
+Tier 0 checks Docker with the same three fixed read-only probes used by the
+compatibility preflight: `docker info`, `docker buildx version`, and the numeric
+`fs.inotify.max_user_instances` sysctl. All probes run so the report exposes
+daemon, plugin, and host-capacity blockers together. Their raw output is
+discarded. The host installer owns
+`/etc/sysctl.d/90-loom-staging-rollout.conf` and requires at least 1024 inotify
+instances; rerun the exact sealed installer and its `check` instead of retrying
+a rollout or raising the image-check timeout.
 
 The fixed Kubernetes client probe reads the current context and gets only the
 target namespace using the explicit installed kubeconfig. It does not apply or

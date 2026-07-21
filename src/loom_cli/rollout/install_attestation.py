@@ -57,6 +57,7 @@ INSTALL_ASSETS = MappingProxyType(
             0o644,
             False,
         ),
+        "sysctl": (Path("/etc/sysctl.d/90-loom-staging-rollout.conf"), 0o644, False),
         "tmpfiles": (Path("/etc/tmpfiles.d/loom-staging-rollout.conf"), 0o644, False),
     }
 )

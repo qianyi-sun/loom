@@ -356,8 +356,13 @@ def test_registered_docker_runtime_reports_both_blockers_without_diagnostics() -
     assert docker.passed is False
     assert docker.evidence["daemon-ready"] is False
     assert docker.evidence["buildx-ready"] is False
+    assert docker.evidence["inotify-capacity-ready"] is False
     assert len(str(docker.evidence["runtime-digest"])) == 64
-    assert calls == [("docker", "info"), ("docker", "buildx", "version")]
+    assert calls == [
+        ("docker", "info"),
+        ("docker", "buildx", "version"),
+        ("sysctl", "-n", "fs.inotify.max_user_instances"),
+    ]
     assert "token" not in str(dict(docker.evidence))
     assert "private" not in str(dict(docker.evidence))
 

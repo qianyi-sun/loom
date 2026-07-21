@@ -607,6 +607,7 @@ def build_docker_runtime_check(run: DockerCommandRunner) -> RegisteredCheck:
             evidence={
                 "daemon-ready": runtime.daemon_ready,
                 "buildx-ready": runtime.buildx_ready,
+                "inotify-capacity-ready": runtime.inotify_capacity_ready,
                 "runtime-digest": runtime.evidence_digest,
             },
         )
@@ -623,14 +624,18 @@ def build_docker_runtime_check(run: DockerCommandRunner) -> RegisteredCheck:
             evidence_schema=(
                 EvidenceField("daemon-ready", "boolean"),
                 EvidenceField("buildx-ready", "boolean"),
+                EvidenceField("inotify-capacity-ready", "boolean"),
                 EvidenceField("runtime-digest", "sha256"),
             ),
             timeout_seconds=15,
             freshness_ttl_seconds=120,
-            remediation="restore service Docker daemon access and the fixed buildx plugin",
+            remediation=(
+                "restore service Docker daemon access, the fixed buildx plugin, and managed "
+                "host inotify instance headroom"
+            ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 

@@ -83,6 +83,7 @@ FINAL_GATE_PATH = Path("/usr/local/libexec/loom-staging-rollout-final-gate")
 TRUST_TOOL_PATH = Path("/usr/local/libexec/loom-staging-rollout-gb10-trust")
 SUDOERS_PATH = Path("/etc/sudoers.d/loom-staging-rollout")
 TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
+SYSCTL_PATH = Path("/etc/sysctl.d/90-loom-staging-rollout.conf")
 KUBECONFIG_PATH = STATE_ROOT / "kubeconfig"
 PREFLIGHT_CREDENTIAL_ROOT = STATE_ROOT / "credentials"
 REHEARSAL_STATE_ROOT = STATE_ROOT / "rehearsals"
@@ -123,6 +124,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_PROTECTED_INPUT_BYTES = 4 << 20
 _MAX_KUBECONFIG_BYTES = 1 << 20
 _MAX_WORKER_ENV_BYTES = 1 << 20
+_INOTIFY_MIN_INSTANCES = 1024
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-9]*[.]service$")
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
@@ -176,6 +178,7 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "rehearsal-authority",
         "readonly-authority",
         "shared-work2-mount-unit",
+        "sysctl",
         "tmpfiles",
     }
 )
@@ -1433,6 +1436,7 @@ class HostSystem:
             "setfacl",
             "ssh",
             "ssh-keygen",
+            "sysctl",
             "systemctl",
             "visudo",
         )
@@ -2110,6 +2114,24 @@ class HostSystem:
         expected = f"directory:{SERVICE_USER}:{SERVICE_GROUP}:700"
         current = self._probe(["stat", "-c", "%F:%U:%G:%a", str(RUNTIME_ROOT)]).stdout.strip()
         return current == expected
+
+    def inotify_capacity_ready(self) -> bool:
+        result = self._probe(["sysctl", "-n", "fs.inotify.max_user_instances"])
+        value = result.stdout.strip()
+        return bool(
+            result.returncode == 0
+            and value.isascii()
+            and value.isdecimal()
+            and int(value) >= _INOTIFY_MIN_INSTANCES
+        )
+
+    def ensure_inotify_capacity(self) -> bool:
+        if self.inotify_capacity_ready():
+            return False
+        self.runner.run(["sysctl", "--load", str(SYSCTL_PATH)])
+        if not self.inotify_capacity_ready():
+            raise InstallError("host inotify instance capacity did not converge safely")
+        return True
 
     def _service_git(self, *arguments: str, check: bool = True) -> CommandResult:
         return self.runner.run(
@@ -3621,6 +3643,7 @@ class HostSystem:
             FINAL_GATE_PATH: "regular file:root:root:755",
             SUDOERS_PATH: "regular file:root:root:440",
             TMPFILES_PATH: "regular file:root:root:644",
+            SYSCTL_PATH: "regular file:root:root:644",
             CONFIG_PATH: "regular file:root:loom-rollout:640",
             INSTALL_RECORD: "regular file:root:root:600",
             INSTALL_ATTESTATION: "regular file:root:loom-rollout:640",
@@ -3636,6 +3659,7 @@ class HostSystem:
             Path("/usr/local/bin"): "directory:root:root:755",
             SUDOERS_PATH.parent: "directory:root:root:755",
             TMPFILES_PATH.parent: "directory:root:root:755",
+            SYSCTL_PATH.parent: "directory:root:root:755",
             SHARED_WORK2_MOUNT_UNIT_PATH.parent: "directory:root:root:755",
         }
         for path, expected in authority.items():
@@ -4264,6 +4288,7 @@ class HostInstaller:
             Path("/usr/local/bin"),
             SUDOERS_PATH.parent,
             TMPFILES_PATH.parent,
+            SYSCTL_PATH.parent,
             SHARED_WORK2_MOUNT_UNIT_PATH.parent,
         )
         for directory in root_directories:
@@ -4355,6 +4380,13 @@ class HostInstaller:
                 "root",
                 "root",
             ),
+            (
+                SYSCTL_PATH,
+                self._asset("loom-staging-rollout.sysctl"),
+                0o644,
+                "root",
+                "root",
+            ),
         )
         sudoers = self._asset("loom-staging-rollout.sudoers")
         attestation_assets = {
@@ -4370,6 +4402,7 @@ class HostInstaller:
             "rehearsal-helper": installed_files[2][1],
             "final-gate-helper": installed_files[8][1],
             "shared-work2-mount-unit": installed_files[6][1],
+            "sysctl": installed_files[9][1],
             "tmpfiles": installed_files[4][1],
         }
 
@@ -4620,6 +4653,7 @@ class HostInstaller:
         broker_runtime_ready = (
             package_runtime_ready and installed_files_ready and self.system.broker_runtime_ready()
         )
+        inotify_capacity_ready = self.system.inotify_capacity_ready()
         preflight_candidate_source_ready = bool(
             broker_runtime_ready
             and shared_worker_repo_ready
@@ -4711,6 +4745,7 @@ class HostInstaller:
             or not preflight_candidate_source_ready
             or not broker_runtime_ready
             or not installed_files_ready
+            or not inotify_capacity_ready
             or not runtime_ready
             or not kubeconfig_ready
             or not sudoers_ready
@@ -4884,6 +4919,8 @@ class HostInstaller:
                 changes.append(f"file:{destination}")
             if self.system.install_owner(destination, owner, mode, group=group):
                 changes.append(f"ownership:{destination}")
+        if self.system.ensure_inotify_capacity():
+            changes.append("sysctl:fs.inotify.max_user_instances")
         if not self.system.broker_runtime_ready():
             raise InstallError("installed broker config probe failed")
         if self.system.ensure_preflight_candidate_source():
@@ -5011,6 +5048,7 @@ class HostInstaller:
             ),
             (SUDOERS_PATH, self._asset("loom-staging-rollout.sudoers"), 0o440),
             (TMPFILES_PATH, self._asset("loom-staging-rollout.tmpfiles"), 0o644),
+            (SYSCTL_PATH, self._asset("loom-staging-rollout.sysctl"), 0o644),
             (
                 KNOWN_HOSTS_PATH,
                 self._source_file("deploy/worker-pools/gb10/known_hosts"),
@@ -5027,6 +5065,8 @@ class HostInstaller:
             for path, payload, mode in expected
             if not self.filesystem.file_matches(path, payload, mode)
         ]
+        if not self.system.inotify_capacity_ready():
+            failures.append("host-inotify-capacity")
         if self.system.maintenance_marker_status() != "disabled":
             failures.append("maintenance-marker")
         config_payload: bytes | None = None
@@ -5075,6 +5115,7 @@ class HostInstaller:
                 "rehearsal-helper": self._asset("loom-staging-rollout-rehearsal"),
                 "final-gate-helper": self._asset("loom-staging-rollout-final-gate"),
                 "shared-work2-mount-unit": self._asset(SHARED_WORK2_MOUNT_UNIT),
+                "sysctl": self._asset("loom-staging-rollout.sysctl"),
                 "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
             }
             expected_attestation = _runner_install_attestation_payload(
@@ -5384,6 +5425,7 @@ class HostInstaller:
             INSTALL_ATTESTATION,
             KUBECONFIG_PATH,
             TMPFILES_PATH,
+            SYSCTL_PATH,
             KNOWN_HOSTS_PATH,
             SHARED_WORK2_MOUNT_UNIT_PATH,
         ]

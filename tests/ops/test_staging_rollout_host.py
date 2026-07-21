@@ -68,6 +68,7 @@ class FakeSystem:
         self.shared_work2_mounted = False
         self.preflight_credentials = False
         self.preflight_candidate_source = False
+        self.inotify_capacity = False
 
     def validate_prerequisites(self) -> None:
         self.validated += 1
@@ -309,6 +310,14 @@ class FakeSystem:
     def runtime_directory_ready(self) -> bool:
         mapped = self.filesystem.path(host.RUNTIME_ROOT)
         return mapped.is_dir() and (mapped.stat().st_mode & 0o777) == 0o700
+
+    def inotify_capacity_ready(self) -> bool:
+        return self.inotify_capacity
+
+    def ensure_inotify_capacity(self) -> bool:
+        changed = not self.inotify_capacity
+        self.inotify_capacity = True
+        return changed
 
     def ensure_candidate(
         self,
@@ -782,6 +791,12 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         == (host.REPO_ROOT / "deploy/worker-pools/gb10/known_hosts").read_bytes()
     )
     assert stat.S_IMODE(known_hosts.stat().st_mode) == 0o644
+    assert (
+        installer.filesystem.path(host.SYSCTL_PATH).read_text(encoding="ascii")
+        == "fs.inotify.max_user_instances = 1024\n"
+    )
+    assert system.inotify_capacity is True
+    assert "sysctl:fs.inotify.max_user_instances" in first["changed"]
     assert set(system.operator_members) == set(host.OPERATORS)
     assert system.docker is True
     assert system.preflight_credentials is True
@@ -873,6 +888,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/staging-rollout/loom-staging-rollout-rehearsal",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
         "deploy/staging-rollout/loom-staging-rollout.tmpfiles",
+        "deploy/staging-rollout/loom-staging-rollout.sysctl",
         "deploy/staging-rollout/shared_work2.mount",
         "deploy/staging-rollout/staging-rollout.toml",
         "deploy/worker-pools/gb10/known_hosts",
@@ -2256,6 +2272,44 @@ def test_check_rejects_installed_known_hosts_drift(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert str(host.KNOWN_HOSTS_PATH) in result["failures"]
+
+
+def test_check_rejects_host_inotify_capacity_drift(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.inotify_capacity = False
+
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert "host-inotify-capacity" in result["failures"]
+
+
+def test_host_system_converges_only_fixed_inotify_sysctl() -> None:
+    class InotifyRunner:
+        def __init__(self) -> None:
+            self.value = 128
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            self.calls.append(call)
+            if call == ["sysctl", "-n", "fs.inotify.max_user_instances"]:
+                return host.CommandResult(0, f"{self.value}\n")
+            if call == ["sysctl", "--load", str(host.SYSCTL_PATH)]:
+                assert kwargs == {}
+                self.value = host._INOTIFY_MIN_INSTANCES
+                return host.CommandResult(0)
+            raise AssertionError(call)
+
+    runner = InotifyRunner()
+    system = host.HostSystem(runner)
+
+    assert system.inotify_capacity_ready() is False
+    assert system.ensure_inotify_capacity() is True
+    assert system.inotify_capacity_ready() is True
+    assert system.ensure_inotify_capacity() is False
+    assert runner.calls.count(["sysctl", "--load", str(host.SYSCTL_PATH)]) == 1
 
 
 def test_check_rejects_root_install_attestation_drift(tmp_path: Path) -> None:

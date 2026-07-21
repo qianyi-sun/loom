@@ -961,6 +961,11 @@ def collect_preflight(
         docker is not None and docker.buildx_ready,
         "install and verify the Docker buildx plugin",
     )
+    add(
+        "docker-inotify",
+        docker is not None and docker.inotify_capacity_ready,
+        "restore the managed host inotify instance headroom",
+    )
 
     kubernetes = (
         probe_kubernetes_client(

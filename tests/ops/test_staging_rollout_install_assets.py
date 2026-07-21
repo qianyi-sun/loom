@@ -16,6 +16,7 @@ def test_client_and_sudoers_fix_the_broker_command() -> None:
     broker = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout-broker").read_text()
     sudoers = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout.sudoers").read_text()
     tmpfiles = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout.tmpfiles").read_text()
+    sysctl = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout.sysctl").read_text()
 
     assert "sudo -n -u loom-rollout -- /usr/local/libexec/loom-staging-rollout-broker" in client
     assert "%loom-staging-operators ALL=(loom-rollout) NOPASSWD:NOSETENV:" in sudoers
@@ -39,6 +40,7 @@ def test_client_and_sudoers_fix_the_broker_command() -> None:
         )
     assert "PYTHONPATH" not in broker
     assert tmpfiles.strip() == "d /run/loom-staging-rollout 0700 loom-rollout loom-rollout -"
+    assert sysctl == "fs.inotify.max_user_instances = 1024\n"
 
 
 def test_isolated_broker_interpreter_ignores_caller_working_directory(tmp_path: Path) -> None:

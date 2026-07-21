@@ -866,10 +866,15 @@ process diagnostics. The DAG check additionally binds the probe to the exact
 runner install hash before it imports candidate code.
 
 Docker readiness follows the same rule. `probe_docker_runtime` owns the fixed,
-read-only daemon and buildx predicates; both the compatibility preflight report
-and Tier 0 `docker.runtime` consume its complete aggregate. A failing daemon
-probe does not suppress the buildx probe, and neither command's stdout or stderr
-is admitted to evidence.
+read-only daemon, buildx, and host inotify-instance-capacity predicates; both the
+compatibility preflight report and Tier 0 `docker.runtime` consume its complete
+aggregate. A failing daemon probe does not suppress the buildx or sysctl probe,
+and no command's raw stdout or stderr is admitted to evidence. The exact host
+installer owns `/etc/sysctl.d/90-loom-staging-rollout.conf`, converges
+`fs.inotify.max_user_instances=1024`, and binds that asset into the root-issued
+install attestation. This prevents Docker container-start queueing from first
+appearing after image construction when Kubernetes already consumes the host's
+small default inotify instance budget.
 
 `probe_kubernetes_client` likewise owns the fixed kubeconfig, current-context,
 and target-namespace predicate. It always probes both context and namespace,

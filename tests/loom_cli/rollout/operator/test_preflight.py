@@ -224,6 +224,8 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, "", "")
     elif argv[-2:] == ["config", "current-context"]:
         stdout = "kind-loom-staging\n"
+    elif argv and argv[0] == "sysctl":
+        stdout = "1024\n"
     elif argv[:1] == ["ssh"] and argv[-1] != "true":
         mount_type = "ext4" if argv[-2] == "trt-gb10-2" else "nfs4"
         mount_source = (
@@ -280,6 +282,7 @@ def test_collect_preflight_uses_shared_docker_runtime_predicate(
         return DockerRuntimeReadiness(
             daemon_ready=True,
             buildx_ready=False,
+            inotify_capacity_ready=True,
         )
 
     monkeypatch.setattr(preflight_module, "probe_docker_runtime", probe)
@@ -295,6 +298,7 @@ def test_collect_preflight_uses_shared_docker_runtime_predicate(
     outcomes = {check.name: check.passed for check in report.checks}
     assert outcomes["docker"] is True
     assert outcomes["docker-buildx"] is False
+    assert outcomes["docker-inotify"] is True
     assert len(calls) == 1
 
 
