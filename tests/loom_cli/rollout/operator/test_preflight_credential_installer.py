@@ -39,6 +39,7 @@ class Result:
 class Runner:
     def __init__(self, source: bytes) -> None:
         self.source = source
+        self.now = NOW
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
 
     def __call__(
@@ -56,7 +57,7 @@ class Runner:
         if "token" in command:
             account = command[command.index("token") + 1]
             namespace = command[command.index("--namespace") + 1]
-            return Result(stdout=_token(namespace, account) + "\n")
+            return Result(stdout=_token(namespace, account, now=self.now) + "\n")
         if "pod/loom-minio-0" in command:
             if input is not None and "--stdin" not in command:
                 return Result(returncode=1, stderr="stdin was not forwarded")
@@ -554,6 +555,32 @@ def test_install_is_idempotent_only_while_bounded_tokens_are_unchanged(tmp_path:
     assert second["ok"] is True
     assert minio_mutations_before == 0
     assert minio_mutations_after == minio_mutations_before
+
+
+def test_install_rotates_tokens_before_runtime_freshness_can_expire(
+    tmp_path: Path,
+) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    old_readonly = installer.paths.readonly_kubeconfig.read_bytes()
+    old_rehearsal = installer.paths.rehearsal_kubeconfig.read_bytes()
+    later = NOW + timedelta(hours=2, minutes=30)
+    installer.now = lambda: later
+    runner.now = later
+
+    assert installer.check()["ok"] is True
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert result["changed"] == sorted(
+        [
+            str(installer.paths.readonly_kubeconfig),
+            str(installer.paths.rehearsal_kubeconfig),
+        ]
+    )
+    assert installer.paths.readonly_kubeconfig.read_bytes() != old_readonly
+    assert installer.paths.rehearsal_kubeconfig.read_bytes() != old_rehearsal
+    assert installer.check()["ok"] is True
 
 
 def test_check_fails_closed_after_token_freshness_expires(tmp_path: Path) -> None:

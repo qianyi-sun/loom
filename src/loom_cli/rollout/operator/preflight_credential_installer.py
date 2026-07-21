@@ -59,6 +59,8 @@ _MINIO_CREDENTIAL_SOURCE = Path("/etc/loom/staging-rollout-readonly-minio.json")
 _SERVICE_USER = "loom-rollout"
 _TOKEN_DURATION = "6h"
 _TOKEN_AUDIENCE = "https://kubernetes.default.svc.cluster.local"
+_RUNTIME_MIN_REMAINING_SECONDS = 2 * 60 * 60
+_INSTALL_MIN_REMAINING_SECONDS = 4 * 60 * 60
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{32,1024}$")
 _READONLY_PROBE_NAME = "staging-rollout-readonly-probe"
 _READONLY_PROBE_ACTOR = "deployment:staging-rollout"
@@ -220,7 +222,7 @@ class PreflightCredentialInstaller:
         self._converge_minio_authority(minio_credential)
         application_token = self._load_or_create_application_token()
         self._converge_application_probe(application_token, team_id=team_id)
-        existing = self.check()
+        existing = self.check(minimum_token_remaining_seconds=_INSTALL_MIN_REMAINING_SECONDS)
         installed_application_token: bytes | None = None
         installed_database_credential: ReadonlyDatabaseCredential | None = None
         installed_minio_credential: ReadonlyMinioCredential | None = None
@@ -284,7 +286,7 @@ class PreflightCredentialInstaller:
                 rehearsal,
             ),
         }
-        result = self.check()
+        result = self.check(minimum_token_remaining_seconds=_INSTALL_MIN_REMAINING_SECONDS)
         if not result["ok"]:
             raise CredentialInstallError("installed preflight credentials did not verify")
         return {
@@ -349,7 +351,11 @@ class PreflightCredentialInstaller:
             require_output=False,
         )
 
-    def check(self) -> dict[str, object]:
+    def check(
+        self,
+        *,
+        minimum_token_remaining_seconds: int = _RUNTIME_MIN_REMAINING_SECONDS,
+    ) -> dict[str, object]:
         now = self.now()
         failures: list[str] = []
         authority: dict[str, object] = {}
@@ -378,6 +384,7 @@ class PreflightCredentialInstaller:
                     namespace=namespace,
                     service_account=account,
                     now=now,
+                    minimum_remaining_seconds=minimum_token_remaining_seconds,
                 )
                 if evidence.audiences != (_TOKEN_AUDIENCE,):
                     raise ValueError("preflight TokenRequest audience is invalid")

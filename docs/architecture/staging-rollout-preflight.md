@@ -242,8 +242,10 @@ client certificate or root credential. The shared renderer accepts only the
 exact service-account subject, the fixed staging API audience
 `https://kubernetes.default.svc.cluster.local`, a lifetime no longer than 24
 hours, and at least two hours of remaining validity. The credential installer
-rotates a token whose metadata is otherwise fresh but whose audience cannot be
-accepted by the fixed API server. The PostgreSQL transport uses kubectl's
+requires four hours of remaining validity for install-time reuse, so the full
+post-install preflight cannot consume the runtime safety margin. It also rotates
+a token whose metadata is otherwise fresh but whose audience cannot be accepted
+by the fixed API server. The PostgreSQL transport uses kubectl's
 explicit loopback `--address=127.0.0.1` option plus a numeric `LOCAL:5432`
 mapping; an address must never be encoded as a third port-mapping field because
 kubectl interprets that field as a named pod port. Installer SQL uses

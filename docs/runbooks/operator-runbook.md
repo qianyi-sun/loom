@@ -1898,7 +1898,10 @@ alone cannot admit a token the API server will reject. It publishes
 minified service-owned `0600` kubeconfigs under
 `/var/lib/loom-staging-rollout/credentials`; inherited root client keys are
 discarded. `check` fails once either token has less than two hours remaining,
-so repeated `install` is the supported refresh path before admission. The
+while `install` requires at least four hours remaining and rotates both
+kubeconfigs otherwise. This headroom prevents a token that is still runtime-valid
+at install admission from expiring during the complete post-install preflight;
+repeated `install` is the supported refresh path before admission. The
 credential check reports only authority metadata and expiry; the deep-preflight
 attestation retains only metadata fingerprints and evidence hashes, never a
 token value.
