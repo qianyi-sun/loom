@@ -15,7 +15,6 @@ HEAVY_CHECKS = (
 )
 
 SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch"}
-FULL_GATE_LABEL = "ci:merge-ready"
 
 LABEL_TO_CHECK = {
     "ci:integration": "integration",
@@ -123,27 +122,17 @@ def _pull_request_gate_mode(
 ) -> tuple[bool, bool, str]:
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
-    Only the coordinator-owned ``ci:merge-ready`` label authorizes a PR to
-    emit the four protected contexts. Drafts are filtered; non-queue-head PRs
-    retain a fast preflight without producing names branch protection accepts.
-    Removing merge readiness or converting a labeled PR back to draft emits an
-    explicit protected-context failure so a prior green result on the same SHA
-    cannot remain merge-authoritative.
+    Every relevant non-draft PR event emits the four protected contexts. Drafts
+    and unrelated metadata changes are filtered. Validation labels remain
+    additive selectors, but no label, author, reviewer, or coordinator grants
+    merge authority.
     """
 
-    label_set = set(labels)
-    full_gate = FULL_GATE_LABEL in label_set and not draft
-    relevant_labels = {*LABEL_TO_CHECK, FULL_GATE_LABEL}
-
-    if action == "unlabeled" and action_label == FULL_GATE_LABEL:
-        return True, False, "invalidate"
-    if action == "converted_to_draft" and FULL_GATE_LABEL in label_set:
-        return True, False, "invalidate"
     if draft:
         return False, False, "filtered"
 
     if action in {"labeled", "unlabeled"}:
-        event_relevant = action_label in relevant_labels
+        event_relevant = action_label in LABEL_TO_CHECK
     elif action == "edited":
         event_relevant = base_changed
     else:
@@ -155,10 +144,8 @@ def _pull_request_gate_mode(
         }
 
     if not event_relevant:
-        return False, full_gate, "filtered"
-    if full_gate:
-        return True, True, "full"
-    return True, False, "preflight"
+        return False, False, "filtered"
+    return True, True, "full"
 
 
 def _is_documentation_path(path: str) -> bool:

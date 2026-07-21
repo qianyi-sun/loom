@@ -117,3 +117,153 @@ def test_ensure_child_rejects_existing_metadata_without_mutation(tmp_path: Path)
         assert stat.S_IMODE(target.stat().st_mode) == 0o700
     finally:
         os.close(parent.fd)
+
+
+def _svc_identity(name: str, *_a: object, **_k: object) -> helper.Identity:
+    # service: uid 2001, primary group 2001 (loom-rollout), NOT in sharedwork(2007)
+    # consumer: uid 2005, in sharedwork(2007)
+    if name == helper.SERVICE_USER:
+        return helper.Identity(name, 2001, 2001, (2001,))
+    return helper.Identity(name, 2005, 2005, (2005, 2007))
+
+
+def test_service_owned_rejects_invalid_relative_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    for bad in ((), ("..",), ("candidates", ""), ("candidates", "a/b")):
+        with pytest.raises(helper.AuthorityError, match="service path is invalid"):
+            helper._converge_service_owned(Path("/shared_work/loom"), bad, ensure=False)
+
+
+def test_service_owned_requires_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 1000)
+    with pytest.raises(helper.AuthorityError, match="requires root"):
+        helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+
+
+def test_service_owned_rejects_bad_group_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(helper, "_identity", _svc_identity)
+    monkeypatch.setattr(
+        helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=2007)
+    )
+    # consumer NOT in sharedwork -> invalid
+    monkeypatch.setattr(
+        helper,
+        "_identity",
+        lambda name, *a, **k: helper.Identity(name, 2001, 2001, (2001,))
+        if name == helper.SERVICE_USER
+        else helper.Identity(name, 2005, 2005, (2005,)),
+    )
+    with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
+        helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+
+
+def test_service_owned_rejects_service_in_shared_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=2007)
+    )
+    # service IS in sharedwork(2007) -> invalid (must not be)
+    monkeypatch.setattr(
+        helper,
+        "_identity",
+        lambda name, *a, **k: helper.Identity(name, 2001, 2001, (2001, 2007))
+        if name == helper.SERVICE_USER
+        else helper.Identity(name, 2005, 2005, (2005, 2007)),
+    )
+    with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
+        helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+
+
+def test_service_cli_rejects_short_or_nonhex_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The privileged CLI must validate a full 40-hex SHA and never touch the fs
+    # for a bad one. We don't reach converge (geteuid check would fail non-root),
+    # because SHA validation happens first and returns exit code 2.
+    for bad in ("abc1234", "z" * 40, "ABC" + "0" * 37, "0" * 39, "0" * 41):
+        rc = helper.main(["service-ensure", "--environment", "development", "--candidate-sha", bad])
+        assert rc == 2
+
+
+def test_service_cli_requires_environment_and_sha() -> None:
+    assert helper.main(["service-ensure", "--candidate-sha", "a" * 40]) == 2
+    assert helper.main(["service-check", "--environment", "staging"]) == 2
+
+
+def test_service_cli_rejects_unknown_environment() -> None:
+    # argparse choices reject anything outside development/staging/production.
+    with pytest.raises(SystemExit):
+        helper.main(["service-ensure", "--environment", "prod", "--candidate-sha", "a" * 40])
+
+
+def test_service_cli_hardcodes_root_and_layout() -> None:
+    # No --root / --path options exist anymore: an arbitrary path cannot be
+    # requested through the privileged CLI.
+    with pytest.raises(SystemExit):
+        helper.main(["service-ensure", "--root", "/etc", "--path", "shadow"])
+    assert helper.SERVICE_ROOT == Path("/shared_work/loom")
+    assert helper.ALLOWED_ENVIRONMENTS == ("development", "staging", "production")
+
+
+def test_service_ensure_never_precreates_sha_and_reports_target(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Privileged setup must ensure ONLY candidates/<env>; the final <sha> dir
+    # is left absent so the materializer can atomically rename-no-replace into
+    # it. Pre-creating an empty <sha> would defeat all-or-nothing publication.
+    captured: dict[str, object] = {}
+
+    def fake(root: object, chain: object, *, ensure: bool) -> dict[str, object]:
+        captured["chain"] = chain
+        captured["ensure"] = ensure
+        return {"model": "service-owned"}
+
+    monkeypatch.setattr(helper, "_converge_service_owned", fake)
+    rc = helper.main(
+        ["service-ensure", "--environment", "staging", "--candidate-sha", "a" * 40],
+    )
+    assert rc == 0
+    assert captured["chain"] == ("candidates", "staging")  # NO sha component
+    assert captured["ensure"] is True
+    import json as _json
+
+    report = _json.loads(capsys.readouterr().out)
+    assert report["candidate_target"] == "/shared_work/loom/candidates/staging/" + "a" * 40
+
+
+def _renameat2_available() -> bool:
+    import ctypes
+
+    try:
+        _ = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError):
+        return False
+    return True
+
+
+def test_atomic_publish_fails_closed_on_existing_target(tmp_path: Path) -> None:
+    # rename-no-replace is what makes publication all-or-nothing: an existing
+    # final target must fail closed rather than overwrite or expose partial data.
+    # Portable across platforms: where renameat2 exists (Linux) the existing
+    # target raises FileExistsError; where it does not (e.g. macOS) atomic
+    # publication is simply unavailable -- itself fail-closed (it never falls
+    # back to a clobbering rename).
+    parent = tmp_path
+    (parent / "src").mkdir()
+    (parent / "dest").mkdir()  # target already exists
+    parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if _renameat2_available():
+            with pytest.raises(FileExistsError):
+                helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
+        else:
+            with pytest.raises(helper.AuthorityError):
+                helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
+    finally:
+        os.close(parent_fd)
