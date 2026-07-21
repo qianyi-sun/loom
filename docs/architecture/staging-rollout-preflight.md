@@ -642,6 +642,10 @@ refreshes one deterministic, plan-bound Docker worker row in the cloned
 database only. Exact id, hostname, candidate version, pool and capabilities
 must match on retry. GB10 host readiness remains a separate prerequisite; the
 synthetic row never registers with or grants authority over protected staging.
+An HTTP rejection from the admission probe is normalized to an allowlisted
+request identity and reason code. The terminal blocker retains those values
+and the response SHA-256, but never the response body, token or free-form server
+detail; malformed probe output falls back to the generic fail-closed blocker.
 
 Each concrete action is wrapped by `JournaledRehearsalBackend`. The
 service-owned mode-0700 root contains one mode-0700 directory per derived

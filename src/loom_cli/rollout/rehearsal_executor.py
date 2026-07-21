@@ -70,6 +70,29 @@ _REHEARSAL_DUMP_PATH = "/var/lib/postgresql/data/loom-rehearsal.dump"
 _REHEARSAL_DUMP_TRANSFER_TIMEOUT = 180
 _REHEARSAL_DUMP_DIGEST_TIMEOUT = 120
 _REHEARSAL_DUMP_RESTORE_TIMEOUT = 1470
+_API_SMOKE_REQUEST_IDS = frozenset(
+    {
+        "batch-readback",
+        "batch-submit",
+        "batches-list",
+        "benchmarks",
+        "health",
+        "probe",
+        "task",
+        "whoami",
+    }
+)
+_API_SMOKE_REASON_CODES = frozenset(
+    {
+        "agent-task-incompatible",
+        "empty-filter",
+        "generic-http-response",
+        "invalid-family-run",
+        "invalid-task-config",
+        "no-active-worker",
+        "probe-failed",
+    }
+)
 
 
 class CommandResult(Protocol):
@@ -514,7 +537,7 @@ class IsolatedRehearsalExecutor:
             return _blocked("api-smoke", "worker-authority-failed")
         suffix = plan.resources.namespace.removeprefix("loom-rehearsal-")
         batch_name = f"rehearsal-{suffix}"
-        result = self._command(
+        probe = self._json_command_result(
             (
                 "kubectl",
                 "--kubeconfig",
@@ -549,7 +572,35 @@ class IsolatedRehearsalExecutor:
             None,
             timeout=120,
         )
-        if result is None or not _api_smoke_result_ready(
+        if probe is None:
+            return _blocked("api-smoke", "probe-failed")
+        returncode, result = probe
+        if returncode != 0:
+            failure = _api_smoke_failure(result)
+            if failure is None:
+                return _blocked("api-smoke", "probe-failed")
+            failure_code, request_id, reason_code, response_sha256 = failure
+            blockers = {
+                "api-smoke": (
+                    failure_code.removeprefix("rehearsal-api-smoke-")
+                    + f".{request_id}.{reason_code}"
+                )
+            }
+            details = {
+                "failure-code": failure_code,
+                "reason-code": reason_code,
+                "request-id": request_id,
+                "status": "blocked",
+            }
+            if response_sha256 is not None:
+                details["response-sha256"] = response_sha256
+                blockers["api-smoke-response-sha256"] = response_sha256
+            return RehearsalStepOutcome(
+                passed=False,
+                details=details,
+                blockers=blockers,
+            )
+        if not _api_smoke_result_ready(
             result,
             plan=plan,
             batch_name=batch_name,
@@ -1764,6 +1815,32 @@ class IsolatedRehearsalExecutor:
             return None
         return value if isinstance(value, dict) else None
 
+    def _json_command_result(
+        self,
+        argv: Sequence[str],
+        payload: bytes | None,
+        *,
+        timeout: int,
+    ) -> tuple[int, dict[str, object]] | None:
+        """Read bounded JSON from a probe on either its success or blocked exit."""
+        try:
+            result = self.run(argv, payload, timeout)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        if (
+            result.returncode not in {0, 1}
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or len(result.stdout.encode()) > _MAX_OUTPUT_BYTES
+            or len(result.stderr.encode()) > _MAX_OUTPUT_BYTES
+        ):
+            return None
+        try:
+            value = json.loads(result.stdout, object_pairs_hook=_reject_duplicate_keys)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return (result.returncode, value) if isinstance(value, dict) else None
+
     def _text_command(
         self,
         argv: Sequence[str],
@@ -2285,6 +2362,47 @@ def _api_smoke_result_ready(
             for key, item in evidence.items()
         )
     )
+
+
+def _api_smoke_failure(
+    value: dict[str, object],
+) -> tuple[str, str, str, str | None] | None:
+    expected = {
+        "failure_code",
+        "reason_code",
+        "request_id",
+        "response_sha256",
+        "schema_version",
+        "status",
+    }
+    failure_code = value.get("failure_code")
+    reason_code = value.get("reason_code")
+    request_id = value.get("request_id")
+    response_sha256 = value.get("response_sha256")
+    if (
+        set(value) != expected
+        or value.get("schema_version") != 1
+        or value.get("status") != "blocked"
+        or not isinstance(failure_code, str)
+        or re.fullmatch(r"rehearsal-api-smoke-(?:failed|http-[1-5][0-9]{2})", failure_code) is None
+        or not isinstance(reason_code, str)
+        or reason_code not in _API_SMOKE_REASON_CODES
+        or not isinstance(request_id, str)
+        or request_id not in _API_SMOKE_REQUEST_IDS
+    ):
+        return None
+    is_http = failure_code.startswith("rehearsal-api-smoke-http-")
+    if is_http:
+        if (
+            not isinstance(response_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", response_sha256) is None
+            or reason_code == "probe-failed"
+            or request_id == "probe"
+        ):
+            return None
+    elif response_sha256 is not None or reason_code != "probe-failed" or request_id != "probe":
+        return None
+    return failure_code, request_id, reason_code, response_sha256
 
 
 def _production_defaults_result_ready(

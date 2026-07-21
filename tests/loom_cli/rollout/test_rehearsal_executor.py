@@ -986,6 +986,170 @@ def test_api_smoke_fails_closed_when_isolated_worker_seed_drifts() -> None:
     assert outcome.blockers == {"api-smoke": "worker-authority-failed"}
 
 
+def test_api_smoke_persists_normalized_nonzero_probe_evidence() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+    response_sha256 = "d" * 64
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if "get" in command and "pods" in command:
+            pod = {
+                "items": [
+                    {
+                        "metadata": {
+                            "annotations": {
+                                "loom.openai.dev/plan-sha256": plan.plan_digest,
+                            },
+                            "labels": {"app": "loom-service"},
+                            "name": "loom-service-abc123",
+                        },
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {
+                                    "imageID": "docker-pullable://loom-service@"
+                                    + plan.image_digests["loom-service"],
+                                    "name": "loom-service",
+                                    "ready": True,
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        if "psql" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "backend": "docker",
+                        "fresh": True,
+                        "hostname": "rehearsal-" + "5" * 24,
+                        "pool_name": "gb10-arm64",
+                        "status": "ready",
+                        "worker_id": str(uuid.UUID(hex=plan.plan_digest[:32], version=4)),
+                    }
+                ),
+                "",
+            )
+        if "exec" in command:
+            failure = {
+                "failure_code": "rehearsal-api-smoke-http-400",
+                "reason_code": "invalid-task-config",
+                "request_id": "batch-submit",
+                "response_sha256": response_sha256,
+                "schema_version": 1,
+                "status": "blocked",
+            }
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                json.dumps(failure),
+                "service request returned HTTP 400\n",
+            )
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.api-smoke", plan)
+
+    assert outcome.blockers == {
+        "api-smoke": "http-400.batch-submit.invalid-task-config",
+        "api-smoke-response-sha256": response_sha256,
+    }
+    assert outcome.details == {
+        "failure-code": "rehearsal-api-smoke-http-400",
+        "reason-code": "invalid-task-config",
+        "request-id": "batch-submit",
+        "response-sha256": response_sha256,
+        "status": "blocked",
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "not-json",
+        json.dumps(
+            {
+                "failure_code": "rehearsal-api-smoke-http-400",
+                "reason_code": "secret-shaped-untrusted-reason",
+                "request_id": "batch-submit",
+                "response_sha256": "d" * 64,
+                "schema_version": 1,
+                "status": "blocked",
+            }
+        ),
+    ],
+)
+def test_api_smoke_rejects_malformed_nonzero_probe_output(failure: str) -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if "get" in command and "pods" in command:
+            pod = {
+                "items": [
+                    {
+                        "metadata": {
+                            "annotations": {
+                                "loom.openai.dev/plan-sha256": plan.plan_digest,
+                            },
+                            "labels": {"app": "loom-service"},
+                            "name": "loom-service-abc123",
+                        },
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {
+                                    "imageID": "docker-pullable://loom-service@"
+                                    + plan.image_digests["loom-service"],
+                                    "name": "loom-service",
+                                    "ready": True,
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        if "psql" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "backend": "docker",
+                        "fresh": True,
+                        "hostname": "rehearsal-" + "5" * 24,
+                        "pool_name": "gb10-arm64",
+                        "status": "ready",
+                        "worker_id": str(uuid.UUID(hex=plan.plan_digest[:32], version=4)),
+                    }
+                ),
+                "",
+            )
+        if "exec" in command:
+            return subprocess.CompletedProcess(argv, 1, failure, "bounded")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.api-smoke", plan)
+
+    assert outcome.blockers == {"api-smoke": "probe-failed"}
+
+
 def test_production_defaults_streams_exact_artifact_to_candidate_probe(tmp_path: Path) -> None:
     base = _plan()
     provider = ProviderPricingDefault(

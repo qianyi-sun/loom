@@ -42,6 +42,48 @@ _STABLE_STAT_FIELDS = (
 class RehearsalSmokeProbeError(RuntimeError):
     """A bounded, non-secret Tier-3 admission failure."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: str = "rehearsal-api-smoke-failed",
+        reason_code: str = "probe-failed",
+        request_id: str = "probe",
+        response_sha256: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
+        self.reason_code = reason_code
+        self.request_id = request_id
+        self.response_sha256 = response_sha256
+
+
+_HTTP_REASON_MARKERS = (
+    ("no active worker", "no-active-worker"),
+    ("matched zero", "empty-filter"),
+    ("invalid task config", "invalid-task-config"),
+    ("agent incompatible with task", "agent-task-incompatible"),
+    ("agent\u00d7task capability mismatch", "agent-task-incompatible"),
+    ("agent x task capability mismatch", "agent-task-incompatible"),
+    ("family run", "invalid-family-run"),
+)
+
+
+def _normalized_http_reason(body: bytes) -> str:
+    """Classify an HTTP failure without returning any response content."""
+    try:
+        value = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "generic-http-response"
+    detail = value.get("detail") if isinstance(value, Mapping) else None
+    if not isinstance(detail, str) or len(detail.encode()) > 16 * 1024:
+        return "generic-http-response"
+    normalized = " ".join(detail.casefold().split())
+    for marker, reason in _HTTP_REASON_MARKERS:
+        if marker in normalized:
+            return reason
+    return "generic-http-response"
+
 
 def load_rehearsal_admin_token(
     path: Path,
@@ -155,6 +197,7 @@ def run_probe(
         method: str,
         path: str,
         *,
+        request_id: str,
         payload: Mapping[str, object] | None = None,
         headers: Mapping[str, str] | None = None,
         accepted: frozenset[int] = frozenset({200}),
@@ -164,36 +207,43 @@ def run_probe(
             str(status).encode() + b"\0" + body
         ).hexdigest()
         if status not in accepted:
-            raise RehearsalSmokeProbeError(f"service request returned HTTP {status}")
+            raise RehearsalSmokeProbeError(
+                f"service request returned HTTP {status}",
+                failure_code=f"rehearsal-api-smoke-http-{status}",
+                reason_code=_normalized_http_reason(body),
+                request_id=request_id,
+                response_sha256=hashlib.sha256(body).hexdigest(),
+            )
         decoded = decode_json_object(body)
         if decoded is None:
             raise RehearsalSmokeProbeError("service response is not a JSON object")
         return decoded
 
-    health = request("GET", "/api/v1/health")
+    health = request("GET", "/api/v1/health", request_id="health")
     if health.get("status") not in {"ok", "healthy"}:
         raise RehearsalSmokeProbeError("service health contract failed")
-    whoami = request("GET", "/api/v1/auth/whoami")
+    whoami = request("GET", "/api/v1/auth/whoami", request_id="whoami")
     identity_error = contract.validate_admin_identity(whoami)
     if identity_error is not None:
         raise RehearsalSmokeProbeError(identity_error)
-    catalog = request("GET", "/api/v1/benchmarks")
+    catalog = request("GET", "/api/v1/benchmarks", request_id="benchmarks")
     catalog_error = contract.validate_benchmark_catalog(catalog)
     if catalog_error is not None:
         raise RehearsalSmokeProbeError(catalog_error)
     quoted_task = urllib.parse.quote(authority.task_id, safe="/")
-    task = request("GET", f"/api/v1/tasks/{quoted_task}")
+    task = request("GET", f"/api/v1/tasks/{quoted_task}", request_id="task")
     if task.get("id") not in {None, authority.task_id} and task.get("task_id") != authority.task_id:
         raise RehearsalSmokeProbeError("service task identity drifted")
 
     query = urllib.parse.urlencode({"team_id": authority.team_id, "q": batch_name, "limit": "20"})
-    existing = request("GET", f"/api/v1/batches?{query}")
+    existing = request("GET", f"/api/v1/batches?{query}", request_id="batches-list")
     batch_id = contract.existing_batch_id(existing, batch_name=batch_name)
     recovered = batch_id is not None
     if batch_id is None:
         submitted = request(
             "POST",
             "/api/v1/admin/batches/on-behalf",
+            request_id="batch-submit",
             payload=contract.submission_payload(batch_name=batch_name),
             headers={"X-Loom-Admin-Actor": authority.admin_actor},
             accepted=frozenset({200, 201}),
@@ -202,7 +252,11 @@ def run_probe(
         if not isinstance(raw_batch_id, str) or not raw_batch_id:
             raise RehearsalSmokeProbeError("service submission returned no batch id")
         batch_id = raw_batch_id
-    persisted = request("GET", f"/api/v1/batches/{batch_id}")
+    persisted = request(
+        "GET",
+        f"/api/v1/batches/{batch_id}",
+        request_id="batch-readback",
+    )
     persisted_error = contract.validate_admitted_batch(
         persisted,
         batch_id=batch_id,
@@ -251,9 +305,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         )
     except (RehearsalSmokeProbeError, ValueError) as exc:
+        if isinstance(exc, RehearsalSmokeProbeError):
+            failure_code = exc.failure_code
+            reason_code = exc.reason_code
+            request_id = exc.request_id
+            response_sha256 = exc.response_sha256
+        else:
+            failure_code = "rehearsal-api-smoke-failed"
+            reason_code = "probe-failed"
+            request_id = "probe"
+            response_sha256 = None
         print(
             json.dumps(
-                {"failure_code": "rehearsal-api-smoke-failed", "status": "blocked"},
+                {
+                    "failure_code": failure_code,
+                    "reason_code": reason_code,
+                    "request_id": request_id,
+                    "response_sha256": response_sha256,
+                    "schema_version": 1,
+                    "status": "blocked",
+                },
                 sort_keys=True,
             )
         )

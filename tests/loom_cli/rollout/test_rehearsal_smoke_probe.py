@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -179,3 +180,62 @@ def test_probe_rejects_persisted_authority_drift(
             expected_owner_uid=os.geteuid(),
             allowed_group_gid=os.getegid(),
         )
+
+
+@pytest.mark.parametrize(
+    ("detail", "reason_code"),
+    [
+        ("no active worker advertises backend 'docker'", "no-active-worker"),
+        ("task_filter matched zero tasks", "empty-filter"),
+        ("invalid task config for exact task", "invalid-task-config"),
+        ("agent\u00d7task capability mismatch", "agent-task-incompatible"),
+        ("invalid family run request", "invalid-family-run"),
+        ("unclassified internal validation", "generic-http-response"),
+    ],
+)
+def test_probe_normalizes_http_failure_without_exposing_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    detail: str,
+    reason_code: str,
+) -> None:
+    secret = _secret(tmp_path)
+    authority = _authority()
+    response = json.dumps({"detail": detail, "token": "must-not-escape"}).encode()
+
+    def http(method, path, *, token, payload=None, headers=None):
+        del method, token, payload, headers
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token"}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": authority.task_id}
+        elif path.startswith("/api/v1/batches?"):
+            value = {"items": []}
+        elif path == "/api/v1/admin/batches/on-behalf":
+            return 400, response
+        else:
+            raise AssertionError(path)
+        return 200, json.dumps(value).encode()
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_smoke_probe._http", http)
+    with pytest.raises(RehearsalSmokeProbeError) as captured:
+        run_probe(
+            plan_sha256="a" * 64,
+            batch_name="rehearsal-abc123",
+            authority=authority,
+            admin_secret_path=secret,
+            expected_owner_uid=os.geteuid(),
+            allowed_group_gid=os.getegid(),
+        )
+
+    failure = captured.value
+    assert str(failure) == "service request returned HTTP 400"
+    assert failure.failure_code == "rehearsal-api-smoke-http-400"
+    assert failure.reason_code == reason_code
+    assert failure.request_id == "batch-submit"
+    assert failure.response_sha256 == hashlib.sha256(response).hexdigest()
+    assert "must-not-escape" not in str(failure)
