@@ -485,7 +485,7 @@ def _release_manifest_with_gb10_contract() -> str:
                     "control_plane_environment": "production",
                     "gb10_desired_states": [
                         {
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "image_tag": "staging-abc123",
                             "env_config_version": "staging-abc123",
                             "source_git_commit": "a" * 40,
@@ -1326,7 +1326,7 @@ def test_env_state_defers_gb10_node_status_drift_to_release_gate(
                             {
                                 "path": (
                                     "gb10_worker_node_status"
-                                    "[production/gb10-arm64/trt-gb10-1]"
+                                    "[production/gb10/trt-gb10-1]"
                                     ".source_git_commit"
                                 ),
                                 "desired": "80f7e01",
@@ -2180,7 +2180,7 @@ def test_gb10_prep_uses_candidate_profile_for_missing_host_failure(
 environment = "staging"
 
 [[gb10_worker_pool_desired_states]]
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 image_tag = "${IMAGE_TAG}"
 max_concurrent = 1
 env_config_version = "${ENV_CONFIG_VERSION}"
@@ -2309,7 +2309,7 @@ def test_gb10_prep_fails_when_current_gb10_profile_has_no_hosts(
 environment = "staging"
 
 [[gb10_worker_pool_desired_states]]
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 image_tag = "${IMAGE_TAG}"
 max_concurrent = 1
 env_config_version = "${ENV_CONFIG_VERSION}"

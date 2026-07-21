@@ -15,7 +15,7 @@ the node-agent remains the host-local convergence mechanism.
   Issue #822 records that node as `unreachable`; staging remains fail-closed on
   the other 14 hosts and 140 slots until a separate merged re-admission change
   restores the node.
-- Slurm partition and Loom pool: `gb10` and `gb10-arm64`.
+- Slurm partition and Loom pool: `gb10` and `gb10`.
 - Release-managed SSH topology:
   `deploy/worker-pools/gb10/ssh_config`. `trt-gb10-1` is the only public
   entrypoint on port `2221`; `trt-gb10-2` through `trt-gb10-15` use their
@@ -204,7 +204,7 @@ the candidate-bound release gate before use.
 - `trt-gb10-1..15` were worker-enabled and `aarch64`.
 - Docker and the private Control Plane, Gateway, and MinIO endpoints passed on
   all 15 hosts.
-- Every worker advertised `cpu_arch=arm64` and pool `gb10-arm64`.
+- Every worker advertised `cpu_arch=arm64` and pool `gb10`.
 - At that evidence date, declared trial concurrency was 10 per host and 150
   total slots. The current #822 exception declares 14 active hosts and 140
   staging slots while retaining node 7 in the physical inventory.

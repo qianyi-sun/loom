@@ -78,7 +78,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         'repo_dir = "/srv/loom-${IMAGE_TAG}"\n'
         "external_runner = true\n"
         "[[gb10_worker_pool_desired_states]]\n"
-        'pool_name = "gb10-arm64"\n'
+        'pool_name = "gb10"\n'
         'image_tag = "${IMAGE_TAG}"\n'
         "max_concurrent = 10\n"
         'env_config_version = "${ENV_CONFIG_VERSION}"\n'
@@ -190,7 +190,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     assert manifest["external_workers"]["gb10_desired_states"] == [
         {
             "environment": "staging",
-            "pool_name": "gb10-arm64",
+            "pool_name": "gb10",
             "image_tag": "staging-abc123",
             "max_concurrent": 10,
             "env_config_version": "staging-abc123",

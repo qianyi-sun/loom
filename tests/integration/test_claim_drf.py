@@ -253,7 +253,7 @@ async def test_claim_filters_by_required_worker_pool(postgres_url: str):
             status="active",
         ))
         for trial_id, required_pool in (
-            (gb10_trial, "gb10-arm64"),
+            (gb10_trial, "gb10"),
             (oldlab_trial, "oldlab"),
         ):
             await s.execute(insert(Trial).values(

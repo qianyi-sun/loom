@@ -54,7 +54,7 @@ const monitorSummaryPayload = {
     },
     pools: [
       {
-        pool_name: "gb10-arm64",
+        pool_name: "gb10",
         backend: "docker",
         cpu_arch: "arm64",
         autoscaler_environment: "production",
@@ -497,7 +497,7 @@ describe("Monitor human-readable labels", () => {
     expect(
       screen.getByText("2 waiting for 9 free slots."),
     ).toBeInTheDocument();
-    expect(screen.getByText("gb10-arm64")).toBeInTheDocument();
+    expect(screen.getByText("gb10")).toBeInTheDocument();
     expect(screen.getByText("staging-x86")).toBeInTheDocument();
     expect(screen.getByText("Active slots")).toBeInTheDocument();
     expect(screen.getByText("Max")).toBeInTheDocument();

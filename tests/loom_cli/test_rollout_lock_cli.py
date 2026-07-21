@@ -1032,7 +1032,7 @@ def test_environment_state_cannot_hide_staging_control_plane_behind_development_
         'environment = "development"\n'
         'control_plane_environment = "staging"\n'
         "[[worker_pool_autoscaler_policies]]\n"
-        'pool_name = "gb10-arm64"\n'
+        'pool_name = "gb10"\n'
         'actuator = "slurm"\n'
         "max_slots = 1\n",
         encoding="utf-8",

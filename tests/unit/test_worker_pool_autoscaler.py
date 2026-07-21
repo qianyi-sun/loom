@@ -680,7 +680,7 @@ def test_queued_trial_capability_matching_uses_policy_backend_and_arch() -> None
     )
     gb10 = _policy_row(
         actuator="gb10",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         actuator_config={"backend": "docker"},
     )
 
@@ -692,8 +692,8 @@ def test_queued_trial_capability_matching_uses_policy_backend_and_arch() -> None
     assert _queued_trial_matches_policy({"cpu_arch": "arm64"}, slurm) is False
     assert _queued_trial_matches_policy({"cpu_arch": "arm64"}, gb10) is True
     assert _queued_trial_matches_policy({"worker_pool": "oldlab"}, slurm) is True
-    assert _queued_trial_matches_policy({"worker_pool": "gb10-arm64"}, slurm) is False
-    assert _queued_trial_matches_policy({"worker_pool": "gb10-arm64"}, gb10) is True
+    assert _queued_trial_matches_policy({"worker_pool": "gb10"}, slurm) is False
+    assert _queued_trial_matches_policy({"worker_pool": "gb10"}, gb10) is True
     assert _queued_trial_matches_policy({"worker_pool": "oldlab"}, gb10) is False
 
 
@@ -1088,7 +1088,7 @@ async def test_load_observation_quarantines_running_job_outside_allowed_nodes() 
     observation = await _load_observation(
         cast(Any, session),
         _policy_row(
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             min_slots=0,
             actuator_config={
                 "allowed_nodes": ["trt-gb10-1"],
@@ -1155,7 +1155,7 @@ async def test_load_observation_does_not_drain_ambiguous_hostname_registration()
     observation = await _load_observation(
         cast(Any, session),
         _policy_row(
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             min_slots=0,
             actuator_config={
                 "allowed_nodes": ["trt-gb10-1"],
@@ -1237,7 +1237,7 @@ async def test_load_observation_does_not_drain_null_link_with_other_job_on_host(
     observation = await _load_observation(
         cast(Any, session),
         _policy_row(
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             min_slots=0,
             actuator_config={
                 "allowed_nodes": ["trt-gb10-1"],
@@ -1314,7 +1314,7 @@ async def test_load_observation_does_not_drain_duplicate_active_worker_link() ->
     observation = await _load_observation(
         cast(Any, session),
         _policy_row(
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             min_slots=0,
             actuator_config={
                 "allowed_nodes": ["trt-gb10-1"],
@@ -1381,7 +1381,7 @@ async def test_load_observation_does_not_drain_worker_with_mismatched_hostname()
     observation = await _load_observation(
         cast(Any, session),
         _policy_row(
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             min_slots=0,
             actuator_config={
                 "allowed_nodes": ["trt-gb10-1"],
@@ -1599,7 +1599,7 @@ async def test_apply_slurm_scale_up_fail_closes_before_counting_drift_job_caps(
     result = await _apply_slurm_scale_up(
         cast(Any, session),
         _policy_row(
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             min_slots=0,
             max_slots=10,
             actuator_config={
@@ -2089,7 +2089,7 @@ async def test_apply_slurm_release_drift_uses_locked_current_allowlist() -> None
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
     worker_id = uuid4()
     stale_policy = _policy_row(
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         actuator_config={
             "backend": "docker",
             "cpu_arch": "arm64",
@@ -2105,7 +2105,7 @@ async def test_apply_slurm_release_drift_uses_locked_current_allowlist() -> None
     )
     current_policy = _policy_row(
         id=stale_policy.id,
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         actuator_config={
             **dict(stale_policy.actuator_config or {}),
             "allowed_nodes": ["trt-gb10-1", "trt-gb10-7"],
@@ -2121,7 +2121,7 @@ async def test_apply_slurm_release_drift_uses_locked_current_allowlist() -> None
     job = SimpleNamespace(
         worker_id=worker_id,
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         nodelist="trt-gb10-7",
         state="running",
         job_id="gb10-job-7",
@@ -2276,7 +2276,7 @@ async def test_apply_gb10_host_intent_creates_desired_state_and_updates_nodes() 
         cast(Any, session),
         _policy_row(
             actuator="gb10",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             actuator_config={
                 "image_tag": "gb10-image",
                 "max_concurrent": 10,
@@ -2324,7 +2324,7 @@ async def test_apply_gb10_scale_up_creates_desired_state_and_selects_hosts() -> 
         cast(Any, session),
         _policy_row(
             actuator="gb10",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             actuator_config={
                 "hosts": ["trt-gb10-1", "trt-gb10-2", "trt-gb10-3"],
                 "image_tag": "gb10-image",

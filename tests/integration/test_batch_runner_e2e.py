@@ -212,7 +212,7 @@ def _insert_gb10_arm64_policy(postgres_url: str) -> None:
     with sl() as s:
         s.execute(insert(WorkerPoolAutoscalerPolicy).values(
             environment="test",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             actuator="gb10",
             enabled=True,
             max_slots=10,
@@ -364,7 +364,7 @@ async def test_runner_rejects_required_pool_coverage_when_tasks_mismatch_pool_ar
             state="submitted",
             created_by_token_prefix="abcdef12",
             expected_trial_count=2,
-            required_worker_pools=["gb10-arm64"],
+            required_worker_pools=["gb10"],
         )
         s.add(c)
         await s.commit()
@@ -397,7 +397,7 @@ async def test_runner_rejects_required_pool_coverage_when_tasks_mismatch_pool_ar
     assert batch_row.fanout_errors
     error = batch_row.fanout_errors[0]
     assert error["reason"] == "required_worker_pool_incompatible"
-    assert error["required_worker_pool"] == "gb10-arm64"
+    assert error["required_worker_pool"] == "gb10"
     assert error["pool_cpu_arches"] == ["arm64"]
     assert error["task_cpu_arches"] == {"x86_64": [task_ids[0]]}
 
@@ -433,7 +433,7 @@ async def test_runner_selects_claimable_task_for_arm64_required_pool_coverage(
             state="submitted",
             created_by_token_prefix="abcdef12",
             expected_trial_count=3,
-            required_worker_pools=["gb10-arm64"],
+            required_worker_pools=["gb10"],
         )
         s.add(c)
         await s.commit()
@@ -451,10 +451,10 @@ async def test_runner_selects_claimable_task_for_arm64_required_pool_coverage(
         cid,
         task_ids[1],
         1,
-        required_worker_pool="gb10-arm64",
+        required_worker_pool="gb10",
     )
     assert captured[-1]["task_id"] == task_ids[1]
-    assert captured[-1]["required_worker_pool"] == "gb10-arm64"
+    assert captured[-1]["required_worker_pool"] == "gb10"
     assert captured[-1]["idempotency_key"] == coverage_key
 
     gb10_worker = uuid4()
@@ -465,7 +465,7 @@ async def test_runner_selects_claimable_task_for_arm64_required_pool_coverage(
             id=gb10_worker,
             hostname="trt-gb10-1",
             version="v",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             capabilities=[{
                 "os": "linux",
                 "cpu_arch": "arm64",
@@ -487,7 +487,7 @@ async def test_runner_selects_claimable_task_for_arm64_required_pool_coverage(
             "cpu_arch": "arm64",
             "gpu_vendor": "none",
             "network_policies": ["public"],
-            "worker_pool": "gb10-arm64",
+            "worker_pool": "gb10",
         }
         coverage_trial_id = coverage_trial.id
         s.commit()

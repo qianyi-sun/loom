@@ -707,7 +707,7 @@ def test_run_smoke_fails_when_required_worker_pool_has_no_terminal_trials(
                 body = (
                     b'{"id":"batch-1","debug_evidence":{"trials":{'
                     b'"summary":{"claimed_without_started":0},'
-                    b'"worker_pools":{"terminal":{"gb10-arm64":12},'
+                    b'"worker_pools":{"terminal":{"gb10":12},'
                     b'"unknown_terminal":0}}}}'
                 )
             elif path == "/api/v1/run-library/batches":
@@ -739,7 +739,7 @@ def test_run_smoke_fails_when_required_worker_pool_has_no_terminal_trials(
 
     assert result.status == "fail"
     assert "oldlab" in result.detail
-    assert "gb10-arm64=12" in result.detail
+    assert "gb10=12" in result.detail
     assert "required worker pools" in result.remediation.lower()
 
 
@@ -750,19 +750,19 @@ def test_worker_pool_coverage_passes_when_required_pools_have_terminal_trials() 
         headers={},
         body=(
             b'{"debug_evidence":{"trials":{"worker_pools":{"terminal":'
-            b'{"gb10-arm64":158,"k8s-worker":12,"oldlab":2},'
+            b'{"gb10":158,"k8s-worker":12,"oldlab":2},'
             b'"unknown_terminal":0}}}}'
         ),
     )
 
     result = gate._worker_pool_coverage_result(
         response,
-        ["oldlab", "gb10-arm64"],
+        ["oldlab", "gb10"],
     )
 
     assert result.status == "pass"
     assert "oldlab=2" in result.detail
-    assert "gb10-arm64=158" in result.detail
+    assert "gb10=158" in result.detail
 
 
 def test_run_smoke_fails_when_service_pod_reports_oom_restart(monkeypatch) -> None:
@@ -859,7 +859,7 @@ def test_run_smoke_rechecks_service_stability_after_route_probe_oom(
                 body = (
                     b'{"id":"batch-1","debug_evidence":{"trials":{'
                     b'"summary":{"claimed_without_started":0},'
-                    b'"worker_pools":{"terminal":{"gb10-arm64":1}}}}}'
+                    b'"worker_pools":{"terminal":{"gb10":1}}}}}'
                 )
             elif path == "/api/v1/run-library/batches":
                 body = b'{"items":[{"id":"batch-1"}]}'

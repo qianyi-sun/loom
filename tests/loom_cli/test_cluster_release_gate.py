@@ -407,7 +407,7 @@ def _external_workers_manifest_section() -> dict[str, Any]:
         "gb10_desired_states": [
             {
                 "environment": "staging",
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
                 "image_tag": "staging-abc123",
                 "max_concurrent": 10,
                 "env_config_version": "staging-abc123",
@@ -551,7 +551,7 @@ def _hf_boundary_evidence(
             },
             "canary_worker_pools": {
                 "active": {},
-                "terminal": {"gb10-arm64": 2},
+                "terminal": {"gb10": 2},
             },
             "expected_trial_count": 2,
             "succeeded_trials": 2,
@@ -1627,7 +1627,7 @@ def test_hf_boundary_rejects_canary_from_non_current_worker_registration(
             {
                 "worker_id": "worker-unlinked",
                 "hostname": "trt-gb10-1",
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
                 "worker_fresh": False,
             },
         ]
@@ -1635,7 +1635,7 @@ def test_hf_boundary_rejects_canary_from_non_current_worker_registration(
         gb10_status["nodes"].append(
             {
                 "environment": "staging",
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
                 "hostname": "trt-gb10-7",
                 "desired_intent": "stopped",
                 "worker_id": "worker-stopped-7",
@@ -1714,13 +1714,13 @@ def test_hf_boundary_requires_fully_succeeded_matching_canary(drift: str) -> Non
     elif drift == "zero-expected":
         boundary["expected_trial_count"] = 0
         boundary["succeeded_trials"] = 0
-        boundary["canary_worker_pools"]["terminal"]["gb10-arm64"] = 0
+        boundary["canary_worker_pools"]["terminal"]["gb10"] = 0
     elif drift == "partial-success":
         boundary["succeeded_trials"] = 1
     elif drift == "boolean-counts":
         boundary["expected_trial_count"] = 1
         boundary["succeeded_trials"] = True
-        boundary["canary_worker_pools"]["terminal"]["gb10-arm64"] = True
+        boundary["canary_worker_pools"]["terminal"]["gb10"] = True
     elif drift == "wrong-task-filter":
         boundary["canary_task_filter"] = {"benchmark_id": "other"}
     elif drift == "mixed-benchmark-filter":
@@ -1906,7 +1906,7 @@ def test_release_gate_fails_when_environment_state_reports_excluded_slurm_node()
             "drift": [
                 {
                     "path": (
-                        "slurm_worker_jobs[production/gb10-arm64/18186].nodelist"
+                        "slurm_worker_jobs[production/gb10/18186].nodelist"
                     ),
                     "desired": ["trt-gb10-1", "trt-gb10-2"],
                     "live": "trt-gb10-7",
@@ -2147,7 +2147,7 @@ def test_release_gate_report_includes_component_evidence_rows() -> None:
     assert oldlab_row["readiness"] == "environment-state converged"
     assert oldlab_row["outcome"] == "pass"
 
-    gb10_row = next(row for row in rows if row["component"] == "gb10-arm64")
+    gb10_row = next(row for row in rows if row["component"] == "gb10")
     assert gb10_row["surface"] == "external-worker"
     assert gb10_row["outcome"] == "pass"
 

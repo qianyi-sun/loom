@@ -750,7 +750,7 @@ knob you need.
 
    Staging cluster configs must render backend pods with `LOOM_ENV=staging`,
    and staging environment-state evidence must use the `staging` control-plane
-   desired-state key. A `production/gb10-arm64` desired-state in staging
+   desired-state key. A `production/gb10` desired-state in staging
    evidence is drift. The broker runs the check from the Slurm submit/shared-
    storage host when the profile contains external Slurm runner pools; the gate
    also verifies runner env files, worker-token fingerprints, shared git
@@ -825,7 +825,7 @@ knob you need.
 
    The candidate-bound driver invokes the idempotent environment-state APIs for
    worker-pool autoscaler policies, GB10 desired state, and Slurm worker job
-   status. A drift failure is actionable, for example desired `gb10-arm64`
+   status. A drift failure is actionable, for example desired `gb10`
    actuator `slurm` but live `gb10`, or an active OLDLAB Slurm job still
    pointing at an older `LOOM_REMOTE_WORKER_REPO_DIR`. Fix repository-owned
    drift in a commit merged to `dev`, then start a new broker request. If the
@@ -834,7 +834,7 @@ knob you need.
    interactive profile, patch SQL, substitute an untracked token, or create an
    out-of-envelope retry against shared staging.
    Staging profiles must target the `staging` Control Plane desired-state
-   environment. Evidence showing `production/gb10-arm64` for a staging rollout
+   environment. Evidence showing `production/gb10` for a staging rollout
    is drift, not a compatibility exception. Pass the resolved release commit as
    `GIT_SHA`; the GB10 desired state stores it as `source_git_commit`, so
    node-agent status and release-gate checks can reject a clean image/env
@@ -1918,7 +1918,7 @@ legacy team tokens are refused before trial submission because they cannot
 create user-facing work under the account-auth model. For
 `--scope=current-gb10`, `--smoke-task-id` defaults to
 `loom-smoke/gb10-oracle-hello-world` with
-`required_worker_pool=gb10-arm64`, because that task is oracle-compatible and
+`required_worker_pool=gb10`, because that task is oracle-compatible and
 declares `cpu_arch=any`. For `--scope=full-cluster`, the default is
 `terminal-bench-2/hello-world` with no required pool. Override
 `--smoke-task-id` only with another short task that exists in the live
@@ -1941,7 +1941,7 @@ rollout-smoke batch on resume, otherwise submits one audited batch through
 `result_status=succeeded`, and `trial_summary.succeeded` covers the expected
 trial count. For `--scope=current-gb10`, this mode defaults to
 `loom-smoke/gb10-oracle-hello-world` with
-`required_worker_pool=gb10-arm64`. That task is a checked-in release-smoke
+`required_worker_pool=gb10`. That task is a checked-in release-smoke
 fixture published by the catalog provisioning gate through
 `loom datasets publish-local deploy/catalog/gb10-smoke`; it is
 oracle-compatible and explicitly `cpu_arch=any`, so the batch API preflight and
@@ -3158,7 +3158,7 @@ loom admin batches submit-on-behalf \
   --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
   --agent oracle \
   --n-per-task 1 \
-  --required-worker-pool gb10-arm64
+  --required-worker-pool gb10
 ```
 
 Model-backed provider canary example:
@@ -3175,7 +3175,7 @@ loom admin batches submit-on-behalf \
   --agent opencode \
   --n-per-task 1 \
   --backend docker \
-  --required-worker-pool gb10-arm64
+  --required-worker-pool gb10
 ```
 
 Audit evidence:
@@ -4365,7 +4365,7 @@ The generated artifact has this shape:
     },
     "canary_worker_pools": {
       "active": {},
-      "terminal": {"gb10-arm64": 2}
+      "terminal": {"gb10": 2}
     },
     "expected_trial_count": 2,
     "succeeded_trials": 2,
@@ -4807,7 +4807,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
      --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
      --agent oracle \
      --n-per-task 1 \
-     --required-worker-pool gb10-arm64
+     --required-worker-pool gb10
 
    # Model-backed path through the provider gateway. This is the release
    # provider smoke because it exercises codex + YibuAPI OpenAI-compatible.
@@ -4822,13 +4822,13 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
      --agent opencode \
      --n-per-task 1 \
      --backend docker \
-     --required-worker-pool gb10-arm64
+     --required-worker-pool gb10
    # then tail it:
    loom eval batch show <batch-id>
    ```
    For mixed-pool release evidence, repeat `--required-worker-pool` for every
    pool that must produce terminal evidence, for example `oldlab`,
-   `k8s-worker`, and `gb10-arm64`. The service adds one extra pool-pinned
+   `k8s-worker`, and `gb10`. The service adds one extra pool-pinned
    coverage trial for each requested pool while leaving the normal batch trials
    portable. When a target pool's CPU architecture is known from active workers
    or autoscaler policy, the coverage trial is selected from tasks compatible
@@ -5191,7 +5191,7 @@ loom eval batch create \
   --task-filter "@$COMPAT_GATE_DIR/corrected-task-filter.json" \
   --n-per-task 1 \
   --name "compat-verifier-gate-${CORRECTED_BENCHMARK_ID}" \
-  --required-worker-pool gb10-arm64 \
+  --required-worker-pool gb10 \
   | tee "$COMPAT_GATE_DIR/canaries/corrected-batch-create.txt"
 
 loom eval batch show "$CORRECTED_BATCH_ID" --format json \
@@ -5294,7 +5294,7 @@ is missing. Do not close them from local tests alone.
       --object-store-write-check-count 64 \
       --object-store-write-check-concurrency 16 \
       --k8s-namespace loom-staging \
-      --required-worker-pool gb10-arm64 \
+      --required-worker-pool gb10 \
       --secret-needle env:STAGING_SECRET_NEEDLE \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
@@ -5323,7 +5323,7 @@ is missing. Do not close them from local tests alone.
     memory, previous pod logs, and large batch detail/cancel traffic before
     accepting the gate. For v1.0's GB10-only gate, the
     `runs.worker_pool_coverage` row must pass with
-    `--required-worker-pool gb10-arm64`; a missing pool means the batch did not
+    `--required-worker-pool gb10`; a missing pool means the batch did not
     produce deterministic terminal evidence on the GB10 worker pool. For
     v1.1/full-cluster OLDLAB-required evidence, repeat the same pattern with an
     additional `--required-worker-pool oldlab` constraint so the gate is
@@ -5607,7 +5607,7 @@ link it from #217; do not merge incomplete evidence.
   `ceiling_slots`, the autoscaler actuator, last decision reason, and blocked
   reason. Kubernetes render labels the baseline pool as `k8s-worker`; remote
   workers should set `LOOM_WORKER_POOL_NAME` to stable names such as `oldlab`
-  or `gb10-arm64`.
+  or `gb10`.
 - Remote worker pools should set `LOOM_WORKER_HOSTNAME` to the physical or VM
   node name before startup. Otherwise Docker Compose workers may register with
   container hostnames, which makes Monitor and capacity evidence harder to map
@@ -5776,13 +5776,13 @@ link it from #217; do not merge incomplete evidence.
   `deploy/worker-pools/gb10/`, but manage normal scale-up/scale-down through
   the Slurm autoscaler policy with `actuator=slurm`,
   `actuator_config.partition=gb10`, `actuator_config.cpu_arch=arm64`, and
-  `pool_name=gb10-arm64`. The backend still displays as `docker` because the
+  `pool_name=gb10`. The backend still displays as `docker` because the
   workers run Docker sandboxes; the autoscaler actuator displays as `slurm`
   because capacity comes from the GB10 Slurm partition. GB10 hosts attach
   through private loopback worker-service tunnels, run the worker compose
   service with `network_mode: host`, and set
   `LOOM_WORKER_HOSTNAME=trt-gb10-N` so Monitor and database evidence map
-  workers to physical hosts. Set `LOOM_WORKER_POOL_NAME=gb10-arm64` so slot
+  workers to physical hosts. Set `LOOM_WORKER_POOL_NAME=gb10` so slot
   summaries and metrics group the hosts together. Keep Docker data-root, worker
   trajectory cache, benchmark cache, and trial scratch on each node's local
   ext4 disk; do not put those hot paths on `/shared_work`. Current staging

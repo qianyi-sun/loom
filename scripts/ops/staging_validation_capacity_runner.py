@@ -830,7 +830,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Replayable admin token source: env:VAR or file:PATH.",
     )
     parser.add_argument("--environment", default="staging")
-    parser.add_argument("--pool-name", default="gb10-arm64")
+    parser.add_argument("--pool-name", default="gb10")
     parser.add_argument(
         "--hosts",
         help="Exact comma-separated merged active GB10 set; runtime host skips are rejected.",
