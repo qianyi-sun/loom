@@ -435,7 +435,9 @@ def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) 
     assert deps.store.read_active() is None
     assert deps.store.envelopes == {}
     assert deps.store.read_events(REQUEST_ID)[-1].event == "backup_failed"
-    assert deps.store.read_events(REQUEST_ID)[-1].reason == "backup_failed"
+    # FailingBackup fails the postgres stage; the durable reason names it end to
+    # end through the broker instead of collapsing to a generic backup_failed.
+    assert deps.store.read_events(REQUEST_ID)[-1].reason == "backup_postgres_failed"
 
 
 def test_object_limit_failure_has_stable_public_reason_and_supported_cleanup(

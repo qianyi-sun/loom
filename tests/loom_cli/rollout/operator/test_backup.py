@@ -3459,6 +3459,17 @@ def test_all_stage_public_reasons_are_approved() -> None:
         assert reason in backup_module._BACKUP_PUBLIC_REASONS
 
 
+def test_backup_public_reason_literal_matches_approved_event_tokens() -> None:
+    # The Literal type, the backup module's runtime set, and the event-model
+    # allowlist must all agree, or a raised reason gets rejected at append time.
+    from typing import get_args
+
+    from loom_cli.rollout.operator.model import APPROVED_BACKUP_EVENT_REASONS
+
+    assert set(get_args(backup_module.BackupPublicReason)) == APPROVED_BACKUP_EVENT_REASONS
+    assert backup_module._BACKUP_PUBLIC_REASONS == APPROVED_BACKUP_EVENT_REASONS
+
+
 def _incomplete_bundle(tmp_path: Path) -> tuple[BackupCreator, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     config = make_config(tmp_path)
