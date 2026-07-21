@@ -191,12 +191,44 @@ def test_probe_rejects_persisted_authority_drift(
         ("agent\u00d7task capability mismatch", "agent-task-incompatible"),
         ("invalid family run request", "invalid-family-run"),
         ("unclassified internal validation", "generic-http-response"),
+        (
+            {"reason": "staging_capacity_evidence_stale", "retryable": True},
+            "staging-capacity-evidence-stale",
+        ),
+        (
+            {"reason": "staging_capacity_evidence_missing", "retryable": True},
+            "staging-capacity-evidence-missing",
+        ),
+        (
+            {"reason": "staging_capacity_evidence_corrupt", "retryable": True},
+            "staging-capacity-evidence-corrupt",
+        ),
+        (
+            {"reason": "staging_capacity_policy_drift", "retryable": True},
+            "staging-capacity-policy-drift",
+        ),
+        (
+            {"reason": "staging_capacity_high_water", "retryable": True},
+            "staging-capacity-high-water",
+        ),
+        (
+            {"reason": "untrusted_capacity_reason", "retryable": True},
+            "generic-http-response",
+        ),
+        (
+            {
+                "reason": "staging_capacity_evidence_stale",
+                "retryable": True,
+                "raw": "must-not-escape",
+            },
+            "generic-http-response",
+        ),
     ],
 )
 def test_probe_normalizes_http_failure_without_exposing_body(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    detail: str,
+    detail: object,
     reason_code: str,
 ) -> None:
     secret = _secret(tmp_path)

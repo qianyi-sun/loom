@@ -1490,6 +1490,16 @@ direct DSN and rewrites them to the rehearsal database. PgBouncer DSNs remain
 optional exactly as in the workloads: present pool keys are also rewritten,
 while an absent optional pool key stays absent and the service uses its direct
 DSN fallback.
+The checkpoint also freezes worker heartbeat and staging-capacity timestamps.
+Before the candidate admission smoke, the executor publishes a deterministic
+worker row and refreshes only the cloned capacity row after proving its exact
+policy/evidence digests and counters remain admission-safe. The capacity
+counters are not invented or recollected from protected staging: they remain
+the checkpoint snapshot and are rebound only to the isolated namespace. A
+missing, corrupt, policy-drifted, or high-water row fails rehearsal before the
+candidate submission. HTTP failure evidence retains only a fixed request ID,
+allowlisted reason code, and response digest; raw response bodies are never
+persisted.
 Before apply, the isolated release artifact also uses the API-server canonical
 shape: mapping-valued null fields are omitted and container resource quantities
 are strings. Empty `EnvVar.value` fields are also omitted because the API server

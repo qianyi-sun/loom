@@ -15,6 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from loom.data_lifecycle import (
+    STAGING_ADMISSION_BYTES_LIMIT,
+    STAGING_ADMISSION_FREE_PERCENT_LIMIT,
+    STAGING_ADMISSION_OBJECT_LIMIT,
+    StagingCapacity,
+    staging_capacity_policy_digest,
+)
+from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.gb10_rehearsal import (
     FixedGB10RehearsalTransport,
@@ -91,6 +99,11 @@ _API_SMOKE_REASON_CODES = frozenset(
         "invalid-task-config",
         "no-active-worker",
         "probe-failed",
+        "staging-capacity-evidence-corrupt",
+        "staging-capacity-evidence-missing",
+        "staging-capacity-evidence-stale",
+        "staging-capacity-high-water",
+        "staging-capacity-policy-drift",
     }
 )
 
@@ -535,6 +548,9 @@ class IsolatedRehearsalExecutor:
         worker_authority = self._seed_api_smoke_worker(plan, required_pool=required_pool)
         if worker_authority is None:
             return _blocked("api-smoke", "worker-authority-failed")
+        capacity_authority = self._seed_api_smoke_capacity(plan)
+        if capacity_authority is None:
+            return _blocked("api-smoke", "capacity-authority-failed")
         suffix = plan.resources.namespace.removeprefix("loom-rehearsal-")
         batch_name = f"rehearsal-{suffix}"
         probe = self._json_command_result(
@@ -618,6 +634,13 @@ class IsolatedRehearsalExecutor:
                     json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest(),
                 "status": "ready",
+                "capacity-authority-sha256": hashlib.sha256(
+                    json.dumps(
+                        capacity_authority,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
                 "worker-authority-sha256": hashlib.sha256(
                     json.dumps(
                         worker_authority,
@@ -679,6 +702,105 @@ class IsolatedRehearsalExecutor:
             "worker_id": worker_id,
         }
         return expected if observed == expected else None
+
+    def _seed_api_smoke_capacity(self, plan: RehearsalPlan) -> dict[str, object] | None:
+        """Refresh exact capacity authority only inside the restored clone.
+
+        The checkpoint freezes the otherwise valid capacity observation just
+        as it freezes worker heartbeats.  Rehearsal keeps the snapshot's exact
+        counters and digests, proves they are still admission-safe, then binds
+        that immutable snapshot to the isolated namespace with a fresh clock.
+        It never observes or mutates protected staging.
+        """
+        observed = self._psql_json(
+            plan,
+            "SELECT json_build_object("
+            "'bytes_used',bytes_used,'disk_free_percent',disk_free_percent,"
+            "'evidence_sha256',evidence_sha256,"
+            "'inode_free_percent',inode_free_percent,'namespace',namespace,"
+            "'object_count',object_count,'policy_sha256',policy_sha256,"
+            "'source',source)::text FROM staging_lifecycle_capacity "
+            "WHERE environment='staging';",
+        )
+        if observed is None or set(observed) != {
+            "bytes_used",
+            "disk_free_percent",
+            "evidence_sha256",
+            "inode_free_percent",
+            "namespace",
+            "object_count",
+            "policy_sha256",
+            "source",
+        }:
+            return None
+        object_count = observed.get("object_count")
+        bytes_used = observed.get("bytes_used")
+        disk_free_percent = observed.get("disk_free_percent")
+        inode_free_percent = observed.get("inode_free_percent")
+        if (
+            type(object_count) is not int
+            or type(bytes_used) is not int
+            or type(disk_free_percent) is not int
+            or type(inode_free_percent) is not int
+        ):
+            return None
+        try:
+            capacity = StagingCapacity(
+                object_count=object_count,
+                bytes_used=bytes_used,
+                disk_free_percent=disk_free_percent,
+                inode_free_percent=inode_free_percent,
+            )
+        except ValueError:
+            return None
+        policy_sha256 = staging_capacity_policy_digest()
+        if (
+            not capacity.admission_allowed
+            or observed.get("policy_sha256") != policy_sha256
+            or observed.get("evidence_sha256") != capacity.evidence_digest
+            or observed.get("source") != CAPACITY_SOURCE
+            or not isinstance(observed.get("namespace"), str)
+        ):
+            return None
+        namespace = plan.resources.namespace
+        refreshed = self._psql_json(
+            plan,
+            "WITH refreshed AS (UPDATE staging_lifecycle_capacity SET "
+            f"namespace='{namespace}',observed_at=clock_timestamp() "
+            "WHERE environment='staging' "
+            f"AND object_count={capacity.object_count} "
+            f"AND bytes_used={capacity.bytes_used} "
+            f"AND disk_free_percent={capacity.disk_free_percent} "
+            f"AND inode_free_percent={capacity.inode_free_percent} "
+            f"AND policy_sha256='{policy_sha256}' "
+            f"AND evidence_sha256='{capacity.evidence_digest}' "
+            f"AND source='{CAPACITY_SOURCE}' RETURNING *) "
+            "SELECT json_build_object("
+            f"'admission_allowed',object_count<{STAGING_ADMISSION_OBJECT_LIMIT} "
+            f"AND bytes_used<{STAGING_ADMISSION_BYTES_LIMIT} "
+            f"AND disk_free_percent>={STAGING_ADMISSION_FREE_PERCENT_LIMIT} "
+            f"AND inode_free_percent>={STAGING_ADMISSION_FREE_PERCENT_LIMIT},"
+            "'bytes_used',bytes_used,'disk_free_percent',disk_free_percent,"
+            "'evidence_sha256',evidence_sha256,"
+            "'fresh',observed_at>=clock_timestamp()-interval '30 seconds',"
+            "'inode_free_percent',inode_free_percent,'namespace',namespace,"
+            "'object_count',object_count,'policy_sha256',policy_sha256,"
+            "'source',source,'status','ready')::text FROM refreshed;",
+        )
+        expected: dict[str, object] = {
+            "admission_allowed": True,
+            "bytes_used": capacity.bytes_used,
+            "disk_free_percent": capacity.disk_free_percent,
+            "evidence_sha256": capacity.evidence_digest,
+            "fresh": True,
+            "inode_free_percent": capacity.inode_free_percent,
+            "namespace": namespace,
+            "object_count": capacity.object_count,
+            "policy_sha256": policy_sha256,
+            "source": CAPACITY_SOURCE,
+            "status": "ready",
+        }
+        return expected if refreshed == expected else None
 
     def _service_pod_name(
         self,

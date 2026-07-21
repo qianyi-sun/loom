@@ -68,6 +68,14 @@ _HTTP_REASON_MARKERS = (
     ("family run", "invalid-family-run"),
 )
 
+_CAPACITY_HTTP_REASONS = {
+    "staging_capacity_evidence_corrupt": "staging-capacity-evidence-corrupt",
+    "staging_capacity_evidence_missing": "staging-capacity-evidence-missing",
+    "staging_capacity_evidence_stale": "staging-capacity-evidence-stale",
+    "staging_capacity_high_water": "staging-capacity-high-water",
+    "staging_capacity_policy_drift": "staging-capacity-policy-drift",
+}
+
 
 def _normalized_http_reason(body: bytes) -> str:
     """Classify an HTTP failure without returning any response content."""
@@ -76,6 +84,15 @@ def _normalized_http_reason(body: bytes) -> str:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return "generic-http-response"
     detail = value.get("detail") if isinstance(value, Mapping) else None
+    if isinstance(detail, Mapping):
+        if set(detail) != {"reason", "retryable"} or detail.get("retryable") is not True:
+            return "generic-http-response"
+        reason = detail.get("reason")
+        return (
+            _CAPACITY_HTTP_REASONS.get(reason, "generic-http-response")
+            if isinstance(reason, str)
+            else "generic-http-response"
+        )
     if not isinstance(detail, str) or len(detail.encode()) > 16 * 1024:
         return "generic-http-response"
     normalized = " ".join(detail.casefold().split())

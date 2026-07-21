@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_cli.rollout.production_defaults_readiness import (
     ProductionDefaultsArtifact,
     ProviderPricingDefault,
@@ -99,6 +101,45 @@ def _plan() -> RehearsalPlan:
         ),
         gb10_authority=gb10_rehearsal_authority(),
     )
+
+
+def _api_smoke_seed_value(command: tuple[str, ...], plan: RehearsalPlan) -> dict[str, object]:
+    sql = next(item.removeprefix("--command=") for item in command if item.startswith("--command="))
+    if "staging_lifecycle_capacity" in sql:
+        capacity = StagingCapacity(
+            object_count=12,
+            bytes_used=34,
+            disk_free_percent=80,
+            inode_free_percent=90,
+        )
+        value: dict[str, object] = {
+            "bytes_used": capacity.bytes_used,
+            "disk_free_percent": capacity.disk_free_percent,
+            "evidence_sha256": capacity.evidence_digest,
+            "inode_free_percent": capacity.inode_free_percent,
+            "namespace": "loom-staging",
+            "object_count": capacity.object_count,
+            "policy_sha256": staging_capacity_policy_digest(),
+            "source": CAPACITY_SOURCE,
+        }
+        if "WITH refreshed AS" in sql:
+            value.update(
+                {
+                    "admission_allowed": True,
+                    "fresh": True,
+                    "namespace": plan.resources.namespace,
+                    "status": "ready",
+                }
+            )
+        return value
+    return {
+        "backend": "docker",
+        "fresh": True,
+        "hostname": "rehearsal-" + "5" * 24,
+        "pool_name": "gb10-arm64",
+        "status": "ready",
+        "worker_id": str(uuid.UUID(hex=plan.plan_digest[:32], version=4)),
+    }
 
 
 def _runtime_images(plan: RehearsalPlan, names: Sequence[str]) -> dict[str, tuple[str, ...]]:
@@ -878,16 +919,9 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
         if "psql" in command:
-            worker_id = str(uuid.UUID(hex=plan.plan_digest[:32], version=4))
-            value = {
-                "backend": "docker",
-                "fresh": True,
-                "hostname": "rehearsal-" + "5" * 24,
-                "pool_name": "gb10-arm64",
-                "status": "ready",
-                "worker_id": worker_id,
-            }
-            return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps(_api_smoke_seed_value(command, plan)), ""
+            )
         if "exec" in command:
             evidence = {
                 "get:/api/v1/auth/whoami": "1" * 64,
@@ -919,11 +953,21 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
 
     assert outcome.passed
     assert outcome.details["batch-id"] == batch_id
+    assert len(outcome.details["capacity-authority-sha256"]) == 64
     assert len(outcome.details["worker-authority-sha256"]) == 64
     seed = next(command for command in calls if "psql" in command)
     seed_sql = next(item for item in seed if item.startswith("--command="))
     assert "ON CONFLICT (id) DO UPDATE" in seed_sql
     assert "gb10-arm64" in seed_sql
+    capacity_queries = [
+        next(item for item in command if item.startswith("--command="))
+        for command in calls
+        if "psql" in command and any("staging_lifecycle_capacity" in item for item in command)
+    ]
+    assert len(capacity_queries) == 2
+    assert "SELECT json_build_object" in capacity_queries[0]
+    assert "WITH refreshed AS" in capacity_queries[1]
+    assert plan.resources.namespace in capacity_queries[1]
     probe = next(
         command for command in calls if "loom_cli.rollout.rehearsal_smoke_probe" in command
     )
@@ -990,6 +1034,71 @@ def test_api_smoke_fails_closed_when_isolated_worker_seed_drifts() -> None:
     assert outcome.blockers == {"api-smoke": "worker-authority-failed"}
 
 
+def test_api_smoke_fails_before_refresh_when_snapshot_capacity_is_high_water() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+    psql_calls: list[str] = []
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if "get" in command and "pods" in command:
+            pod = {
+                "items": [
+                    {
+                        "metadata": {
+                            "annotations": {
+                                "loom.openai.dev/plan-sha256": plan.plan_digest,
+                            },
+                            "labels": {"app": "loom-service"},
+                            "name": "loom-service-abc123",
+                        },
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {
+                                    "imageID": "docker-pullable://loom-service@"
+                                    + plan.image_digests["loom-service"],
+                                    "name": "loom-service",
+                                    "ready": True,
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        if "psql" in command:
+            sql = next(item for item in command if item.startswith("--command="))
+            psql_calls.append(sql)
+            if "staging_lifecycle_capacity" not in sql:
+                value = _api_smoke_seed_value(command, plan)
+            else:
+                capacity = StagingCapacity(250_000, 34, 80, 90)
+                value = {
+                    "bytes_used": capacity.bytes_used,
+                    "disk_free_percent": capacity.disk_free_percent,
+                    "evidence_sha256": capacity.evidence_digest,
+                    "inode_free_percent": capacity.inode_free_percent,
+                    "namespace": "loom-staging",
+                    "object_count": capacity.object_count,
+                    "policy_sha256": staging_capacity_policy_digest(),
+                    "source": CAPACITY_SOURCE,
+                }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+        raise AssertionError("candidate probe must not run without safe capacity authority")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.api-smoke", plan)
+
+    assert outcome.blockers == {"api-smoke": "capacity-authority-failed"}
+    assert len(psql_calls) == 2
+    assert "WITH refreshed AS" not in psql_calls[-1]
+
+
 def test_api_smoke_persists_normalized_nonzero_probe_evidence() -> None:
     plan = _plan()
     release = _release_artifact(plan)
@@ -1026,19 +1135,7 @@ def test_api_smoke_persists_normalized_nonzero_probe_evidence() -> None:
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
         if "psql" in command:
             return subprocess.CompletedProcess(
-                argv,
-                0,
-                json.dumps(
-                    {
-                        "backend": "docker",
-                        "fresh": True,
-                        "hostname": "rehearsal-" + "5" * 24,
-                        "pool_name": "gb10-arm64",
-                        "status": "ready",
-                        "worker_id": str(uuid.UUID(hex=plan.plan_digest[:32], version=4)),
-                    }
-                ),
-                "",
+                argv, 0, json.dumps(_api_smoke_seed_value(command, plan)), ""
             )
         if "exec" in command:
             failure = {
@@ -1127,19 +1224,7 @@ def test_api_smoke_rejects_malformed_nonzero_probe_output(failure: str) -> None:
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
         if "psql" in command:
             return subprocess.CompletedProcess(
-                argv,
-                0,
-                json.dumps(
-                    {
-                        "backend": "docker",
-                        "fresh": True,
-                        "hostname": "rehearsal-" + "5" * 24,
-                        "pool_name": "gb10-arm64",
-                        "status": "ready",
-                        "worker_id": str(uuid.UUID(hex=plan.plan_digest[:32], version=4)),
-                    }
-                ),
-                "",
+                argv, 0, json.dumps(_api_smoke_seed_value(command, plan)), ""
             )
         if "exec" in command:
             return subprocess.CompletedProcess(argv, 1, failure, "bounded")
