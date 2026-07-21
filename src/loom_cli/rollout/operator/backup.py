@@ -154,12 +154,60 @@ DeadlineWaiter = Callable[[threading.Event, float], bool]
 Clock = Callable[[], datetime]
 BackupPublicReason = Literal[
     "backup_failed",
-    "backup_object_limit_exceeded",
+    "backup_precondition_failed",
+    "backup_capacity_exhausted",
+    "backup_config_invalid",
+    "backup_postgres_failed",
+    "backup_minio_failed",
     "backup_transport_failed",
+    "backup_object_limit_exceeded",
+    "backup_secrets_failed",
+    "backup_manifest_failed",
 ]
 _BACKUP_PUBLIC_REASONS = frozenset(
-    {"backup_failed", "backup_object_limit_exceeded", "backup_transport_failed"}
+    {
+        "backup_failed",
+        "backup_precondition_failed",
+        "backup_capacity_exhausted",
+        "backup_config_invalid",
+        "backup_postgres_failed",
+        "backup_minio_failed",
+        "backup_transport_failed",
+        "backup_object_limit_exceeded",
+        "backup_secrets_failed",
+        "backup_manifest_failed",
+    }
 )
+
+# Map each internal stage code to a durable, secret-safe public reason so an
+# operator can see *which* backup stage failed via `status`, instead of every
+# failure collapsing to a generic `backup_failed`. Codes absent here default to
+# `backup_failed` (the safe, non-committal fallback).
+_STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
+    "backup_request_not_pending": "backup_precondition_failed",
+    "backup_clock_invalid": "backup_precondition_failed",
+    "service_account_unavailable": "backup_precondition_failed",
+    "backup_capacity_unavailable": "backup_capacity_exhausted",
+    "backup_root_create_failed": "backup_capacity_exhausted",
+    "component_sync_failed": "backup_capacity_exhausted",
+    "minio_bucket_config_invalid": "backup_config_invalid",
+    "postgres_dump_failed": "backup_postgres_failed",
+    "minio_credentials_failed": "backup_minio_failed",
+    "minio_snapshot_failed": "backup_minio_failed",
+    "minio_transport_failed": "backup_transport_failed",
+    "minio_transport_cleanup_failed": "backup_transport_failed",
+    "minio_object_limit_exceeded": "backup_object_limit_exceeded",
+    "secret_export_failed": "backup_secrets_failed",
+    "manifest_write_failed": "backup_manifest_failed",
+    "manifest_validation_failed": "backup_manifest_failed",
+    "manifest_hash_failed": "backup_manifest_failed",
+    "manifest_publish_failed": "backup_manifest_failed",
+    "backup_manifest_digest_mismatch": "backup_manifest_failed",
+}
+
+
+def _public_reason_for_code(code: str) -> BackupPublicReason:
+    return _STAGE_PUBLIC_REASONS.get(code, "backup_failed")
 
 
 def normalize_backup_public_reason(value: object) -> BackupPublicReason:
@@ -621,7 +669,12 @@ _T = TypeVar("_T")
 
 
 def _stage(code: str, operation: Callable[[], _T]) -> _T:
-    """Run a stage and discard any secret-bearing exception before raising."""
+    """Run a stage and discard any secret-bearing exception before raising.
+
+    The stage ``code`` is mapped to a durable, secret-safe ``public_reason`` so
+    the failing stage is diagnosable through the operator status/logs surface
+    instead of collapsing to a generic ``backup_failed``.
+    """
     try:
         result = operation()
     except BackupError:
@@ -630,7 +683,7 @@ def _stage(code: str, operation: Callable[[], _T]) -> _T:
         pass
     else:
         return result
-    raise BackupError(code)
+    raise BackupError(code, public_reason=_public_reason_for_code(code))
 
 
 def _command_environment(config: OperatorConfig) -> dict[str, str]:
