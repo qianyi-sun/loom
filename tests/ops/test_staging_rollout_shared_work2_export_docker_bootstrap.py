@@ -172,6 +172,7 @@ def test_provision_source_rolls_back_new_parent_on_clone_failure(
     monkeypatch.setattr(bootstrap, "SOURCE_PARENT", parent)
     monkeypatch.setattr(bootstrap, "SOURCE", source)
     monkeypatch.setattr(bootstrap, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap, "_reject_stale_backups", lambda: None)
     monkeypatch.setattr(
         bootstrap,
         "_checked",
@@ -225,6 +226,7 @@ def test_provision_source_rolls_back_after_published_validation_failure(
     monkeypatch.setattr(bootstrap, "SOURCE_PARENT", parent)
     monkeypatch.setattr(bootstrap, "SOURCE", source)
     monkeypatch.setattr(bootstrap, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap, "_reject_stale_backups", lambda: None)
 
     def checked(*argv: str) -> str:
         if "clone" in argv:
