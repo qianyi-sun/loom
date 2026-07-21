@@ -524,9 +524,7 @@ class PreflightDag:
         self._attested_dependencies = attested_dependencies
         for check in checks:
             missing = (
-                set(check.spec.dependencies)
-                - self._checks.keys()
-                - self._attested_dependencies
+                set(check.spec.dependencies) - self._checks.keys() - self._attested_dependencies
             )
             if missing:
                 raise ValueError(f"check has unknown dependencies: {sorted(missing)}")
@@ -561,9 +559,7 @@ class PreflightDag:
             name: check for name, check in self._checks.items() if check.spec.tier <= through_tier
         }
         if any(
-            set(check.spec.dependencies)
-            - selected.keys()
-            - self._attested_dependencies
+            set(check.spec.dependencies) - selected.keys() - self._attested_dependencies
             for check in selected.values()
         ):
             raise ValueError("selected tier omits a required dependency")
@@ -593,16 +589,13 @@ class PreflightDag:
                 or execution.expires_at <= validation_time
             ):
                 raise ValueError("prior check execution is expired or drifted")
-        pending = {
-            check_id: check for check_id, check in selected.items() if check_id not in prior
-        }
+        pending = {check_id: check for check_id, check in selected.items() if check_id not in prior}
         results: dict[str, CheckExecution] = dict(prior)
         while pending:
             ready = [
                 check
                 for check in pending.values()
-                if set(check.spec.dependencies)
-                <= (results.keys() | self._attested_dependencies)
+                if set(check.spec.dependencies) <= (results.keys() | self._attested_dependencies)
             ]
             if not ready:
                 raise RuntimeError("preflight DAG made no progress")
@@ -987,19 +980,30 @@ class PreflightAttestation:
         required = [
             result for result in executions if result.stage is not StageCapability.FINAL_ONLY
         ]
+        # Tier 0 and Tier 2 are re-executed by final admission immediately
+        # before protected staging mutation. Their rehearsal records remain
+        # exact evidence-hash references, but a long checkpoint/rehearsal must
+        # not fail solely because those earlier observations aged while the
+        # current DAG was still running. Tier 1 build artifacts and Tier 3
+        # isolated rehearsal are not repeated, so they remain the attestation's
+        # freshness authority. The fallback preserves the strict contract for
+        # small registries containing only admission-rechecked checks.
+        freshness_authority = [result for result in required if result.tier not in {0, 2}]
+        if not freshness_authority:
+            freshness_authority = required
         if len({result.check_id for result in required}) != len(required):
             raise ValueError("attestation contains duplicate check evidence")
         if not required or any(not result.passed for result in required):
             raise ValueError("attestation requires every non-final check to pass")
-        if any(
-            result.finished_at > issued_at or result.expires_at <= issued_at for result in required
+        if any(result.finished_at > issued_at for result in required) or any(
+            result.expires_at <= issued_at for result in freshness_authority
         ):
             raise ValueError("attestation contains future or expired evidence")
         if bindings.environment != "staging" or not bindings.namespace:
             raise ValueError("attestation is staging-only")
         digests = {result.check_id: result.implementation_digest for result in required}
         evidence = {result.check_id: result.evidence_hash for result in required}
-        expires_at = min(result.expires_at for result in required)
+        expires_at = min(result.expires_at for result in freshness_authority)
         payload = {
             "schema_version": 1,
             "bindings": _attestation_bindings_payload(bindings),

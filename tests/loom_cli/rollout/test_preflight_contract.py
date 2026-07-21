@@ -33,6 +33,7 @@ def _spec(
     mutation_class: MutationClass = MutationClass.NONE,
     final_only_justification: str | None = None,
     run_after_failed_dependencies: bool = False,
+    freshness_ttl_seconds: int = 600,
 ) -> CheckSpec:
     return CheckSpec(
         check_id=check_id,
@@ -44,7 +45,7 @@ def _spec(
         input_keys=("candidate.sha",),
         evidence_schema=(EvidenceField("status.value", "string"),),
         timeout_seconds=5,
-        freshness_ttl_seconds=600,
+        freshness_ttl_seconds=freshness_ttl_seconds,
         remediation=f"repair {check_id}",
         secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         final_only_justification=final_only_justification,
@@ -58,6 +59,9 @@ def _check(
     passed: bool = True,
     dependencies: tuple[str, ...] = (),
     delay: float = 0,
+    tier: int = 0,
+    stage: StageCapability = StageCapability.STATIC,
+    freshness_ttl_seconds: int = 600,
 ) -> RegisteredCheck:
     def probe(_context: CheckContext) -> CheckProbe:
         if delay:
@@ -65,7 +69,13 @@ def _check(
         return CheckProbe(passed=passed, evidence={"status.value": "ready"})
 
     return RegisteredCheck(
-        spec=_spec(check_id, dependencies=dependencies),
+        spec=_spec(
+            check_id,
+            dependencies=dependencies,
+            tier=tier,
+            stage=stage,
+            freshness_ttl_seconds=freshness_ttl_seconds,
+        ),
         implementation_version="v1",
         operations={CheckOperation.PROBE: probe},
     )
@@ -607,6 +617,39 @@ def test_attestation_rejects_incomplete_or_expired_results() -> None:
             bindings=_bindings(),
             executions=passed,
             issued_at=NOW + timedelta(minutes=11),
+            registry_digest="9" * 64,
+            coverage_digest="a" * 64,
+        )
+
+
+def test_attestation_uses_non_rechecked_evidence_as_freshness_authority() -> None:
+    executions = PreflightDag(
+        [
+            _check("candidate.identity", freshness_ttl_seconds=60),
+            _check(
+                "rehearsal.cleanup",
+                dependencies=("candidate.identity",),
+                tier=3,
+                stage=StageCapability.ISOLATED_REHEARSAL,
+                freshness_ttl_seconds=3600,
+            ),
+        ]
+    ).run(_context(), through_tier=3, now=lambda: NOW)
+
+    attestation = PreflightAttestation.issue(
+        bindings=_bindings(),
+        executions=executions,
+        issued_at=NOW + timedelta(minutes=2),
+        registry_digest="9" * 64,
+        coverage_digest="a" * 64,
+    )
+
+    assert attestation.expires_at == NOW + timedelta(hours=1)
+    with pytest.raises(ValueError, match="expired evidence"):
+        PreflightAttestation.issue(
+            bindings=_bindings(),
+            executions=executions,
+            issued_at=NOW + timedelta(hours=1, seconds=1),
             registry_digest="9" * 64,
             coverage_digest="a" * 64,
         )

@@ -890,9 +890,13 @@ A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to
 
 Rollout start refuses a missing, expired, incomplete, or drifted attestation.
 An unchanged candidate and epoch may reuse expensive evidence until its minimum
-TTL expires; start rechecks only drift-sensitive inputs. Candidate, config,
-token metadata, epoch, host boot ID, mount, or implementation drift invalidates
-the attestation.
+TTL expires. Tier 1 build artifacts and Tier 3 isolated rehearsal define that
+minimum because they are not repeated. Tier 0 and Tier 2 observations may age
+while the detached checkpoint and rehearsal are still running, but they remain
+only exact evidence-hash references: final admission reruns those checks and
+requires the current evidence and implementation identities to match before
+protected mutation. Candidate, config, token metadata, epoch, host boot ID,
+mount, or implementation drift therefore still invalidates the attestation.
 
 The canonical JSON form is strict-schema, duplicate-key rejecting, and
 digest-addressed. It round-trips every binding and per-check digest before

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -186,6 +186,26 @@ def test_tier_two_assessment_is_rechecked_before_tier_three_attestation(
     assert assessment.through_tier == 2
     assert {item.tier for item in assessment.executions} == {0, 1, 2}
     assert result.passed and result.attestation is not None
+
+
+def test_rehearsal_accepts_aged_assessment_after_exact_fresh_recheck(
+    tmp_path: Path,
+) -> None:
+    registry = _registry()
+    now = [datetime(2026, 7, 19, 10, tzinfo=UTC)]
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: now[0],
+    )
+    context = _context(registry)
+    assessment = pipeline.assess(context=context)
+
+    now[0] += timedelta(minutes=10)
+    rehearsal = pipeline.rehearse(context=context, assessment=assessment)
+
+    assert rehearsal.passed
+    assert all(execution.expires_at > now[0] for execution in rehearsal.executions)
 
 
 def test_rehearsal_and_attestation_are_separate_restore_authority_steps(

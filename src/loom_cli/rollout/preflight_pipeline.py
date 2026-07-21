@@ -501,7 +501,7 @@ class PreflightPipeline:
         for check_id, earlier in prior.items():
             later = current[check_id]
             if (
-                earlier.expires_at <= now
+                later.expires_at <= now
                 or not later.passed
                 or earlier.input_fingerprint != later.input_fingerprint
                 or earlier.implementation_digest != later.implementation_digest
