@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -3635,15 +3637,34 @@ def test_all_stage_public_reasons_are_approved() -> None:
         assert reason in backup_module.BACKUP_PUBLIC_REASONS
 
 
-def test_backup_public_reason_literal_matches_approved_event_tokens() -> None:
-    # The Literal type, the backup module's runtime set, and the event-model
-    # allowlist must all agree, or a raised reason gets rejected at append time.
-    from typing import get_args
+def test_all_backup_failure_callsite_codes_are_classified() -> None:
+    tree = ast.parse(inspect.getsource(backup_module))
+    literal_codes: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Call)
+            or not node.args
+            or not isinstance(node.args[0], ast.Constant)
+            or not isinstance(node.args[0].value, str)
+        ):
+            continue
+        called_name = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else None
+        )
+        if called_name in {"BackupError", "BackupPolicyLimitError", "_stage"}:
+            literal_codes.add(node.args[0].value)
 
-    from loom_cli.rollout.operator.model import APPROVED_BACKUP_EVENT_REASONS
-
-    assert set(get_args(backup_module.BackupPublicReason)) == APPROVED_BACKUP_EVENT_REASONS
-    assert backup_module._BACKUP_PUBLIC_REASONS == APPROVED_BACKUP_EVENT_REASONS
+    classified_codes = set(backup_module._STAGE_PUBLIC_REASONS)
+    assert literal_codes <= classified_codes
+    assert {
+        "latest_publish_failed",
+        "backup_cleanup_failed",
+        "backup_retirement_failed",
+    } <= classified_codes
 
 
 def _incomplete_bundle(tmp_path: Path) -> tuple[BackupCreator, Path]:
