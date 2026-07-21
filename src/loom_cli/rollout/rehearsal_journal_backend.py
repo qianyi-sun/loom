@@ -85,7 +85,10 @@ class JournaledRehearsalBackend:
                     outcome = RehearsalStepOutcome(
                         passed=False,
                         details=outcome.details,
-                        blockers={**dict(outcome.blockers), "cleanup": "not-verified"},
+                        blockers={
+                            **dict(outcome.blockers),
+                            "cleanup-verification": "not-verified",
+                        },
                     )
             elif outcome.cleanup_verified:
                 raise ValueError("cleanup verification is attached to a non-cleanup step")
@@ -291,6 +294,7 @@ def _read_record(
             raise ValueError("rehearsal journal record changed while read")
     finally:
         os.close(fd)
+
     def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
         loaded_pairs: dict[str, object] = {}
         for key, value in pairs:
@@ -339,7 +343,9 @@ def _observation(
         or type(record.get("passed")) is not bool
         or type(record.get("cleanup_verified")) is not bool
         or not isinstance(blockers, dict)
-        or not all(isinstance(key, str) and isinstance(value, str) for key, value in blockers.items())
+        or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in blockers.items()
+        )
         or not isinstance(record.get("evidence_digest"), str)
         or _SHA256_RE.fullmatch(str(record["evidence_digest"])) is None
         or not isinstance(record.get("journal_digest"), str)

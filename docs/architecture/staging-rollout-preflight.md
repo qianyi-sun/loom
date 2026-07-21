@@ -627,6 +627,11 @@ check contract to dependent Tier 3 isolated cleanup; static, readonly and
 protected checks cannot opt out of ordinary dependency blocking. A failed
 rehearsal therefore still produces cleanup evidence instead of leaking its
 namespace, database clone, object prefix or transient unit.
+Transient systemd units receive a bounded five-second garbage-collection
+window after the exact stop/reset sequence; any other load state or expiry
+fails closed before namespace deletion. Cleanup journaling retains the precise
+resource blocker and records incomplete verification under a separate key, so
+the generic evidence guard cannot erase the actionable cause.
 
 Each concrete action is wrapped by `JournaledRehearsalBackend`. The
 service-owned mode-0700 root contains one mode-0700 directory per derived

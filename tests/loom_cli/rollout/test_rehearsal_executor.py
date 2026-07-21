@@ -1190,17 +1190,24 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
         },
     }
     unit_active = True
+    load_state_reads = 0
     namespace_present = True
     calls: list[tuple[tuple[str, ...], bytes | None]] = []
+    sleeps: list[float] = []
 
     def run(argv, payload, _timeout):
-        nonlocal unit_active, namespace_present
+        nonlocal load_state_reads, namespace_present, unit_active
         command = tuple(argv)
         calls.append((command, payload))
         if command[:3] == ("systemctl", "--user", "show"):
             if command[-1] == "--value":
+                if not unit_active:
+                    load_state_reads += 1
                 return subprocess.CompletedProcess(
-                    argv, 0, "loaded\n" if unit_active else "not-found\n", ""
+                    argv,
+                    0,
+                    "loaded\n" if unit_active or load_state_reads <= 2 else "not-found\n",
+                    "",
                 )
             if not unit_active:
                 return subprocess.CompletedProcess(argv, 4, "", "")
@@ -1234,10 +1241,12 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
 
     outcome = IsolatedRehearsalExecutor(
         run=run,
+        sleep=sleeps.append,
         gb10_transport_factory=passing_gb10_transport_factory,
     ).execute("rehearsal.cleanup", plan)
 
     assert outcome.passed and outcome.cleanup_verified
+    assert sleeps == [0.1, 0.1]
     assert outcome.details["status"] == "absent"
     delete = next(command for command, _payload in calls if "--raw" in command)
     assert delete[-2:] == ("-f", "-")
@@ -1277,6 +1286,41 @@ def test_cleanup_refuses_unknown_unit_or_namespace_identity() -> None:
         gb10_transport_factory=passing_gb10_transport_factory,
     ).execute("rehearsal.cleanup", plan)
     assert namespace.blockers == {"cleanup": "namespace-identity-drift"}
+
+
+def test_cleanup_fails_closed_when_transient_unit_does_not_unload() -> None:
+    plan = _plan()
+    monotonic_values = iter((0.0, 0.0, 1.0, 5.0))
+    sleeps: list[float] = []
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+            description = f"Loom isolated rehearsal {plan.plan_digest}"
+            output = (
+                "LoadState=loaded\nActiveState=active\nSubState=exited\nType=oneshot\n"
+                "Result=success\nExecMainStatus=0\nNeedDaemonReload=no\nTransient=yes\n"
+                f"Description={description}\n"
+            )
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        if command[:3] in {
+            ("systemctl", "--user", "stop"),
+            ("systemctl", "--user", "reset-failed"),
+        }:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError("namespace cleanup must not start before the unit disappears")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        monotonic=lambda: next(monotonic_values),
+        sleep=sleeps.append,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    assert outcome.blockers == {"cleanup": "systemd-remains"}
+    assert sleeps == [0.1, 0.1]
 
 
 def test_stream_runner_reads_private_file_without_following_parent_symlinks(

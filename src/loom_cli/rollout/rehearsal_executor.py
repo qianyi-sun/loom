@@ -227,6 +227,7 @@ class IsolatedRehearsalExecutor:
     browser_artifacts: BrowserArtifactBuilder = _default_browser_artifact
     kubeconfig: Path = REHEARSAL_KUBECONFIG
     monotonic: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
     gb10_transport_factory: GB10TransportFactory | None = None
     runtime_image_resolver: RuntimeImageResolver | None = None
 
@@ -1502,7 +1503,7 @@ class IsolatedRehearsalExecutor:
                 return _blocked("cleanup", "systemd-stop-failed")
             if not self._status(contract.reset_argv, timeout=30):
                 return _blocked("cleanup", "systemd-reset-failed")
-        if self._systemd_load_state(contract) != "not-found":
+        if not self._wait_systemd_absent(contract):
             return _blocked("cleanup", "systemd-remains")
 
         observed = self._command(
@@ -1588,6 +1589,16 @@ class IsolatedRehearsalExecutor:
         if final is not None:
             return _blocked("cleanup", "namespace-remains")
         return _cleanup_ready(plan)
+
+    def _wait_systemd_absent(self, contract: RehearsalSystemdActivation) -> bool:
+        deadline = self.monotonic() + 5.0
+        while True:
+            load_state = self._systemd_load_state(contract)
+            if load_state == "not-found":
+                return True
+            if load_state != "loaded" or self.monotonic() >= deadline:
+                return False
+            self.sleep(0.1)
 
     def _systemd_load_state(self, contract: RehearsalSystemdActivation) -> str:
         try:

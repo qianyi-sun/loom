@@ -153,7 +153,7 @@ def test_backend_requires_verified_cleanup(tmp_path: Path) -> None:
 
     observation = backend.execute("rehearsal.cleanup", _plan())
 
-    assert observation.blockers == {"cleanup": "not-verified"}
+    assert observation.blockers == {"cleanup-verification": "not-verified"}
     assert not observation.cleanup_verified
 
 
