@@ -1623,6 +1623,7 @@ class IsolatedRehearsalExecutor:
                 "--tuples-only",
                 "--no-align",
                 "--set=ON_ERROR_STOP=1",
+                "--username=loom_rehearsal",
                 f"--dbname={plan.resources.database}",
                 f"--command={sql}",
             ),

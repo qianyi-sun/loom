@@ -350,6 +350,7 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps(observed), "")
         if "psql" in argv:
+            assert "--username=loom_rehearsal" in argv
             command = next(item for item in argv if item.startswith("--command="))
             if "to_regclass" in command:
                 record = {"database": plan.resources.database, "restored": restored}

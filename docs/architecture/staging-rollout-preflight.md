@@ -510,7 +510,9 @@ snapshot identity, and then restores from that regular file with four bounded
 Transfer, digest verification, restore and cleanup share one combined 30-minute
 budget; the staged dump is removed before the database proof can pass. This
 avoids the single-stream restore bottleneck without weakening checkpoint
-identity or keeping rehearsal payloads after verification.
+identity or keeping rehearsal payloads after verification. Every subsequent
+database identity and migration verification query uses that same explicit
+isolated role; no libpq operating-system-user fallback is accepted.
 
 `RehearsalActionSource` is the sole plan and resource-name authority for these
 actions. Its identity factory and action factory consume the same checkpoint,
