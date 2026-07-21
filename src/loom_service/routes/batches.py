@@ -1166,6 +1166,7 @@ async def _create_batch_record(
             seeded = await prepare_family_run_state(
                 session=s,
                 batch_id=b.id,
+                submission_team_id=submission_team_id,
                 tasks=task_rows,
                 catalog_default=catalog_default,
                 override=override_family_run,

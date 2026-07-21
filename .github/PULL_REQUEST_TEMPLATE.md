@@ -16,20 +16,17 @@
 ## Target Branch
 
 - [ ] This PR targets `dev` for normal development.
-- [ ] For this normal `dev` PR, squash auto-merge and the coordinator-owned
-      `ci:merge-ready` label are enabled only while it is the queue head.
-      GitHub keeps that selected candidate queued until
+- [ ] For this normal `dev` PR, the trusted base-branch controller enables
+      squash auto-merge for every non-draft PR, regardless of author or
+      reviewer. GitHub keeps the candidate queued until
       `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
       `staging-smoke-gate` succeed on the current head SHA. These four strict,
       app-bound checks are the only merge authority: `dev` requires no human
       approval, no CODEOWNER approval, and no conversation resolution.
-      Non-head PRs run distinct preflight checks and cannot satisfy these
-      protected contexts.
 - [ ] This PR targets `main` only for a production release promotion from `dev`;
-      Qianyi (`@qianyi-sun`) reviews the fixed candidate and its evidence and
-      performs the manual squash merge. Never enable auto-merge for this PR.
-      Repository-wide `allow_auto_merge` cannot disable it on `main` alone, so
-      this prohibition is an operator-enforced release rule.
+      the same author-neutral controller enables squash auto-merge after the
+      release evidence is attached. Human or CODEOWNER approval is not merge
+      authority; the current-head CI gates are.
 
 ## Scope
 
@@ -52,8 +49,8 @@
   every heavy lane until they have an explicit owner.
 - Manual dispatches report `*-manual` contexts and never replace the protected
   PR contexts. Record any manually dispatched additional validation above.
-- CODEOWNERS supplies advisory ownership routing on `dev`; it is deliberately
-  not a merge gate there. CI/release-authority changes still select full CI.
+- Ownership routing is advisory, not a merge gate. CI/release-authority changes
+  still select full CI.
 
 ## Documentation
 
@@ -73,13 +70,8 @@
 
 Complete this section only for PRs targeting `main`.
 
-GitHub evaluates the target branch's CODEOWNERS. For the first promotion that
-introduces the Qianyi-only catch-all, the current `main` file still contains
-invalid `@carinrc` owners, so only `main`'s generic one-approval rule plus
-Qianyi's manual release process protect that bootstrap. Prefer a non-Qianyi
-identity (or a future restricted bot) as PR author: GitHub users cannot approve
-their own pull requests. Once the catch-all lands, Qianyi approval is required
-for subsequent promotions.
+The production release remains evidence-gated and may only promote `dev` to
+`main`. The PR author and reviewer identities do not affect merge eligibility.
 
 - Candidate SHA:
 - Immutable prod tag (`vX.Y.Z`; never move after publication):
@@ -95,14 +87,12 @@ for subsequent promotions.
 - Rendered production manifest:
 - DB recovery point:
 - `release_owner_approval` evidence URL (candidate/evidence decision):
-- Qianyi PR approval URL (when GitHub can record it):
-- Qianyi manual squash operator:
 - Production Environment approver (deployment-secret release):
 - I confirm this PR targets `main` only for release promotion from validated `dev`.
-- I confirm Qianyi (`@qianyi-sun`) reviewed the fixed candidate and evidence,
-  auto-merge was never enabled, and Qianyi will perform the manual squash merge.
-- I confirm `release_owner_approval`, GitHub PR review, and Production
-  Environment approval are distinct controls and are not interchangeable.
+- I confirm the trusted controller enabled squash auto-merge and the protected
+  current-head CI gates are the only merge authority.
+- I confirm `release_owner_approval` evidence and Production Environment
+  approval are distinct controls and are not interchangeable with CI.
 - I confirm the prod tag is new, immutable, and will not be force-moved.
 
 ## Deployment Notes

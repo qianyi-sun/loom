@@ -1,13 +1,9 @@
-"""Unit tests for OrchestratorGatewayClient (#672 PR-3).
-
-Covers the wire shape the ``skill_patcher_llm`` adapter depends on:
-POST /v1/chat/completions with an OpenAI-shaped body plus the Loom
-attribution block carrying ``dialect`` so the gateway can record the
-llm_calls row under ``family_evolver``.
-"""
+"""Unit tests for the family-orchestrator JWT-to-Gateway bridge."""
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -15,182 +11,168 @@ import pytest
 
 from loom_family_orchestrator.gateway_client import OrchestratorGatewayClient
 
+_TEAM_ID = "00000000-0000-4000-8000-000000000001"
+_TRIAL_ID = "00000000-0000-4000-8000-000000000002"
+_CONNECTION_ID = "78964dda-638b-4ca1-ae19-6355d35e826c"
 
-@pytest.mark.asyncio
-async def test_orchestrator_gateway_client_posts_openai_shape() -> None:
-    """The client wraps httpx and speaks the same shape the family-run
-    adapter expects: model + messages + max_tokens + loom.dialect."""
-    captured: dict[str, Any] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        captured["method"] = request.method
-        captured["url"] = str(request.url)
-        captured["headers"] = dict(request.headers)
-        captured["body"] = request.read().decode("utf-8")
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {"message": {"role": "assistant", "content": "OK"}},
-                ],
-            },
-        )
-
-    transport = httpx.MockTransport(_handler)
-    client = OrchestratorGatewayClient(
+def _client(
+    gateway_handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    control_plane_handler: Callable[[httpx.Request], httpx.Response] | None = None,
+) -> OrchestratorGatewayClient:
+    cp_handler = control_plane_handler or (
+        lambda _request: httpx.Response(201, json={"token": "loom_step_test"})
+    )
+    return OrchestratorGatewayClient(
         base_url="http://gateway.local",
-        team_id="00000000-0000-0000-0000-000000000001",
-        token="stub-token",
-        _client=httpx.AsyncClient(transport=transport, base_url="http://gateway.local"),
+        control_plane_url="http://control-plane.local",
+        worker_token="loom_fo_test",
+        _client=httpx.AsyncClient(
+            transport=httpx.MockTransport(gateway_handler),
+            base_url="http://gateway.local",
+        ),
+        _control_plane_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(cp_handler),
+            base_url="http://control-plane.local",
+        ),
     )
 
-    resp = await client.chat_completion(
+
+@pytest.mark.asyncio
+async def test_posts_real_attribution_with_control_plane_step_jwt() -> None:
+    captured: dict[str, Any] = {}
+
+    def cp_handler(request: httpx.Request) -> httpx.Response:
+        captured["cp_headers"] = dict(request.headers)
+        captured["cp_body"] = json.loads(request.content)
+        return httpx.Response(201, json={"token": "loom_step_authoritative"})
+
+    def gateway_handler(request: httpx.Request) -> httpx.Response:
+        captured["gateway_headers"] = dict(request.headers)
+        captured["gateway_body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    client = _client(gateway_handler, control_plane_handler=cp_handler)
+    response = await client.chat_completion(
         model="anthropic/claude-sonnet-4-6",
         messages=[{"role": "user", "content": "hi"}],
         dialect="family_evolver",
         max_tokens=1024,
         timeout_sec=30.0,
+        team_id=_TEAM_ID,
+        trial_id=_TRIAL_ID,
     )
-    assert resp["choices"][0]["message"]["content"] == "OK"
 
-    import json
-
-    body = json.loads(captured["body"])
-    assert captured["method"] == "POST"
-    assert captured["url"].endswith("/v1/chat/completions")
-    assert body["model"] == "anthropic/claude-sonnet-4-6"
-    assert body["max_tokens"] == 1024
-    assert body["loom"]["dialect"] == "family_evolver"
-    assert body["loom"]["team_id"] == "00000000-0000-0000-0000-000000000001"
-    assert body["loom"]["step_id"] == "family_evolver"
-    assert captured["headers"]["authorization"] == "Bearer stub-token"
+    assert response["choices"][0]["message"]["content"] == "OK"
+    assert captured["cp_headers"]["authorization"] == "Bearer loom_fo_test"
+    assert captured["cp_body"] == {
+        "team_id": _TEAM_ID,
+        "trial_id": _TRIAL_ID,
+        "step_id": "family_evolver",
+        "ttl_sec": 90,
+        "provider_connection_id": None,
+    }
+    assert captured["gateway_headers"]["authorization"] == (
+        "Bearer loom_step_authoritative"
+    )
+    assert captured["gateway_body"]["loom"] == {
+        "team_id": _TEAM_ID,
+        "trial_id": _TRIAL_ID,
+        "step_id": "family_evolver",
+        "dialect": "family_evolver",
+    }
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_gateway_client_omits_auth_when_token_empty() -> None:
-    """Trusted-network deployments may not set a token — the client
-    must skip the Authorization header rather than sending an empty
-    Bearer that a strict gateway would 401."""
+async def test_forwards_configured_provider_to_cp_body_and_header() -> None:
     captured: dict[str, Any] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def cp_handler(request: httpx.Request) -> httpx.Response:
+        captured["cp_body"] = json.loads(request.content)
+        return httpx.Response(201, json={"token": "loom_step_provider_bound"})
+
+    def gateway_handler(request: httpx.Request) -> httpx.Response:
         captured["headers"] = dict(request.headers)
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": ""}}]},
-        )
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
 
-    transport = httpx.MockTransport(_handler)
-    client = OrchestratorGatewayClient(
-        base_url="http://gateway.local",
-        team_id="t",
-        token="",
-        _client=httpx.AsyncClient(transport=transport, base_url="http://gateway.local"),
-    )
-    await client.chat_completion(
-        model="x",
-        messages=[{"role": "user", "content": "hi"}],
-        dialect="family_evolver",
-        max_tokens=1,
-        timeout_sec=1.0,
-    )
-    assert "authorization" not in {k.lower() for k in captured["headers"]}
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_gateway_client_forwards_provider_connection_id() -> None:
-    """#672 blocker #695: when the adapter spec carries a BYO
-    provider_connection_id, the client MUST forward it both as the
-    ``loom.provider_connection_id`` body field (the current gateway
-    ``/v1/chat/completions`` shape) AND as the
-    ``x-loom-provider-connection-id`` header (forward-compat with the
-    facade auth path).
-    """
-    captured: dict[str, Any] = {}
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        captured["headers"] = dict(request.headers)
-        captured["body"] = request.read().decode("utf-8")
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": "OK"}}]},
-        )
-
-    transport = httpx.MockTransport(_handler)
-    client = OrchestratorGatewayClient(
-        base_url="http://gateway.local",
-        team_id="00000000-0000-0000-0000-000000000001",
-        token="stub-token",
-        _client=httpx.AsyncClient(transport=transport, base_url="http://gateway.local"),
-    )
-    await client.chat_completion(
-        model="anthropic/claude-haiku-4-5",
+    await _client(gateway_handler, control_plane_handler=cp_handler).chat_completion(
+        model="openai/model",
         messages=[{"role": "user", "content": "hi"}],
         dialect="family_evolver",
         max_tokens=64,
         timeout_sec=5.0,
-        provider_connection_id="78964dda-638b-4ca1-ae19-6355d35e826c",
+        team_id=_TEAM_ID,
+        trial_id=_TRIAL_ID,
+        provider_connection_id=_CONNECTION_ID,
     )
 
-    import json as _json
-
-    body = _json.loads(captured["body"])
-    assert body["loom"]["provider_connection_id"] == "78964dda-638b-4ca1-ae19-6355d35e826c"
-    assert (
-        captured["headers"]["x-loom-provider-connection-id"]
-        == "78964dda-638b-4ca1-ae19-6355d35e826c"
-    )
+    assert captured["cp_body"]["provider_connection_id"] == _CONNECTION_ID
+    assert captured["body"]["loom"]["provider_connection_id"] == _CONNECTION_ID
+    assert captured["headers"]["x-loom-provider-connection-id"] == _CONNECTION_ID
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_gateway_client_omits_provider_connection_id_when_unset() -> None:
-    """Default path (no BYO connection): no header + no body field, so
-    the gateway falls back to the legacy platform-credentialed route."""
+async def test_unconfigured_provider_is_explicit_null_at_cp_and_omitted_at_gateway() -> None:
     captured: dict[str, Any] = {}
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        captured["headers"] = dict(request.headers)
-        captured["body"] = request.read().decode("utf-8")
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": "OK"}}]},
-        )
+    def cp_handler(request: httpx.Request) -> httpx.Response:
+        captured["cp_body"] = json.loads(request.content)
+        return httpx.Response(201, json={"token": "loom_step_platform"})
 
-    transport = httpx.MockTransport(_handler)
-    client = OrchestratorGatewayClient(
-        base_url="http://gateway.local",
-        team_id="t",
-        token="",
-        _client=httpx.AsyncClient(transport=transport, base_url="http://gateway.local"),
-    )
-    await client.chat_completion(
-        model="x",
+    def gateway_handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    await _client(gateway_handler, control_plane_handler=cp_handler).chat_completion(
+        model="anthropic/model",
         messages=[{"role": "user", "content": "hi"}],
         dialect="family_evolver",
         max_tokens=1,
         timeout_sec=1.0,
+        team_id=_TEAM_ID,
+        trial_id=_TRIAL_ID,
     )
 
-    import json as _json
-
-    body = _json.loads(captured["body"])
-    assert "provider_connection_id" not in body["loom"]
-    assert "x-loom-provider-connection-id" not in {k.lower() for k in captured["headers"]}
+    assert captured["cp_body"]["provider_connection_id"] is None
+    assert "provider_connection_id" not in captured["body"]["loom"]
+    assert "x-loom-provider-connection-id" not in captured["headers"]
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_gateway_client_raises_on_non_2xx() -> None:
-    """A gateway 4xx/5xx must propagate as httpx.HTTPStatusError so
-    the skill_patcher_llm adapter's failure_policy sees a plain
-    exception it can classify."""
+async def test_control_plane_rejection_stops_before_gateway() -> None:
+    gateway_called = False
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, json={"error": "boom"})
+    def cp_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "provider_connection not found"})
 
-    transport = httpx.MockTransport(_handler)
-    client = OrchestratorGatewayClient(
-        base_url="http://gateway.local",
-        team_id="t",
-        token="",
-        _client=httpx.AsyncClient(transport=transport, base_url="http://gateway.local"),
-    )
+    def gateway_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal gateway_called
+        gateway_called = True
+        return httpx.Response(200, json={})
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _client(
+            gateway_handler,
+            control_plane_handler=cp_handler,
+        ).chat_completion(
+            model="openai/model",
+            messages=[{"role": "user", "content": "hi"}],
+            dialect="family_evolver",
+            max_tokens=1,
+            timeout_sec=1.0,
+            team_id=_TEAM_ID,
+            trial_id=_TRIAL_ID,
+            provider_connection_id=_CONNECTION_ID,
+        )
+    assert gateway_called is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_non_2xx_propagates() -> None:
+    client = _client(lambda _request: httpx.Response(500, json={"error": "boom"}))
     with pytest.raises(httpx.HTTPStatusError):
         await client.chat_completion(
             model="x",
@@ -198,4 +180,6 @@ async def test_orchestrator_gateway_client_raises_on_non_2xx() -> None:
             dialect="family_evolver",
             max_tokens=1,
             timeout_sec=1.0,
+            team_id=_TEAM_ID,
+            trial_id=_TRIAL_ID,
         )

@@ -73,7 +73,8 @@ SELECT batch_id,
 """)
 
 _LOAD_BATCH_SPEC_SQL = text("""
-SELECT family_run_spec
+SELECT family_run_spec,
+       team_id
   FROM batches
  WHERE id = (:batch_id)::uuid
 """)
@@ -307,6 +308,9 @@ async def run_once(ctx: OrchestratorContext) -> bool:
             attempt_count=trial_row["attempt_count"] or 1,
         )
         adapter_params = dict(spec.adapter.params)
+        # The persisted Batch row, not user-controlled plugin params, is the
+        # authority for delegated provider access and usage attribution.
+        adapter_params["team_id"] = str(spec_row["team_id"])
         if ctx.gateway is not None and "gateway" not in adapter_params:
             adapter_params["gateway"] = ctx.gateway
         if (

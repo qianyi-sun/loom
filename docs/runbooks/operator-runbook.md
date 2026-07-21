@@ -102,25 +102,15 @@ the heavy staging evidence, encode it as a release gate manifest, and run
 `.github/workflows/release-promotion-gate.yml` before opening or merging the
 release PR.
 
-`main` accepts only a production release promotion from `dev`. Qianyi
-(`@qianyi-sun`) personally reviews the fixed candidate and evidence and
-performs the manual squash merge. Never enable auto-merge for the promotion
-PR. GitHub's `allow_auto_merge` capability is repository-wide and cannot
-encode a `main`-only prohibition, so the operator must enforce this rule.
+`main` accepts only a same-repository production release promotion from `dev`.
+The trusted base-branch controller enables squash auto-merge after the release
+evidence is attached. The four current-head CI gates are the only merge
+authority; author and reviewer identities do not affect eligibility.
 
-GitHub evaluates the target branch's CODEOWNERS. For the first promotion that
-introduces the Qianyi-only catch-all, current `main` still has invalid legacy
-`@carinrc` owners; its generic one-approval rule and Qianyi's manual process
-are the only bootstrap controls. Prefer a non-Qianyi identity or future
-restricted bot as the PR author because GitHub users cannot approve their own
-pull request. Once the catch-all lands, Qianyi CODEOWNER approval is required
-for subsequent promotions.
-
-Do not conflate three separate decisions: manifest
+Do not conflate separate decisions: manifest
 `release_owner_approval` records acceptance of a particular candidate and
-evidence package; GitHub PR review controls the `main` merge; Production
-Environment approval releases deployment secrets. They are distinct controls
-and are not interchangeable.
+evidence package, while Production Environment approval releases deployment
+secrets. They are distinct from CI merge authority and are not interchangeable.
 
 Production tags are immutable SemVer Git tags on `main`, for example
 `v1.0.0`. Pick the exact `prod_tag` in the release issue before opening the
@@ -128,8 +118,8 @@ release PR, record it in the release gate manifest and PR template, and never
 move it after publication. If the same code must be re-released, create a new
 SemVer tag. A workflow-driven rollback first restores the previous validated
 tree on `dev` through its normal CI gate, then promotes that exact `dev`
-candidate through a new Qianyi-reviewed, manually squash-merged `main` release
-PR and deploys from `main`; never force-move a tag or open a direct rollback
+candidate through a new CI-gated auto-merged `main` release PR and deploys from
+`main`; never force-move a tag or open a direct rollback
 branch -> `main` PR.
 
 Production deployment dispatches use `main` only. Immutable SemVer tags remain
@@ -188,9 +178,8 @@ Normal flow:
    candidate SHA, prod tag, image digests, frontend route evidence,
    worker-isolation evidence, raw-delivery/export requirement status, and
    rollback notes to the release PR from `dev` to `main`.
-9. Confirm auto-merge was never enabled. Qianyi (`@qianyi-sun`) personally
-   reviews the fixed candidate and evidence, records the GitHub approval when
-   author identity permits, and performs the manual squash merge.
+9. Confirm squash auto-merge is enabled and the four protected current-head CI
+   gates are the only merge authority.
 10. Tag the merged `main` commit with the recorded immutable `prod_tag`.
 11. Deploy production from `main` with the same candidate SHA, image tag, and
    release gate workflow run id. The production deploy preflight downloads the
@@ -215,9 +204,10 @@ in the manifest.
 Hotfix path: branch from `dev`, apply the minimal fix, and land it through the
 normal CI-only `dev` auto-merge path. Run the same release gate against the
 exact merged `dev` SHA, choose a new SemVer prod tag, then open the only
-permitted `dev` -> `main` release-promotion PR. Qianyi reviews and manually
-squash merges it before deploying production with that candidate SHA and gate
-run id. Do not open a direct hotfix branch -> `main` PR.
+permitted `dev` -> `main` release-promotion PR. Let the trusted controller
+enable squash auto-merge and wait for all protected gates before deploying
+production with that candidate SHA and gate run id. Do not open a direct
+hotfix branch -> `main` PR.
 
 ### Deploy, inspect, and rollback by environment
 
@@ -5973,44 +5963,64 @@ migrations (`batches.family_run_spec`, `trials.family_key`,
 submit seeder, and worker pre-start helper. The orchestrator service
 and `skill_patcher_llm` adapter ship in PR-2.
 
-### Orchestrator gateway credentials (#697)
+### Orchestrator gateway credential and BYO routing (#695)
 
 `skill_patcher_llm` (the reference LLM-driven adapter) evolves the
 shared-skill directory between trials by calling the LLM gateway.
-Because the orchestrator runs as a service account — not a real trial
-— it cannot mint a step-JWT, so it uses a team-scoped token instead.
-Provision two secrets on the target namespace (both keys live on
-`loom-secrets`):
+The Deployment uses one dedicated, teamless family-orchestrator worker
+credential, not a represented team identity. An administrator with
+`admin:tokens` issues it through Control Plane
+`POST /admin/family-orchestrator-tokens`; the returned token has only the
+internal `family:evolve` scope and must be stored as the
+`family-orchestrator-token` key in `loom-secrets`:
 
 ```
 kubectl -n <ns> patch secret loom-secrets --type=merge -p '{
   "data": {
-    "family-orchestrator-team-id": "<b64-team-UUID>",
-    "family-orchestrator-token": "<b64-loom_team_...-token>"
+    "family-orchestrator-token": "<b64-loom_fo_...-token>"
   }
 }'
 kubectl -n <ns> rollout restart deploy/loom-family-orchestrator
 ```
 
-The keys are schema-owned so `loom cluster preflight` does not report
-them as orphan secrets, but `loom cluster bootstrap-secrets` intentionally
-does not emit placeholder values for them. Leave them absent until the
-operator is ready to enable an LLM-backed family adapter, then patch the
-real team id/token as above.
+Treat the one-time token response as a credential: do not print it to logs,
+paste it into issue comments, or retain it in evidence. The key is schema-owned
+so `loom cluster preflight` does not report it as an orphan, but
+`loom cluster bootstrap-secrets` intentionally does not emit a placeholder.
+Leave it absent until the operator is ready to enable an LLM-backed family
+adapter.
 
-Both keys are marked `optional: true` on the Deployment so the
-orchestrator boots without them — it just logs
+The key is marked `optional: true` on the Deployment so the orchestrator boots
+without it — it just logs
 `family_orchestrator_gateway_unconfigured` and refuses to call
 `SkillPatcherLLMAdapter.evolve` (non-LLM adapters still advance).
 
-Reuse an existing team with `llm:call` scope (e.g. the batch-runner
-service team) or create a dedicated `family-orchestrator` team via
-`loom admin teams create --name family-orchestrator` + `loom tokens
-issue --team family-orchestrator --scopes llm:call,batches:write`.
+The `family:evolve` credential cannot call the Gateway directly. For each
+evolve operation, `OrchestratorGatewayClient` sends the real completed trial
+id, represented batch team, `step_id="family_evolver"`, and an explicit
+`provider_connection_id` value (including null) to Control Plane
+`POST /admin/step-tokens`. The Control Plane loads the trial, requires its team
+to match the represented batch team, verifies that a configured provider is
+owned by or shared with that team, and returns a short-lived `llm:call` step
+JWT. That JWT binds the trial, team, family-evolver step, and provider before
+the request reaches the Gateway.
 
 For BYO provider routing (the operator wants the evolver to call
-their own upstream, not the platform default), the adapter forwards
-`provider_connection_id` from `family_run.adapter.params` to the
-gateway (both as `loom.provider_connection_id` in the body and the
-`x-loom-provider-connection-id` header). Callers set this on the
-batch's resolved family_run spec — no cluster-side change needed.
+their own upstream, not the platform default), set only
+`family_run.adapter.params.provider_connection_id`. At batch acceptance,
+`normalize_evolver_provider_connection()` canonicalizes the UUID and validates
+the connection against the represented batch team's owner/share boundary.
+Secret-like adapter parameter keys fail closed recursively; never put an API
+key, bearer token, authorization header, credential, password, cookie, or
+secret reference in `family_run.adapter.params`.
+
+The Gateway treats the step-JWT provider claim as authoritative. If the client
+also sends `x-loom-provider-connection-id` or
+`loom.provider_connection_id`, both must match the JWT or the request is
+rejected before dispatch. If the adapter has no configured evolver provider,
+the Control Plane receives an explicit null, the JWT carries an authoritative
+null provider claim, the header and body field are omitted, and the Gateway
+uses the platform path;
+it does not inherit the completed trial's provider. Cross-team provider ids
+remain existence-hiding failures, and errors/evidence must not record or echo
+credentials or secret references.

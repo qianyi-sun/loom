@@ -33,7 +33,12 @@ permissions:
 
 concurrency:
   group: staging-smoke-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
+         (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+          contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+         (github.event.action == 'edited' && github.event.changes.base != null)) }}
 
 jobs:
   plan:
@@ -1039,8 +1044,7 @@ jobs:
   staging-smoke-gate:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
-          (needs.plan.outputs.gate_mode == 'full' || needs.plan.outputs.gate_mode == 'invalidate') && 'staging-smoke-gate' ||
-          needs.plan.outputs.gate_mode == 'preflight' && 'staging-smoke-gate-preflight' ||
+          needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
           'staging-smoke-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
@@ -1056,14 +1060,10 @@ jobs:
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
           case "$GATE_MODE" in
-            full|preflight|filtered|invalidate) ;;
+            full|filtered) ;;
             *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
           esac
-          if [[ "$GATE_MODE" == "invalidate" ]]; then
-            echo "FAIL: merge-ready authority was removed from this candidate" >&2
-            exit 1
-          fi
-          if [[ "$GATE_MODE" == "filtered" || "$GATE_MODE" == "preflight" ]]; then
+          if [[ "$GATE_MODE" == "filtered" ]]; then
             [[ "$SMOKE_RESULT" == "skipped" ]] || exit 1
             exit 0
           fi
