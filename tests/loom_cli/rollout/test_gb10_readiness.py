@@ -209,6 +209,87 @@ def test_candidate_source_probe_settles_one_transient_shared_source_read() -> No
     assert sleeps == [0.25]
 
 
+def test_candidate_source_probe_bounds_nfs_publication_backoff() -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    calls = 0
+    sleeps: list[float] = []
+    payload = json.dumps(
+        {
+            "candidate_sha": CANDIDATE_SHA,
+            "candidate_tree": CANDIDATE_TREE,
+            "unit_sha256": UNIT_DIGESTS,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls < 6:
+            return subprocess.CompletedProcess(argv, 1, "", "shared publication pending")
+        return subprocess.CompletedProcess(argv, 0, payload, "")
+
+    result = probe_gb10_candidate_source_readonly(
+        run,
+        (target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        candidate_sha=CANDIDATE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        image_tag="staging-aaaaaaa",
+        unit_sha256=UNIT_DIGESTS,
+        unit_set_digest=UNIT_SET_DIGEST,
+        settle_attempts=6,
+        settle_interval_seconds=2.0,
+        sleep=sleeps.append,
+    )
+
+    assert result.ready
+    assert calls == 6
+    assert sleeps == [2.0, 4.0, 8.0, 16.0, 30.0]
+    assert sum(sleeps) == 60.0
+
+
+def test_candidate_source_probe_never_retries_divergent_content() -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    calls = 0
+    sleeps: list[float] = []
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "candidate_sha": CANDIDATE_SHA,
+                    "candidate_tree": "c" * 40,
+                    "unit_sha256": UNIT_DIGESTS,
+                }
+            ),
+            "",
+        )
+
+    result = probe_gb10_candidate_source_readonly(
+        run,
+        (target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        candidate_sha=CANDIDATE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        image_tag="staging-aaaaaaa",
+        unit_sha256=UNIT_DIGESTS,
+        unit_set_digest=UNIT_SET_DIGEST,
+        sleep=sleeps.append,
+    )
+
+    assert not result.ready
+    assert calls == 1
+    assert sleeps == []
+
+
 def test_fleet_probe_collects_all_hosts_and_settles_transient_timer() -> None:
     targets = tuple(GB10ProbeTarget(host, "loom-gb10-node-agent.service") for host in BOOT_IDS)
     calls: defaultdict[str, int] = defaultdict(int)

@@ -930,7 +930,10 @@ the immutable checkout beneath the fixed `/shared_work2` authority. It never
 installs, starts, enables, or restarts a GB10 unit. Installer `check` and Tier 0
 then use the same read-only verifier, so the candidate-source gate cannot be
 made circular by asking a rollout mutation step to satisfy its own admission
-predicate.
+predicate. A newly published NFS checkout receives at most six exact probe
+observations with capped exponential backoff (60 seconds total sleep). This
+absorbs only the bounded cross-host visibility window; divergent content or an
+unsettled checkout still fails inside the 180-second check budget.
 
 The initial contract and coverage manifest are additive foundations. Existing
 broker predicates remain mapped while adapters are converted to the shared

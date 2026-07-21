@@ -332,8 +332,8 @@ def probe_gb10_candidate_source_readonly(
     unit_sha256: Mapping[str, str],
     unit_set_digest: str,
     max_concurrency: int = 8,
-    settle_attempts: int = 3,
-    settle_interval_seconds: float = 0.5,
+    settle_attempts: int = 6,
+    settle_interval_seconds: float = 2.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> GB10CandidateSourceReadiness:
     """Verify the same exact shared source on the complete fixed GB10 fleet."""
@@ -341,7 +341,7 @@ def probe_gb10_candidate_source_readonly(
         not targets
         or len({target.ssh_target for target in targets}) != len(targets)
         or not 1 <= max_concurrency <= 16
-        or not 1 <= settle_attempts <= 4
+        or not 1 <= settle_attempts <= 6
         or not 0 <= settle_interval_seconds <= 5
         or _SHA256_RE.fullmatch(unit_set_digest) is None
     ):
@@ -364,16 +364,20 @@ def probe_gb10_candidate_source_readonly(
                 result = run(
                     (*_ssh_argv(target, ssh_config=ssh_config, identity=identity)[:-1], command)
                 )
-                payload = json.loads(result.stdout)
             except Exception:
-                payload = None
                 result = None
-            if result is not None and result.returncode == 0 and payload == expected_payload:
+            if result is not None and result.returncode == 0:
+                try:
+                    payload = json.loads(result.stdout)
+                except (TypeError, ValueError):
+                    return None
+                if payload != expected_payload:
+                    return None
                 return hashlib.sha256(
                     json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest()
             if attempt + 1 < settle_attempts:
-                sleep(settle_interval_seconds)
+                sleep(min(settle_interval_seconds * (2**attempt), 30.0))
         return None
 
     outcomes: dict[str, str | None] = {}
