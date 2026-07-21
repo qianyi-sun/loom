@@ -361,7 +361,7 @@ def test_registered_docker_runtime_reports_both_blockers_without_diagnostics() -
     assert calls == [
         ("docker", "info"),
         ("docker", "buildx", "version"),
-        ("sysctl", "-n", "fs.inotify.max_user_instances"),
+        ("/usr/sbin/sysctl", "-n", "fs.inotify.max_user_instances"),
     ]
     assert "token" not in str(dict(docker.evidence))
     assert "private" not in str(dict(docker.evidence))

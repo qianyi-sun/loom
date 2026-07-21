@@ -18,6 +18,7 @@ class CommandResult(Protocol):
 
 
 CommandRunner = Callable[[Sequence[str]], CommandResult]
+_SYSCTL = "/usr/sbin/sysctl"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +57,7 @@ def _command_ready(run: CommandRunner, argv: tuple[str, ...]) -> bool:
 
 def _inotify_capacity_ready(run: CommandRunner) -> bool:
     try:
-        result = run(("sysctl", "-n", "fs.inotify.max_user_instances"))
+        result = run((_SYSCTL, "-n", "fs.inotify.max_user_instances"))
         value = result.stdout.strip()
     except Exception:
         return False

@@ -1779,7 +1779,7 @@ subject to the installer check and broker status gates below.
 
 Tier 0 checks Docker with the same three fixed read-only probes used by the
 compatibility preflight: `docker info`, `docker buildx version`, and the numeric
-`fs.inotify.max_user_instances` sysctl. All probes run so the report exposes
+`fs.inotify.max_user_instances` value through fixed `/usr/sbin/sysctl`. All probes run so the report exposes
 daemon, plugin, and host-capacity blockers together. Their raw output is
 discarded. The host installer owns
 `/etc/sysctl.d/90-loom-staging-rollout.conf` and requires at least 1024 inotify

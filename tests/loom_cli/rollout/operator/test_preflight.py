@@ -224,7 +224,7 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, "", "")
     elif argv[-2:] == ["config", "current-context"]:
         stdout = "kind-loom-staging\n"
-    elif argv and argv[0] == "sysctl":
+    elif argv and argv[0] == "/usr/sbin/sysctl":
         stdout = "1024\n"
     elif argv[:1] == ["ssh"] and argv[-1] != "true":
         mount_type = "ext4" if argv[-2] == "trt-gb10-2" else "nfs4"

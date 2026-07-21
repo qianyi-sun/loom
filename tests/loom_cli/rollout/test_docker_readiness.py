@@ -10,7 +10,7 @@ def test_docker_runtime_probe_collects_both_independent_results() -> None:
 
     def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        if argv[0] == "sysctl":
+        if argv[0] == "/usr/sbin/sysctl":
             return subprocess.CompletedProcess(argv, 0, "1024\n", "")
         return subprocess.CompletedProcess(argv, 1 if argv[-1] == "info" else 0, "secret", "")
 
@@ -24,7 +24,7 @@ def test_docker_runtime_probe_collects_both_independent_results() -> None:
     assert calls == [
         ("docker", "info"),
         ("docker", "buildx", "version"),
-        ("sysctl", "-n", "fs.inotify.max_user_instances"),
+        ("/usr/sbin/sysctl", "-n", "fs.inotify.max_user_instances"),
     ]
     assert len(readiness.evidence_digest) == 64
     assert "secret" not in repr(readiness)
@@ -37,7 +37,7 @@ def test_docker_runtime_probe_fails_closed_per_command_exception() -> None:
         calls.append(argv)
         if argv[-1] == "info":
             raise OSError("private daemon diagnostic")
-        stdout = "1023\n" if argv[0] == "sysctl" else ""
+        stdout = "1023\n" if argv[0] == "/usr/sbin/sysctl" else ""
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
     readiness = probe_docker_runtime(run)
