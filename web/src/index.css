@@ -18,9 +18,9 @@
   --text-primary: #1e293b;      /* slate-800 */
   --text-secondary: #475569;    /* slate-600 */
   --text-muted: #64748b;        /* slate-500 */
-  --accent: #6366f1;             /* indigo-500 */
-  --accent-hover: #4f46e5;       /* indigo-600 */
-  --accent-glow: rgba(99, 102, 241, 0.15);
+  --accent: #4f46e5;             /* indigo-600 */
+  --accent-hover: #4338ca;       /* indigo-700 */
+  --accent-glow: rgba(79, 70, 229, 0.15);
 }
 
 * {

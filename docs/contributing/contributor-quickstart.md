@@ -100,6 +100,46 @@ fast-tier coverage summary. The mypy step uses a GitHub Actions cache for
 running `uv run mypy`. `dev` pushes skip the Python gate because the
 squash-merged PR already produced the required context.
 
+Frontend, SPA image/runtime-config, and frontend gate changes additionally
+select the required `web-checks` job. `repository-checks` fails when that
+selected job fails or is missing. Reproduce the complete frontend gate with a
+frozen install:
+
+```bash
+cd web
+npm ci
+npm run typecheck
+npm run lint
+npm run test:coverage
+npm run build
+npx --no-install playwright install chromium
+npm run test:e2e
+```
+
+The Playwright command defaults to the local `/dev` prefix. To exercise the
+same generic production-build harness at the production basename without
+contacting a live environment, use:
+
+```bash
+LOOM_E2E_ROUTE_PREFIX=/prod npm run test:e2e
+```
+
+`LOOM_E2E_ORIGIN` may select a different localhost port. Both inputs are
+validated and never authorize staging or production access. The harness never
+reuses an existing server: if the selected local origin is occupied, stop that
+process or select another localhost port so Playwright can build and serve its
+own browser-test bundle.
+
+Vitest enforces statements, lines, and functions at 80% and branches at 75%;
+only the generated `src/api/schema.d.ts` production source is excluded. The
+Playwright gate serves the production build at `/dev` by default and supports
+the same local contract at `/prod`. It exercises logged-out, user, and admin
+routes at 1440x900 and 390x844, reloads deep links, and rejects empty roots,
+page errors, unexpected console output, same-origin request failures, failed
+browser assets, and script/style MIME mismatches. Axe must report zero serious
+or critical violations. Its exact request/response fixtures are local-only and
+contain no deployment credentials.
+
 ```bash
 uv run ruff check src tests packages migrations
 uv run mypy
@@ -152,7 +192,15 @@ query one path with:
 ```bash
 python3 scripts/component_ownership.py validate
 python3 scripts/component_ownership.py query tests/integration/test_trial_e2e_docker.py
+python3 scripts/component_ownership.py test-paths --lane frontend
 ```
+
+When the authority exposes its frontend-lane query, `web-checks` consumes that
+output instead of copying the owned web test patterns into the workflow. Until
+that command is available, the job runs the complete Vitest suite. The quality
+gate still owns thresholds, build/browser behavior, and the two specialized
+route-smoke unit harnesses; component and test ownership remains the manifest's
+responsibility.
 
 The validator fails for missing or ambiguous ownership, stale patterns,
 undeclared owner names, and a `pytest.mark.docker` module outside the Docker

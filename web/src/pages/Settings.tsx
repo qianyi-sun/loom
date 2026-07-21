@@ -173,7 +173,7 @@ export default function Settings(): JSX.Element {
     return (
       <div className="space-y-8">
         <header className="max-w-3xl">
-          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
             Loom staging
           </p>
           <h1 className="mt-2 text-3xl font-bold text-slate-950">
@@ -454,7 +454,7 @@ export default function Settings(): JSX.Element {
               LINK_BUTTON,
               canManageProviders
                 ? "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                : "pointer-events-none border-slate-200 bg-slate-50 text-slate-400",
+                : "pointer-events-none border-slate-200 bg-slate-50 text-slate-600",
             )}
             aria-disabled={!canManageProviders}
             title={

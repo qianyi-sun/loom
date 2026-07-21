@@ -78,8 +78,10 @@ const TOKEN_SCOPE_OPTIONS = [
   },
 ] as const;
 
-const TOKEN_SCOPE_LABELS = new Map(
-  TOKEN_SCOPE_OPTIONS.map((option) => [option.value, option.label]),
+const TOKEN_SCOPE_LABELS: ReadonlyMap<string, string> = new Map(
+  TOKEN_SCOPE_OPTIONS.map(
+    (option): [string, string] => [option.value, option.label],
+  ),
 );
 
 function formatTokenScopes(scopes: string[]): string {

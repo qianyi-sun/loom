@@ -46,15 +46,15 @@ function InviteSummary({ invite }: { invite: InviteLookup }): JSX.Element {
   return (
     <div className="grid gap-3 sm:grid-cols-3">
       <div>
-        <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Team</p>
+        <p className="text-xs font-medium uppercase tracking-wider text-slate-600">Team</p>
         <p className="mt-1 text-sm font-semibold text-slate-900">{invite.team_name}</p>
       </div>
       <div>
-        <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Role</p>
+        <p className="text-xs font-medium uppercase tracking-wider text-slate-600">Role</p>
         <p className="mt-1 text-sm font-semibold text-slate-900">{invite.role}</p>
       </div>
       <div>
-        <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Invite</p>
+        <p className="text-xs font-medium uppercase tracking-wider text-slate-600">Invite</p>
         <p className="mt-1 font-mono text-sm text-slate-700">{invite.code_prefix}</p>
       </div>
     </div>

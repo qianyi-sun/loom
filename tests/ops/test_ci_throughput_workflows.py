@@ -540,6 +540,7 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
         "INTEGRATION_SELECTED",
         "DOCKER_SELECTED",
         "COVERAGE_SELECTED",
+        "WEB_SELECTED",
     ],
 )
 def test_repository_checks_fails_closed_for_invalid_planner_booleans(
@@ -558,6 +559,8 @@ def test_repository_checks_fails_closed_for_invalid_planner_booleans(
         "DOCKER_RESULT": "skipped",
         "COVERAGE_SELECTED": "false",
         "COVERAGE_RESULT": "skipped",
+        "WEB_SELECTED": "false",
+        "WEB_RESULT": "skipped",
     }
     env[planner_name] = planner_value
 
@@ -599,6 +602,8 @@ def test_repository_checks_preserves_result_semantics(
             "DOCKER_RESULT": validation_result,
             "COVERAGE_SELECTED": selected,
             "COVERAGE_RESULT": validation_result,
+            "WEB_SELECTED": selected,
+            "WEB_RESULT": validation_result,
         },
         check=False,
     )
@@ -687,6 +692,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "integration",
         "integration-docker",
         "coverage-summary",
+        "web-checks",
     }
     assert "always()" in jobs["repository-checks"]["if"]
     assert jobs["lint-and-static"]["needs"] == "workflow-plan"
@@ -704,6 +710,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "cluster_smoke",
         "staging_smoke",
         "coverage_summary",
+        "web_checks",
     } <= set(jobs["workflow-plan"]["outputs"])
 
     aggregate_step = next(
@@ -723,6 +730,8 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "DOCKER_RESULT": "${{ needs.integration-docker.result }}",
         "COVERAGE_SELECTED": "${{ needs.workflow-plan.outputs.coverage_summary }}",
         "COVERAGE_RESULT": "${{ needs.coverage-summary.result }}",
+        "WEB_SELECTED": "${{ needs.workflow-plan.outputs.web_checks }}",
+        "WEB_RESULT": "${{ needs.web-checks.result }}",
     }
     aggregate_script = aggregate_step["run"]
     for result_name in (
@@ -732,8 +741,23 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "INTEGRATION_RESULT",
         "DOCKER_RESULT",
         "COVERAGE_RESULT",
+        "WEB_RESULT",
     ):
         assert f'"${result_name}"' in aggregate_script
+
+    assert jobs["web-checks"]["needs"] == "workflow-plan"
+    assert "needs.workflow-plan.outputs.web_checks == 'true'" in jobs["web-checks"]["if"]
+    web_script = "\n".join(
+        step.get("run", "") for step in jobs["web-checks"]["steps"] if "run" in step
+    )
+    assert "component_ownership.py test-paths --lane frontend" in web_script
+    assert "component_ownership.py --help | grep -q -- 'test-paths'" in web_script
+    assert "npm run typecheck" in web_script
+    assert "npm run lint" in web_script
+    assert "vitest run --coverage" in web_script
+    assert "npm run test:coverage" in web_script
+    assert "npm run build" in web_script
+    assert "npm run test:e2e" in web_script
 
 
 def test_python_test_shards_are_complete_and_non_overlapping() -> None:

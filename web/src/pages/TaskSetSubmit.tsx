@@ -60,11 +60,12 @@ export default function TaskSetSubmit(): JSX.Element {
         <Card.Body>
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-slate-700">
+              <label htmlFor="task-set-manifest" className="block text-sm font-medium text-slate-700">
                 Manifest (required)
               </label>
               <input
                 ref={manifestRef}
+                id="task-set-manifest"
                 type="file"
                 accept=".yaml,.yml,.json"
                 className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
@@ -75,11 +76,12 @@ export default function TaskSetSubmit(): JSX.Element {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-slate-700">
+              <label htmlFor="task-set-verifier" className="block text-sm font-medium text-slate-700">
                 Verifier (optional)
               </label>
               <input
                 ref={verifierRef}
+                id="task-set-verifier"
                 type="file"
                 accept=".py"
                 className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
@@ -90,11 +92,12 @@ export default function TaskSetSubmit(): JSX.Element {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-slate-700">
+              <label htmlFor="task-set-transform" className="block text-sm font-medium text-slate-700">
                 Transform (optional)
               </label>
               <input
                 ref={transformRef}
+                id="task-set-transform"
                 type="file"
                 accept=".py"
                 className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"

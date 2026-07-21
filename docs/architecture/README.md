@@ -117,6 +117,9 @@ there.
 
 ## Human-readable SPA
 
+- **[frontend-quality-gate.md](frontend-quality-gate.md)** — required strict
+  TypeScript, Vitest coverage, production build, prefix-route Playwright, axe,
+  failure-ledger, ownership, and repository aggregation contracts.
 - **[human-readable-spa-ux.md](human-readable-spa-ux.md)** — two-layer
   default/diagnostics rule; humanizer libraries; SPA specifications for
   New Batch, Monitor, Trial Detail, Batch Detail, Providers.

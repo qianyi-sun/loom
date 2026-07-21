@@ -4627,6 +4627,15 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    command's fresh logged-out context; retain it as rollout evidence and do not
    substitute a signed-in profile.
 
+   The repository `web-checks` job is a prerequisite for this candidate-bound
+   evidence, not a substitute for it. The frontend gate must already be green
+   on the exact merged `dev` SHA before a future candidate is fixed and sent to
+   the broker. A local branch or Draft PR cannot be added to, re-resolve, or
+   replace an in-progress fixed candidate. See
+   [`frontend-quality-gate.md`](../architecture/frontend-quality-gate.md) for
+   the reusable Playwright/axe/failure-ledger contract and its recovery-test
+   extension boundary.
+
    **Staging-only authenticated admin UI acceptance.** After the logged-out
    route smoke passes in the candidate-bound brokered protected-staging
    rollout, validate the protected Admin Access and Rate cards surfaces with

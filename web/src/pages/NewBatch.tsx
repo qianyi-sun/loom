@@ -287,7 +287,7 @@ function FieldLabel({
       <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
         {children}
       </span>
-      {hint ? <span className="text-xs text-slate-400">{hint}</span> : null}
+      {hint ? <span className="text-xs text-slate-600">{hint}</span> : null}
     </div>
   );
 }
@@ -410,7 +410,7 @@ function BenchmarkPicker({
               className={
                 populated > 0
                   ? "flex items-center gap-2 bg-indigo-50/60 px-3 py-2 text-sm font-semibold text-indigo-900"
-                  : "flex items-center gap-2 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-400"
+                  : "flex items-center gap-2 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600"
               }
             >
               <input
@@ -443,8 +443,8 @@ function BenchmarkPicker({
               <span
                 className={
                   populated > 0
-                    ? "ml-auto font-normal normal-case text-xs text-indigo-600/70"
-                    : "ml-auto font-normal normal-case text-xs text-slate-400"
+                    ? "ml-auto font-normal normal-case text-xs text-indigo-800"
+                    : "ml-auto font-normal normal-case text-xs text-slate-600"
                 }
               >
                 {populated}/{rows.length} ready
@@ -462,7 +462,7 @@ function BenchmarkPicker({
                   key={r.id}
                   className={
                     !selectable
-                      ? "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-400 cursor-not-allowed"
+                      ? "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-600 cursor-not-allowed"
                       : "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
                   }
                   title={readinessMessage}
@@ -487,8 +487,8 @@ function BenchmarkPicker({
                     <span
                       className={
                         !selectable
-                          ? "text-xs italic text-slate-400"
-                          : "text-xs text-slate-400"
+                          ? "text-xs italic text-slate-600"
+                          : "text-xs text-slate-600"
                       }
                     >
                       {countText}
@@ -703,7 +703,8 @@ function identitySubsetPart(args: {
       description: nText ? `last ${nText}` : "last tasks",
     };
   }
-  return { name: shortToken(args.subsetKind), description: args.subsetKind.replaceAll("_", " ") };
+  const exhaustive: never = args.subsetKind;
+  throw new Error(`unsupported subset kind: ${String(exhaustive)}`);
 }
 
 function identityTagPart(tagFilters: Record<string, string[]>): string {
@@ -1645,7 +1646,7 @@ export default function NewBatch(): JSX.Element {
                     Shared settings applied to every trial unless a combination overrides them.
                   </span>
                 </span>
-                <span className="text-slate-400 transition-transform group-open:rotate-90">
+                <span className="text-slate-600 transition-transform group-open:rotate-90">
                   ›
                 </span>
               </summary>

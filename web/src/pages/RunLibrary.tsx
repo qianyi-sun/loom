@@ -94,7 +94,7 @@ function ArtifactBadges({
   truncated?: boolean;
 }): JSX.Element {
   const visible = ARTIFACT_LABELS.filter(([key]) => summary[key] > 0);
-  if (visible.length === 0) return <span className="text-xs text-slate-400">None</span>;
+  if (visible.length === 0) return <span className="text-xs text-slate-600">None</span>;
   return (
     <div className="flex flex-wrap gap-1">
       {visible.map(([key, label]) => (

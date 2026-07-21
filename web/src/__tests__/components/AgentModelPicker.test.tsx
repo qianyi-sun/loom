@@ -9,6 +9,7 @@ import {
   AgentModelPicker,
   type AgentModelValue,
 } from "../../components/AgentModelPicker";
+import type { FetchMock } from "../../test-utils/fetchMock";
 
 const INITIAL_VALUE: AgentModelValue = {
   agentName: "litellm",
@@ -19,7 +20,7 @@ const INITIAL_VALUE: AgentModelValue = {
 
 function mockPickerEndpoints(
   modelSources: string[] = ["api", "local-server", "hf"],
-): ReturnType<typeof vi.spyOn> {
+): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
@@ -132,7 +133,7 @@ function renderPicker(): void {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Harness />
       </MemoryRouter>
     </QueryClientProvider>,

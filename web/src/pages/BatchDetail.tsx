@@ -84,8 +84,15 @@ function deliveryObjectText(delivery: DeliveryExport | undefined): string | null
   return `${trajectories} trajectories / ${atif} ATIF`;
 }
 
-function deliveryReady(delivery: DeliveryExport | undefined): boolean {
-  return delivery?.status === "ready" && Boolean(delivery.download_url);
+type ReadyDeliveryExport = DeliveryExport & {
+  status: "ready";
+  download_url: string;
+};
+
+function deliveryReady(
+  delivery: DeliveryExport | undefined,
+): delivery is ReadyDeliveryExport {
+  return delivery?.status === "ready" && typeof delivery.download_url === "string";
 }
 
 export default function BatchDetail(): JSX.Element {
@@ -692,7 +699,7 @@ export default function BatchDetail(): JSX.Element {
             >
               Open in Monitor →
             </Link>
-            <span className="text-slate-400 transition-transform group-open:rotate-90">
+            <span className="text-slate-600 transition-transform group-open:rotate-90">
               ›
             </span>
           </summary>

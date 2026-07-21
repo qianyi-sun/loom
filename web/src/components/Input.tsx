@@ -7,7 +7,7 @@ import { forwardRef, type InputHTMLAttributes, type TextareaHTMLAttributes } fro
 import { cn } from "../lib/cn";
 
 const FIELD_BASE =
-  "block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 disabled:cursor-not-allowed disabled:opacity-60";
+  "block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 placeholder:text-slate-600 disabled:cursor-not-allowed disabled:opacity-60";
 
 export const Input = forwardRef<
   HTMLInputElement,

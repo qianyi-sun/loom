@@ -260,6 +260,29 @@ def test_frontend_route_contract_selects_staging_smoke(path: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "web/src/App.tsx",
+        "web/src/api/schema.d.ts",
+        "web/e2e/routes.spec.ts",
+        "web/playwright.config.ts",
+        "deploy/Dockerfile.web",
+        "deploy/nginx-spa.conf",
+        "deploy/nginx-spa-security-headers.conf",
+        "deploy/web-runtime-config.sh",
+        ".github/workflows/ci.yml",
+        "config/component-ownership.toml",
+        "scripts/component_ownership.py",
+    ],
+)
+def test_frontend_quality_contract_selects_web_checks(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+
+    assert plan.web_checks is True
+    assert f"path:{path}" in plan.reasons["web_checks"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "web/src/__tests__/AuthContext.test.tsx",
         "web/src/auth/AuthContext.tsx",
     ],
@@ -416,3 +439,4 @@ def test_merge_group_selects_every_heavy_gate() -> None:
         "cluster_smoke",
         "staging_smoke",
     }
+    assert plan.web_checks is True

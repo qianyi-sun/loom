@@ -17,7 +17,7 @@ describe("Layout", () => {
   });
 
   it("passes current team context into the authenticated app shell", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/v1/auth/me")) {
         return jsonResponse({
@@ -58,7 +58,7 @@ describe("Layout", () => {
   });
 
   it("gives the signed-out settings page a wide public onboarding shell", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/v1/auth/me")) {
         return jsonResponse({ detail: "unauthorized" }, 401);
@@ -75,7 +75,7 @@ describe("Layout", () => {
   });
 
   it("keeps invite acceptance reachable before sign-in", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/v1/auth/me")) {
         return jsonResponse({ detail: "unauthorized" }, 401);
@@ -105,7 +105,7 @@ describe("Layout", () => {
     ["/auth/setup?token=loom_setup_abc", "/api/v1/auth/setup/lookup", "Set Password"],
     ["/auth/reset?token=loom_reset_abc", "/api/v1/auth/reset/lookup", "Reset Password"],
   ])("keeps %s reachable before sign-in", async (route, lookupPath, heading) => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/v1/auth/me")) {
         return jsonResponse({ detail: "unauthorized" }, 401);

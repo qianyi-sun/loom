@@ -10,10 +10,11 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Tasks from "../../pages/Tasks";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 interface FetchSpyHandle {
-  spy: ReturnType<typeof vi.spyOn>;
+  spy: FetchMock;
 }
 
 const TASKS_RESPONSE = {
@@ -42,7 +43,7 @@ const BENCHMARKS_RESPONSE = {
 
 function setupFetch(): FetchSpyHandle {
   const spy = vi
-    .spyOn(global, "fetch")
+    .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
       if (url.includes("/api/v1/benchmarks")) {

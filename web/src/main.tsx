@@ -51,7 +51,7 @@ function renderApp(): void {
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
-        <BrowserRouter basename={routePath || undefined}>
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} basename={routePath || undefined}>
           <AuthProvider>
             <MountedApp rootElement={rootElement} />
           </AuthProvider>

@@ -20,7 +20,7 @@ describe("currentServerOrigin", () => {
 
   it("includes the production route path for first-prod deployments", () => {
     setFrontendConfigForTests({
-      environment: "prod",
+      environment: "production",
       environmentLabel: "Production",
       routePath: "/prod",
       apiBase: "/prod",

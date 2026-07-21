@@ -55,7 +55,7 @@ function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
       <Card.Body className="space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-xs uppercase tracking-wider text-slate-400">
+            <p className="text-xs uppercase tracking-wider text-slate-600">
               Trial
             </p>
             <p className="mt-1 font-mono text-sm text-slate-900 break-all">
