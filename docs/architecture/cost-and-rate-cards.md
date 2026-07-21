@@ -167,6 +167,11 @@ and before release-gate/smoke, so a fresh DB-backed rollout does not lose
 the official YibuAPI rate card or revert the hosted provider to
 `tokens-only`.
 
+Authenticated Service reads use the shared `rate_cards` database authority
+directly, including browser sessions. Mutations still cross the Gateway admin
+surface with the caller's bearer credential and require `admin:rate_cards`;
+the Service never substitutes an operator secret for a browser session.
+
 ## Usage API and CLI
 
 `GET /api/v1/usage` is the admin/user API for totals. It supports:
