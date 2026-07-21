@@ -26,6 +26,10 @@ gb10-node-agent.env
 *.local
 .env.local
 
+# Developer-specific local dev cluster config (copied from
+# deploy/local/local.example.cluster.toml). The example template stays tracked.
+/deploy/local/local.cluster.toml
+
 # Owner-local Codex context
 AGENTS.md
 MEMORY.md
