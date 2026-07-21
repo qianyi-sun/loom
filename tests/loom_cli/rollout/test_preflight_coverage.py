@@ -111,9 +111,13 @@ def test_systemd_activation_is_classified_as_isolated_rehearsal() -> None:
     entries = {entry.check_id: entry for entry in load_coverage_manifest().checks}
 
     manager = entries["systemd.user-manager"]
+    launch_cancel = entries["lifecycle.launch-cancel"]
     activation = entries["rehearsal.systemd-launch"]
     assert manager.tier == 0
     assert manager.mutation_class is MutationClass.NONE
+    assert launch_cancel.tier == 0
+    assert launch_cancel.stage is StageCapability.STATIC
+    assert launch_cancel.mutation_class is MutationClass.ISOLATED
     assert activation.tier == 3
     assert activation.stage is StageCapability.ISOLATED_REHEARSAL
     assert activation.mutation_class is MutationClass.ISOLATED

@@ -120,3 +120,24 @@ def test_image_and_rehearsal_adapters_reject_authority_drift(tmp_path: Path) -> 
         InstalledPreflightCommands(config, {**_environment(), "TOKEN": "forbidden"})
     with pytest.raises(ValueError, match="Job name"):
         commands.lifecycle_capacity_wait("../unsafe")
+
+
+def test_systemd_preflight_is_allowlisted_and_uses_short_timeout(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    def run(argv, **kwargs):
+        calls.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=run,
+    )
+
+    commands.systemd_preflight(("systemd-run", "--user", "/usr/bin/true"))
+
+    assert calls[0]["timeout"] == 10
+    assert calls[0]["argv"][0] == "systemd-run"
+    with pytest.raises(ValueError, match="outside authority"):
+        commands.systemd_preflight(("journalctl", "--user"))

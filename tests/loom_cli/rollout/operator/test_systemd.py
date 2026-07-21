@@ -15,6 +15,8 @@ from loom_cli.rollout.operator.systemd import (
     SystemdUnitStatus,
     SystemdUserManager,
     UnitLaunchError,
+    probe_transient_launch_cancel,
+    transient_service_argv,
 )
 
 SERVICE_UID = 2222
@@ -168,6 +170,111 @@ def assert_sanitized_operation_error(
         )
     )
     assert sentinel not in rendered
+
+
+def test_transient_service_builder_and_probe_share_exact_launch_prefix() -> None:
+    running = False
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        nonlocal running
+        command = tuple(argv)
+        calls.append(command)
+        if command[0] == "systemd-run":
+            running = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "show"):
+            if "--property=Transient" in command:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    (
+                        "LoadState=loaded\nActiveState=active\nSubState=running\n"
+                        "Transient=yes\nMainPID=4242\n"
+                    ),
+                    "",
+                )
+            return subprocess.CompletedProcess(
+                argv,
+                0 if running else 4,
+                "loaded\n" if running else "not-found\n",
+                "",
+            )
+        if command[:3] == ("systemctl", "--user", "stop"):
+            running = False
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "reset-failed"):
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        raise AssertionError(command)
+
+    clock = iter((0.0, 0.011, 0.011, 0.020))
+    evidence = probe_transient_launch_cancel(
+        run,
+        candidate_sha="a" * 40,
+        working_directory=Path("/opt/loom-staging-runner/repo"),
+        monotonic=lambda: next(clock),
+    )
+
+    expected = transient_service_argv(
+        unit_name=calls[1][5],
+        working_directory=Path("/opt/loom-staging-runner/repo"),
+        command=("/usr/bin/sleep", "300"),
+    )
+    assert calls[1] == tuple(expected)
+    assert evidence.ready
+    assert evidence.launch_latency_ms == 11
+    assert evidence.cancel_latency_ms == 9
+    assert evidence.unit_absent
+
+
+def test_transient_probe_failure_attempts_only_exact_cleanup() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        command = tuple(argv)
+        calls.append(command)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(argv, 4, "not-found\n", "")
+        if command[0] == "systemd-run":
+            return subprocess.CompletedProcess(argv, 1, "", "launch failed")
+        return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+
+    with pytest.raises(UnitLaunchError, match="launch failed"):
+        probe_transient_launch_cancel(
+            run,
+            candidate_sha="a" * 40,
+            working_directory=Path("/opt/loom-staging-runner/repo"),
+            monotonic=lambda: 0.0,
+        )
+
+    unit_names = {
+        item[3] if item[0] == "systemctl" else item[5]
+        for item in calls
+        if item[0] in {"systemctl", "systemd-run"}
+    }
+    assert len(unit_names) == 1
+    assert all("loom-preflight-lifecycle-" in name for name in unit_names)
+
+
+@pytest.mark.parametrize(
+    ("unit_name", "working_directory", "command"),
+    (
+        ("other.service", Path("/fixed"), ("/usr/bin/true",)),
+        ("loom-preflight-lifecycle-0123456789abcdef.service", Path("relative"), ("/usr/bin/true",)),
+        ("loom-preflight-lifecycle-0123456789abcdef.service", Path("/fixed"), ("true",)),
+    ),
+)
+def test_transient_service_builder_rejects_authority_drift(
+    unit_name: str,
+    working_directory: Path,
+    command: tuple[str, ...],
+) -> None:
+    with pytest.raises(UnitLaunchError, match="authority"):
+        transient_service_argv(
+            unit_name=unit_name,
+            working_directory=working_directory,
+            command=command,
+        )
 
 
 def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:

@@ -86,6 +86,7 @@ from loom_cli.rollout.operator.candidate import (
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.manifest_apply_contract import MANIFEST_APPLY_CONTRACT_DIGEST
 from loom_cli.rollout.operator.model import CandidateBinding
+from loom_cli.rollout.operator.systemd import SystemdLaunchCancelEvidence
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -1010,8 +1011,9 @@ def build_backup_lease_eligibility_check(
 
 def build_lifecycle_launch_cancel_check(
     self_test: Callable[[], LifecycleSelfTestEvidence] = run_lifecycle_self_test,
+    runtime_test: Callable[[], SystemdLaunchCancelEvidence] | None = None,
 ) -> RegisteredCheck:
-    """Build the Tier 0 isolated test of the broker's shared lifecycle protocol."""
+    """Build the Tier 0 protocol and real transient-unit launch/cancel test."""
     expected_protocol_digest = lifecycle_protocol_digest()
 
     def probe(context: CheckContext) -> CheckProbe:
@@ -1019,17 +1021,36 @@ def build_lifecycle_launch_cancel_check(
             return _empty_lifecycle_probe(expected_protocol_digest)
         try:
             evidence = self_test()
+            if runtime_test is None:
+                return _empty_lifecycle_probe(expected_protocol_digest)
+            runtime = runtime_test()
         except Exception:
             return _empty_lifecycle_probe(expected_protocol_digest)
+        ready = (
+            evidence.ready
+            and evidence.protocol_digest == expected_protocol_digest
+            and runtime.ready
+            and runtime.launched
+            and runtime.cancelled
+            and runtime.unit_absent
+        )
         return CheckProbe(
-            passed=evidence.ready and evidence.protocol_digest == expected_protocol_digest,
+            passed=ready,
             evidence={
-                "ready": evidence.ready,
+                "ready": ready,
                 "scenario-count": evidence.scenario_count,
                 "transition-count": evidence.transition_count,
                 "rejection-count": evidence.rejection_count,
                 "protocol-digest": evidence.protocol_digest,
                 "self-test-digest": evidence.evidence_digest,
+                "runtime-ready": runtime.ready,
+                "launched": runtime.launched,
+                "cancelled": runtime.cancelled,
+                "unit-absent": runtime.unit_absent,
+                "launch-latency-ms": runtime.launch_latency_ms,
+                "cancel-latency-ms": runtime.cancel_latency_ms,
+                "latency-budget-ms": runtime.latency_budget_ms,
+                "runtime-digest": runtime.evidence_digest,
             },
         )
 
@@ -1040,8 +1061,12 @@ def build_lifecycle_launch_cancel_check(
             tier=0,
             stage=StageCapability.STATIC,
             dependencies=("systemd.user-manager",),
-            mutation_class=MutationClass.NONE,
-            input_keys=("lifecycle.protocol.sha256", "runner.config.sha256"),
+            mutation_class=MutationClass.ISOLATED,
+            input_keys=(
+                "candidate.sha",
+                "lifecycle.protocol.sha256",
+                "runner.config.sha256",
+            ),
             evidence_schema=(
                 EvidenceField("ready", "boolean"),
                 EvidenceField("scenario-count", "integer"),
@@ -1049,13 +1074,24 @@ def build_lifecycle_launch_cancel_check(
                 EvidenceField("rejection-count", "integer"),
                 EvidenceField("protocol-digest", "sha256"),
                 EvidenceField("self-test-digest", "sha256"),
+                EvidenceField("runtime-ready", "boolean"),
+                EvidenceField("launched", "boolean"),
+                EvidenceField("cancelled", "boolean"),
+                EvidenceField("unit-absent", "boolean"),
+                EvidenceField("launch-latency-ms", "integer"),
+                EvidenceField("cancel-latency-ms", "integer"),
+                EvidenceField("latency-budget-ms", "integer"),
+                EvidenceField("runtime-digest", "sha256"),
             ),
-            timeout_seconds=5,
-            freshness_ttl_seconds=300,
-            remediation="restore the reviewed short-lock backup and launch transition protocol",
+            timeout_seconds=75,
+            freshness_ttl_seconds=120,
+            remediation=(
+                "restore the reviewed short-lock lifecycle protocol and repair the systemd user "
+                "manager or kernel path until the exact transient launch/cancel round trip passes"
+            ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -1070,6 +1106,14 @@ def _empty_lifecycle_probe(protocol_digest: str) -> CheckProbe:
             "rejection-count": 0,
             "protocol-digest": protocol_digest,
             "self-test-digest": "0" * 64,
+            "runtime-ready": False,
+            "launched": False,
+            "cancelled": False,
+            "unit-absent": False,
+            "launch-latency-ms": 0,
+            "cancel-latency-ms": 0,
+            "latency-budget-ms": 10_000,
+            "runtime-digest": "0" * 64,
         },
     )
 

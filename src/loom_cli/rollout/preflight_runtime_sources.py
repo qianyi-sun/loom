@@ -40,6 +40,10 @@ from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_di
 from loom_cli.rollout.operator.candidate import GitRunner
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
+from loom_cli.rollout.operator.systemd import (
+    SystemdLaunchCancelEvidence,
+    probe_transient_launch_cancel,
+)
 from loom_cli.rollout.preflight_artifact_store import (
     LoadedPreflightArtifacts,
     PreflightArtifactStore,
@@ -220,6 +224,7 @@ class PreflightRuntimeSources:
     now: Callable[[], datetime]
     importer: ModuleImporter = importlib.import_module
     lifecycle_self_test: Callable[[], LifecycleSelfTestEvidence] = run_lifecycle_self_test
+    lifecycle_runtime_test: Callable[[], SystemdLaunchCancelEvidence] | None = None
     monotonic: Callable[[], float] | None = None
     loaded_artifacts: LoadedPreflightArtifacts | None = None
 
@@ -394,7 +399,17 @@ class PreflightRuntimeSources:
             ),
             build_readonly_authority_check(self.readonly_authority_source),
             build_capacity_high_water_check(self.capacity_source),
-            build_lifecycle_launch_cancel_check(self.lifecycle_self_test),
+            build_lifecycle_launch_cancel_check(
+                self.lifecycle_self_test,
+                self.lifecycle_runtime_test
+                or (
+                    lambda: probe_transient_launch_cancel(
+                        lambda argv: self.systemd_run(argv),
+                        candidate_sha=self.candidate.resolved_sha,
+                        working_directory=self.candidate_root,
+                    )
+                ),
+            ),
             systemd_check,
             build_gb10_ssh_topology_check(
                 self.gb10_run,

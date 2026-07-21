@@ -1277,10 +1277,24 @@ def test_registered_backup_lease_rejects_context_drift_without_reading_lease() -
 
 
 def test_registered_lifecycle_check_runs_shared_protocol_self_test() -> None:
-    check = build_lifecycle_launch_cancel_check()
+    from loom_cli.rollout.operator.systemd import SystemdLaunchCancelEvidence
+
+    check = build_lifecycle_launch_cancel_check(
+        runtime_test=lambda: SystemdLaunchCancelEvidence(
+            ready=True,
+            launched=True,
+            cancelled=True,
+            unit_absent=True,
+            launch_latency_ms=11,
+            cancel_latency_ms=9,
+            latency_budget_ms=15_000,
+            evidence_digest="e" * 64,
+        )
+    )
     context = CheckContext(
         {
             "runner.config.sha256": "a" * 64,
+            "candidate.sha": "b" * 40,
             "lifecycle.protocol.sha256": lifecycle_protocol_digest(),
         }
     )
@@ -1292,16 +1306,20 @@ def test_registered_lifecycle_check_runs_shared_protocol_self_test() -> None:
     assert result.evidence["ready"] is True
     assert result.evidence["scenario-count"] == 4
     assert result.evidence["rejection-count"] == 6
+    assert result.evidence["runtime-ready"] is True
+    assert result.evidence["unit-absent"] is True
 
 
 def test_registered_lifecycle_check_rejects_protocol_binding_drift() -> None:
     calls: list[object] = []
     check = build_lifecycle_launch_cancel_check(
-        lambda: calls.append(object())  # type: ignore[arg-type,return-value]
+        lambda: calls.append(object()),  # type: ignore[arg-type,return-value]
+        lambda: calls.append(object()),  # type: ignore[arg-type,return-value]
     )
     context = CheckContext(
         {
             "runner.config.sha256": "a" * 64,
+            "candidate.sha": "b" * 40,
             "lifecycle.protocol.sha256": "f" * 64,
         }
     )
@@ -1312,6 +1330,24 @@ def test_registered_lifecycle_check_rejects_protocol_binding_drift() -> None:
     assert not result.passed
     assert result.evidence["scenario-count"] == 0
     assert calls == []
+
+
+def test_registered_lifecycle_check_fails_closed_without_runtime_probe() -> None:
+    check = build_lifecycle_launch_cancel_check()
+    context = CheckContext(
+        {
+            "candidate.sha": "b" * 40,
+            "runner.config.sha256": "a" * 64,
+            "lifecycle.protocol.sha256": lifecycle_protocol_digest(),
+        }
+    )
+    dag = PreflightDag((_passing_dependency("systemd.user-manager"), check))
+
+    result = next(item for item in dag.run(context) if item.check_id == check.spec.check_id)
+
+    assert not result.passed
+    assert result.evidence["runtime-ready"] is False
+    assert result.evidence["runtime-digest"] == "0" * 64
 
 
 def test_registered_migration_plan_binds_exact_candidate_graph_and_policy() -> None:

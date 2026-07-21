@@ -920,7 +920,13 @@ Systemd readiness is single-source as well. The broker-facing Tier 0 probe and
 the final GB10 convergence step consume the same user-manager, oneshot service,
 and timer-state classifiers. The read-only probe binds the manager version,
 `Linger=yes`, host boot ID, and a bounded user-manager RPC latency. Actual
-`systemd-run` activation is not disguised as a static read: the checked-in
+`systemd-run` activation is not disguised as a read. Tier 0
+`lifecycle.launch-cancel` creates one deterministic isolated unit with the
+same `systemd-run --user --collect --service-type=exec`, UMask, and working
+directory builder used by backup and rollout units. It runs a fixed sleep,
+verifies the transient PID, stops and resets the exact unit, and requires a
+final `not-found` readback inside the short RPC budget before any request or
+backup can exist. Only hashed evidence is retained. The checked-in
 `rehearsal.systemd-launch` predicate belongs to the isolated rehearsal tier,
 where a request-specific unit and cleanup journal prove launch/cancel latency
 without mutating protected staging. The action also executes that exact
@@ -934,8 +940,9 @@ after backup verification; pending/running backup may instead enter the
 cancel-requested path and must seal as failed before any new admission. Tier 0
 `lifecycle.launch-cancel` exercises success, pre-start cancellation,
 in-flight cancellation, backup failure, and forbidden early-launch sequences
-against that same implementation. The probe is static; it does not create a
-request, unit, backup, or protected-staging mutation.
+against that same implementation. The probe does not create a request, backup,
+or protected-staging mutation. Its one transient self-test unit is an explicitly
+isolated Tier 0 mutation and must be absent before the check can pass.
 
 The GB10 Tier 0 path first runs `gb10.ssh-topology` with the exact SSH-config
 digest, no-follow identity metadata, strict known-hosts policy, and BatchMode.

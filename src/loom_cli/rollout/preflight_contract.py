@@ -125,7 +125,10 @@ class CheckSpec:
         if self.tier not in expected_tiers[self.stage]:
             raise ValueError("preflight tier does not match stage capability")
         allowed_mutations = {
-            StageCapability.STATIC: {MutationClass.NONE},
+            StageCapability.STATIC: {
+                MutationClass.NONE,
+                MutationClass.ISOLATED,
+            },
             StageCapability.BASELINE_LIVE_READONLY: {MutationClass.NONE},
             StageCapability.ISOLATED_REHEARSAL: {
                 MutationClass.NONE,

@@ -19,6 +19,7 @@ from loom_cli.rollout.image_readiness import (
     ImageDescriptor,
     image_plan_digest,
 )
+from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
     CheckOperation,
@@ -31,6 +32,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
     build_image_preflight_checks,
+    build_lifecycle_launch_cancel_check,
     build_manifest_preflight_checks,
     build_rehearsal_checks,
     build_staging_baseline_checks,
@@ -297,6 +299,9 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
         service_uid=1001,
         monotonic=lambda: next(clock),
     )
+    lifecycle = build_lifecycle_launch_cancel_check(
+        runtime_test=lambda: (_ for _ in ()).throw(TimeoutError("systemd-run timeout"))
+    )
 
     target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
     gb10 = build_gb10_host_readiness_check(
@@ -492,6 +497,17 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
             CheckContext({"runner.config.sha256": config_digest, "service.uid": 1001}),
         ),
         RegressionReplayCase(
+            "backup-transient-launch-latency",
+            lifecycle,
+            CheckContext(
+                {
+                    "candidate.sha": _CANDIDATE,
+                    "lifecycle.protocol.sha256": lifecycle_protocol_digest(),
+                    "runner.config.sha256": config_digest,
+                }
+            ),
+        ),
+        RegressionReplayCase(
             "backup-object-inode-growth",
             capacity,
             CheckContext(
@@ -558,7 +574,7 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
 def test_all_historical_blockers_replay_through_production_checks(tmp_path: Path) -> None:
     evidence = replay_regression_manifest(_cases(tmp_path))
 
-    assert len(evidence.implementation_digests) == 13
+    assert len(evidence.implementation_digests) == 14
     assert set(evidence.implementation_digests) == set(evidence.evidence_hashes)
 
 

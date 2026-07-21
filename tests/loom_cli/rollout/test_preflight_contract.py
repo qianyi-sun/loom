@@ -373,6 +373,39 @@ def test_input_fingerprint_rejects_raw_secret_fields() -> None:
         check.input_fingerprint(CheckContext(bindings={"admin.token": "raw-secret"}))
 
 
+def test_tier_zero_allows_only_isolated_or_nonmutating_checks() -> None:
+    isolated = CheckSpec(
+        check_id="lifecycle.launch-cancel",
+        failure_code="lifecycle.launch-cancel.failed",
+        tier=0,
+        stage=StageCapability.STATIC,
+        dependencies=(),
+        mutation_class=MutationClass.ISOLATED,
+        input_keys=("candidate.sha",),
+        evidence_schema=(EvidenceField("ready", "boolean"),),
+        timeout_seconds=75,
+        freshness_ttl_seconds=120,
+        remediation="repair the isolated transient lifecycle probe",
+        secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+    )
+    assert isolated.mutation_class is MutationClass.ISOLATED
+    with pytest.raises(ValueError, match="mutation class"):
+        CheckSpec(
+            check_id="lifecycle.protected",
+            failure_code="lifecycle.protected.failed",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=(),
+            mutation_class=MutationClass.PROTECTED_STAGING,
+            input_keys=("candidate.sha",),
+            evidence_schema=(EvidenceField("ready", "boolean"),),
+            timeout_seconds=75,
+            freshness_ttl_seconds=120,
+            remediation="never mutate protected staging in Tier 0",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        )
+
+
 def test_check_contract_accepts_bounded_string_map_evidence() -> None:
     spec = CheckSpec(
         check_id="gb10.host-readiness",

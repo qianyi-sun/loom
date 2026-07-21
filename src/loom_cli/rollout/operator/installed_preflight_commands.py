@@ -87,6 +87,12 @@ class InstalledPreflightCommands:
     def simple(self, argv: Sequence[str]) -> CommandResult:
         return self._execute(argv, timeout=120)
 
+    def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
+        """Run only the fixed Tier 0 systemd probes with a short RPC bound."""
+        if not argv or argv[0] not in {"loginctl", "systemctl", "systemd-run"}:
+            raise ValueError("systemd preflight command is outside authority")
+        return self._execute(argv, timeout=10)
+
     def git(self, argv: list[str]) -> CommandResult:
         environment = {
             **self.child_environment,

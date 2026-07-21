@@ -226,7 +226,7 @@ def build_installed_deep_preflight_composition(
         readonly_authority_source=readonly.capabilities,
         capacity_source=readonly.capacity,
         backup_authority_factory=backup_authority,
-        systemd_run=commands.simple,
+        systemd_run=commands.systemd_preflight,
         gb10_run=commands.simple,
         gb10_mount_source=shared_mount,
         systemd_analyze_run=commands.simple,
