@@ -122,9 +122,9 @@ Deferred long-horizon items use
 Feature branches cut from `dev`. PRs target `dev`. `main` is reserved
 for release promotion PRs from `dev`.
 
-Deployment environments are separated from branch workflow:
-`development` and `staging` use the canonical dev route
-`https://yylx.world/dev`, while `production` follows `main` or
+Deployment environments are separated from branch workflow: `development`
+uses `https://yylx.world/dev`, `staging` uses
+`https://yylx.world/staging`, and `production` follows `main` or
 immutable `vX.Y.Z` production release tags at `https://yylx.world/prod`. Do
 not use environment-specific yylx frontend subdomains as entrypoints; they are
 not provisioned. Production deploys use the protected GitHub
