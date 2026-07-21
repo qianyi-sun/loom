@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         type=secret_source_argparse_type("--staging-admin-token"),
     )
     parser.add_argument("--staging-environment", default="staging")
-    parser.add_argument("--pool-name", default="gb10-arm64")
+    parser.add_argument("--pool-name", default="gb10")
     parser.add_argument(
         "--target",
         dest="targets",

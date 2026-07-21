@@ -41,7 +41,7 @@ def test_run_once_bridges_prod_pressure_to_staging_worker_control(monkeypatch) -
         prod_admin_token="prod-secret",
         staging_cp_url="http://staging-cp:8080",
         staging_admin_token="staging-secret",
-        targets=[("staging", "gb10-arm64")],
+        targets=[("staging", "gb10")],
         preemptible=True,
         grace_period_seconds=600,
         freshness_seconds=120,
@@ -53,16 +53,16 @@ def test_run_once_bridges_prod_pressure_to_staging_worker_control(monkeypatch) -
     assert len(report["targets"]) == 1
     entry = report["targets"][0]
     assert entry["environment"] == "staging"
-    assert entry["pool_name"] == "gb10-arm64"
+    assert entry["pool_name"] == "gb10"
     assert entry["worker_control"]["new_staging_claims_allowed"] is False
     assert calls[0]["method"] == "GET"
     assert calls[0]["path"] == (
-        "/admin/worker-pools/gb10-arm64/prod-pressure?freshness_sec=120"
+        "/admin/worker-pools/gb10/prod-pressure?freshness_sec=120"
     )
     assert calls[1]["method"] == "POST"
     # #892: POST to the actuator-neutral route, not the GB10 lifecycle route.
     assert calls[1]["path"] == (
-        "/admin/worker-pools/staging/gb10-arm64/prod-pressure"
+        "/admin/worker-pools/staging/gb10/prod-pressure"
     )
     assert calls[1]["body"] == {
         "prod_pending_count": 3,
@@ -99,7 +99,7 @@ def test_run_once_forwards_clear_signal_for_recovery(monkeypatch) -> None:
         prod_admin_token="prod-secret",
         staging_cp_url="http://staging-cp:8080",
         staging_admin_token="staging-secret",
-        targets=[("staging", "gb10-arm64")],
+        targets=[("staging", "gb10")],
         preemptible=False,
         grace_period_seconds=0,
         freshness_seconds=120,
@@ -131,7 +131,7 @@ def test_run_once_fails_closed_when_prod_pressure_source_is_unavailable(monkeypa
         prod_admin_token="prod-secret",
         staging_cp_url="http://staging-cp:8080",
         staging_admin_token="staging-secret",
-        targets=[("staging", "gb10-arm64")],
+        targets=[("staging", "gb10")],
         preemptible=True,
         grace_period_seconds=600,
         freshness_seconds=120,
@@ -168,7 +168,7 @@ def test_run_once_fans_out_to_multiple_targets(monkeypatch) -> None:
         prod_admin_token="prod-secret",
         staging_cp_url="http://staging-cp:8080",
         staging_admin_token="staging-secret",
-        targets=[("staging", "gb10-arm64"), ("staging", "oldlab")],
+        targets=[("staging", "gb10"), ("staging", "oldlab")],
         preemptible=True,
         grace_period_seconds=600,
         freshness_seconds=90,
@@ -177,14 +177,14 @@ def test_run_once_fans_out_to_multiple_targets(monkeypatch) -> None:
 
     assert report["status"] == "pass"
     assert [(t["environment"], t["pool_name"]) for t in report["targets"]] == [
-        ("staging", "gb10-arm64"),
+        ("staging", "gb10"),
         ("staging", "oldlab"),
     ]
     # One GET + one POST per target, in order.
     methods = [(c["method"], c["path"]) for c in calls]
     assert methods == [
-        ("GET", "/admin/worker-pools/gb10-arm64/prod-pressure?freshness_sec=90"),
-        ("POST", "/admin/worker-pools/staging/gb10-arm64/prod-pressure"),
+        ("GET", "/admin/worker-pools/gb10/prod-pressure?freshness_sec=90"),
+        ("POST", "/admin/worker-pools/staging/gb10/prod-pressure"),
         ("GET", "/admin/worker-pools/oldlab/prod-pressure?freshness_sec=90"),
         ("POST", "/admin/worker-pools/staging/oldlab/prod-pressure"),
     ]
@@ -212,7 +212,7 @@ def test_run_once_marks_status_fail_when_one_target_errors(monkeypatch) -> None:
         prod_admin_token="prod-secret",
         staging_cp_url="http://staging-cp:8080",
         staging_admin_token="staging-secret",
-        targets=[("staging", "gb10-arm64"), ("staging", "oldlab")],
+        targets=[("staging", "gb10"), ("staging", "oldlab")],
         preemptible=True,
         grace_period_seconds=600,
         freshness_seconds=120,
@@ -258,13 +258,13 @@ def test_main_defaults_to_single_target_backward_compatible(monkeypatch, capsys)
     assert rc == 0
     methods = [(c["method"], c["path"]) for c in calls]
     assert methods == [
-        ("GET", "/admin/worker-pools/gb10-arm64/prod-pressure?freshness_sec=120"),
-        ("POST", "/admin/worker-pools/staging/gb10-arm64/prod-pressure"),
+        ("GET", "/admin/worker-pools/gb10/prod-pressure?freshness_sec=120"),
+        ("POST", "/admin/worker-pools/staging/gb10/prod-pressure"),
     ]
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "pass"
     assert [(t["environment"], t["pool_name"]) for t in report["targets"]] == [
-        ("staging", "gb10-arm64"),
+        ("staging", "gb10"),
     ]
 
 
@@ -293,7 +293,7 @@ def test_main_fans_out_repeated_target_flags(monkeypatch, capsys) -> None:
             "--prod-admin-token", "env:PROD_TOKEN",
             "--staging-cp-url", "http://staging-cp:8080",
             "--staging-admin-token", "env:STAGING_TOKEN",
-            "--target", "staging:gb10-arm64",
+            "--target", "staging:gb10",
             "--target", "staging:oldlab",
         ],
     )
@@ -301,12 +301,12 @@ def test_main_fans_out_repeated_target_flags(monkeypatch, capsys) -> None:
     assert rc == 0
     posts = [c["path"] for c in calls if c["method"] == "POST"]
     assert posts == [
-        "/admin/worker-pools/staging/gb10-arm64/prod-pressure",
+        "/admin/worker-pools/staging/gb10/prod-pressure",
         "/admin/worker-pools/staging/oldlab/prod-pressure",
     ]
     report = json.loads(capsys.readouterr().out)
     assert [(t["environment"], t["pool_name"]) for t in report["targets"]] == [
-        ("staging", "gb10-arm64"),
+        ("staging", "gb10"),
         ("staging", "oldlab"),
     ]
 

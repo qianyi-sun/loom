@@ -167,8 +167,8 @@ Attach these to the release issue or release PR:
   stale physical profile copy. For staging, the rendered
   service/control-plane/gateway pods must have
   `LOOM_ENV=staging`, and `environment-state` evidence must show staging
-  worker-pool policies and GB10 desired state keyed as `staging/gb10-arm64`.
-  Any current-path staging evidence that reports `production/gb10-arm64` is
+  worker-pool policies and GB10 desired state keyed as `staging/gb10`.
+  Any current-path staging evidence that reports `production/gb10` is
   drift, not a valid migration exception.
 - Benchmark reward acceptance transcript from
   `scripts/benchmark_reward_gate.py`: the readiness gate must pass against the
@@ -254,7 +254,7 @@ Attach these to the release issue or release PR:
   The canary must wait for a clean staging anchor, completed #190 targeted
   durability validation, and an explicit coordinator `GO`. The batch must use
   repeated `--required-worker-pool` flags for `oldlab` and
-  `gb10-arm64`; terminal evidence must include `runs.worker_pool_coverage`
+  `gb10`; terminal evidence must include `runs.worker_pool_coverage`
   and `runs.claimed_without_started` from the smoke gate. Staging
   clusters run with `k8s_worker.enabled=false` (#383) so x86_64
   coverage is delivered by the Slurm-managed `oldlab` pool, not by an
@@ -399,7 +399,7 @@ python scripts/staging_smoke_gate.py \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace loom-staging \
-  --required-worker-pool gb10-arm64 \
+  --required-worker-pool gb10 \
   --secret-needle env:STAGING_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
@@ -461,10 +461,10 @@ the first GB10/ARM64 canary also creates a worker-local compatibility base
 image on the ARM64 Docker daemon before building the task image, because the
 upstream tag is amd64-only.
 Do not rely on theoretical max-slot saturation to prove worker-pool coverage.
-For v1.0's GB10-only staging gate, require `--required-worker-pool gb10-arm64`.
+For v1.0's GB10-only staging gate, require `--required-worker-pool gb10`.
 For v1.1/full-cluster mixed-pool evidence, create the release/acceptance batch
 with repeated `--required-worker-pool` flags, for example
-`--required-worker-pool oldlab --required-worker-pool gb10-arm64`. On clusters
+`--required-worker-pool oldlab --required-worker-pool gb10`. On clusters
 that intentionally host a dedicated k8s worker node pool, add
 `--required-worker-pool k8s-worker` as well. The service adds one
 pool-pinned coverage trial per required pool while leaving the normal portable
@@ -594,7 +594,7 @@ paths, stale remote env worker-token fingerprints, inactive OLDLAB autoscaler
 timers, unscoped external autoscaler commands that omit `--pool-name oldlab`,
 missing or unexecutable external autoscaler `ExecStart` command paths, recent
 failed autoscaler service results such as `status=203/EXEC`, and the active
-`gb10-arm64`/`oldlab` pool shapes; the node-agent check catches stale
+`gb10`/`oldlab` pool shapes; the node-agent check catches stale
 host-local checkouts, local-build fallback using an old tree, and env files
 that did not apply even when the pool still has healthy heartbeats.
 The installed runner's private generated directory must already contain a

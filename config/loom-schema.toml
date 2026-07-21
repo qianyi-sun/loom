@@ -743,7 +743,7 @@ description = "Optional worker hostname override used for registration and fleet
 used_by     = ["worker"]
 python_type = "str"
 default     = "default"
-description = "Resource-pool label advertised at worker registration for slot capacity summaries. Set to values like k8s-worker, gb10-arm64, or oldlab."
+description = "Resource-pool label advertised at worker registration for slot capacity summaries. Set to values like k8s-worker, gb10, or oldlab."
 
 [service_config.blocking_io_max_workers]
 used_by     = ["worker"]

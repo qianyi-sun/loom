@@ -657,7 +657,7 @@ async def test_reconcile_submits_gb10_capacity_through_slurm_partition(
                 ))
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 actuator="slurm",
                 enabled=True,
                 min_slots=0,
@@ -712,7 +712,7 @@ async def test_reconcile_submits_gb10_capacity_through_slurm_partition(
         assert results[0].action == "scale_up"
         assert runner.submitted_nodes == ["trt-gb10-1"]
         assert runner.submitted_configs[0].partition == "gb10"
-        assert runner.submitted_configs[0].pool_name == "gb10-arm64"
+        assert runner.submitted_configs[0].pool_name == "gb10"
         assert runner.submitted_configs[0].requested_concurrency == 10
 
         async with session_factory() as s:
@@ -727,7 +727,7 @@ async def test_reconcile_submits_gb10_capacity_through_slurm_partition(
         assert job.requested_memory_mib == 115000
         assert job.requested_concurrency == 10
         assert job.state == "pending"
-        assert job.redacted_env["LOOM_WORKER_POOL_NAME"] == "gb10-arm64"
+        assert job.redacted_env["LOOM_WORKER_POOL_NAME"] == "gb10"
         assert policy.actuator == "slurm"
         assert policy.last_decision == "scale_up"
         assert policy.last_decision_reason == "queued_deficit"
@@ -890,7 +890,7 @@ async def test_external_slurm_runner_reconcile_can_be_scoped_to_one_pool(
     try:
         async with session_factory() as s:
             for pool_name, node, cpu_arch in (
-                ("gb10-arm64", "gb10-1", "arm64"),
+                ("gb10", "gb10-1", "arm64"),
                 ("oldlab", "oldlab-1", "x86_64"),
             ):
                 await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
@@ -1267,7 +1267,7 @@ async def test_reconcile_drains_and_cancels_running_job_outside_allowed_nodes(
                     "network_policies": ["none"],
                 }],
                 max_concurrent=10,
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 drain_state="active",
                 registered_at=now,
                 last_seen_at=now,
@@ -1275,7 +1275,7 @@ async def test_reconcile_drains_and_cancels_running_job_outside_allowed_nodes(
             ))
             await s.execute(insert(SlurmWorkerJob).values(
                 environment="staging",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 nodelist="trt-gb10-7",
                 requested_cpus=20,
                 requested_memory_mib=115000,
@@ -1290,7 +1290,7 @@ async def test_reconcile_drains_and_cancels_running_job_outside_allowed_nodes(
             ))
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
                 environment="staging",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 actuator="slurm",
                 enabled=True,
                 min_slots=0,
@@ -1388,7 +1388,7 @@ async def test_reconcile_sets_gb10_host_intent_to_draining(
                     "network_policies": ["none"],
                 }],
                 max_concurrent=2,
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 drain_state="active",
                 registered_at=now,
                 last_seen_at=now,
@@ -1396,7 +1396,7 @@ async def test_reconcile_sets_gb10_host_intent_to_draining(
             ))
             await s.execute(insert(GB10WorkerPoolDesiredState).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 image_tag="gb10-image",
                 max_concurrent=2,
                 env_config_version="gb10-env",
@@ -1407,7 +1407,7 @@ async def test_reconcile_sets_gb10_host_intent_to_draining(
             ))
             await s.execute(insert(GB10WorkerNodeStatus).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 hostname="trt-gb10-1",
                 worker_id=worker_id,
                 current_image_tag="gb10-image",
@@ -1422,7 +1422,7 @@ async def test_reconcile_sets_gb10_host_intent_to_draining(
             ))
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 actuator="gb10",
                 enabled=True,
                 min_slots=0,
@@ -1476,7 +1476,7 @@ async def test_reconcile_sets_gb10_host_intent_by_hostname_when_worker_id_missin
                     "network_policies": ["none"],
                 }],
                 max_concurrent=2,
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 drain_state="active",
                 registered_at=now,
                 last_seen_at=now,
@@ -1484,7 +1484,7 @@ async def test_reconcile_sets_gb10_host_intent_by_hostname_when_worker_id_missin
             ))
             await s.execute(insert(GB10WorkerPoolDesiredState).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 image_tag="gb10-image",
                 max_concurrent=2,
                 env_config_version="gb10-env",
@@ -1495,7 +1495,7 @@ async def test_reconcile_sets_gb10_host_intent_by_hostname_when_worker_id_missin
             ))
             await s.execute(insert(GB10WorkerNodeStatus).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 hostname="trt-gb10-1",
                 worker_id=None,
                 current_image_tag="gb10-image",
@@ -1510,7 +1510,7 @@ async def test_reconcile_sets_gb10_host_intent_by_hostname_when_worker_id_missin
             ))
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 actuator="gb10",
                 enabled=True,
                 min_slots=0,
@@ -1566,7 +1566,7 @@ async def test_reconcile_sets_gb10_stopped_hosts_active_for_scale_up(
                 ))
             await s.execute(insert(GB10WorkerPoolDesiredState).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 image_tag="gb10-image",
                 max_concurrent=2,
                 env_config_version="gb10-env",
@@ -1580,7 +1580,7 @@ async def test_reconcile_sets_gb10_stopped_hosts_active_for_scale_up(
             ))
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 actuator="gb10",
                 enabled=True,
                 min_slots=0,
@@ -1642,7 +1642,7 @@ async def test_reconcile_only_marks_selected_gb10_hosts_active_for_scale_up(
             ))
             await s.execute(insert(GB10WorkerPoolDesiredState).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 image_tag="gb10-image",
                 max_concurrent=10,
                 env_config_version="gb10-env",
@@ -1654,7 +1654,7 @@ async def test_reconcile_only_marks_selected_gb10_hosts_active_for_scale_up(
             for hostname in hostnames:
                 await s.execute(insert(GB10WorkerNodeStatus).values(
                     environment="production",
-                    pool_name="gb10-arm64",
+                    pool_name="gb10",
                     hostname=hostname,
                     current_image_tag="gb10-image",
                     current_max_concurrent=10,
@@ -1668,7 +1668,7 @@ async def test_reconcile_only_marks_selected_gb10_hosts_active_for_scale_up(
                 ))
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 actuator="gb10",
                 enabled=True,
                 min_slots=0,

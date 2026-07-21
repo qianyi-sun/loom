@@ -149,12 +149,12 @@ def test_batch_debug_evidence_reports_terminal_worker_pool_coverage() -> None:
         llm_calls=[],
         worker_pool_names_by_id={
             oldlab_worker_id: "oldlab",
-            gb10_worker_id: "gb10-arm64",
+            gb10_worker_id: "gb10",
         },
     )
 
     assert evidence["trials"]["worker_pools"]["terminal"] == {
-        "gb10-arm64": 1,
+        "gb10": 1,
         "oldlab": 1,
     }
     assert evidence["trials"]["worker_pools"]["unknown_terminal"] == 0

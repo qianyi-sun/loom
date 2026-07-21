@@ -10,7 +10,7 @@ SkillLearnBench full/max-slot workload across the release-managed external
 pools used by staging/prod profiles:
 
 - `oldlab` - x86_64 elastic Slurm workers.
-- `gb10-arm64` - ARM64 GB10 Slurm-backed workers.
+- `gb10` - ARM64 GB10 Slurm-backed workers.
 
 Per #383, staging/prod external-worker profiles render with
 `k8s_worker.enabled=false`; the in-cluster Kubernetes `loom-worker` Deployment
@@ -39,7 +39,7 @@ Stop before submitting any workload unless every item in this section is true.
    anchor. The rollout evidence must not show control-plane, service, worker,
    Postgres, or DNS dependency crash loops.
 5. #188 pool coverage is configured in the canary submission with repeated
-   `--required-worker-pool oldlab --required-worker-pool gb10-arm64`. The
+   `--required-worker-pool oldlab --required-worker-pool gb10`. The
    selected task slate must include at least one task compatible with each
    required pool's CPU architecture when that architecture is known from active
    workers or autoscaler policy; fanout records
@@ -177,7 +177,7 @@ loom admin gb10-workers status \
   --cp-url "$CP_URL" \
   --admin-token "file:$ADMIN_TOKEN_FILE" \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --release-image-tag "$IMAGE_TAG" \
   --release-env-config-version "$ENV_CONFIG_VERSION" \
   --format json \
@@ -198,7 +198,7 @@ The anchor is not clean if any of these checks show:
 - `environment-state check` not returning `ok=true` / `drift=[]`.
 - stale OLDLAB or GB10 env/repo paths from an older `IMAGE_TAG`.
 - `last_blocked_reason=release_state_drift` on any autoscaler policy.
-- zero healthy slots for `oldlab` or `gb10-arm64`.
+- zero healthy slots for `oldlab` or `gb10`.
 - GB10 source provenance missing, dirty, or mismatched with desired `GIT_SHA`.
 - current service/control-plane/worker restarts that are not explained by the
   accepted rollout window.
@@ -322,7 +322,7 @@ loom eval batch create \
   --backend docker \
   --storage-preflight-evidence "$CANARY_DIR/01-clean-anchor/minio-storage-preflight-$IMAGE_TAG.json" \
   --required-worker-pool oldlab \
-  --required-worker-pool gb10-arm64 \
+  --required-worker-pool gb10 \
   | tee "$CANARY_DIR/04-submit/batch-create.txt"
 ```
 
@@ -346,7 +346,7 @@ jq '{id, state, expected_trial_count, required_worker_pools}' \
 ```
 
 Stop if `required_worker_pools` is not exactly
-`["oldlab","gb10-arm64"]` or if the expected count does not include the two
+`["oldlab","gb10"]` or if the expected count does not include the two
 #188 coverage trials. During the watch loop, also stop if batch debug or
 detail output records a `required_worker_pool_incompatible` fanout error; the
 task slate is not valid release evidence for all required pools.
@@ -447,7 +447,7 @@ uv run python scripts/staging_smoke_gate.py \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace "$K8S_NAMESPACE" \
   --required-worker-pool oldlab \
-  --required-worker-pool gb10-arm64 \
+  --required-worker-pool gb10 \
   --secret-needle env:STAGING_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --fail-on-skip \
@@ -474,7 +474,7 @@ Acceptance requires:
 - `runs.claimed_without_started=0`.
 - `runs.worker_pool_coverage` passes for both required pools.
 - `batch-debug-final.json` has terminal worker-pool evidence for `oldlab` and
-  `gb10-arm64`.
+  `gb10`.
 - Each architecture family has platform-successful terminal trials with
   persisted trajectory and artifact/ATIF evidence.
 - The object-store write probe passes at the documented count/concurrency.

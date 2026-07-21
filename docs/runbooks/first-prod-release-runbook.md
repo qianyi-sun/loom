@@ -254,7 +254,7 @@ uv run python scripts/ops/staging_validation_capacity_runner.py \
   --cp-url http://127.0.0.1:18081 \
   --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --hosts trt-gb10-1,trt-gb10-2,trt-gb10-3,trt-gb10-4,trt-gb10-5,trt-gb10-6,trt-gb10-8,trt-gb10-9,trt-gb10-10,trt-gb10-11,trt-gb10-12,trt-gb10-13,trt-gb10-14,trt-gb10-15 \
   --ssh-config deploy/worker-pools/gb10/ssh_config \
   --ssh-identity /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
@@ -312,7 +312,7 @@ uv run python scripts/ops/prod_pressure_worker_control.py \
   --staging-cp-url http://127.0.0.1:18081 \
   --staging-admin-token file:/path/to/staging-admin-token \
   --staging-environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --preemptible \
   --grace-period-seconds 600 \
   --watch-interval-seconds 30 \

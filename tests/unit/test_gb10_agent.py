@@ -18,7 +18,7 @@ from loom_cli.gb10_agent import (
 def test_build_plan_blocks_non_canary_host_until_policy_expands() -> None:
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="new-image",
         max_concurrent=10,
         env_config_version="gb10-env-v2",
@@ -28,7 +28,7 @@ def test_build_plan_blocks_non_canary_host_until_policy_expands() -> None:
     local = LocalWorkerState(
         hostname="trt-gb10-2",
         image_tag="old-image",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         max_concurrent=5,
         env_config_version="gb10-env-v1",
     )
@@ -45,7 +45,7 @@ def test_build_plan_blocks_non_canary_host_until_policy_expands() -> None:
 def test_build_plan_detects_capacity_intent_change() -> None:
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="gb10-env-v2",
@@ -57,7 +57,7 @@ def test_build_plan_detects_capacity_intent_change() -> None:
     local = LocalWorkerState(
         hostname="trt-gb10-1",
         image_tag="current-image",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         max_concurrent=10,
         env_config_version="gb10-env-v2",
         capacity_intent="active",
@@ -75,7 +75,7 @@ def test_build_plan_detects_capacity_intent_change() -> None:
 def test_build_plan_detects_source_git_commit_drift() -> None:
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="staging-53897aa",
         max_concurrent=10,
         env_config_version="staging-53897aa",
@@ -86,7 +86,7 @@ def test_build_plan_detects_source_git_commit_drift() -> None:
     local = LocalWorkerState(
         hostname="trt-gb10-1",
         image_tag="staging-53897aa",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         max_concurrent=10,
         env_config_version="staging-53897aa",
         source_git_commit="7b61049ffffffffff00000000000000000000000",
@@ -105,7 +105,7 @@ def test_build_plan_detects_source_git_commit_drift() -> None:
 def test_build_plan_detects_dirty_source_checkout() -> None:
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="staging-53897aa",
         max_concurrent=10,
         env_config_version="staging-53897aa",
@@ -116,7 +116,7 @@ def test_build_plan_detects_dirty_source_checkout() -> None:
     local = LocalWorkerState(
         hostname="trt-gb10-1",
         image_tag="staging-53897aa",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         max_concurrent=10,
         env_config_version="staging-53897aa",
         source_git_commit="53897aa3d6917dfe0800b6291012ab512bbfc6df",
@@ -132,7 +132,7 @@ def test_build_plan_detects_dirty_source_checkout() -> None:
 def test_build_plan_allows_canary_host_and_force_override() -> None:
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="new-image",
         max_concurrent=10,
         env_config_version="gb10-env-v2",
@@ -142,14 +142,14 @@ def test_build_plan_allows_canary_host_and_force_override() -> None:
     blocked_local = LocalWorkerState(
         hostname="trt-gb10-2",
         image_tag="old-image",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         max_concurrent=5,
         env_config_version="gb10-env-v1",
     )
     canary_local = LocalWorkerState(
         hostname="trt-gb10-1",
         image_tag="old-image",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         max_concurrent=5,
         env_config_version="gb10-env-v1",
     )
@@ -194,7 +194,7 @@ def test_report_node_includes_compose_source_git_provenance(
     ).stdout.strip()
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="staging-76875ac",
         max_concurrent=10,
         env_config_version="staging-76875ac",
@@ -204,7 +204,7 @@ def test_report_node_includes_compose_source_git_provenance(
     local = LocalWorkerState(
         hostname="trt-gb10-1",
         image_tag="staging-76875ac",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         max_concurrent=10,
         env_config_version="staging-76875ac",
     )
@@ -236,7 +236,7 @@ def test_report_node_includes_compose_source_git_provenance(
     )
 
     assert captured["url"] == (
-        "http://cp:8080/admin/gb10-worker-pools/production/gb10-arm64/nodes/trt-gb10-1/report"
+        "http://cp:8080/admin/gb10-worker-pools/production/gb10/nodes/trt-gb10-1/report"
     )
     body = captured["json"]
     assert isinstance(body, dict)
@@ -257,7 +257,7 @@ def test_render_env_updates_preserves_comments_and_appends_missing_keys(tmp_path
         {
             "LOOM_IMAGE_TAG": "new-image",
             "LOOM_WORKER_MAX_CONCURRENT": "10",
-            "LOOM_WORKER_POOL_NAME": "gb10-arm64",
+            "LOOM_WORKER_POOL_NAME": "gb10",
             "LOOM_WORKER_ENV_CONFIG_VERSION": "gb10-env-v2",
         },
     )
@@ -266,7 +266,7 @@ def test_render_env_updates_preserves_comments_and_appends_missing_keys(tmp_path
         "# operator note",
         "LOOM_IMAGE_TAG=new-image",
         "LOOM_WORKER_MAX_CONCURRENT=10",
-        "LOOM_WORKER_POOL_NAME=gb10-arm64",
+        "LOOM_WORKER_POOL_NAME=gb10",
         "LOOM_WORKER_ENV_CONFIG_VERSION=gb10-env-v2",
     ]
 
@@ -281,7 +281,7 @@ def test_apply_dry_run_uses_every_compose_file(
         "LOOM_IMAGE_TAG=old-image\n"
         "LOOM_WORKER_TOKEN=loom_w_existing_secret\n"
         "LOOM_WORKER_MINIO_SECRET_KEY=minio-secret\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=5\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=old-env\n",
         encoding="utf-8",
@@ -292,7 +292,7 @@ def test_apply_dry_run_uses_every_compose_file(
     hostnet.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="new-image",
         max_concurrent=10,
         env_config_version="new-env",
@@ -314,7 +314,7 @@ def test_apply_dry_run_uses_every_compose_file(
             cp_url="http://cp:8080",
             admin_token="env:LOOM_ADMIN_TOKEN",
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[base, hostnet],
@@ -348,7 +348,7 @@ def test_apply_dry_run_detects_worker_token_drift(
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
         "LOOM_WORKER_TOKEN=loom_w_old_secret\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n",
         encoding="utf-8",
@@ -359,7 +359,7 @@ def test_apply_dry_run_detects_worker_token_drift(
     worker_token_file.write_text("loom_w_new_secret\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -382,7 +382,7 @@ def test_apply_dry_run_detects_worker_token_drift(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=f"file:{worker_token_file}",
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -410,7 +410,7 @@ def test_apply_restarts_missing_active_worker_when_release_metadata_is_current(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=active\n",
@@ -420,7 +420,7 @@ def test_apply_restarts_missing_active_worker_when_release_metadata_is_current(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -458,7 +458,7 @@ def test_apply_restarts_missing_active_worker_when_release_metadata_is_current(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=None,
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -487,7 +487,7 @@ def test_apply_fails_when_active_worker_never_reaches_running_after_up(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=active\n",
@@ -497,7 +497,7 @@ def test_apply_fails_when_active_worker_never_reaches_running_after_up(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -536,7 +536,7 @@ def test_apply_fails_when_active_worker_never_reaches_running_after_up(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=None,
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -586,7 +586,7 @@ def test_apply_reuses_current_image_for_running_or_idle_exit_active_worker(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=active\n",
@@ -596,7 +596,7 @@ def test_apply_reuses_current_image_for_running_or_idle_exit_active_worker(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -634,7 +634,7 @@ def test_apply_reuses_current_image_for_running_or_idle_exit_active_worker(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=None,
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -660,7 +660,7 @@ def test_apply_running_wrong_image_pulls_builds_and_recreates_worker(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=active\n",
@@ -670,7 +670,7 @@ def test_apply_running_wrong_image_pulls_builds_and_recreates_worker(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -713,7 +713,7 @@ def test_apply_running_wrong_image_pulls_builds_and_recreates_worker(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=None,
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -836,7 +836,7 @@ def test_apply_updates_source_checkout_before_compose(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=staging-old\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=staging-old\n",
         encoding="utf-8",
@@ -848,7 +848,7 @@ def test_apply_updates_source_checkout_before_compose(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="staging-53897aa",
         max_concurrent=10,
         env_config_version="staging-53897aa",
@@ -881,7 +881,7 @@ def test_apply_updates_source_checkout_before_compose(
             cp_url="http://cp:8080",
             admin_token="env:LOOM_ADMIN_TOKEN",
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -923,7 +923,7 @@ def test_apply_cleans_legacy_repo_temp_env_files(
     env_file = source_dir / ".env"
     env_file.write_text(
         "LOOM_IMAGE_TAG=old-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=5\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=old-env\n",
         encoding="utf-8",
@@ -936,7 +936,7 @@ def test_apply_cleans_legacy_repo_temp_env_files(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="new-image",
         max_concurrent=10,
         env_config_version="new-env",
@@ -963,7 +963,7 @@ def test_apply_cleans_legacy_repo_temp_env_files(
             cp_url="http://cp:8080",
             admin_token="env:LOOM_ADMIN_TOKEN",
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -994,7 +994,7 @@ def test_apply_stopped_intent_stops_without_pull_or_restart(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=active\n",
@@ -1004,7 +1004,7 @@ def test_apply_stopped_intent_stops_without_pull_or_restart(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -1038,7 +1038,7 @@ def test_apply_stopped_intent_stops_without_pull_or_restart(
             cp_url="http://cp:8080",
             admin_token="env:LOOM_ADMIN_TOKEN",
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -1068,7 +1068,7 @@ def test_apply_new_draining_intent_updates_env_without_stopping_compose(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=active\n",
@@ -1078,7 +1078,7 @@ def test_apply_new_draining_intent_updates_env_without_stopping_compose(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="staging",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -1107,7 +1107,7 @@ def test_apply_new_draining_intent_updates_env_without_stopping_compose(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=None,
             environment="staging",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -1135,7 +1135,7 @@ def test_apply_draining_env_does_not_stop_in_flight_worker(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=draining\n",
@@ -1145,7 +1145,7 @@ def test_apply_draining_env_does_not_stop_in_flight_worker(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="staging",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -1174,7 +1174,7 @@ def test_apply_draining_env_does_not_stop_in_flight_worker(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=None,
             environment="staging",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -1203,7 +1203,7 @@ def test_apply_stopped_env_still_stops_running_container(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=stopped\n",
@@ -1213,7 +1213,7 @@ def test_apply_stopped_env_still_stops_running_container(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="staging",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -1249,7 +1249,7 @@ def test_apply_stopped_env_still_stops_running_container(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=None,
             environment="staging",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -1277,7 +1277,7 @@ def test_apply_stopped_env_fails_if_container_remains_running(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=current-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
         "LOOM_GB10_CAPACITY_INTENT=stopped\n",
@@ -1287,7 +1287,7 @@ def test_apply_stopped_env_fails_if_container_remains_running(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="staging",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="current-image",
         max_concurrent=10,
         env_config_version="current-env",
@@ -1317,7 +1317,7 @@ def test_apply_stopped_env_fails_if_container_remains_running(
             admin_token="env:LOOM_ADMIN_TOKEN",
             worker_token=None,
             environment="staging",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -1342,7 +1342,7 @@ def test_apply_failure_leaves_env_file_retryable(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=old-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=5\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=old-env\n",
         encoding="utf-8",
@@ -1351,7 +1351,7 @@ def test_apply_failure_leaves_env_file_retryable(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="new-image",
         max_concurrent=10,
         env_config_version="new-env",
@@ -1372,7 +1372,7 @@ def test_apply_failure_leaves_env_file_retryable(
             cp_url="http://cp:8080",
             admin_token="env:LOOM_ADMIN_TOKEN",
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -1399,7 +1399,7 @@ def test_apply_builds_local_worker_image_when_registry_pull_fails(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=old-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=5\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=old-env\n",
         encoding="utf-8",
@@ -1416,7 +1416,7 @@ def test_apply_builds_local_worker_image_when_registry_pull_fails(
     )
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="new-image",
         max_concurrent=10,
         env_config_version="new-env",
@@ -1445,7 +1445,7 @@ def test_apply_builds_local_worker_image_when_registry_pull_fails(
             cp_url="http://cp:8080",
             admin_token="env:LOOM_ADMIN_TOKEN",
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -1477,7 +1477,7 @@ def test_rollback_apply_publishes_previous_state_to_control_plane(
     env_file = tmp_path / ".env.remote-worker"
     env_file.write_text(
         "LOOM_IMAGE_TAG=bad-image\n"
-        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
         "LOOM_WORKER_MAX_CONCURRENT=10\n"
         "LOOM_WORKER_ENV_CONFIG_VERSION=bad-env\n",
         encoding="utf-8",
@@ -1486,7 +1486,7 @@ def test_rollback_apply_publishes_previous_state_to_control_plane(
     compose_file.write_text("services: {}\n", encoding="utf-8")
     desired = DesiredState(
         environment="production",
-        pool_name="gb10-arm64",
+        pool_name="gb10",
         image_tag="bad-image",
         max_concurrent=10,
         env_config_version="bad-env",
@@ -1528,7 +1528,7 @@ def test_rollback_apply_publishes_previous_state_to_control_plane(
             cp_url="http://cp:8080",
             admin_token="env:LOOM_ADMIN_TOKEN",
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             hostname="trt-gb10-1",
             env_file=env_file,
             compose_file=[compose_file],
@@ -1543,7 +1543,7 @@ def test_rollback_apply_publishes_previous_state_to_control_plane(
 
     assert rc == 0
     assert captured["url"] == (
-        "http://cp:8080/admin/gb10-worker-pools/production/gb10-arm64/desired-state"
+        "http://cp:8080/admin/gb10-worker-pools/production/gb10/desired-state"
     )
     assert captured["json"] == {
         "image_tag": "good-image",

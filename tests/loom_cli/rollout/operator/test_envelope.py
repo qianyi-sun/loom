@@ -422,7 +422,7 @@ def test_envelope_mode_rejects_explicit_manual_override_by_argv_presence(
         ["--smoke-submit-mode", "admin-on-behalf"],
         ["--smoke-api-token", "file:/private/staging-smoke-token"],
         ["--smoke-task-id", "loom-smoke/gb10-oracle-hello-world"],
-        ["--smoke-required-worker-pool", "gb10-arm64"],
+        ["--smoke-required-worker-pool", "gb10"],
         ["--smoke-agent", "oracle"],
         ["--smoke-on-behalf-username", "devansh"],
         ["--smoke-on-behalf-team-id", "11111111-1111-4111-8111-111111111111"],

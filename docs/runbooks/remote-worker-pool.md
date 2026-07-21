@@ -65,7 +65,7 @@ with the runtime hostname, which may be only a container ID in Docker Compose.
 Using the host name keeps Monitor, worker inventory, and capacity evidence
 readable when many remote workers attach through the same control plane.
 Set `LOOM_WORKER_POOL_NAME` to the stable pool identity shared by similar
-workers, for example `gb10-arm64`, `oldlab`, or `remote-worker`. Monitor,
+workers, for example `gb10`, `oldlab`, or `remote-worker`. Monitor,
 `loom resources status`, and Prometheus slot metrics group capacity by this
 pool name plus backend and CPU architecture.
 
@@ -313,7 +313,7 @@ resources instead of this fixed manual slice.
 The staged GB10 staging plan is recorded under
 `deploy/worker-pools/gb10/`. GB10 workers execute Docker sandboxes on ARM64
 hosts, but normal capacity management should still use the same Slurm
-autoscaler policy shape as OLDLAB: `actuator=slurm`, `pool_name=gb10-arm64`,
+autoscaler policy shape as OLDLAB: `actuator=slurm`, `pool_name=gb10`,
 `actuator_config.partition=gb10`, `actuator_config.cpu_arch=arm64`, and one
 allowed node per `trt-gb10-N` host. GB10's Docker data-root plus worker scratch
 must stay on each node's local ext4 disk. Do not use `/shared_work` for GB10
@@ -703,7 +703,7 @@ Desired state is stored per `(environment, pool_name)` and includes:
 For staging and staging release rollouts, apply the repository
 environment-state profile so the Slurm autoscaler policy and GB10 compatibility
 desired state converge together. The staging profile must write the
-`staging/gb10-arm64` CP key; `production/gb10-arm64` belongs to production and
+`staging/gb10` CP key; `production/gb10` belongs to production and
 is drift in current-path staging evidence. Run this from the Slurm submit host when the
 profile declares an external Slurm autoscaler supervisor; staging uses that
 path to install and check the OLDLAB user timer, and the rendered service must
@@ -745,7 +745,7 @@ admin API:
 curl -sS -X PUT \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  http://control-node.lan:18081/admin/gb10-worker-pools/staging/gb10-arm64/desired-state \
+  http://control-node.lan:18081/admin/gb10-worker-pools/staging/gb10/desired-state \
   -d '{
     "image_tag": "staging-<commit>",
     "source_git_commit": "<full-release-commit>",
@@ -786,7 +786,7 @@ loom admin gb10-workers status \
   --cp-url http://control-node.lan:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --release-image-tag "$IMAGE_TAG" \
   --release-env-config-version "$ENV_CONFIG_VERSION"
 ```
@@ -809,7 +809,7 @@ loom worker gb10-agent plan \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --env-file /home/qianyi/loom-worker-build-staging/.env \
   --source-dir /home/qianyi/loom-worker-build-staging
 
@@ -817,7 +817,7 @@ loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --env-file /home/qianyi/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
   --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
@@ -835,7 +835,7 @@ loom worker gb10-agent plan \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --env-file /home/qianyi/loom-worker-build-staging/.env \
   --source-dir /home/qianyi/loom-worker-build-staging \
   --worker-token file:/secure/path/current-worker-token
@@ -844,7 +844,7 @@ loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --env-file /home/qianyi/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
   --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \

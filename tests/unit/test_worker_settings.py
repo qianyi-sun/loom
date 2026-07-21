@@ -65,7 +65,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT", "2")
     monkeypatch.setenv("LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC", "12.5")
     monkeypatch.setenv("LOOM_WORKER_MAX_CONCURRENT", "10")
-    monkeypatch.setenv("LOOM_WORKER_POOL_NAME", "gb10-arm64")
+    monkeypatch.setenv("LOOM_WORKER_POOL_NAME", "gb10")
     monkeypatch.setenv("LOOM_WORKER_BLOCKING_IO_MAX_WORKERS", "40")
     monkeypatch.setenv("LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS", "300")
     monkeypatch.setenv("LOOM_WORKER_TRAJECTORY_CACHE_DIR", str(tmp_path))
@@ -82,7 +82,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     )
     s = WorkerSettings(_env_file=None)
     assert s.max_concurrent == 10
-    assert s.pool_name == "gb10-arm64"
+    assert s.pool_name == "gb10"
     assert s.minio_max_pool_connections == 512
     assert s.minio_connect_timeout_sec == 7.5
     assert s.minio_read_timeout_sec == 180

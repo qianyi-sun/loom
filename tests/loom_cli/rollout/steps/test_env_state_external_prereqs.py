@@ -79,7 +79,7 @@ def _write_external_prereq_profile(
 environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 max_slots = 150
@@ -91,7 +91,7 @@ repo_dir = "{repo_dir}"
 requested_concurrency = 10
 
 [external_slurm_runner_prerequisites]
-pools = ["gb10-arm64"]
+pools = ["gb10"]
 expected_repo_ref = "${{IMAGE_TAG}}"
 require_clean_repo = true
 require_worker_token_parity = true
@@ -357,7 +357,7 @@ def test_materializes_external_slurm_env_file_without_secret_evidence(
     assert "LOOM_WORKER_MINIO_SECRET_KEY=keep-secret" in first_content
     assert 'LOOM_WORKER_SUBPROCESS_GATEWAY_URL=""' in first_content
     assert "LOOM_WORKER_MAX_CONCURRENT=10" in first_content
-    assert "LOOM_WORKER_POOL_NAME=gb10-arm64" in first_content
+    assert "LOOM_WORKER_POOL_NAME=gb10" in first_content
 
     evidence = step_dir.artifact_path(
         "external-slurm-runner-prerequisites.json",

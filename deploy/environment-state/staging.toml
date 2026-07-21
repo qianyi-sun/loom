@@ -11,7 +11,7 @@ environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
 # #822: active capacity is 14 hosts / 140 slots; node 7 remains stopped below.
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 min_slots = 0
@@ -55,7 +55,7 @@ exclusive = true
 external_runner = true
 
 [[gb10_worker_pool_desired_states]]
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
@@ -119,7 +119,7 @@ rate_card_provider = "yibuapi"
 required = true
 
 [external_slurm_runner_prerequisites]
-pools = ["gb10-arm64"]
+pools = ["gb10"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true
@@ -136,13 +136,13 @@ env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker
 # Staging is a live environment, so this ships enabled=true + active=true:
 # applying the profile installs, enables (for boot) and starts the timer.
 [[external_slurm_autoscaler_supervisors]]
-name = "gb10-arm64-staging"
-pool_name = "gb10-arm64"
+name = "gb10-staging"
+pool_name = "gb10"
 service_name = "loom-autoscaler-gb10-staging.service"
 timer_name = "loom-autoscaler-gb10-staging.timer"
 working_directory = "/opt/loom-staging-runner/repo"
 python_path = "/opt/loom-staging-runner/venv/bin/python"
 script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "gb10-arm64", "--namespace", "loom-staging", "--kubeconfig", "/etc/loom/kubeconfig/staging.yaml", "--db-local-port", "15451", "--freshness-sec", "120"]
+args = ["--pool-name", "gb10", "--namespace", "loom-staging", "--kubeconfig", "/etc/loom/kubeconfig/staging.yaml", "--db-local-port", "15451", "--freshness-sec", "120"]
 enabled = true
 active = true

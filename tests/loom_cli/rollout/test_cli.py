@@ -997,7 +997,7 @@ class TestRolloutCLIRealRun:
                 "--smoke-task-id",
                 "loom-smoke/gb10-oracle-hello-world",
                 "--smoke-required-worker-pool",
-                "gb10-arm64",
+                "gb10",
                 "--smoke-agent",
                 "oracle",
                 "--smoke-on-behalf-username",
@@ -1014,7 +1014,7 @@ class TestRolloutCLIRealRun:
         assert ctx.smoke_submit_mode == "admin-on-behalf"
         assert ctx.smoke_api_token_source == "file:/run/loom/smoke-token"
         assert ctx.smoke_task_id == "loom-smoke/gb10-oracle-hello-world"
-        assert ctx.smoke_required_worker_pool == "gb10-arm64"
+        assert ctx.smoke_required_worker_pool == "gb10"
         assert ctx.smoke_agent == "oracle"
         assert ctx.smoke_on_behalf_username == "devansh"
         assert ctx.smoke_on_behalf_team_id == "agentic-rl-team-id"

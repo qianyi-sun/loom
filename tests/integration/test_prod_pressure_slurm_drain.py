@@ -309,7 +309,7 @@ async def test_handler_gb10_pool_still_requires_desired_state(
         async with session_factory() as s:
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
                 **_slurm_policy_values(
-                    pool_name="gb10-arm64",
+                    pool_name="gb10",
                     actuator="gb10",
                     actuator_config={"backend": "docker", "cpu_arch": "arm64"},
                 ),
@@ -322,7 +322,7 @@ async def test_handler_gb10_pool_still_requires_desired_state(
                 await apply_prod_pressure_signal(
                     s,
                     environment="staging",
-                    pool_name="gb10-arm64",
+                    pool_name="gb10",
                     signal=ProdPressureSignal(1, 0, 1),
                     preemptible=True,
                     grace_period_seconds=600,

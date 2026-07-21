@@ -329,7 +329,7 @@ def _add_hf_boundary_evidence_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--canary-summary-json", type=Path, default=None)
     p.add_argument("--worker-boundary-json", type=Path, default=None)
     p.add_argument("--canary-batch-id", default=None)
-    p.add_argument("--worker-pool", default="gb10-arm64")
+    p.add_argument("--worker-pool", default="gb10")
     p.add_argument("--cluster-config", type=Path, default=None)
     p.add_argument(
         "--gb10-workers-status",

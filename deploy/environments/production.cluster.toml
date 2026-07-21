@@ -13,7 +13,7 @@ persistent_storage_backend = "static-host-path"
 persistent_storage_host_path_root = "/data/loom-prod"
 
 # Trial execution capacity comes from Slurm-managed pools (`oldlab`,
-# `gb10-arm64`); the in-cluster loom-worker Deployment is omitted to
+# `gb10`); the in-cluster loom-worker Deployment is omitted to
 # avoid double-scheduling the OLDLAB host Docker daemon. See #383.
 [k8s_worker]
 enabled = false

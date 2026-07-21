@@ -44,7 +44,7 @@ _STAGING_GB10_HOST_INTENTS = {
     **{f"trt-gb10-{index}": "active" for index in range(1, 16) if index != 7},
     "trt-gb10-7": "stopped",
 }
-_STAGING_GB10_POOL_NAME = "gb10-arm64"
+_STAGING_GB10_POOL_NAME = "gb10"
 _STAGING_GB10_MAX_CONCURRENT = 10
 _STAGING_GB10_TARGET_SLOTS = 140
 _SAFE_WORKLOAD_CONTRACT_ENV_VALUES = frozenset({"internal_trusted", "True", "False"})

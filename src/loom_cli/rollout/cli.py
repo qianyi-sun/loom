@@ -187,7 +187,7 @@ _ROLLOUT_PRESETS: dict[str, RolloutPreset] = {
         ),
         smoke_submit_mode="admin-on-behalf",
         smoke_task_id="loom-smoke/gb10-oracle-hello-world",
-        smoke_required_worker_pool="gb10-arm64",
+        smoke_required_worker_pool="gb10",
         smoke_agent="oracle",
         smoke_on_behalf_username="devansh",
         smoke_on_behalf_team_id="env:LOOM_SMOKE_ON_BEHALF_TEAM_ID",
@@ -1106,7 +1106,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         action=_ExplicitStoreAction,
         help=(
             "Optional worker-pool requirement for smoke submission. "
-            "current-gb10 defaults to gb10-arm64 when the task id is not "
+            "current-gb10 defaults to gb10 when the task id is not "
             "overridden."
         ),
     )

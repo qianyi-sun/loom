@@ -80,7 +80,7 @@ def _canary_summary() -> dict[str, object]:
         "task_filter": {
             "task_ids": ["skilllearnbench/example/example-1"],
         },
-        "worker_pools": {"terminal": {"gb10-arm64": 2}},
+        "worker_pools": {"terminal": {"gb10": 2}},
         "expected_trial_count": 2,
         "succeeded_trials": 2,
         "task_provenance": {
@@ -226,7 +226,7 @@ def test_canary_row_requires_success_benchmark_and_gb10_pool(
         "state": "finished",
         "result_status": "succeeded",
         "task_filter": {"benchmark_id": "skilllearnbench"},
-        "required_worker_pools": ["gb10-arm64"],
+        "required_worker_pools": ["gb10"],
     }
     row.update(overrides)
 
@@ -234,7 +234,7 @@ def test_canary_row_requires_success_benchmark_and_gb10_pool(
         hf_boundary_evidence._is_successful_canary_row(
             row,
             benchmark_id="skilllearnbench",
-            worker_pool="gb10-arm64",
+            worker_pool="gb10",
         )
         is expected
     )
@@ -245,21 +245,21 @@ def test_canary_trial_summary_records_actual_task_provenance() -> None:
         [
             {
                 "state": "succeeded",
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
                 "task_benchmark_id": "skilllearnbench",
                 "task_set_id": None,
                 "worker_id": "worker-current-1",
             },
             {
                 "state": "succeeded",
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
                 "task_benchmark_id": "other",
                 "task_set_id": None,
                 "worker_id": "worker-current-2",
             },
             {
                 "state": "succeeded",
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
                 "task_benchmark_id": None,
                 "task_set_id": "other-set",
                 "worker_id": None,
@@ -269,7 +269,7 @@ def test_canary_trial_summary_records_actual_task_provenance() -> None:
     )
 
     assert summary == {
-        "worker_pools": {"active": {}, "terminal": {"gb10-arm64": 3}},
+        "worker_pools": {"active": {}, "terminal": {"gb10": 3}},
         "succeeded_trials": 3,
         "task_provenance": {
             "trial_count": 3,
@@ -321,7 +321,7 @@ def test_collect_explicit_canary_batch_persists_trial_worker_ids(
                             "created_at": "2026-01-01T00:00:00Z",
                             "finished_at": "2026-01-01T00:01:00Z",
                             "expected_trial_count": 2,
-                            "required_worker_pools": ["gb10-arm64"],
+                            "required_worker_pools": ["gb10"],
                         },
                     ],
                 )
@@ -330,14 +330,14 @@ def test_collect_explicit_canary_batch_persists_trial_worker_ids(
                     {
                         "state": "succeeded",
                         "worker_id": "worker-old-1",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "task_benchmark_id": "skilllearnbench",
                         "task_set_id": None,
                     },
                     {
                         "state": "succeeded",
                         "worker_id": "worker-old-2",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "task_benchmark_id": "skilllearnbench",
                         "task_set_id": None,
                     },
@@ -361,7 +361,7 @@ def test_collect_explicit_canary_batch_persists_trial_worker_ids(
         hf_boundary_evidence.collect_canary_summary_from_db(
             db_url="postgresql://loom:test@localhost/loom",
             benchmark_id="skilllearnbench",
-            worker_pool="gb10-arm64",
+            worker_pool="gb10",
             canary_batch_id=batch_id,
         ),
     )
