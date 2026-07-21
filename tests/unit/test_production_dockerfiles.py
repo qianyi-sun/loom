@@ -32,3 +32,9 @@ def test_control_plane_source_is_readable_by_declared_nonroot_workloads() -> Non
     text = (ROOT / "deploy" / "Dockerfile.control-plane").read_text()
 
     assert "chmod -R a+rX ./src ./migrations" in text
+
+
+def test_service_source_is_readable_by_declared_nonroot_workloads() -> None:
+    text = (ROOT / "deploy" / "Dockerfile.service").read_text()
+
+    assert "chmod -R a+rX ./src ./packages ./migrations" in text
