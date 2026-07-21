@@ -187,8 +187,47 @@ def test_release_artifact_isolates_exact_candidate_subset(tmp_path: Path) -> Non
         rehearsal_env = {item["name"]: item.get("value") for item in pod["containers"][0]["env"]}
         if name == "loom-web":
             assert rehearsal_env["LOOM_FRONTEND_REHEARSAL_ID"] == "5" * 24
+            assert pod["containers"][0]["volumeMounts"][-1] == {
+                "mountPath": "/usr/share/nginx/html",
+                "name": "loom-rehearsal-webroot",
+            }
+            assert pod["volumes"][-1] == {
+                "emptyDir": {"sizeLimit": "128Mi"},
+                "name": "loom-rehearsal-webroot",
+            }
+            assert pod["initContainers"] == [
+                {
+                    "args": [
+                        "-R",
+                        "/usr/share/nginx/html/.",
+                        "/var/run/loom-webroot/",
+                    ],
+                    "command": ["/bin/cp"],
+                    "image": "loom-web:" + plan.image_tag,
+                    "name": "loom-webroot-copy",
+                    "resources": {
+                        "limits": {"cpu": "200m", "memory": "128Mi"},
+                        "requests": {"cpu": "25m", "memory": "16Mi"},
+                    },
+                    "securityContext": {
+                        "allowPrivilegeEscalation": False,
+                        "capabilities": {"drop": ["ALL"]},
+                        "readOnlyRootFilesystem": True,
+                        "runAsGroup": 101,
+                        "runAsNonRoot": True,
+                        "runAsUser": 101,
+                    },
+                    "volumeMounts": [
+                        {
+                            "mountPath": "/var/run/loom-webroot",
+                            "name": "loom-rehearsal-webroot",
+                        }
+                    ],
+                }
+            ]
         else:
             assert "LOOM_FRONTEND_REHEARSAL_ID" not in rehearsal_env
+            assert pod.get("initContainers") is None
         assert name in artifact.deployment_images
     postgres = next(
         resource

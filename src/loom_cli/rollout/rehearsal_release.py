@@ -222,6 +222,13 @@ def _isolate_deployment(
             }
         )
     mounts.append({"mountPath": "/tmp", "name": "loom-rehearsal-tmp"})
+    if name == "loom-web":
+        mounts.append(
+            {
+                "mountPath": "/usr/share/nginx/html",
+                "name": "loom-rehearsal-webroot",
+            }
+        )
     volumes = pod.get("volumes")
     if volumes is None:
         volumes = []
@@ -240,6 +247,35 @@ def _isolate_deployment(
             raise ValueError("rehearsal deployment volume authority is invalid")
         secret["defaultMode"] = 0o440
     volumes.append({"emptyDir": {"sizeLimit": "128Mi"}, "name": "loom-rehearsal-tmp"})
+    if name == "loom-web":
+        webroot_mount = {
+            "mountPath": "/var/run/loom-webroot",
+            "name": "loom-rehearsal-webroot",
+        }
+        pod["initContainers"] = [
+            {
+                "args": [
+                    "-R",
+                    "/usr/share/nginx/html/.",
+                    "/var/run/loom-webroot/",
+                ],
+                "command": ["/bin/cp"],
+                "image": expected_image,
+                "name": "loom-webroot-copy",
+                "resources": {
+                    "limits": {"cpu": "200m", "memory": "128Mi"},
+                    "requests": {"cpu": "25m", "memory": "16Mi"},
+                },
+                "securityContext": copy.deepcopy(container["securityContext"]),
+                "volumeMounts": [webroot_mount],
+            }
+        ]
+        volumes.append(
+            {
+                "emptyDir": {"sizeLimit": "128Mi"},
+                "name": "loom-rehearsal-webroot",
+            }
+        )
     forbidden = {
         "affinity",
         "dnsConfig",

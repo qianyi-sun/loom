@@ -606,6 +606,15 @@ Ingress and NetworkPolicy specs, successful init/main termination, every schema
 v4 browser predicate, logout cleanup and rehearsal binding must all read back
 before the check can pass. Namespace deletion remains the only cleanup path.
 
+The isolated `loom-web` pod keeps its image root filesystem read-only while
+honouring the image's runtime configuration contract. One fixed non-root init
+container from that same exact candidate image copies only the baked webroot
+into a size-limited request-local `emptyDir`; the main container mounts that
+volume at `/usr/share/nginx/html`. Runtime `index.html` and configuration writes
+therefore cannot widen filesystem authority or escape the rehearsal namespace.
+An input manifest that already contains an init container is still rejected,
+and no mutable host or persistent volume is admitted.
+
 Tier 3 is therefore the first stage after the request-specific backup worker
 has published a restore-verified lease. The pre-backup assessment alone is
 never launch authority; only the complete Tier 0–3 attestation can be promoted
