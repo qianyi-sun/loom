@@ -31,11 +31,17 @@ from .backup import (
     normalize_backup_public_reason,
 )
 from .backup_job import PreflightBackupJobEnvelope, transition_backup_job
-from .backup_rotation import begin_candidate, fail_candidate
+from .backup_retirement import BackupPayloadRetirer
+from .backup_rotation import (
+    backup_rotation_admission_blockers,
+    begin_candidate,
+    fail_candidate,
+)
 from .candidate import CandidateBindingError, bind_configured_candidate
 from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
+from .installed_backup_retention import InstalledBackupRetentionService
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
 from .installed_lifecycle_capacity import InstalledLifecycleCapacityService
 from .installed_manifest_ownership import InstalledManifestOwnershipService
@@ -134,6 +140,11 @@ def _parser() -> argparse.ArgumentParser:
     capacity_commands.add_parser("inventory")
     capacity_apply = capacity_commands.add_parser("apply")
     capacity_apply.add_argument("--approved-plan-sha256", required=True)
+    retention = commands.add_parser("backup-retention")
+    retention_commands = retention.add_subparsers(dest="retention_action", required=True)
+    retention_commands.add_parser("inventory")
+    retention_apply = retention_commands.add_parser("apply")
+    retention_apply.add_argument("--approved-plan-sha256", required=True)
     return parser
 
 
@@ -162,6 +173,7 @@ class BrokerDependencies:
     new_payload_id: Callable[[], str] | None = None
     manifest_ownership: Any | None = None
     lifecycle_capacity: Any | None = None
+    backup_retention: Any | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -448,6 +460,42 @@ def _lifecycle_capacity(
     return 0
 
 
+def _backup_retention(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    action: str,
+    approved_plan_sha256: str | None,
+) -> int:
+    if caller.username != "qianyi":
+        return _safe_error(
+            dependencies,
+            "backup retention maintenance requires coordinator authority",
+        )
+    if (
+        dependencies.config.source_mode != "sealed-cumulative"
+        or dependencies.backup_retention is None
+    ):
+        return _safe_error(dependencies, "backup retention maintenance is not configured")
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_maintenance_idle()
+        if action == "inventory" and approved_plan_sha256 is None:
+            plan = dependencies.backup_retention.inventory()
+        elif action == "apply" and approved_plan_sha256 is not None:
+            plan = dependencies.backup_retention.load_claim(approved_plan_sha256)
+        else:
+            return 2
+    if action == "inventory":
+        _write_json(
+            dependencies.stdout,
+            {"plan": plan.to_dict(), "plan_sha256": plan.plan_digest},
+        )
+        return 0
+    result = dependencies.backup_retention.apply(plan)
+    _write_json(dependencies.stdout, result)
+    return 0
+
+
 def _start_staged(
     dependencies: BrokerDependencies,
     caller: CallerIdentity,
@@ -499,7 +547,7 @@ def _start_staged(
                 {"reason": "mutation_epoch_drift"},
             )
         rotation = dependencies.store.read_backup_rotation()
-        if rotation.candidate is not None or rotation.payload_count >= 2:
+        if backup_rotation_admission_blockers(rotation):
             raise LifecycleBusyError(
                 "detached backup storage is already at the transient limit",
                 {"reason": "backup_lifecycle_busy"},
@@ -1477,6 +1525,22 @@ def _default_dependencies() -> BrokerDependencies:
         if config.source_mode == "sealed-cumulative"
         else None
     )
+    backup = BackupCreator(
+        config,
+        service_uid=service_uid,
+        runner=backup_runner,
+        object_inventory_provider=inventory_provider,
+    )
+    backup_retention = (
+        InstalledBackupRetentionService(
+            config=config,
+            service_uid=service_uid,
+            store=store,
+            retirer=BackupPayloadRetirer(creator=backup, store=store),
+        )
+        if config.source_mode == "sealed-cumulative"
+        else None
+    )
     return BrokerDependencies(
         config=config,
         authenticate=lambda: caller_from_sudo(
@@ -1487,12 +1551,7 @@ def _default_dependencies() -> BrokerDependencies:
         ),
         preflight=lambda: collect_preflight(config, service_uid=service_uid),
         bind_candidate=bind_exact_candidate,
-        backup=BackupCreator(
-            config,
-            service_uid=service_uid,
-            runner=backup_runner,
-            object_inventory_provider=inventory_provider,
-        ),
+        backup=backup,
         store=store,
         lifecycle=lifecycle,
         systemd=systemd,
@@ -1509,6 +1568,7 @@ def _default_dependencies() -> BrokerDependencies:
         read_mutation_epoch=deep_preflight.current_mutation_epoch,
         manifest_ownership=manifest_ownership,
         lifecycle_capacity=lifecycle_capacity,
+        backup_retention=backup_retention,
     )
 
 
@@ -1569,6 +1629,13 @@ def _main(
                 deps,
                 caller,
                 action=args.capacity_action,
+                approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
+            )
+        if args.command == "backup-retention":
+            return _backup_retention(
+                deps,
+                caller,
+                action=args.retention_action,
                 approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
             )
         return 2

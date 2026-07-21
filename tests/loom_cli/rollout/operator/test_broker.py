@@ -589,6 +589,79 @@ def test_lifecycle_capacity_rejects_non_coordinator(tmp_path: Path) -> None:
     assert service.calls == []
 
 
+class _BackupRetention:
+    def __init__(self, lifecycle: FakeLifecycle) -> None:
+        self.lifecycle = lifecycle
+        self.calls: list[tuple[str, object]] = []
+        self.plan = SimpleNamespace(
+            plan_digest="f" * 64,
+            to_dict=lambda: {"rotation_generation": 7, "schema_version": 1},
+        )
+
+    def inventory(self):  # type: ignore[no-untyped-def]
+        self.calls.append(("inventory", self.lifecycle.guard_depth))
+        return self.plan
+
+    def load_claim(self, digest: str):  # type: ignore[no-untyped-def]
+        self.calls.append(("load", self.lifecycle.guard_depth))
+        assert digest == "f" * 64
+        return self.plan
+
+    def apply(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("apply", self.lifecycle.guard_depth))
+        assert plan is self.plan
+        return {"retired_payload_ids": ["payload-failed01"], "schema_version": 1}
+
+
+def test_backup_retention_requires_maintenance_and_digest_approval(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    service = _BackupRetention(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("qianyi", 2001),
+        config=sealed_config,
+        backup_retention=service,
+    )
+
+    assert broker_main(["backup-retention", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+    deps.lifecycle.maintenance = True
+    assert broker_main(["backup-retention", "inventory"], dependencies=dependencies) == 0
+    assert service.calls == [("inventory", 1)]
+    assert _last_json(deps.stdout)["plan_sha256"] == "f" * 64
+
+    assert (
+        broker_main(
+            [
+                "backup-retention",
+                "apply",
+                "--approved-plan-sha256",
+                "f" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    assert service.calls[-2:] == [("load", 1), ("apply", 0)]
+
+
+def test_backup_retention_rejects_non_coordinator(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    service = _BackupRetention(deps.lifecycle)
+    dependencies = replace(deps.dependencies, backup_retention=service)
+
+    assert broker_main(["backup-retention", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+
 @pytest.mark.parametrize("reason", ["", "   ", "x" * 501])
 def test_cancel_reason_is_nonempty_and_bounded(tmp_path: Path, reason: str) -> None:
     deps = fakes(tmp_path)

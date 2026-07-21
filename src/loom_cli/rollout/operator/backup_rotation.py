@@ -345,6 +345,16 @@ class BackupRotationResult:
     delete_payload_ids: tuple[str, ...] = ()
 
 
+def backup_rotation_admission_blockers(state: BackupRotationState) -> dict[str, str]:
+    """Return the single-source pre-request rotation capacity blockers."""
+    blockers: dict[str, str] = {}
+    if state.candidate is not None:
+        blockers["candidate"] = "present"
+    if state.payload_count >= 2:
+        blockers["transient-limit"] = "reached"
+    return blockers
+
+
 def begin_candidate(
     state: BackupRotationState,
     *,
@@ -580,6 +590,7 @@ __all__ = [
     "BackupRotationResult",
     "BackupRotationState",
     "acknowledge_retirement",
+    "backup_rotation_admission_blockers",
     "begin_candidate",
     "collect_failed_candidate",
     "fail_candidate",

@@ -19,6 +19,7 @@ def test_historical_blockers_are_checked_in_and_earliest_stage_classified() -> N
         "systemd-user-manager-latency",
         "backup-transient-launch-latency",
         "backup-object-inode-growth",
+        "backup-retirement-capacity",
         "capacity-row-baseline-isolation",
         "release-baseline-drift",
         "candidate-api-smoke-binding",

@@ -20,6 +20,10 @@ from loom_cli.rollout.image_readiness import (
     image_plan_digest,
 )
 from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
+from loom_cli.rollout.operator.backup_rotation import (
+    BackupRetirementRecord,
+    BackupRotationState,
+)
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
     CheckOperation,
@@ -27,6 +31,7 @@ from loom_cli.rollout.preflight_contract import (
     RegisteredCheck,
 )
 from loom_cli.rollout.preflight_registered_checks import (
+    build_backup_rotation_capacity_check,
     build_browser_runtime_check,
     build_capacity_high_water_check,
     build_gb10_candidate_source_check,
@@ -285,6 +290,29 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
             inode_free_percent=1,
         )
     )
+    blocked_rotation = BackupRotationState(
+        generation=7,
+        retirements=(
+            BackupRetirementRecord(
+                payload_id="payload-failed01",
+                request_id="req-failed0001",
+                bundle_name="20260719T180000Z-req-failed0001",
+                reason="failed",
+                manifest_sha256=None,
+            ),
+            BackupRetirementRecord(
+                payload_id="payload-failed02",
+                request_id="req-failed0002",
+                bundle_name="20260719T190000Z-req-failed0002",
+                reason="failed",
+                manifest_sha256=None,
+            ),
+        ),
+    )
+    rotation_capacity = build_backup_rotation_capacity_check(
+        lambda: blocked_rotation,
+        expected_rotation_digest=blocked_rotation.evidence_digest,
+    )
 
     clock = iter((0.0, 6.0))
     outputs = iter(
@@ -518,6 +546,11 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
             ),
         ),
         RegressionReplayCase(
+            "backup-retirement-capacity",
+            rotation_capacity,
+            CheckContext({"backup.rotation.sha256": blocked_rotation.evidence_digest}),
+        ),
+        RegressionReplayCase(
             "capacity-row-baseline-isolation",
             storage_baseline,
             baseline_context,
@@ -574,7 +607,7 @@ def _cases(tmp_path: Path) -> tuple[RegressionReplayCase, ...]:
 def test_all_historical_blockers_replay_through_production_checks(tmp_path: Path) -> None:
     evidence = replay_regression_manifest(_cases(tmp_path))
 
-    assert len(evidence.implementation_digests) == 14
+    assert len(evidence.implementation_digests) == 15
     assert set(evidence.implementation_digests) == set(evidence.evidence_hashes)
 
 

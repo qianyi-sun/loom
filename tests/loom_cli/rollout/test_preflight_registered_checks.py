@@ -36,6 +36,10 @@ from loom_cli.rollout.image_readiness import (
 )
 from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
+from loom_cli.rollout.operator.backup_rotation import (
+    BackupRetirementRecord,
+    BackupRotationState,
+)
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
@@ -54,6 +58,7 @@ from loom_cli.rollout.preflight_contract import (
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
     build_backup_lease_eligibility_check,
+    build_backup_rotation_capacity_check,
     build_browser_runtime_check,
     build_candidate_identity_check,
     build_capacity_high_water_check,
@@ -1029,6 +1034,90 @@ def _backup_lease(now: datetime) -> BackupLease:
     )
 
 
+def test_registered_backup_rotation_capacity_reports_retirement_limit() -> None:
+    state = BackupRotationState(
+        generation=7,
+        retirements=(
+            BackupRetirementRecord(
+                payload_id="payload-failed01",
+                request_id="req-failed0001",
+                bundle_name="20260719T180000Z-req-failed0001",
+                reason="failed",
+                manifest_sha256=None,
+            ),
+            BackupRetirementRecord(
+                payload_id="payload-failed02",
+                request_id="req-failed0002",
+                bundle_name="20260719T190000Z-req-failed0002",
+                reason="failed",
+                manifest_sha256=None,
+            ),
+        ),
+    )
+    check = build_backup_rotation_capacity_check(
+        lambda: state,
+        expected_rotation_digest=state.evidence_digest,
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            check,
+        )
+    )
+
+    result = next(
+        item
+        for item in dag.run(
+            CheckContext(
+                {
+                    "backup.rotation.sha256": state.evidence_digest,
+                    "runner.config.sha256": "a" * 64,
+                }
+            )
+        )
+        if item.check_id == check.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.failure_code == "backup.rotation-capacity.blocked"
+    assert result.evidence["payload-count"] == 2
+    assert result.evidence["retirement-count"] == 2
+    assert result.evidence["blockers"] == {"transient-limit": "reached"}
+
+
+def test_registered_backup_rotation_capacity_rejects_digest_drift() -> None:
+    expected = BackupRotationState()
+    observed = BackupRotationState(generation=1)
+    check = build_backup_rotation_capacity_check(
+        lambda: observed,
+        expected_rotation_digest=expected.evidence_digest,
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            check,
+        )
+    )
+
+    result = next(
+        item
+        for item in dag.run(
+            CheckContext(
+                {
+                    "backup.rotation.sha256": expected.evidence_digest,
+                    "runner.config.sha256": "a" * 64,
+                }
+            )
+        )
+        if item.check_id == check.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.evidence["blockers"] == {"rotation-digest": "drifted"}
+
+
 def _backup_lease_context(lease: BackupLease) -> CheckContext:
     return CheckContext(
         {
@@ -1070,8 +1159,7 @@ def test_registered_backup_lease_accepts_exact_unchanged_restored_authority() ->
     check = _backup_lease_check(lease, now)
     dag = PreflightDag(
         (
-            _passing_dependency("capacity.high-water"),
-            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("backup.rotation-capacity"),
             _passing_dependency("kubernetes.client"),
             check,
         )
@@ -1110,8 +1198,7 @@ def test_registered_backup_lease_selects_fresh_when_active_lease_is_absent() -> 
     )
     dag = PreflightDag(
         (
-            _passing_dependency("capacity.high-water"),
-            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("backup.rotation-capacity"),
             _passing_dependency("kubernetes.client"),
             check,
         )
@@ -1137,8 +1224,7 @@ def test_registered_backup_lease_selects_fresh_when_lease_expired() -> None:
     check = _backup_lease_check(expired, now)
     dag = PreflightDag(
         (
-            _passing_dependency("capacity.high-water"),
-            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("backup.rotation-capacity"),
             _passing_dependency("kubernetes.client"),
             check,
         )
@@ -1179,8 +1265,7 @@ def test_registered_backup_lease_rejects_unreadable_authority() -> None:
     )
     dag = PreflightDag(
         (
-            _passing_dependency("capacity.high-water"),
-            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("backup.rotation-capacity"),
             _passing_dependency("kubernetes.client"),
             check,
         )
@@ -1221,8 +1306,7 @@ def test_registered_backup_lease_rejects_runtime_authority_failure() -> None:
     )
     dag = PreflightDag(
         (
-            _passing_dependency("capacity.high-water"),
-            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("backup.rotation-capacity"),
             _passing_dependency("kubernetes.client"),
             check,
         )
@@ -1260,8 +1344,7 @@ def test_registered_backup_lease_rejects_context_drift_without_reading_lease() -
     bindings["staging.mutation-epoch"] = 8
     dag = PreflightDag(
         (
-            _passing_dependency("capacity.high-water"),
-            _passing_dependency("lifecycle.launch-cancel"),
+            _passing_dependency("backup.rotation-capacity"),
             _passing_dependency("kubernetes.client"),
             check,
         )

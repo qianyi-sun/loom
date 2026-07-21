@@ -45,11 +45,18 @@ def build_installed_backup_authority(
     ):
         raise ValueError("installed backup inventory drifts from mutation authority")
     state = store.read_backup_rotation()
+    expected_rotation_digest = state.evidence_digest
+
+    def current_rotation() -> BackupRotationState:
+        return store.read_backup_rotation()
+
     active = state.active
     if active is None or active.lease is None:
         return BackupAdmissionAuthority.fresh(
             schema_revision=inventory.schema_revision,
             object_inventory_root=inventory.inventory_root,
+            rotation_source=current_rotation,
+            expected_rotation_digest=expected_rotation_digest,
         )
     lease = active.lease
 
@@ -74,6 +81,8 @@ def build_installed_backup_authority(
         object_inventory_root=lease.object_inventory_root,
         manifest_sha256=lease.manifest_sha256,
         component_sha256=lease.component_sha256,
+        rotation_source=current_rotation,
+        expected_rotation_digest=expected_rotation_digest,
     )
 
 

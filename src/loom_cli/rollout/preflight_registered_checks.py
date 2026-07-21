@@ -78,6 +78,10 @@ from loom_cli.rollout.operator.backup_lease import (
     component_set_digest,
     evaluate_backup_lease,
 )
+from loom_cli.rollout.operator.backup_rotation import (
+    BackupRotationState,
+    backup_rotation_admission_blockers,
+)
 from loom_cli.rollout.operator.candidate import (
     CandidateBindingError,
     GitRunner,
@@ -978,8 +982,7 @@ def build_backup_lease_eligibility_check(
             tier=0,
             stage=StageCapability.STATIC,
             dependencies=(
-                "capacity.high-water",
-                "lifecycle.launch-cancel",
+                "backup.rotation-capacity",
                 "kubernetes.client",
             ),
             mutation_class=MutationClass.NONE,
@@ -1005,6 +1008,85 @@ def build_backup_lease_eligibility_check(
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
         implementation_version="v2",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def build_backup_rotation_capacity_check(
+    rotation_source: Callable[[], BackupRotationState],
+    *,
+    expected_rotation_digest: str,
+) -> RegisteredCheck:
+    """Build the Tier 0 bounded backup-rotation admission invariant."""
+    if len(expected_rotation_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_rotation_digest
+    ):
+        raise ValueError("backup rotation digest is invalid")
+
+    def failed(*, blockers: Mapping[str, str], digest: str = "0" * 64) -> CheckProbe:
+        return CheckProbe(
+            passed=False,
+            evidence={
+                "admission-allowed": False,
+                "active-present": False,
+                "candidate-present": False,
+                "payload-count": 0,
+                "retirement-count": 0,
+                "rotation-digest": digest,
+                "blockers": dict(blockers),
+            },
+        )
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if context.bindings["backup.rotation.sha256"] != expected_rotation_digest:
+            return failed(blockers={"input-binding": "mismatch"})
+        try:
+            state = rotation_source()
+        except (OSError, RuntimeError, ValueError):
+            return failed(blockers={"rotation-authority": "unavailable"})
+        blockers = backup_rotation_admission_blockers(state)
+        if state.evidence_digest != expected_rotation_digest:
+            blockers["rotation-digest"] = "drifted"
+        return CheckProbe(
+            passed=not blockers,
+            evidence={
+                "admission-allowed": not blockers,
+                "active-present": state.active is not None,
+                "candidate-present": state.candidate is not None,
+                "payload-count": state.payload_count,
+                "retirement-count": len(state.retirements),
+                "rotation-digest": state.evidence_digest,
+                "blockers": blockers,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="backup.rotation-capacity",
+            failure_code="backup.rotation-capacity.blocked",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("capacity.high-water", "lifecycle.launch-cancel"),
+            mutation_class=MutationClass.NONE,
+            input_keys=("backup.rotation.sha256",),
+            evidence_schema=(
+                EvidenceField("admission-allowed", "boolean"),
+                EvidenceField("active-present", "boolean"),
+                EvidenceField("candidate-present", "boolean"),
+                EvidenceField("payload-count", "integer"),
+                EvidenceField("retirement-count", "integer"),
+                EvidenceField("rotation-digest", "sha256"),
+                EvidenceField("blockers", "string-map"),
+            ),
+            timeout_seconds=15,
+            freshness_ttl_seconds=60,
+            remediation=(
+                "freeze admission and use digest-approved backup rotation retirement; never "
+                "delete payloads or old request evidence directly"
+            ),
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -2941,6 +3023,7 @@ def _empty_final_gate_probe() -> CheckProbe:
 __all__ = [
     "CredentialProbeSource",
     "build_backup_lease_eligibility_check",
+    "build_backup_rotation_capacity_check",
     "build_browser_runtime_check",
     "build_candidate_identity_check",
     "build_capacity_high_water_check",

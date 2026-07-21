@@ -477,3 +477,25 @@ directories, symlinks, special files, ownership/mode drift, manifest drift and
 cross-filesystem traversal remain fail closed. A crash-safe receipt makes the
 same approved plan idempotently retryable. The current `latest` payload and all
 manifest-less failed, partial or route-cutover evidence remain preserved.
+
+Persisted retirements already named by the rotation record use a separate
+installed maintenance surface, never the legacy directory inventory. An
+operator first enables the root-owned admission freeze, then runs
+`loom-staging-rollout backup-retention inventory`. The returned plan binds the
+rotation generation and digest, active payload identity, and every exact
+retirement record. `backup-retention apply --approved-plan-sha256 DIGEST`
+loads only that immutable service-owned plan. For each unreferenced record it
+publishes compact evidence, removes only the exact bundle with the normal
+no-follow retirement implementation, publishes a deletion receipt, and then
+CAS-acknowledges that record. The active lease, old request/events, journals,
+latest pointer, and any unrelated or unresolved path remain untouched.
+Partial convergence is retryable from the same plan only when every missing
+record has its exact receipt; extra records, candidates, active attempts, or
+identity drift fail closed.
+
+The same rotation-capacity predicate is registered at Tier 0 as
+`backup.rotation-capacity`. It blocks before request publication when a
+candidate exists, the exact rotation digest drifts, or the steady-one /
+transient-two bound has no free candidate slot. The broker repeats that shared
+predicate under the short launch lock only as a drift-sensitive admission
+recheck, so a late `backup_lifecycle_busy` is a preflight coverage regression.

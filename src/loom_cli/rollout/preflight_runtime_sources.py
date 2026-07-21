@@ -37,6 +37,7 @@ from loom_cli.rollout.manifest_readiness import (
 from loom_cli.rollout.migration_manifest_readiness import MigrationManifestArtifact
 from loom_cli.rollout.migration_readiness import MigrationPlanEvidence
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
+from loom_cli.rollout.operator.backup_rotation import BackupRotationState
 from loom_cli.rollout.operator.candidate import GitRunner
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
@@ -52,6 +53,7 @@ from loom_cli.rollout.preflight_contract import RegisteredCheck, SafeValue
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
     build_backup_lease_eligibility_check,
+    build_backup_rotation_capacity_check,
     build_browser_runtime_check,
     build_candidate_identity_check,
     build_capacity_high_water_check,
@@ -116,10 +118,13 @@ class BackupAdmissionAuthority:
     object_inventory_root: str
     manifest_sha256: str
     component_sha256: Mapping[str, str]
+    rotation_source: Callable[[], BackupRotationState]
+    expected_rotation_digest: str
 
     def __post_init__(self) -> None:
         digests = (
             self.expected_lease_digest,
+            self.expected_rotation_digest,
             self.object_inventory_root,
             self.manifest_sha256,
             *self.component_sha256.values(),
@@ -137,8 +142,17 @@ class BackupAdmissionAuthority:
         component_set_digest(self.component_sha256)
 
     @classmethod
-    def fresh(cls, *, schema_revision: str, object_inventory_root: str) -> BackupAdmissionAuthority:
+    def fresh(
+        cls,
+        *,
+        schema_revision: str,
+        object_inventory_root: str,
+        rotation_source: Callable[[], BackupRotationState] | None = None,
+        expected_rotation_digest: str | None = None,
+    ) -> BackupAdmissionAuthority:
         """Select a fresh checkpoint without claiming a reusable payload."""
+        empty_rotation = BackupRotationState()
+        source = rotation_source or (lambda: empty_rotation)
         return cls(
             lease_source=lambda: None,
             expected_lease_digest=_SHA256_ZERO,
@@ -152,6 +166,8 @@ class BackupAdmissionAuthority:
                 "object_inventory": _SHA256_ZERO,
                 "postgres": _SHA256_ZERO,
             },
+            rotation_source=source,
+            expected_rotation_digest=(expected_rotation_digest or empty_rotation.evidence_digest),
         )
 
     @classmethod
@@ -160,6 +176,9 @@ class BackupAdmissionAuthority:
 
         def unavailable_source() -> BackupLease | None:
             raise RuntimeError("backup admission authority is unavailable")
+
+        def unavailable_rotation() -> BackupRotationState:
+            raise RuntimeError("backup rotation authority is unavailable")
 
         return cls(
             lease_source=unavailable_source,
@@ -174,6 +193,8 @@ class BackupAdmissionAuthority:
                 "object_inventory": _SHA256_ZERO,
                 "postgres": _SHA256_ZERO,
             },
+            rotation_source=unavailable_rotation,
+            expected_rotation_digest=_SHA256_ZERO,
         )
 
 
@@ -410,6 +431,10 @@ class PreflightRuntimeSources:
                     )
                 ),
             ),
+            build_backup_rotation_capacity_check(
+                authority.rotation_source,
+                expected_rotation_digest=authority.expected_rotation_digest,
+            ),
             systemd_check,
             build_gb10_ssh_topology_check(
                 self.gb10_run,
@@ -558,6 +583,7 @@ class PreflightRuntimeSources:
             "backup.component-set.sha256": component_set_digest(authority.component_sha256),
             "backup.lease.sha256": authority.expected_lease_digest,
             "backup.manifest.sha256": authority.manifest_sha256,
+            "backup.rotation.sha256": authority.expected_rotation_digest,
             "backup.source-request": authority.source_request_id,
             "browser.report-schema.sha256": browser_report_schema_digest(),
             "candidate.base.sha": self.candidate.approved_base_sha or "none",
