@@ -1265,6 +1265,38 @@ Set `actuator_config.exclusive=false` only for deliberately shared Slurm nodes
 after lowering `requested_cpus`, `requested_memory_mib`, and
 `requested_concurrency` to a load-tested slice that coexists with other jobs.
 
+### Slurm scheduler fields (account / QoS / reservation)
+
+`actuator_config` accepts optional Slurm scheduler bindings, all defaulting to
+empty (no flag emitted, so existing configs are unchanged):
+
+- `slurm_account` — emitted as `sbatch --account=<x>`. Use per-environment
+  accounts (e.g. `loom-dev`, `loom-staging`, `loom-prod`) for attribution and
+  scheduler-side limits.
+- `slurm_reservation` — emitted as `sbatch --reservation=<x>`. Required if a
+  Slurm reservation carves nodes out of the general pool; without it, jobs
+  pinned via `--nodelist` to reserved nodes pend indefinitely.
+- `slurm_qos`, `qos_normal`, `qos_boost` — QoS names emitted as `sbatch
+  --qos=<x>`. The controller picks the QoS **per submission** from the pool's
+  DB-sourced slot sum (`active_slots + pending_slots`, i.e. the summed
+  `requested_concurrency` of live `SlurmWorkerJob` rows), NOT a `squeue` query:
+  - if that sum is **below** `min_slots`, the pool is under its warm floor and
+    the submission uses `qos_boost` (higher priority);
+  - otherwise it uses `qos_normal` (falling back to `slurm_qos` if set).
+  Note: with `min_slots=0` the boost condition is unreachable, so `qos_boost`
+  never fires — set a positive `min_slots` if you want a boost floor.
+
+### max_slots clamp (no overshoot)
+
+The autoscaler never submits a worker that would push the pool's committed slot
+sum past `max_slots`. When a submission would overshoot, its concurrency is
+clamped to the remaining budget (`max_slots - active_plus_pending`), and its
+CPU/memory are scaled **proportionally from the pre-clamp request** using an
+integer ceiling — e.g. a 10-slot / 115000 MiB worker clamped to 4 slots
+requests `ceil(115000 * 4 / 10) = 46000` MiB (never the per-slot default
+`4 * memory_mib_per_slot`, and never a banker's-rounded under-request).
+Resource-aware `safe_slots` selection is applied first, then this budget clamp.
+
 OLDLAB 1-5 should use conservative resource-aware scale-up rather than a
 static high `requested_concurrency`. With `resource_aware=true`, the autoscaler
 queries `sinfo` before each scale-up and excludes nodes with an active Loom
