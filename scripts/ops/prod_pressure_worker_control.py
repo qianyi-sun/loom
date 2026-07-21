@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Bridge production queue pressure into staging GB10 worker claim control.
+"""Bridge production queue pressure into staging worker claim control.
 
 This process reads a secret-free pressure snapshot from the production Control
-Plane and submits it to staging's GB10 lifecycle endpoint.  The staging CP
-immediately drains matching worker registry rows, so the existing claim query
-stops assigning new work before host-local Compose shutdown converges.
+Plane and submits it to staging's actuator-neutral worker-pool prod-pressure
+endpoint.  The staging CP applies the signal per the pool's actuator: GB10
+pools drain the worker registry, Slurm pools record drain intent that the
+external autoscaler actor + scheduler claim path consume.  Either way the
+existing claim query stops assigning new work.
+
+One invocation can fan out to several ``ENVIRONMENT:POOL`` targets; each target
+is fetched from the prod CP and applied to staging independently, and the
+per-target results are aggregated into a single evidence report.
 """
 
 from __future__ import annotations
@@ -74,19 +80,35 @@ def _http_json(
     return parsed
 
 
-def run_once(
+_REQUIRED_PRESSURE_FIELDS = (
+    "prod_pending_count",
+    "prod_active_count",
+    "prod_capacity_shortfall",
+)
+
+
+def _run_once_for_target(
     *,
     prod_cp_url: str,
     prod_admin_token: str,
     staging_cp_url: str,
     staging_admin_token: str,
-    staging_environment: str,
+    environment: str,
     pool_name: str,
     preemptible: bool,
     grace_period_seconds: int,
     freshness_seconds: int,
     timeout: float,
 ) -> dict[str, Any]:
+    """Bridge one ``(environment, pool_name)`` target.
+
+    GETs the secret-free pressure signal for ``pool_name`` from the prod CP,
+    then POSTs it to that target's actuator-neutral staging route. Returns a
+    per-target entry; on a POST/validation failure the entry carries an
+    ``error`` field (redacted) instead of ``worker_control`` and the caller
+    fails the aggregate report.
+    """
+    entry: dict[str, Any] = {"environment": environment, "pool_name": pool_name}
     pressure_path = (
         f"/admin/worker-pools/{pool_name}/prod-pressure"
         f"?freshness_sec={freshness_seconds}"
@@ -110,20 +132,17 @@ def run_once(
             "prod_capacity_shortfall": 1,
             "source": "production pressure signal unavailable; fail-closed drain",
         }
-    required = (
-        "prod_pending_count",
-        "prod_active_count",
-        "prod_capacity_shortfall",
-    )
-    missing = [field for field in required if field not in pressure]
+    entry["pressure"] = pressure
+    if pressure_fetch_error is not None:
+        entry["pressure_fetch_error"] = pressure_fetch_error
+        entry["fail_closed"] = True
+    missing = [field for field in _REQUIRED_PRESSURE_FIELDS if field not in pressure]
     if missing:
-        raise RuntimeError(
-            "production pressure response is missing: " + ", ".join(missing),
+        entry["error"] = (
+            "production pressure response is missing: " + ", ".join(missing)
         )
-    body = {
-        field: pressure[field]
-        for field in required
-    }
+        return entry
+    body = {field: pressure[field] for field in _REQUIRED_PRESSURE_FIELDS}
     body.update(
         {
             "source": str(pressure.get("source") or "control-plane prod queue summary"),
@@ -131,32 +150,80 @@ def run_once(
             "grace_period_seconds": grace_period_seconds,
         },
     )
-    result = _http_json(
-        method="POST",
-        base_url=staging_cp_url,
-        token=staging_admin_token,
-        path=(
-            f"/admin/gb10-worker-pools/{staging_environment}/{pool_name}/"
-            "prod-pressure"
-        ),
-        body=body,
-        timeout=timeout,
-    )
-    report: dict[str, Any] = {
+    try:
+        result = _http_json(
+            method="POST",
+            base_url=staging_cp_url,
+            token=staging_admin_token,
+            path=f"/admin/worker-pools/{environment}/{pool_name}/prod-pressure",
+            body=body,
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        entry["error"] = redact_text(str(exc))
+        return entry
+    entry["worker_control"] = result
+    return entry
+
+
+def run_once(
+    *,
+    prod_cp_url: str,
+    prod_admin_token: str,
+    staging_cp_url: str,
+    staging_admin_token: str,
+    targets: list[tuple[str, str]],
+    preemptible: bool,
+    grace_period_seconds: int,
+    freshness_seconds: int,
+    timeout: float,
+) -> dict[str, Any]:
+    """Fan out to every ``(environment, pool_name)`` target and aggregate.
+
+    Each target is bridged independently: a failing target records its error
+    and flips the top-level ``status`` to ``"fail"`` without aborting the
+    remaining targets.
+    """
+    entries: list[dict[str, Any]] = []
+    status = "pass"
+    for environment, pool_name in targets:
+        entry = _run_once_for_target(
+            prod_cp_url=prod_cp_url,
+            prod_admin_token=prod_admin_token,
+            staging_cp_url=staging_cp_url,
+            staging_admin_token=staging_admin_token,
+            environment=environment,
+            pool_name=pool_name,
+            preemptible=preemptible,
+            grace_period_seconds=grace_period_seconds,
+            freshness_seconds=freshness_seconds,
+            timeout=timeout,
+        )
+        if entry.get("error") is not None:
+            status = "fail"
+        entries.append(entry)
+    return {
         "artifact_type": "prod-pressure-worker-control",
-        "status": "pass",
-        "pressure": pressure,
-        "worker_control": result,
+        "status": status,
+        "targets": entries,
     }
-    if pressure_fetch_error is not None:
-        report["pressure_fetch_error"] = pressure_fetch_error
-        report["fail_closed"] = True
-    return report
 
 
 def _write_evidence(path: Path, report: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dict(report), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _parse_target(value: str) -> tuple[str, str]:
+    """Parse a ``--target ENVIRONMENT:POOL`` value into a target tuple."""
+    environment, sep, pool_name = value.partition(":")
+    environment = environment.strip()
+    pool_name = pool_name.strip()
+    if not sep or not environment or not pool_name:
+        raise argparse.ArgumentTypeError(
+            f"--target must be ENVIRONMENT:POOL with both non-empty, got {value!r}",
+        )
+    return (environment, pool_name)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -175,6 +242,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--staging-environment", default="staging")
     parser.add_argument("--pool-name", default="gb10-arm64")
+    parser.add_argument(
+        "--target",
+        dest="targets",
+        action="append",
+        type=_parse_target,
+        default=None,
+        metavar="ENVIRONMENT:POOL",
+        help=(
+            "Repeatable staging target as ENVIRONMENT:POOL. When omitted, the "
+            "single --staging-environment/--pool-name pair is used."
+        ),
+    )
     parser.set_defaults(preemptible=True)
     preemptible = parser.add_mutually_exclusive_group()
     preemptible.add_argument("--preemptible", dest="preemptible", action="store_true")
@@ -213,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
     except SecretSourceError as exc:
         parser.error(str(exc))
 
+    targets = args.targets or [(args.staging_environment, args.pool_name)]
+
     while True:
         try:
             report = run_once(
@@ -220,8 +301,7 @@ def main(argv: list[str] | None = None) -> int:
                 prod_admin_token=prod_admin_token,
                 staging_cp_url=args.staging_cp_url,
                 staging_admin_token=staging_admin_token,
-                staging_environment=args.staging_environment,
-                pool_name=args.pool_name,
+                targets=targets,
                 preemptible=args.preemptible,
                 grace_period_seconds=args.grace_period_seconds,
                 freshness_seconds=args.freshness_seconds,
@@ -236,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write("\n")
         sys.stdout.flush()
         if args.watch_interval_seconds <= 0:
-            return 0
+            return 0 if report["status"] == "pass" else 1
         time.sleep(args.watch_interval_seconds)
 
 

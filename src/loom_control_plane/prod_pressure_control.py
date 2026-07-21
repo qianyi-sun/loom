@@ -20,6 +20,7 @@ from loom.db.schema import (
     GB10WorkerNodeStatus,
     Trial,
     Worker,
+    WorkerPoolAutoscalerPolicy,
 )
 from loom_control_plane.gb10_worker_lifecycle import (
     _reconcile_worker_registry_for_host_intents,
@@ -233,6 +234,99 @@ async def _active_staging_trials_by_host(
     return [(trial, str(hostname)) for trial, hostname in rows]
 
 
+async def _apply_slurm_prod_pressure(
+    session: AsyncSession,
+    *,
+    policy: WorkerPoolAutoscalerPolicy,
+    signal: ProdPressureSignal,
+    preemptible: bool,
+    grace_period_seconds: int,
+    now: datetime,
+) -> dict[str, object]:
+    """Record prod-pressure drain intent for a Slurm-actuated pool (#892).
+
+    Single-writer contract: this only records intent into
+    ``policy.prod_pressure_state``. The external autoscaler actor is the sole
+    writer of the Slurm side effects (``scancel``, ``SlurmWorkerJob`` state,
+    ``Worker.drain_state``); the scheduler claim path *reads* the intent to
+    fence new claims. No worker or job rows are mutated here, so this composes
+    with the in-cluster CP (which cannot reach ``scancel``).
+    """
+    raw = policy.prod_pressure_state if isinstance(policy.prod_pressure_state, dict) else {}
+    state: dict[str, Any] = dict(raw)
+    previous_signal = state.get("last_signal")
+    previous_grace_action = state.get("last_grace_action")
+
+    if signal.has_pressure:
+        already_draining = state.get("state") == "draining"
+        if not already_draining:
+            state = {"state": "draining", "started_at": now.isoformat()}
+        grace = _grace_evidence(
+            control=state,
+            signal=signal,
+            preemptible=preemptible,
+            grace_period_seconds=grace_period_seconds,
+            now=now,
+        )
+        action = "pressure_held" if already_draining else "draining"
+    else:
+        grace = _grace_evidence(
+            control=state,
+            signal=signal,
+            preemptible=preemptible,
+            grace_period_seconds=grace_period_seconds,
+            now=now,
+        )
+        action = "recovered" if state.get("state") == "draining" else "no_pressure"
+
+    current_signal = signal.public_dict()
+    state["last_signal"] = current_signal
+    state["last_grace_action"] = grace["action"]
+    state["preemptible"] = bool(preemptible)
+    state["grace_period_seconds"] = int(grace_period_seconds)
+    state["updated_at"] = now.isoformat()
+
+    # Draining keeps the intent for the external actor + claim path to read;
+    # recovery/no-pressure clears it to NULL so both see normal operation.
+    drain_intent_active = action in {"draining", "pressure_held"}
+    policy.prod_pressure_state = state if drain_intent_active else None
+    policy.updated_at = now
+
+    if (
+        action in {"draining", "recovered"}
+        or previous_signal != current_signal
+        or previous_grace_action != grace["action"]
+    ):
+        session.add(
+            AdminAuditEvent(
+                actor="prod-pressure-controller",
+                action="worker.capacity.prod_pressure",
+                target_type="worker_pool",
+                target_id=f"{policy.environment}/{policy.pool_name}",
+                event_metadata={
+                    "action": action,
+                    "actuator": "slurm",
+                    "cause": current_signal["cause"],
+                    "prod_pending_count": signal.prod_pending_count,
+                    "prod_active_count": signal.prod_active_count,
+                    "prod_capacity_shortfall": signal.prod_capacity_shortfall,
+                    "grace_action": grace["action"],
+                },
+            ),
+        )
+    await session.flush()
+    return {
+        "action": action,
+        "actuator": "slurm",
+        "prod_pressure": current_signal,
+        "new_staging_claims_allowed": not drain_intent_active,
+        "drain_intent_active": drain_intent_active,
+        "grace": grace,
+        "environment": policy.environment,
+        "pool_name": policy.pool_name,
+    }
+
+
 async def apply_prod_pressure_signal(
     session: AsyncSession,
     *,
@@ -248,6 +342,29 @@ async def apply_prod_pressure_signal(
     if grace_period_seconds < 0:
         raise ValueError("grace_period_seconds must be non-negative")
     now = now or datetime.now(UTC)
+
+    # Dispatch on the pool's actuator. Slurm pools record drain intent only;
+    # the external autoscaler actor performs the scancel/release. GB10 pools
+    # (and pools without a policy row, for backward compatibility) fall through
+    # to the registry-fencing desired-state drain below.
+    policy_row = (
+        await session.execute(
+            select(WorkerPoolAutoscalerPolicy).where(
+                WorkerPoolAutoscalerPolicy.environment == environment,
+                WorkerPoolAutoscalerPolicy.pool_name == pool_name,
+            ),
+        )
+    ).scalar_one_or_none()
+    if policy_row is not None and policy_row.actuator == "slurm":
+        return await _apply_slurm_prod_pressure(
+            session,
+            policy=policy_row,
+            signal=signal,
+            preemptible=preemptible,
+            grace_period_seconds=grace_period_seconds,
+            now=now,
+        )
+
     desired = await get_desired_state(
         session,
         environment=environment,

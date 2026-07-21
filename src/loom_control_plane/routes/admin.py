@@ -485,16 +485,22 @@ async def put_gb10_worker_pool_desired_state(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/gb10-worker-pools/{environment}/{pool_name}/prod-pressure")
-async def put_gb10_worker_pool_prod_pressure(
+async def _consume_prod_pressure(
+    *,
+    request: Request,
     environment: str,
     pool_name: str,
-    request: Request,
     payload: _ProdPressurePayload,
-    authorization: str | None = Header(default=None),
+    authorization: str | None,
+    scope: str,
 ) -> dict[str, object]:
-    """Consume a prod pressure signal into desired state and claim fencing."""
-    await _require_admin_scope(request, authorization, "admin:gb10_workers")
+    """Consume a prod-pressure signal for one pool.
+
+    ``apply_prod_pressure_signal`` dispatches on the pool's actuator: GB10 pools
+    mutate desired state + registry claim fencing; Slurm pools record a drain
+    intent the external actor + claim path consume (#892).
+    """
+    await _require_admin_scope(request, authorization, scope)
     try:
         async with request.app.state.session_factory() as session:
             result = await apply_prod_pressure_signal(
@@ -514,6 +520,44 @@ async def put_gb10_worker_pool_prod_pressure(
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/worker-pools/{environment}/{pool_name}/prod-pressure")
+async def put_worker_pool_prod_pressure(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    payload: _ProdPressurePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Actuator-neutral prod-pressure route for any worker pool (#892)."""
+    return await _consume_prod_pressure(
+        request=request,
+        environment=environment,
+        pool_name=pool_name,
+        payload=payload,
+        authorization=authorization,
+        scope="admin:worker_pools",
+    )
+
+
+@router.post("/gb10-worker-pools/{environment}/{pool_name}/prod-pressure")
+async def put_gb10_worker_pool_prod_pressure(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    payload: _ProdPressurePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Backward-compatible alias of the neutral prod-pressure route."""
+    return await _consume_prod_pressure(
+        request=request,
+        environment=environment,
+        pool_name=pool_name,
+        payload=payload,
+        authorization=authorization,
+        scope="admin:gb10_workers",
+    )
 
 
 @router.get("/gb10-worker-pools/{environment}/{pool_name}/desired-state")

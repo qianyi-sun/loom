@@ -1502,6 +1502,82 @@ async def _apply_slurm_release_drained(
     return SlurmScaleUpActuatorResult()
 
 
+async def _apply_slurm_prod_pressure_drain(
+    session: AsyncSession,
+    row: WorkerPoolAutoscalerPolicy,
+    *,
+    runner: SlurmWorkerCommandRunner | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Consume the prod-pressure drain intent recorded by the CP handler (#892).
+
+    Single-writer: this is the ONLY place a prod-pressure drain scancels
+    ``SlurmWorkerJob``s and flips ``Worker.drain_state``. Returns a summary when
+    a drain intent is active (so the caller skips normal scaling this tick), or
+    ``None`` when there is no active intent. Only ``cancel_retryable``
+    (preemptible + grace elapsed) reclaims jobs now; ``wait`` /
+    ``not_preemptible`` holds -- running jobs finish naturally while the
+    scheduler claim path (which reads the same intent) fences new claims.
+    """
+    raw = row.prod_pressure_state if isinstance(row.prod_pressure_state, dict) else None
+    if not raw or raw.get("state") != "draining":
+        return None
+    grace_action = str(raw.get("last_grace_action") or "wait")
+    if grace_action != "cancel_retryable":
+        return {
+            "action": "prod_pressure_hold",
+            "grace_action": grace_action,
+            "cancelled_job_ids": [],
+        }
+    config = _slurm_config_from_policy(row)
+    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    jobs = (
+        (
+            await session.execute(
+                select(SlurmWorkerJob)
+                .where(
+                    SlurmWorkerJob.environment == row.environment,
+                    SlurmWorkerJob.pool_name == row.pool_name,
+                    SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                )
+                .with_for_update(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    cancelled_job_ids: list[str] = []
+    worker_ids: set[Any] = set()
+    for job in jobs:
+        if job.job_id:
+            await runner.cancel_job(job.job_id)
+            cancelled_job_ids.append(job.job_id)
+        job.state = "cancelled"
+        job.slurm_state = "CANCELLED"
+        job.pending_reason = "cancelled by prod-pressure reclaim"
+        job.finished_at = now
+        job.updated_at = now
+        if job.worker_id is not None:
+            worker_ids.add(job.worker_id)
+    if worker_ids:
+        # Fence the reclaimed workers; scancel kills the job process, so the
+        # crash reclaimer requeues any orphaned in-flight trials.
+        await session.execute(
+            update(Worker)
+            .where(Worker.id.in_(worker_ids))
+            .values(
+                drain_state="drained",
+                drain_reason="prod-pressure reclaim",
+                drain_owner="prod-pressure-controller",
+            ),
+        )
+    return {
+        "action": "prod_pressure_drain",
+        "grace_action": grace_action,
+        "cancelled_job_ids": cancelled_job_ids,
+    }
+
+
 async def _apply_gb10_host_intent(
     session: AsyncSession,
     row: WorkerPoolAutoscalerPolicy,
@@ -1733,6 +1809,34 @@ async def reconcile_worker_pool_autoscaler_once(
                 runner=slurm_runner,
                 now=now,
             )
+            # Prod-pressure reclaim takes precedence over normal scaling: if the
+            # CP handler recorded an active drain intent, reclaim (or hold) this
+            # tick and skip the scale-up/down decision entirely.
+            prod_pressure_summary = await _apply_slurm_prod_pressure_drain(
+                session,
+                row,
+                runner=slurm_runner,
+                now=now,
+            )
+            if prod_pressure_summary is not None:
+                observation = await _load_observation(
+                    session,
+                    row,
+                    now=now,
+                    freshness_sec=freshness_sec,
+                )
+                decision = _base_decision(
+                    action=str(prod_pressure_summary["action"]),
+                    reason=f"prod_pressure grace={prod_pressure_summary['grace_action']}",
+                    policy=_policy_to_config(row),
+                    observation=observation,
+                    desired_slots=0,
+                )
+                _persist_decision(row, decision, now=now)
+                if actuator_error is not None:
+                    row.last_error = actuator_error
+                decisions.append(decision)
+                continue
         observation = await _load_observation(
             session,
             row,
