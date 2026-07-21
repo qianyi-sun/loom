@@ -208,6 +208,61 @@ def test_rehearsal_accepts_aged_assessment_after_exact_fresh_recheck(
     assert all(execution.expires_at > now[0] for execution in rehearsal.executions)
 
 
+def test_rehearsal_accepts_fresh_volatile_evidence_for_same_input(
+    tmp_path: Path,
+) -> None:
+    registry = _registry()
+    checks = list(registry.checks)
+    target = next(check for check in checks if check.spec.check_id == "systemd.user-manager")
+    calls = 0
+
+    def probe(_context: CheckContext) -> CheckProbe:
+        nonlocal calls
+        calls += 1
+        return CheckProbe(passed=True, evidence={"result": f"ok-{calls}"})
+
+    checks[checks.index(target)] = RegisteredCheck(
+        spec=target.spec,
+        implementation_version=target.implementation_version,
+        operations={CheckOperation.PROBE: probe},
+    )
+    registry = PreflightRegistry.build(checks, through_tier=3)
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+    assessment = pipeline.assess(context=context)
+
+    rehearsal = pipeline.rehearse(context=context, assessment=assessment)
+
+    assert rehearsal.passed
+    assert calls == 2
+
+
+def test_rehearsal_accepts_checkpoint_transition_for_backup_lease(
+    tmp_path: Path,
+) -> None:
+    registry = _registry()
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+    assessment = pipeline.assess(context=context)
+    transitioned = dict(context.bindings)
+    transitioned["input.backup.lease-eligibility"] = "restore-verified-checkpoint"
+
+    rehearsal = pipeline.rehearse(
+        context=CheckContext(transitioned),
+        assessment=assessment,
+    )
+
+    assert rehearsal.passed
+
+
 def test_rehearsal_and_attestation_are_separate_restore_authority_steps(
     tmp_path: Path,
 ) -> None:

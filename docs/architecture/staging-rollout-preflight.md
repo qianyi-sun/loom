@@ -57,8 +57,13 @@ immutable build/baseline artifacts are retained while a request-specific
 checkpoint is created and restore-verified.
 Tier 3 reruns the earlier probes as drift checks, reuses the immutable image,
 manifest, and baseline artifacts instead of rebuilding them, and refuses to
-attest if any input fingerprint, implementation digest, evidence hash, or TTL
-differs from the assessment. This removes the previous circular dependency in
+attest if a rerun is stale or failed, if a check implementation changed, or if
+an authority input fingerprint changed. The one declared exception is
+`backup.lease-eligibility`: its input must transition from the pre-backup
+fresh-checkpoint sentinel to the newly restore-verified checkpoint. Volatile
+latency, transient-unit and host observations may produce a new evidence hash;
+the fresh passing evidence becomes the attestation authority and is rechecked
+again at final admission. This removes the previous circular dependency in
 which clone rehearsal needed a verified lease while the broker demanded the
 rehearsal attestation before it could create that lease.
 

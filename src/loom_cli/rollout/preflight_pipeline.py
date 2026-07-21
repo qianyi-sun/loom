@@ -28,6 +28,8 @@ from loom_cli.rollout.preflight_contract import (
 )
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
+_CHECKPOINT_TRANSITION_CHECK_IDS = frozenset({"backup.lease-eligibility"})
+
 
 @dataclass(frozen=True, slots=True)
 class PreflightBlocker:
@@ -503,9 +505,11 @@ class PreflightPipeline:
             if (
                 later.expires_at <= now
                 or not later.passed
-                or earlier.input_fingerprint != later.input_fingerprint
                 or earlier.implementation_digest != later.implementation_digest
-                or earlier.evidence_hash != later.evidence_hash
+                or (
+                    check_id not in _CHECKPOINT_TRANSITION_CHECK_IDS
+                    and earlier.input_fingerprint != later.input_fingerprint
+                )
             ):
                 raise ValueError("pre-backup assessment evidence drifted")
 
