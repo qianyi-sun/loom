@@ -28,15 +28,21 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _NAMESPACE_RE = re.compile(r"loom-rehearsal-[0-9a-f]{24}\Z")
 _DATABASE_RE = re.compile(r"loom_rehearsal_[0-9a-f]{24}\Z")
 _SECRET_NAMES = ("loom-admin-secret", "loom-secrets", "loom-staging-tls")
-_DATABASE_URL_KEYS = (
+_DIRECT_DATABASE_URL_KEYS = (
     "cp-db-url",
-    "cp-db-url-pool",
     "gw-db-url",
-    "gw-db-url-pool",
     "svc-db-url",
+)
+_OPTIONAL_POOL_DATABASE_URL_KEYS = (
+    "cp-db-url-pool",
+    "gw-db-url-pool",
     "svc-db-url-pool",
 )
-_DATABASE_KEYS = ("postgres-password", "postgres-user", *_DATABASE_URL_KEYS)
+_REQUIRED_DATABASE_KEYS = (
+    "postgres-password",
+    "postgres-user",
+    *_DIRECT_DATABASE_URL_KEYS,
+)
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_SECRET_BYTES = 1024 * 1024
 
@@ -229,13 +235,14 @@ def _read_secret(
             raise ValueError("rehearsal admin Secret token contract is invalid") from exc
         cloned_data["admin-token"] = base64.b64encode(token.encode()).decode()
     if name == "loom-secrets":
-        if any(key not in cloned_data for key in _DATABASE_KEYS):
+        if any(key not in cloned_data for key in _REQUIRED_DATABASE_KEYS):
             raise ValueError("rehearsal checkpoint database Secret authority is incomplete")
         direct_url = f"postgresql+psycopg://loom_rehearsal@loom-postgres:5432/{database}"
         replacements = {
             "postgres-password": "rehearsal-trust-only",
             "postgres-user": "loom_rehearsal",
-            **{key: direct_url for key in _DATABASE_URL_KEYS},
+            **{key: direct_url for key in _DIRECT_DATABASE_URL_KEYS},
+            **{key: direct_url for key in _OPTIONAL_POOL_DATABASE_URL_KEYS if key in cloned_data},
         }
         cloned_data.update(
             {key: base64.b64encode(value.encode()).decode() for key, value in replacements.items()}

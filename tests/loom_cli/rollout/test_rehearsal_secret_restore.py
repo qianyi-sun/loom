@@ -21,6 +21,7 @@ def _checkpoint(
     tmp_path: Path,
     *,
     complete_database_authority: bool = True,
+    include_pool_authority: bool = True,
     valid_encoding: bool = True,
 ) -> Path:
     root = tmp_path / "backup"
@@ -43,21 +44,16 @@ def _checkpoint(
         if not valid_encoding and name == "loom-admin-secret":
             data["key"] = "not-base64!"
         if name == "loom-secrets" and complete_database_authority:
-            data.update(
-                {
-                    key: base64.b64encode(("old-" + key).encode()).decode()
-                    for key in (
-                        "cp-db-url",
-                        "cp-db-url-pool",
-                        "gw-db-url",
-                        "gw-db-url-pool",
-                        "postgres-password",
-                        "postgres-user",
-                        "svc-db-url",
-                        "svc-db-url-pool",
-                    )
-                }
-            )
+            keys = [
+                "cp-db-url",
+                "gw-db-url",
+                "postgres-password",
+                "postgres-user",
+                "svc-db-url",
+            ]
+            if include_pool_authority:
+                keys.extend(("cp-db-url-pool", "gw-db-url-pool", "svc-db-url-pool"))
+            data.update({key: base64.b64encode(("old-" + key).encode()).decode() for key in keys})
         payload = yaml.safe_dump(
             {
                 "apiVersion": "v1",
@@ -197,6 +193,31 @@ def test_secret_artifact_requires_complete_database_authority(tmp_path: Path) ->
             database="loom_rehearsal_" + "a" * 24,
             plan_digest="b" * 64,
         )
+
+
+def test_secret_artifact_preserves_absent_optional_pool_urls(tmp_path: Path) -> None:
+    manifest = _checkpoint(tmp_path, include_pool_authority=False)
+    digest = backup_manifest_sha256(manifest, expected_owner_uid=os.geteuid())
+
+    artifact = build_rehearsal_secret_artifact(
+        manifest,
+        manifest_sha256=digest,
+        namespace="loom-rehearsal-" + "a" * 24,
+        database="loom_rehearsal_" + "a" * 24,
+        plan_digest="b" * 64,
+    )
+
+    loom_secrets = next(
+        document
+        for document in yaml.safe_load_all(artifact.payload)
+        if document["metadata"]["name"] == "loom-secrets"
+    )
+    decoded = {key: base64.b64decode(value).decode() for key, value in loom_secrets["data"].items()}
+    expected_url = (
+        "postgresql+psycopg://loom_rehearsal@loom-postgres:5432/loom_rehearsal_" + "a" * 24
+    )
+    assert {decoded[key] for key in decoded if key.endswith("-db-url")} == {expected_url}
+    assert not any(key.endswith("-db-url-pool") for key in decoded)
 
 
 def test_secret_artifact_rejects_invalid_base64_from_valid_manifest(tmp_path: Path) -> None:

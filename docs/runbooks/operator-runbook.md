@@ -1485,6 +1485,11 @@ The writer removes an inherited POSIX access ACL and proves that no ACL remains
 before writing PostgreSQL, object, secret, inventory, or manifest bytes. A
 missing removal primitive, metadata drift, or residual named reader fails the
 backup before publication; the later trusted reader remains equally strict.
+The isolated Secret clone requires PostgreSQL credentials plus each service's
+direct DSN and rewrites them to the rehearsal database. PgBouncer DSNs remain
+optional exactly as in the workloads: present pool keys are also rewritten,
+while an absent optional pool key stays absent and the service uses its direct
+DSN fallback.
 
 When `manifests.field-ownership` reports only the recognized legacy lifecycle
 resources, keep rollout admission disabled with the root-owned maintenance
