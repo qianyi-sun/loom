@@ -13,6 +13,7 @@ import pytest
 from loom_cli.rollout.failure_authority import classify_rollout_failure
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.operator import worker as worker_module
+from loom_cli.rollout.operator.backup import BackupError
 from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope, transition_backup_job
 from loom_cli.rollout.operator.model import ActivePointer, DriverEnvelope, RequestEvent
 from loom_cli.rollout.operator.policy import sanitized_child_environment
@@ -484,6 +485,52 @@ def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path
     state = store.read_preflight_backup_job_state(REQUEST_ID)
     assert state.phase is LifecyclePhase.BACKUP_FAILED
     assert state.failure_code == "backup_cancelled"
+
+
+def test_backup_worker_persists_secret_safe_backup_stage_code(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        raise BackupError("postgres_dump_failed")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=fail_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 1
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "postgres_dump_failed"
+
+
+def test_backup_worker_redacts_unclassified_failure_text(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        raise ValueError("secret-bearing diagnostic")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=fail_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 1
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "backup_failed"
+    persisted = (
+        store.root / "requests" / REQUEST_ID / "preflight-backup" / "state.json"
+    ).read_text()
+    assert "secret-bearing" not in persisted
 
 
 def _install_fake_signal_handlers(

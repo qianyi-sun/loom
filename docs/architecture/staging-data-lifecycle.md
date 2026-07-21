@@ -504,3 +504,7 @@ candidate exists, the exact rotation digest drifts, or the steady-one /
 transient-two bound has no free candidate slot. The broker repeats that shared
 predicate under the short launch lock only as a drift-sensitive admission
 recheck, so a late `backup_lifecycle_busy` is a preflight coverage regression.
+Detached workers persist the stable, secret-safe `BackupError` stage code in
+their failed job state. Unclassified exception text is never persisted and
+collapses to `backup_failed`, so a replacement is diagnosable without exposing
+child-process output or mutating the failed request.

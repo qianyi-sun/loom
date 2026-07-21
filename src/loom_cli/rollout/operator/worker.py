@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import pwd
+import re
 import signal
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from loom_cli.rollout.failure_authority import RolloutFailureEvidence
 from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 
+from .backup import BackupError
 from .backup_job import (
     BackupJobState,
     PreflightBackupJobEnvelope,
@@ -48,6 +50,16 @@ class _ArgumentError(ValueError):
 
 class _CancellationSignal(BaseException):
     pass
+
+
+_FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
+
+
+def _backup_failure_code(error: BaseException) -> str:
+    """Retain only the secret-safe stage code already owned by BackupError."""
+    if isinstance(error, BackupError) and _FAILURE_CODE_RE.fullmatch(error.code) is not None:
+        return error.code
+    return "backup_failed"
 
 
 class _Parser(argparse.ArgumentParser):
@@ -460,7 +472,7 @@ def run_backup_job(
             failure_code="backup_cancelled",
         )
         return 130
-    except BaseException:
+    except BaseException as error:
         current = dependencies.store.read_preflight_backup_job_state(envelope.request_id)
         action = (
             LifecycleAction.SEAL_CANCELLED
@@ -472,7 +484,9 @@ def run_backup_job(
             current,
             action=action,
             failure_code=(
-                "backup_cancelled" if action is LifecycleAction.SEAL_CANCELLED else "backup_failed"
+                "backup_cancelled"
+                if action is LifecycleAction.SEAL_CANCELLED
+                else _backup_failure_code(error)
             ),
         )
         return 1
