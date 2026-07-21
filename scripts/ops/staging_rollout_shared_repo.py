@@ -542,7 +542,11 @@ def _converge_service_owned(
         for name in relative_chain:
             if ensure:
                 child, was_created = _ensure_child(
-                    current, name, uid=service.uid, gid=shared_gid, mode=SERVICE_DIR_MODE,
+                    current,
+                    name,
+                    uid=service.uid,
+                    gid=shared_gid,
+                    mode=SERVICE_DIR_MODE,
                 )
                 if was_created:
                     created.append(name)
