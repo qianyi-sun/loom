@@ -13,7 +13,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, insert, text
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import LlmCall, ProviderConnection, RateCard, Secret, Team, Token
+from loom.auth import mint_step_jwt
+from loom.db.schema import (
+    LlmCall,
+    ProviderConnection,
+    ProviderConnectionShare,
+    RateCard,
+    Secret,
+    Team,
+    Token,
+)
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from tests.integration.gateway_db import delete_all_teams_and_quotas, delete_team_and_quota
@@ -32,7 +41,7 @@ def seed_data(postgres_url: str) -> tuple[UUID, str]:
             insert(Token).values(
                 token_hash=hashlib.sha256(raw_token.encode()).digest(),
                 type="team",
-                scopes=["submit"],
+                scopes=["submit", "llm:call"],
                 team_id=team_id,
                 issued_at=datetime.now(UTC),
                 expires_at=None,
@@ -168,6 +177,45 @@ def test_chat_rejects_bad_token(app, seed_data):  # type: ignore[no-untyped-def]
             },
         )
         assert r.status_code == 401
+
+
+def test_chat_rejects_valid_token_without_llm_call_scope(
+    app,
+    seed_data,
+    postgres_url,
+):  # type: ignore[no-untyped-def]
+    team_id, _ = seed_data
+    raw_token = f"loom_team_{uuid4().hex}"
+    engine = create_engine(postgres_url)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_token.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
+    engine.dispose()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "anthropic/claude-opus-4-7",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+            },
+        )
+    assert r.status_code == 401
+    assert r.json()["detail"] == "not authorized"
 
 
 def test_chat_rejects_team_id_mismatch(app, seed_data):  # type: ignore[no-untyped-def]
@@ -545,6 +593,103 @@ def test_chat_byo_uses_egress_pool_for_openai_compatible(  # type: ignore[no-unt
     }
 
 
+def test_chat_byo_accepts_header_only_connection_id(  # type: ignore[no-untyped-def]
+    app_with_byo,
+    seed_data,
+    postgres_url,
+):
+    app, _ = app_with_byo
+    team_id, raw_token = seed_data
+    conn_id = _seed_byo_connection(postgres_url, team_id)
+    pool = _CapturingEgressPool()
+    with TestClient(app) as client:
+        app.state.egress_client_pool = pool
+        r = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {raw_token}",
+                "x-loom-provider-connection-id": str(conn_id),
+            },
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert pool.connection_ids == [conn_id]
+
+
+def test_chat_byo_accepts_matching_header_and_body(  # type: ignore[no-untyped-def]
+    app_with_byo,
+    seed_data,
+    postgres_url,
+):
+    app, _ = app_with_byo
+    team_id, raw_token = seed_data
+    conn_id = _seed_byo_connection(postgres_url, team_id)
+    pool = _CapturingEgressPool()
+    with TestClient(app) as client:
+        app.state.egress_client_pool = pool
+        r = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {raw_token}",
+                "x-loom-provider-connection-id": str(conn_id),
+            },
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert pool.connection_ids == [conn_id]
+
+
+def test_chat_byo_rejects_mismatched_header_and_body(  # type: ignore[no-untyped-def]
+    app_with_byo,
+    seed_data,
+    postgres_url,
+):
+    app, _ = app_with_byo
+    team_id, raw_token = seed_data
+    conn_id = _seed_byo_connection(postgres_url, team_id)
+    pool = _CapturingEgressPool()
+    with TestClient(app) as client:
+        app.state.egress_client_pool = pool
+        r = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {raw_token}",
+                "x-loom-provider-connection-id": str(uuid4()),
+            },
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+    assert r.status_code == 400
+    assert "body says" in r.json()["detail"]
+    assert "header says" in r.json()["detail"]
+    assert pool.connection_ids == []
+
+
 def test_chat_byo_omits_null_optional_message_fields_before_forwarding(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
@@ -879,6 +1024,120 @@ def test_chat_byo_invalid_uuid_returns_400(  # type: ignore[no-untyped-def]
     assert "valid UUID" in r.json()["detail"]
 
 
+def test_chat_byo_shared_connection_uses_jwt_authority_and_target_attribution(
+    app_with_byo,
+    seed_data,
+    postgres_url,
+):  # type: ignore[no-untyped-def]
+    app, _ = app_with_byo
+    owner_team, _ = seed_data
+    target_team = uuid4()
+    target_trial = uuid4()
+    conn_id = _seed_byo_connection(postgres_url, owner_team)
+
+    engine = create_engine(postgres_url)
+    with engine.begin() as conn:
+        conn.execute(insert(Team).values(id=target_team, name=f"target-{target_team}"))
+        conn.execute(
+            insert(ProviderConnectionShare).values(
+                provider_connection_id=conn_id,
+                target_team_id=target_team,
+                created_by_actor="test:chat-share",
+            )
+        )
+    engine.dispose()
+
+    pool = _CapturingEgressPool()
+    with TestClient(app) as client:
+        app.state.egress_client_pool = pool
+        settings: GatewaySettings = app.state.settings
+        step_jwt = mint_step_jwt(
+            team_id=target_team,
+            trial_id=target_trial,
+            step_id="family-evolver",
+            ttl_sec=60,
+            signing_key=settings.step_jwt_signing_key.get_secret_value(),
+            provider_connection_id=conn_id,
+        )
+        r = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {step_jwt}",
+                "x-loom-provider-connection-id": str(conn_id),
+            },
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(target_team),
+                    "trial_id": str(uuid4()),
+                    "step_id": "caller-value-is-not-authority",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert pool.connection_ids == [conn_id]
+
+    engine = create_engine(postgres_url)
+    with engine.connect() as conn:
+        row = (
+            conn.execute(
+                text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+                {"trial_id": target_trial},
+            )
+            .mappings()
+            .one()
+        )
+    engine.dispose()
+    assert row["team_id"] == target_team
+    assert row["trial_id"] == target_trial
+    assert row["step_id"] == "family-evolver"
+
+
+def test_chat_byo_jwt_rejects_conflicting_body_before_lookup(
+    app_with_byo,
+    seed_data,
+    postgres_url,
+):  # type: ignore[no-untyped-def]
+    app, _ = app_with_byo
+    team_id, _ = seed_data
+    conn_id = _seed_byo_connection(postgres_url, team_id)
+    pool = _CapturingEgressPool()
+    with TestClient(app) as client:
+        app.state.egress_client_pool = pool
+        settings: GatewaySettings = app.state.settings
+        step_jwt = mint_step_jwt(
+            team_id=team_id,
+            trial_id=uuid4(),
+            step_id="family-evolver",
+            ttl_sec=60,
+            signing_key=settings.step_jwt_signing_key.get_secret_value(),
+            provider_connection_id=conn_id,
+        )
+        r = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {step_jwt}",
+                "x-loom-provider-connection-id": str(conn_id),
+            },
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": str(uuid4()),
+                },
+            },
+        )
+    assert r.status_code == 400
+    assert "JWT scope is authoritative" in r.json()["detail"]
+    assert "body says" in r.json()["detail"]
+    assert pool.connection_ids == []
+
+
 def test_chat_byo_cross_team_returns_404(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
@@ -923,16 +1182,20 @@ def test_chat_byo_cross_team_returns_404(  # type: ignore[no-untyped-def]
         with sf() as s:
             from sqlalchemy import delete
 
-            s.execute(delete(ProviderConnection).where(
-                ProviderConnection.team_id == other_team,
-            ))
+            s.execute(
+                delete(ProviderConnection).where(
+                    ProviderConnection.team_id == other_team,
+                )
+            )
             delete_team_and_quota(s, other_team)
             s.commit()
         eng.dispose()
 
 
 def test_chat_records_family_evolver_dialect_from_loom_block(
-    app, seed_data, postgres_url,
+    app,
+    seed_data,
+    postgres_url,
 ):  # type: ignore[no-untyped-def]
     """#672 PR-3: when the client sets ``loom.dialect`` on a chat call,
     the resulting ``llm_calls`` row must carry that value instead of

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import jwt
@@ -79,15 +80,36 @@ def test_authcontext_backwards_compat_fields_present() -> None:
 
 
 def test_mint_without_provider_connection_id_omits_claim() -> None:
-    """Default mint (no provider_connection_id) → claim absent, verify
-    returns ctx.provider_connection_id is None. Backwards compat: JWTs
-    minted before issue #72 still verify cleanly."""
+    """Default mint stays compatible with the legacy unbound JWT shape."""
     token = mint_step_jwt(
         team_id=uuid4(), trial_id=uuid4(), step_id="main",
         ttl_sec=60, signing_key=_KEY,
     )
     ctx = verify_step_jwt(token, signing_key=_KEY)
     assert ctx.provider_connection_id is None
+    assert ctx.provider_connection_id_bound is False
+
+
+def test_pre_provider_claim_jwt_keeps_legacy_unbound_shape() -> None:
+    """Rolling-upgrade compatibility: an old JWT with no claim still verifies."""
+    now = datetime.now(UTC)
+    body = jwt.encode(
+        {
+            "iss": "loom-control-plane",
+            "sub": "step-session",
+            "team_id": str(uuid4()),
+            "trial_id": str(uuid4()),
+            "step_id": "main",
+            "exp": int((now + timedelta(seconds=60)).timestamp()),
+            "iat": int(now.timestamp()),
+            "scopes": ["llm:call"],
+        },
+        _KEY,
+        algorithm="HS256",
+    )
+    ctx = verify_step_jwt(f"loom_step_{body}", signing_key=_KEY)
+    assert ctx.provider_connection_id is None
+    assert ctx.provider_connection_id_bound is False
 
 
 def test_mint_with_provider_connection_id_roundtrips() -> None:
@@ -122,8 +144,7 @@ def test_mint_with_provider_connection_id_does_not_affect_other_claims() -> None
 
 
 def test_explicit_none_provider_connection_id_equivalent_to_omitted() -> None:
-    """Passing None explicitly should produce the same shape as
-    omitting the kwarg entirely (no claim in payload, None on verify)."""
+    """Passing None explicitly stays equivalent to omitting the kwarg."""
     a = mint_step_jwt(
         team_id=uuid4(), trial_id=uuid4(), step_id="s",
         ttl_sec=60, signing_key=_KEY,
@@ -131,3 +152,19 @@ def test_explicit_none_provider_connection_id_equivalent_to_omitted() -> None:
     )
     ctx = verify_step_jwt(a, signing_key=_KEY)
     assert ctx.provider_connection_id is None
+    assert ctx.provider_connection_id_bound is False
+
+
+def test_explicit_null_provider_binding_roundtrips() -> None:
+    token = mint_step_jwt(
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="family_evolver",
+        ttl_sec=60,
+        signing_key=_KEY,
+        provider_connection_id=None,
+        provider_connection_id_bound=True,
+    )
+    ctx = verify_step_jwt(token, signing_key=_KEY)
+    assert ctx.provider_connection_id is None
+    assert ctx.provider_connection_id_bound is True

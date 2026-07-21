@@ -117,6 +117,35 @@ def test_issue_batch_runner_token(
     assert row.scopes == ["submit:batch"]
 
 
+def test_issue_family_orchestrator_token(
+    app,  # type: ignore[no-untyped-def]
+    postgres_url: str,
+) -> None:
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/family-orchestrator-tokens",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={"expires_in_days": 90},
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["token"].startswith("loom_fo_")
+
+    engine = create_engine(postgres_url)
+    sl = sessionmaker(engine)
+    with sl() as s:
+        row = s.execute(
+            select(Token).where(
+                Token.token_hash == hashlib.sha256(body["token"].encode()).digest(),
+            ),
+        ).scalar_one()
+    engine.dispose()
+    assert row.type == "family_orchestrator"
+    assert row.team_id is None
+    assert row.scopes == ["family:evolve"]
+
+
 def test_issue_worker_token_accepts_singleton_admin_secret(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
