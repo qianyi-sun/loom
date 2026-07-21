@@ -36,6 +36,9 @@ class CommandResult(Protocol):
     @property
     def stdout(self) -> str: ...
 
+    @property
+    def stderr(self) -> str: ...
+
 
 CommandRunner = Callable[[Sequence[str]], CommandResult]
 
