@@ -592,7 +592,10 @@ The isolated release includes the exact candidate `loom-llm-gateway`
 deployment and service as well as the web, service, and control-plane
 workloads. This keeps the authenticated rate-card browser check inside the
 rehearsal namespace and cloned database instead of crossing into protected
-staging or failing against an absent upstream.
+staging or failing against an absent upstream. The gateway image makes its
+editable source and migration tree read-only accessible to the rehearsal's
+fixed non-root UID; sealed checkout file modes therefore cannot make the
+candidate start only as root.
 
 Browser report schema v4 has two mutually exclusive bindings. Protected final
 acceptance retains the broker request/attempt/envelope binding; Tier 3 instead

@@ -6,6 +6,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY migrations ./migrations
-RUN pip install --no-cache-dir -e .
+RUN chmod -R a+rX ./src ./migrations && \
+    pip install --no-cache-dir -e .
 EXPOSE 9100
 CMD ["python", "-m", "loom_llm_gateway"]
