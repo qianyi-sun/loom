@@ -12,6 +12,7 @@ from loom_cli.rollout.operator.manifest_apply_contract import (
     server_side_schema_validation_argv,
 )
 from loom_cli.rollout.operator.readonly_preflight_authority import READONLY_KUBECONFIG_PATH
+from loom_cli.rollout.systemd_readiness import probe_user_manager_readonly
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
 
 
@@ -125,9 +126,15 @@ def test_image_and_rehearsal_adapters_reject_authority_drift(tmp_path: Path) -> 
 def test_systemd_preflight_is_allowlisted_and_uses_short_timeout(tmp_path: Path) -> None:
     calls: list[dict[str, object]] = []
 
+    outputs = {
+        ("systemctl", "--user", "show", "--property=Version", "--value"): "255.4\n",
+        ("loginctl", "show-user", "995", "--property=Linger", "--value"): "yes\n",
+        ("cat", "/proc/sys/kernel/random/boot_id"): ("7e88249c-33bf-4660-a8bd-d27fe375ee51\n"),
+    }
+
     def run(argv, **kwargs):
         calls.append({"argv": tuple(argv), **kwargs})
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=outputs.get(tuple(argv), ""), stderr="")
 
     commands = InstalledPreflightCommands(
         _config(tmp_path),
@@ -136,8 +143,14 @@ def test_systemd_preflight_is_allowlisted_and_uses_short_timeout(tmp_path: Path)
     )
 
     commands.systemd_preflight(("systemd-run", "--user", "/usr/bin/true"))
+    evidence = probe_user_manager_readonly(commands.systemd_preflight, uid=995)
 
     assert calls[0]["timeout"] == 10
     assert calls[0]["argv"][0] == "systemd-run"
+    assert evidence is not None
+    assert evidence.boot_id == "7e88249c-33bf-4660-a8bd-d27fe375ee51"
+    assert all(call["timeout"] == 10 for call in calls)
     with pytest.raises(ValueError, match="outside authority"):
         commands.systemd_preflight(("journalctl", "--user"))
+    with pytest.raises(ValueError, match="outside authority"):
+        commands.systemd_preflight(("cat", "/etc/passwd"))

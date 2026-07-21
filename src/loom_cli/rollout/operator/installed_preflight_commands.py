@@ -18,6 +18,7 @@ from .manifest_apply_contract import (
 from .readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 
 _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+_BOOT_ID_PROBE = ("cat", "/proc/sys/kernel/random/boot_id")
 
 
 class CommandResult(Protocol):
@@ -89,9 +90,12 @@ class InstalledPreflightCommands:
 
     def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
         """Run only the fixed Tier 0 systemd probes with a short RPC bound."""
-        if not argv or argv[0] not in {"loginctl", "systemctl", "systemd-run"}:
+        command = tuple(argv)
+        if not command or (
+            command[0] not in {"loginctl", "systemctl", "systemd-run"} and command != _BOOT_ID_PROBE
+        ):
             raise ValueError("systemd preflight command is outside authority")
-        return self._execute(argv, timeout=10)
+        return self._execute(command, timeout=10)
 
     def git(self, argv: list[str]) -> CommandResult:
         environment = {
