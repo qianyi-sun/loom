@@ -386,6 +386,7 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     )
     restore_call = next(call[0] for call in calls if "pg_restore" in call[0])
     assert "--jobs=4" in restore_call
+    assert "--username=loom_rehearsal" in restore_call
     assert restore_call[-1] == "/var/lib/postgresql/data/loom-rehearsal.dump"
     remove_call = next(call[0] for call in calls if "rm" in call[0])
     assert remove_call[-4:] == (

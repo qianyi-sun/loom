@@ -506,10 +506,11 @@ unresolved or non-derived digest remains invalid.
 The isolated database rehearsal first streams the exact checkpoint dump into
 the pod-scoped emptyDir, verifies its SHA-256 against the attested PostgreSQL
 snapshot identity, and then restores from that regular file with four bounded
-`pg_restore` jobs. Transfer, digest verification, restore and cleanup share one
-combined 30-minute budget; the staged dump is removed before the database proof
-can pass. This avoids the single-stream restore bottleneck without weakening
-checkpoint identity or keeping rehearsal payloads after verification.
+`pg_restore` jobs bound to the isolated `loom_rehearsal` database role.
+Transfer, digest verification, restore and cleanup share one combined 30-minute
+budget; the staged dump is removed before the database proof can pass. This
+avoids the single-stream restore bottleneck without weakening checkpoint
+identity or keeping rehearsal payloads after verification.
 
 `RehearsalActionSource` is the sole plan and resource-name authority for these
 actions. Its identity factory and action factory consume the same checkpoint,

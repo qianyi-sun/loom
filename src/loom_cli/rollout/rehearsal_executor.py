@@ -885,6 +885,7 @@ class IsolatedRehearsalExecutor:
                 "--jobs=4",
                 "--no-owner",
                 "--no-privileges",
+                "--username=loom_rehearsal",
                 f"--dbname={plan.resources.database}",
                 _REHEARSAL_DUMP_PATH,
             ),
