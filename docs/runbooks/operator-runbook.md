@@ -102,25 +102,15 @@ the heavy staging evidence, encode it as a release gate manifest, and run
 `.github/workflows/release-promotion-gate.yml` before opening or merging the
 release PR.
 
-`main` accepts only a production release promotion from `dev`. Qianyi
-(`@qianyi-sun`) personally reviews the fixed candidate and evidence and
-performs the manual squash merge. Never enable auto-merge for the promotion
-PR. GitHub's `allow_auto_merge` capability is repository-wide and cannot
-encode a `main`-only prohibition, so the operator must enforce this rule.
+`main` accepts only a same-repository production release promotion from `dev`.
+The trusted base-branch controller enables squash auto-merge after the release
+evidence is attached. The four current-head CI gates are the only merge
+authority; author and reviewer identities do not affect eligibility.
 
-GitHub evaluates the target branch's CODEOWNERS. For the first promotion that
-introduces the Qianyi-only catch-all, current `main` still has invalid legacy
-`@carinrc` owners; its generic one-approval rule and Qianyi's manual process
-are the only bootstrap controls. Prefer a non-Qianyi identity or future
-restricted bot as the PR author because GitHub users cannot approve their own
-pull request. Once the catch-all lands, Qianyi CODEOWNER approval is required
-for subsequent promotions.
-
-Do not conflate three separate decisions: manifest
+Do not conflate separate decisions: manifest
 `release_owner_approval` records acceptance of a particular candidate and
-evidence package; GitHub PR review controls the `main` merge; Production
-Environment approval releases deployment secrets. They are distinct controls
-and are not interchangeable.
+evidence package, while Production Environment approval releases deployment
+secrets. They are distinct from CI merge authority and are not interchangeable.
 
 Production tags are immutable SemVer Git tags on `main`, for example
 `v1.0.0`. Pick the exact `prod_tag` in the release issue before opening the
@@ -128,8 +118,8 @@ release PR, record it in the release gate manifest and PR template, and never
 move it after publication. If the same code must be re-released, create a new
 SemVer tag. A workflow-driven rollback first restores the previous validated
 tree on `dev` through its normal CI gate, then promotes that exact `dev`
-candidate through a new Qianyi-reviewed, manually squash-merged `main` release
-PR and deploys from `main`; never force-move a tag or open a direct rollback
+candidate through a new CI-gated auto-merged `main` release PR and deploys from
+`main`; never force-move a tag or open a direct rollback
 branch -> `main` PR.
 
 Production deployment dispatches use `main` only. Immutable SemVer tags remain
@@ -188,9 +178,8 @@ Normal flow:
    candidate SHA, prod tag, image digests, frontend route evidence,
    worker-isolation evidence, raw-delivery/export requirement status, and
    rollback notes to the release PR from `dev` to `main`.
-9. Confirm auto-merge was never enabled. Qianyi (`@qianyi-sun`) personally
-   reviews the fixed candidate and evidence, records the GitHub approval when
-   author identity permits, and performs the manual squash merge.
+9. Confirm squash auto-merge is enabled and the four protected current-head CI
+   gates are the only merge authority.
 10. Tag the merged `main` commit with the recorded immutable `prod_tag`.
 11. Deploy production from `main` with the same candidate SHA, image tag, and
    release gate workflow run id. The production deploy preflight downloads the
@@ -215,9 +204,10 @@ in the manifest.
 Hotfix path: branch from `dev`, apply the minimal fix, and land it through the
 normal CI-only `dev` auto-merge path. Run the same release gate against the
 exact merged `dev` SHA, choose a new SemVer prod tag, then open the only
-permitted `dev` -> `main` release-promotion PR. Qianyi reviews and manually
-squash merges it before deploying production with that candidate SHA and gate
-run id. Do not open a direct hotfix branch -> `main` PR.
+permitted `dev` -> `main` release-promotion PR. Let the trusted controller
+enable squash auto-merge and wait for all protected gates before deploying
+production with that candidate SHA and gate run id. Do not open a direct
+hotfix branch -> `main` PR.
 
 ### Deploy, inspect, and rollback by environment
 

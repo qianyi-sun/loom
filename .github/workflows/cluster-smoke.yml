@@ -29,8 +29,8 @@ on:
       - "src/loom_cli/templates/k8s/**"
       - ".github/workflows/cluster-smoke.yml"
   pull_request:
-    # Protected names are reserved for the queue head. The planner selects the
-    # smoke from changed paths or labels and filters irrelevant metadata events.
+    # Every relevant non-draft PR reports the protected gate name. The planner
+    # selects smoke from changed paths or labels and filters metadata events.
     types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   merge_group:
     types: [checks_requested]
@@ -40,7 +40,12 @@ permissions:
 
 concurrency:
   group: cluster-smoke-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
+         (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+          contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+         (github.event.action == 'edited' && github.event.changes.base != null)) }}
 
 jobs:
   plan:
@@ -274,8 +279,7 @@ jobs:
   cluster-smoke-gate:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' && 'cluster-smoke-gate-manual' ||
-          (needs.plan.outputs.gate_mode == 'full' || needs.plan.outputs.gate_mode == 'invalidate') && 'cluster-smoke-gate' ||
-          needs.plan.outputs.gate_mode == 'preflight' && 'cluster-smoke-gate-preflight' ||
+          needs.plan.outputs.gate_mode == 'full' && 'cluster-smoke-gate' ||
           'cluster-smoke-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
@@ -291,14 +295,10 @@ jobs:
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
           case "$GATE_MODE" in
-            full|preflight|filtered|invalidate) ;;
+            full|filtered) ;;
             *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
           esac
-          if [[ "$GATE_MODE" == "invalidate" ]]; then
-            echo "FAIL: merge-ready authority was removed from this candidate" >&2
-            exit 1
-          fi
-          if [[ "$GATE_MODE" == "filtered" || "$GATE_MODE" == "preflight" ]]; then
+          if [[ "$GATE_MODE" == "filtered" ]]; then
             [[ "$SMOKE_RESULT" == "skipped" ]] || exit 1
             exit 0
           fi

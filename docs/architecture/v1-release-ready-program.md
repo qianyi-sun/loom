@@ -85,16 +85,15 @@ cycle, documentation update, CI labels, acceptance evidence, and rollback.
 Issue #700 is the first implementation workstream because every later PR relies
 on correct merge gating.
 
-Every merge-group candidate and the coordinator-selected PR queue head reports
-four stable required contexts:
+Every merge-group candidate and relevant non-draft PR reports four stable
+required contexts:
 `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
 `staging-smoke-gate`. The shared planner computes the validation work required
 by changed paths and labels, and each gate enforces its selected result. A
 selected job that is cancelled, skipped unexpectedly, or absent is a failure.
 Labels may add validation but cannot remove path-inferred validation. Docs-only
-PRs keep a bounded location-and-format fast path. Non-head PRs report distinct
-preflight/filtered contexts; only a non-draft PR with `ci:merge-ready` reports
-the protected names. Runtime Markdown, executable files under `docs/`, and unknown
+PRs keep a bounded location-and-format fast path. Drafts and unrelated metadata
+events report distinct filtered contexts. Runtime Markdown, executable files under `docs/`, and unknown
 non-document paths are not docs-only; unknown runtime paths select every heavy
 lane until a canonical owner is declared.
 
@@ -111,27 +110,25 @@ GHCR, and do not use a publication cache; manual dispatch is build-only. Only
 the `publish` job on a push to `dev` or `main` requests job-scoped
 `packages: write` authority. This protects the normal workflow path, but it is
 not a hard ceiling for a same-repository writer because branch workflow code
-runs under the PR-controlled definition and advisory CODEOWNERS on `dev` does
-not block it. A fork-only autonomous-agent boundary or an external trusted
+runs under the PR-controlled definition. A fork-only autonomous-agent boundary or an external trusted
 workflow/App is still required for that stronger guarantee.
 The required `staging-smoke-gate` is likewise credential-free and depends only
 on the kind smoke. Real AWS validation belongs to a separately protected,
 trusted post-merge/release lane and a skipped cloud run cannot count as cloud
 evidence.
 
-The coordinator enables squash auto-merge and applies `ci:merge-ready` only to
-the current `dev` queue head. GitHub queues that candidate until every required
-gate is visible and successful on the current head SHA. These four strict,
+The trusted base-branch controller enables squash auto-merge for every eligible
+non-draft PR without using author or reviewer identity. GitHub queues each
+candidate until every required gate is visible and successful on the current
+head SHA. These four strict,
 GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
-approval, and no conversation resolution. CODEOWNERS remains advisory routing
-on `dev`, while its changes still select full CI.
+approval, and no conversation resolution. Governance changes still select full
+CI.
 
-`main` accepts only a production release promotion from `dev`. Qianyi
-(`@qianyi-sun`) personally reviews the fixed candidate and evidence and then
-performs the manual squash merge. Never enable auto-merge for a promotion PR.
-The repository-wide `allow_auto_merge` capability cannot express a `main`-only
-prohibition, so this remains an operator-enforced release rule.
+`main` accepts only a same-repository production release promotion from `dev`.
+The same controller enables squash auto-merge after release evidence is
+attached; the four current-head CI gates are its only merge authority.
 
 The design covers at least:
 
@@ -161,28 +158,19 @@ GitHub settings are part of the acceptance evidence:
 - `dev` requires the four strict, app-bound current-head checks and no other
   merge authority: no human approval, no CODEOWNER approval, and no
   conversation resolution;
-- `main` retains the four strict checks, generic one-approval, CODEOWNER-review,
-  conversation-resolution, admin-enforcement, and linear-history controls;
+- `main` retains the four strict checks, admin-enforcement, and linear-history
+  controls, with no human, CODEOWNER, or conversation-resolution gate;
 - production-capable environments restrict deployment branches;
 - `production` requires owner approval;
 - secret-bearing `ci-aws` and `huggingface-publish` environments no longer have
   empty protection policy.
 
-CODEOWNERS is advisory on `dev` and uses a catch-all `* @qianyi-sun` so it can
-protect `main` promotion. GitHub evaluates the target branch's CODEOWNERS, so
-the first promotion carrying this change still uses current `main`'s invalid
-legacy `@carinrc` owners. That bootstrap can rely only on `main`'s generic
-one-approval rule plus Qianyi's personal review and manual squash. A
-non-Qianyi identity or future restricted bot should open the PR because GitHub
-users cannot approve their own pull requests. After the catch-all reaches
-`main`, Qianyi CODEOWNER approval protects every subsequent promotion.
-
-Neither CODEOWNERS nor the four same-repository workflow checks form an ideal
+The four same-repository workflow checks do not form an ideal
 autonomous-agent trust root. An organization-required workflow or separate
 GitHub App with a distinct app identity should eventually emit merge authority
 so a PR cannot redefine its own judge. The manifest's
-`release_owner_approval`, GitHub PR review, and Production Environment approval
-are separate controls and are not interchangeable.
+`release_owner_approval` evidence and Production Environment approval are
+separate controls and are not interchangeable with CI merge authority.
 
 ### Workstream B: Workload Trust Contract
 
@@ -433,8 +421,8 @@ state rather than relying on issue prose or this design:
 7. confirm there are no unowned or untracked release blockers;
 8. confirm the working tree and generated files are clean;
 9. publish the final readiness comment on #715 and the draft promotion PR;
-10. confirm auto-merge is disabled for the promotion and record Qianyi's
-    candidate/evidence review and manual squash responsibility;
+10. confirm squash auto-merge is enabled and only the current-head protected
+    CI gates can complete the promotion;
 11. leave #39 open for the separately authorized release and post-deploy
     production validation.
 

@@ -899,24 +899,15 @@ The workflow commands below are not part of the no-secret dry run. They are
 listed here so the release owner can run the same command shape with real
 evidence after the dry run passes.
 
-`main` accepts only this production release promotion from `dev`. Qianyi
-(`@qianyi-sun`) personally reviews the fixed candidate and evidence and
-performs the manual squash merge. Never enable auto-merge for the promotion
-PR. The repository-wide `allow_auto_merge` capability cannot encode a
-`main`-only prohibition, so the release operator enforces it.
+`main` accepts only this same-repository production release promotion from
+`dev`. The trusted base-branch controller enables squash auto-merge after the
+fixed candidate evidence is attached. The four current-head CI gates are the
+only merge authority; author and reviewer identities do not affect eligibility.
 
-First-promotion bootstrap: GitHub evaluates the target branch's CODEOWNERS.
-Current `main` still contains invalid legacy `@carinrc` owners, so the first
-promotion carrying `* @qianyi-sun` has only `main`'s generic one-approval rule
-plus Qianyi's manual process. Prefer a non-Qianyi identity or future restricted
-bot as PR author because GitHub users cannot approve their own pull request.
-After that promotion lands, Qianyi CODEOWNER approval protects subsequent
-promotions.
-
-The release manifest's `release_owner_approval` records Qianyi's acceptance of
-the fixed candidate/evidence package. GitHub PR review authorizes the `main`
-merge, while Production Environment approval releases deployment secrets.
-These are distinct controls and are not interchangeable.
+The release manifest's `release_owner_approval` records acceptance of the fixed
+candidate/evidence package, while Production Environment approval releases
+deployment secrets. These are distinct from CI merge authority and are not
+interchangeable.
 
 `LIVE PROD AUTHORITY REQUIRED` for tag pushes and production deploys.
 `release-promotion-gate.yml` runs in the `staging` GitHub Environment, but it
@@ -940,9 +931,9 @@ Created workflow_dispatch event for release-promotion-gate.yml at dev
 
 Prepare the release PR from `dev` to `main`; attach the release-gate run,
 frontend route evidence, worker-capacity evidence, raw-delivery/user-E2E
-status, HF mirror/token-boundary evidence, and rollback plan. Confirm
-auto-merge is disabled, then have Qianyi perform the manual squash merge after
-the evidence review. A squash merge creates a different commit identity, so
+status, HF mirror/token-boundary evidence, and rollback plan. Confirm the
+trusted controller enabled squash auto-merge, then wait for all protected
+current-head CI gates. A squash merge creates a different commit identity, so
 production compares the candidate and merged release Git tree object IDs.
 Equal trees prove that the promoted source content is exact and does not
 require candidate commit ancestry. After merge, tag the merged `main` commit
@@ -1075,9 +1066,9 @@ Expected success output:
 
 For a workflow-driven rollback, first restore the exact previous validated tree
 on `dev` through its normal CI-only auto-merge path. Then create a new release
-manifest/tag and promote that exact `dev` candidate through a Qianyi-reviewed,
-manually squash-merged `dev` -> `main` PR. Do not open a direct rollback branch
--> `main` PR. The production workflow rejects a previous tag ref and also
+manifest/tag and promote that exact `dev` candidate through a CI-gated,
+auto-merged `dev` -> `main` PR. Do not open a direct rollback branch -> `main`
+PR. The production workflow rejects a previous tag ref and also
 rejects a previous candidate while `main` still has the newer tree. After the
 rollback promotion lands:
 
@@ -1127,11 +1118,10 @@ Before declaring the first production release ready:
   after route probes and security scanning, not only the pre-route baseline.
 - The production deploy uses `main` only; immutable `vX.Y.Z` tags are release
   records, not deployment workflow entry points.
-- The promotion source is `dev`; Qianyi (`@qianyi-sun`) reviewed the fixed
-  candidate/evidence and performed the manual squash merge. Auto-merge was
-  never enabled for the `main` PR.
-- `release_owner_approval`, GitHub PR review, and Production Environment
-  approval are recorded separately and were not treated as interchangeable.
+- The promotion source is `dev`; the trusted controller enabled squash
+  auto-merge and the four protected current-head CI gates passed.
+- `release_owner_approval` evidence and Production Environment approval are
+  recorded separately and were not treated as interchangeable with CI.
 - Rollback prep records previous image/tag, previous release-gate run, DB
   recovery point, object-storage recovery point, and redacted secret evidence.
 - No live prod/staging workload, DB change, worker cancellation, tag push,

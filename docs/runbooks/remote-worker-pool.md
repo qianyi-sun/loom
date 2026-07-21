@@ -383,6 +383,28 @@ job has verified it on each target node. This script is for manual or staged
 launches. For elastic pools, prefer the Control Plane controller below so batch
 submission stays independent of Slurm latency.
 
+## Candidate Publication Contract (service-owned root)
+
+Per-environment worker candidates published under
+`/shared_work/loom/candidates/<environment>/<sha>/` follow an all-or-nothing,
+service-owned contract (#874):
+
+- The rollout **service** (`loom-rollout`) owns the root and every level below
+  it (mode `2750`); workers read via the `sharedwork` group but never write —
+  that is the immutability guarantee for a published candidate.
+- Privileged setup (`staging_rollout_shared_repo.py service-ensure
+  --environment <env> --candidate-sha <sha>`) validates the environment
+  (development/staging/production) and a full 40-hex SHA, hardcodes
+  `/shared_work/loom`, and ensures **only** `candidates/<environment>`. It never
+  pre-creates the final `<sha>` directory and accepts no arbitrary root/path.
+- The publisher/materializer builds the complete candidate in a private
+  temporary tree, then **atomically** rename-no-replaces it into
+  `candidates/<environment>/<sha>`. An already-present target fails closed (no
+  overwrite, no partial content becomes visible).
+- **Rollback** is merge-revert + a fresh candidate: revert on the authoritative
+  branch and publish a new SHA. The broker never re-points at or reuses a
+  retained historical `<sha>`; retained directories are forensic only.
+
 ## Elastic Slurm Controller
 
 The Control Plane can run an internal elastic Slurm worker controller loop. It
