@@ -1490,6 +1490,10 @@ direct DSN and rewrites them to the rehearsal database. PgBouncer DSNs remain
 optional exactly as in the workloads: present pool keys are also rewritten,
 while an absent optional pool key stays absent and the service uses its direct
 DSN fallback.
+Before apply, the isolated release artifact also uses the API-server canonical
+shape: mapping-valued null fields are omitted and container resource quantities
+are strings. Live readback remains an exact subset check; arbitrary numeric and
+string values are not treated as interchangeable.
 
 When `manifests.field-ownership` reports only the recognized legacy lifecycle
 resources, keep rollout admission disabled with the root-owned maintenance

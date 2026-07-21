@@ -202,6 +202,7 @@ def _isolate_deployment(
             {"name": "TMPDIR", "value": "/tmp"},
         )
     )
+    _canonicalize_resource_quantities(container)
     mounts = container.get("volumeMounts")
     if mounts is None:
         mounts = []
@@ -281,6 +282,7 @@ def _isolate_deployment(
     template["metadata"] = template_metadata
     template["spec"] = pod
     spec["template"] = template
+    _drop_null_mapping_fields(value)
     _reject_unsafe_fields(value)
     return value, selector
 
@@ -434,6 +436,44 @@ def _reject_unsafe_fields(value: object) -> None:
     elif isinstance(value, list):
         for item in value:
             _reject_unsafe_fields(item)
+
+
+def _canonicalize_resource_quantities(container: dict[str, object]) -> None:
+    resources = container.get("resources")
+    if resources is None:
+        return
+    resources = _mapping(resources, label="container resources")
+    for boundary in ("limits", "requests"):
+        quantities = resources.get(boundary)
+        if quantities is None:
+            continue
+        quantities = _mapping(quantities, label=f"container resource {boundary}")
+        for name, value in quantities.items():
+            if (
+                not isinstance(name, str)
+                or not name
+                or isinstance(value, bool)
+                or not isinstance(value, (int, str))
+            ):
+                raise ValueError("rehearsal container resource quantity is invalid")
+            quantities[name] = str(value)
+        resources[boundary] = quantities
+    container["resources"] = resources
+
+
+def _drop_null_mapping_fields(value: object) -> None:
+    if isinstance(value, dict):
+        for key in tuple(value):
+            item = value[key]
+            if item is None:
+                value.pop(key)
+                continue
+            _drop_null_mapping_fields(item)
+    elif isinstance(value, list):
+        for item in value:
+            if item is None:
+                raise ValueError("rehearsal resource contains a null list entry")
+            _drop_null_mapping_fields(item)
 
 
 def _mapping(value: object, *, label: str) -> dict[str, object]:

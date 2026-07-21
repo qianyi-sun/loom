@@ -227,6 +227,21 @@ def test_release_artifact_accepts_real_staging_render(tmp_path: Path) -> None:
         "loom-service",
         "loom-web",
     }
+    assert not _contains_null_mapping_field(resources)
+    for resource in resources:
+        if resource["kind"] != "Deployment":
+            continue
+        container = resource["spec"]["template"]["spec"]["containers"][0]
+        for quantities in container.get("resources", {}).values():
+            assert all(isinstance(value, str) for value in quantities.values())
+
+
+def _contains_null_mapping_field(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(item is None or _contains_null_mapping_field(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_null_mapping_field(item) for item in value)
+    return False
 
 
 def test_release_artifact_rejects_host_authority_or_image_drift(tmp_path: Path) -> None:
