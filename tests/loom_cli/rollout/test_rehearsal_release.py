@@ -232,6 +232,7 @@ def test_release_artifact_accepts_real_staging_render(tmp_path: Path) -> None:
         if resource["kind"] != "Deployment":
             continue
         container = resource["spec"]["template"]["spec"]["containers"][0]
+        assert all(item.get("value") != "" for item in container.get("env", []))
         for quantities in container.get("resources", {}).values():
             assert all(isinstance(value, str) for value in quantities.values())
 

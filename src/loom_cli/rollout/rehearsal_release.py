@@ -202,6 +202,7 @@ def _isolate_deployment(
             {"name": "TMPDIR", "value": "/tmp"},
         )
     )
+    _canonicalize_environment(environment)
     _canonicalize_resource_quantities(container)
     mounts = container.get("volumeMounts")
     if mounts is None:
@@ -459,6 +460,12 @@ def _canonicalize_resource_quantities(container: dict[str, object]) -> None:
             quantities[name] = str(value)
         resources[boundary] = quantities
     container["resources"] = resources
+
+
+def _canonicalize_environment(environment: list[dict[str, object]]) -> None:
+    for item in environment:
+        if item.get("value") == "":
+            item.pop("value")
 
 
 def _drop_null_mapping_fields(value: object) -> None:
