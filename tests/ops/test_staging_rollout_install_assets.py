@@ -123,10 +123,8 @@ def test_gb10_ssh_authority_is_strict_and_repo_owned() -> None:
     assert all(" ssh-ed25519 " in entry for entry in entries)
 
 
-def test_privileged_runner_paths_have_advisory_owner_and_full_ci_selection() -> None:
-    owners = (REPO_ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
-    assert "* @qianyi-sun" in owners.splitlines()
-    assert "not a `dev` merge gate" in owners
+def test_privileged_runner_paths_use_full_ci_without_owner_review() -> None:
+    assert not (REPO_ROOT / ".github/CODEOWNERS").exists()
     plan = plan_validations(
         changed_paths=["deploy/staging-rollout/loom-staging-rollout.sudoers"],
         labels=set(),
