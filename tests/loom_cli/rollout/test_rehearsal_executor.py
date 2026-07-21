@@ -1353,6 +1353,79 @@ def test_cleanup_refuses_unknown_unit_or_namespace_identity() -> None:
     assert namespace.blockers == {"cleanup": "namespace-identity-drift"}
 
 
+def test_cleanup_accepts_reset_race_only_after_unit_is_absent() -> None:
+    plan = _plan()
+    unit_active = True
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _payload, _timeout):
+        nonlocal unit_active
+        command = tuple(argv)
+        calls.append(command)
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    "loaded\n" if unit_active else "not-found\n",
+                    "",
+                )
+            if not unit_active:
+                return subprocess.CompletedProcess(argv, 4, "", "")
+            description = f"Loom isolated rehearsal {plan.plan_digest}"
+            output = (
+                "LoadState=loaded\nActiveState=active\nSubState=exited\nType=oneshot\n"
+                "Result=success\nExecMainStatus=0\nNeedDaemonReload=no\nTransient=yes\n"
+                f"Description={description}\n"
+            )
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        if command[:3] == ("systemctl", "--user", "stop"):
+            unit_active = False
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "reset-failed"):
+            return subprocess.CompletedProcess(argv, 5, "", "unit not loaded")
+        if "get" in command and "namespace" in command:
+            return subprocess.CompletedProcess(argv, 1, "", "not found")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    assert outcome.passed and outcome.cleanup_verified
+    assert any(command[-1] == "--value" for command in calls)
+
+
+def test_cleanup_rejects_reset_failure_while_unit_is_still_loaded() -> None:
+    plan = _plan()
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+            description = f"Loom isolated rehearsal {plan.plan_digest}"
+            output = (
+                "LoadState=loaded\nActiveState=active\nSubState=exited\nType=oneshot\n"
+                "Result=success\nExecMainStatus=0\nNeedDaemonReload=no\nTransient=yes\n"
+                f"Description={description}\n"
+            )
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        if command[:3] == ("systemctl", "--user", "stop"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "reset-failed"):
+            return subprocess.CompletedProcess(argv, 5, "", "unit still loaded")
+        raise AssertionError("namespace cleanup must not follow an ambiguous reset failure")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    assert outcome.blockers == {"cleanup": "systemd-reset-failed"}
+
+
 def test_cleanup_fails_closed_when_transient_unit_does_not_unload() -> None:
     plan = _plan()
     monotonic_values = iter((0.0, 0.0, 1.0, 5.0))

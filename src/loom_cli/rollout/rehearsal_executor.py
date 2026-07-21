@@ -1563,7 +1563,12 @@ class IsolatedRehearsalExecutor:
             if not self._status(contract.stop_argv, timeout=30):
                 return _blocked("cleanup", "systemd-stop-failed")
             if not self._status(contract.reset_argv, timeout=30):
-                return _blocked("cleanup", "systemd-reset-failed")
+                # A successful stop may synchronously garbage-collect a
+                # transient unit before reset-failed obtains its manager
+                # reference. Accept that race only after the independent,
+                # exact load-state probe proves the unit is already absent.
+                if self._systemd_load_state(contract) != "not-found":
+                    return _blocked("cleanup", "systemd-reset-failed")
         if not self._wait_systemd_absent(contract):
             return _blocked("cleanup", "systemd-remains")
 

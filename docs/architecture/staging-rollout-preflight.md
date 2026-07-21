@@ -632,6 +632,9 @@ window after the exact stop/reset sequence; any other load state or expiry
 fails closed before namespace deletion. Cleanup journaling retains the precise
 resource blocker and records incomplete verification under a separate key, so
 the generic evidence guard cannot erase the actionable cause.
+If `stop` garbage-collects the transient unit before `reset-failed` acquires
+it, the reset error is accepted only after a separate exact load-state readback
+proves `not-found`; loaded or unavailable state still fails closed.
 
 The restored database snapshot necessarily contains frozen worker heartbeat
 timestamps. Before the isolated API admission probe, the rehearsal inserts or
