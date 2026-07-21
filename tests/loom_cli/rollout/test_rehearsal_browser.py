@@ -140,7 +140,20 @@ def test_browser_artifact_is_exact_restricted_and_candidate_bound(tmp_path: Path
     assert policy["spec"]["egress"] == [
         {
             "ports": [{"port": 443, "protocol": "TCP"}],
-            "to": [{"ipBlock": {"cidr": "10.96.12.34/32"}}],
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}
+                    },
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/component": "controller",
+                            "app.kubernetes.io/instance": "ingress-nginx",
+                            "app.kubernetes.io/name": "ingress-nginx",
+                        }
+                    },
+                }
+            ],
         }
     ]
 

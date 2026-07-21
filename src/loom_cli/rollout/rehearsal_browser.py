@@ -76,7 +76,7 @@ def build_rehearsal_browser_artifact(
     resources = (
         _ingress(plan),
         _browser_job(plan, ingress_ip=ingress_ip),
-        _browser_network_policy(plan, ingress_ip=ingress_ip),
+        _browser_network_policy(plan),
     )
     payload = yaml.safe_dump_all(resources, sort_keys=True).encode()
     return RehearsalBrowserArtifact(
@@ -392,7 +392,7 @@ def _browser_job(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str, object]:
     }
 
 
-def _browser_network_policy(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str, object]:
+def _browser_network_policy(plan: RehearsalPlan) -> dict[str, object]:
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -405,7 +405,22 @@ def _browser_network_policy(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str
             "egress": [
                 {
                     "ports": [{"port": 443, "protocol": "TCP"}],
-                    "to": [{"ipBlock": {"cidr": f"{ingress_ip}/32"}}],
+                    "to": [
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {
+                                    "kubernetes.io/metadata.name": INGRESS_CONTROLLER_NAMESPACE,
+                                }
+                            },
+                            "podSelector": {
+                                "matchLabels": {
+                                    "app.kubernetes.io/component": "controller",
+                                    "app.kubernetes.io/instance": "ingress-nginx",
+                                    "app.kubernetes.io/name": "ingress-nginx",
+                                }
+                            },
+                        }
+                    ],
                 }
             ],
             "podSelector": {"matchLabels": {"app": BROWSER_JOB_NAME}},

@@ -654,6 +654,10 @@ The browser rehearsal binds its restricted egress and host alias to the exact
 IPv4 ClusterIP of the fixed ingress-nginx controller Service. Both ClusterIP
 and NodePort exposure are accepted because NodePort retains that same in-cluster
 service identity; LoadBalancer, ExternalName and identity drift fail closed.
+The browser pod resolves the fixed Service ClusterIP, while its egress policy
+selects the exact ingress-nginx controller namespace and pod identity. This
+keeps the allowlist valid after Service DNAT without opening arbitrary cluster
+or Internet egress.
 Ingress regex paths remain absolute Kubernetes paths (the ingress controller
 adds regex anchoring), and the 64-byte rehearsal plan digest is carried in a
 pod annotation rather than an overlong label. Candidate and workload selector
