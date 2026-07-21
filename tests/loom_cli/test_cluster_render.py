@@ -743,7 +743,7 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     [
         ("production.cluster.toml", "/prod"),
         ("development.cluster.toml", "/dev"),
-        ("staging.cluster.toml", "/dev"),
+        ("staging.cluster.toml", "/staging"),
     ],
 )
 def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
@@ -1409,7 +1409,11 @@ def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:
     of the schema default. See #383 rationale."""
     envs_dir = _REPO_ROOT / "deploy" / "environments"
     expected = {
-        "development.cluster.toml": True,
+        # Shared dev runs trial execution on external Slurm (#857/#873), same
+        # as staging/prod, so its in-cluster loom-worker Deployment is disabled.
+        # Per-developer LOCAL dev uses deploy/local/local.example.cluster.toml,
+        # which can opt into k8s_worker for offline / no-Slurm use.
+        "development.cluster.toml": False,
         "staging.cluster.toml": False,
         "production.cluster.toml": False,
     }
@@ -1679,3 +1683,14 @@ def test_container_registry_load_from_toml(tmp_path: Path) -> None:
     cfg_path.write_text('container_registry = "192.168.50.13:5000"\n')
     cfg = load_cluster_config(cfg_path)
     assert cfg.container_registry == "192.168.50.13:5000"
+
+
+def test_local_example_template_renders() -> None:
+    """The shipped local dev template must actually RENDER, not just load: e.g.
+    frontend_api_base_path must be a renderer-valid root/prefix form ("/"), not
+    "/api" which `cluster render` rejects. Guards the #882 template against a
+    render-invalid value that load_cluster_config alone would not catch."""
+    cfg = load_cluster_config(_REPO_ROOT / "deploy/local/local.example.cluster.toml")
+    docs = _load_docs(render_manifests(cfg))
+    assert docs  # rendered manifests without raising
+    assert cfg.k8s_worker.enabled is True  # default local worker path

@@ -39,11 +39,11 @@ body:
       options:
         - label: "Release PR targets `main` and uses `dev` as the source branch."
           required: true
-        - label: "Qianyi (`@qianyi-sun`) personally reviewed the fixed candidate and evidence and will perform the manual squash merge."
+        - label: "The fixed candidate and release evidence are complete before the CI-gated auto-merge."
           required: true
-        - label: "Never enable auto-merge for the `main` promotion PR."
+        - label: "The trusted controller enables squash auto-merge; current-head CI gates are the only merge authority."
           required: true
-        - label: "The manifest's `release_owner_approval`, GitHub PR review, and Production Environment approval are distinct controls and are not interchangeable."
+        - label: "The manifest's `release_owner_approval` evidence and Production Environment approval are distinct controls and are not interchangeable with CI."
           required: true
         - label: "`pyproject.toml` version bumped (root + any published packages); GitHub release notes drafted from squash-merge PR titles since last tag."
           required: true

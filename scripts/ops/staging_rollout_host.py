@@ -12,11 +12,13 @@ import argparse
 import base64
 import binascii
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -37,14 +39,21 @@ SERVICE_USER = "loom-rollout"
 SERVICE_GROUP = "loom-rollout"
 OPERATOR_GROUP = "loom-staging-operators"
 OPERATORS = ("qianyi", "hongjian", "devansh")
+SHARED_WORK_CONSUMER = "qianyi"
+SHARED_WORK_GROUP = "sharedwork"
+SHARED_WORKER_AUTHORITY_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout")
+SHARED_WORKER_REPO_ROOT = SHARED_WORKER_AUTHORITY_ROOT / "worker-repos"
 
 RUNNER_ROOT = Path("/opt/loom-staging-runner")
 INSTALL_SOURCE = RUNNER_ROOT / "source"
+SHARED_WORKER_REPO_HELPER = INSTALL_SOURCE / "scripts/ops/staging_rollout_shared_repo.py"
 CANDIDATE_REPO = RUNNER_ROOT / "repo"
 VENV = RUNNER_ROOT / "venv"
 STATE_ROOT = Path("/var/lib/loom-staging-rollout")
 ACTIVE_POINTER = STATE_ROOT / "active.json"
 GENERATED_ROOT = STATE_ROOT / "generated"
+GENERATED_GB10_ENV_SEED = GENERATED_ROOT / "staging-gb10-worker-staging-bootstrap.env"
+LEGACY_GB10_ENV_ROOT = Path("/shared_work/qianyi/loom-worker-capacity")
 RUNTIME_ROOT = Path("/run/loom-staging-rollout")
 MAINTENANCE_MARKER = RUNTIME_ROOT / "maintenance"
 CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
@@ -88,6 +97,7 @@ _TEAM_TOKEN = "__SMOKE_ON_BEHALF_TEAM_ID__"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_PROTECTED_INPUT_BYTES = 4 << 20
 _MAX_KUBECONFIG_BYTES = 1 << 20
+_MAX_WORKER_ENV_BYTES = 1 << 20
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-9]*[.]service$")
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
@@ -112,10 +122,55 @@ _ACL_ENTRY_RE = re.compile(
 )
 _ACL_SNAPSHOT_ENTRY_RE = re.compile(r"(user|group|mask|other):([^:]*):([rwx-]{3})")
 _ACL_ENTRY_ORDER = {"user": 0, "group": 1, "mask": 2, "other": 3}
+_GB10_ENV_NAME_RE = re.compile(r"^staging-gb10-worker-staging-[A-Za-z0-9._-]+[.]env$")
+_REQUIRED_GB10_ENV_KEYS = frozenset(
+    {
+        "LOOM_WORKER_CONTROL_PLANE_URL",
+        "LOOM_WORKER_GATEWAY_URL",
+        "LOOM_WORKER_TOKEN",
+        "LOOM_WORKER_MINIO_ENDPOINT",
+        "LOOM_WORKER_MINIO_ACCESS_KEY",
+        "LOOM_WORKER_MINIO_SECRET_KEY",
+    }
+)
 
 
 class InstallError(RuntimeError):
     """Fail-closed installation or convergence error."""
+
+
+def _validate_gb10_env_payload(payload: bytes) -> None:
+    if not payload or len(payload) > _MAX_WORKER_ENV_BYTES:
+        raise InstallError("GB10 worker env template payload is invalid")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InstallError("GB10 worker env template is not UTF-8") from exc
+    keys: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise InstallError("GB10 worker env template contains a malformed entry")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None or key in keys:
+            raise InstallError("GB10 worker env template contains an invalid key")
+        if key in _REQUIRED_GB10_ENV_KEYS:
+            if "${" in value:
+                raise InstallError(
+                    "GB10 worker env template required values cannot use interpolation"
+                )
+            try:
+                semantic_parts = shlex.split(value, comments=True, posix=True)
+            except ValueError as exc:
+                raise InstallError("GB10 worker env template contains a malformed entry") from exc
+            if not any(part.strip() for part in semantic_parts):
+                raise InstallError("GB10 worker env template contains an empty value")
+        keys.add(key)
+    if not _REQUIRED_GB10_ENV_KEYS.issubset(keys):
+        raise InstallError("GB10 worker env template is missing required settings")
 
 
 def _acl_snapshot_map(
@@ -392,6 +447,96 @@ class LocalFilesystem:
             return payload
         finally:
             os.close(fd)
+
+    def _gb10_env_candidates(
+        self,
+        root: Path,
+        *,
+        require_private_mode: bool,
+    ) -> tuple[tuple[Path, os.stat_result, bytes], ...]:
+        directory = self.path(root)
+        if not directory.exists():
+            return ()
+        try:
+            directory_metadata = os.lstat(directory)
+        except OSError as exc:
+            raise InstallError("GB10 worker env template directory is unavailable") from exc
+        if not stat.S_ISDIR(directory_metadata.st_mode) or stat.S_ISLNK(directory_metadata.st_mode):
+            raise InstallError("GB10 worker env template directory is unsafe")
+        candidates: list[tuple[Path, os.stat_result, bytes]] = []
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise InstallError("GB10 worker env template directory is unreadable") from exc
+        for entry in entries:
+            if _GB10_ENV_NAME_RE.fullmatch(entry.name) is None:
+                continue
+            absolute = root / entry.name
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(
+                    os,
+                    "O_NOFOLLOW",
+                    0,
+                )
+            )
+            try:
+                fd = os.open(entry.path, flags)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise InstallError("GB10 worker env template metadata is unsafe") from exc
+                raise InstallError("GB10 worker env template is unavailable") from exc
+            try:
+                metadata = os.fstat(fd)
+                expected_mode = 0o600 if require_private_mode else stat.S_IMODE(metadata.st_mode)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_size <= 0
+                    or metadata.st_size > _MAX_WORKER_ENV_BYTES
+                    or stat.S_IMODE(metadata.st_mode) != expected_mode
+                    or (not require_private_mode and stat.S_IMODE(metadata.st_mode) & 0o022)
+                ):
+                    raise InstallError("GB10 worker env template metadata is unsafe")
+                payload = os.read(fd, _MAX_WORKER_ENV_BYTES + 1)
+                if len(payload) != metadata.st_size:
+                    raise InstallError("GB10 worker env template changed during validation")
+            finally:
+                os.close(fd)
+            _validate_gb10_env_payload(payload)
+            current = os.lstat(entry.path)
+            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+            ):
+                raise InstallError("GB10 worker env template changed during validation")
+            candidates.append((absolute, metadata, payload))
+        return tuple(candidates)
+
+    def generated_gb10_env_templates(self) -> tuple[Path, ...]:
+        return tuple(
+            path
+            for path, _, _ in self._gb10_env_candidates(
+                GENERATED_ROOT,
+                require_private_mode=True,
+            )
+        )
+
+    def legacy_gb10_env_template_payload(self) -> bytes:
+        candidates = self._gb10_env_candidates(
+            LEGACY_GB10_ENV_ROOT,
+            require_private_mode=False,
+        )
+        if not candidates:
+            raise InstallError("legacy GB10 worker env template is unavailable")
+        _, _, payload = max(
+            candidates,
+            key=lambda item: (item[1].st_mtime_ns, item[0].name),
+        )
+        return payload
 
     def ensure_directory(self, absolute: Path, mode: int) -> bool:
         path = self.path(absolute)
@@ -1255,9 +1400,18 @@ class HostSystem:
             }
             for name, payload in assets.items():
                 (directory / name).write_bytes(payload)
+            shared_repo_helper = directory / "staging_rollout_shared_repo.py"
+            shared_repo_helper.write_bytes(
+                self.source_file(
+                    source_root,
+                    source_sha,
+                    "scripts/ops/staging_rollout_shared_repo.py",
+                )
+            )
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-broker")])
             self.runner.run(["visudo", "-cf", str(directory / "loom-staging-rollout.sudoers")])
+            self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_repo_helper)])
 
     def source_file(self, source_root: Path, source_sha: str, relative_path: str) -> bytes:
         if source_root != INSTALL_SOURCE or _SHA_RE.fullmatch(source_sha) is None:
@@ -1383,6 +1537,122 @@ class HostSystem:
         if unexpected:
             raise InstallError("service account has unexpected supplementary groups")
         return "docker" in groups
+
+    def shared_worker_repo_identity(self) -> dict[str, object]:
+        service_uid, service_gid = self._service_ids()
+        consumer = self._probe(["getent", "passwd", SHARED_WORK_CONSUMER])
+        consumer_uid = self._probe(["id", "-u", SHARED_WORK_CONSUMER])
+        shared_group = self._probe(["getent", "group", SHARED_WORK_GROUP])
+        consumer_groups = self._probe(["id", "-nG", SHARED_WORK_CONSUMER])
+        consumer_fields = consumer.stdout.strip().split(":")
+        group_fields = shared_group.stdout.strip().split(":")
+        rendered_uid = consumer_uid.stdout.strip()
+        if (
+            consumer.returncode != 0
+            or consumer_uid.returncode != 0
+            or shared_group.returncode != 0
+            or consumer_groups.returncode != 0
+            or len(consumer_fields) < 4
+            or len(group_fields) < 3
+            or not consumer_fields[2].isdigit()
+            or not rendered_uid.isdigit()
+            or not group_fields[2].isdigit()
+            or int(consumer_fields[2]) != int(rendered_uid)
+            or int(consumer_fields[2]) == 0
+            or int(group_fields[2]) == 0
+        ):
+            raise InstallError("shared worker repository identity is unavailable or inconsistent")
+        if SHARED_WORK_GROUP not in consumer_groups.stdout.split():
+            raise InstallError("shared worker repository consumer lacks sharedwork membership")
+        identity: dict[str, object] = {
+            "root": str(SHARED_WORKER_REPO_ROOT),
+            "service_user": SERVICE_USER,
+            "service_uid": service_uid,
+            "service_primary_group": SERVICE_GROUP,
+            "service_primary_gid": service_gid,
+            "consumer_user": SHARED_WORK_CONSUMER,
+            "consumer_uid": int(rendered_uid),
+            "shared_group": SHARED_WORK_GROUP,
+            "shared_gid": int(group_fields[2]),
+        }
+
+        report = self._shared_worker_repo_helper("check")
+        if report is None:
+            return identity
+        for key, value in identity.items():
+            if report.get(key) != value:
+                raise InstallError("shared worker repository helper identity drifted")
+        return report
+
+    @staticmethod
+    def _validate_shared_worker_repo_report(payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise InstallError("shared worker repository helper report is invalid")
+        expected_strings = {
+            "root": str(SHARED_WORKER_REPO_ROOT),
+            "service_user": SERVICE_USER,
+            "service_primary_group": SERVICE_GROUP,
+            "consumer_user": SHARED_WORK_CONSUMER,
+            "shared_group": SHARED_WORK_GROUP,
+            "parent_mode": "2775",
+            "authority_mode": "2750",
+            "repository_mode": "2750",
+            "service_capability": "parent-not-writable;repository-writable-searchable",
+            "consumer_capability": "repository-readable-searchable-not-writable",
+        }
+        expected_integers = {
+            "service_uid",
+            "service_primary_gid",
+            "consumer_uid",
+            "shared_gid",
+            "parent_device",
+            "parent_inode",
+            "authority_device",
+            "authority_inode",
+            "repository_device",
+            "repository_inode",
+        }
+        if payload.get("schema_version") != 1 or any(
+            payload.get(key) != value for key, value in expected_strings.items()
+        ):
+            raise InstallError("shared worker repository helper report is invalid")
+        if any(
+            type(payload.get(key)) is not int or int(payload[key]) < 0 for key in expected_integers
+        ):
+            raise InstallError("shared worker repository helper report is invalid")
+        created = payload.get("created")
+        if (
+            not isinstance(created, list)
+            or any(value not in {"authority-root", "repository-root"} for value in created)
+            or len(set(created)) != len(created)
+        ):
+            raise InstallError("shared worker repository helper report is invalid")
+        return dict(payload)
+
+    def _shared_worker_repo_helper(self, command: str) -> dict[str, object] | None:
+        if command not in {"check", "ensure"}:
+            raise InstallError("shared worker repository helper command is invalid")
+        result = self._probe([str(SYSTEM_PYTHON), str(SHARED_WORKER_REPO_HELPER), command])
+        if result.returncode == 2 and command == "check":
+            return None
+        if result.returncode != 0:
+            raise InstallError("shared worker repository helper failed safely")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, ValueError) as exc:
+            raise InstallError("shared worker repository helper report is invalid") from exc
+        return self._validate_shared_worker_repo_report(payload)
+
+    def shared_worker_repo_root_ready(self) -> bool:
+        return self._shared_worker_repo_helper("check") is not None
+
+    def ensure_shared_worker_repo_root(self) -> bool:
+        if self.shared_worker_repo_root_ready():
+            return False
+        report = self._shared_worker_repo_helper("ensure")
+        if report is None:  # pragma: no cover - ensure never returns absent
+            raise InstallError("shared worker repository authority did not converge safely")
+        return bool(report["created"])
 
     def ensure_root_directory(self, path: Path, *, mode: int) -> bool:
         expected = f"directory:root:root:{mode:o}"
@@ -2509,6 +2779,11 @@ class HostSystem:
         service_groups = set(self._probe(["id", "-nG", SERVICE_USER]).stdout.split())
         if service_groups != {SERVICE_USER, "docker"}:
             failures.append("service-groups")
+        try:
+            if not self.shared_worker_repo_root_ready():
+                failures.append("shared-worker-repo-root")
+        except InstallError:
+            failures.append("shared-worker-repo-root")
         if not service_account_ready or not self.candidate_ready(expected_sha):
             failures.append("candidate-checkout")
         for path in PROTECTED_INPUTS:
@@ -3028,6 +3303,9 @@ class HostInstaller:
             "service_user": SERVICE_USER,
             "operator_group": OPERATOR_GROUP,
             "operators": list(OPERATORS),
+            "shared_worker_repo_root": str(SHARED_WORKER_REPO_ROOT),
+            "shared_worker_repo_consumer": SHARED_WORK_CONSUMER,
+            "shared_worker_repo_group": SHARED_WORK_GROUP,
             "protected_inputs": [str(path) for path in PROTECTED_INPUTS],
             "data_directories": [str(path) for path in DATA_DIRECTORIES],
             "preserves": [str(STATE_ROOT), "/data/loom-staging/rollouts"],
@@ -3147,6 +3425,21 @@ class HostInstaller:
         created_service_key = self._record_flag(previous_record, "created_service_key")
         service_key_missing = not self.system.service_key_present()
         created_service_key = created_service_key or service_key_missing
+        generated_env_error: InstallError | None = None
+        try:
+            generated_env_templates = self.filesystem.generated_gb10_env_templates()
+        except InstallError as exc:
+            generated_env_templates = ()
+            generated_env_error = exc
+        generated_env_templates_ready = bool(generated_env_templates) and all(
+            self.system.file_owner_ready(
+                path,
+                owner=SERVICE_USER,
+                mode=0o600,
+                nlink=1,
+            )
+            for path in generated_env_templates
+        )
         raw_acl_plans = [
             plan for path in PROTECTED_INPUTS for plan in self.system.plan_input_acl(path)
         ]
@@ -3203,6 +3496,11 @@ class HostInstaller:
             trust_ledger_migrated=trust_ledger_migrated,
             trust_requires_revocation=trust_requires_revocation,
         )
+        group_missing = not self.system.group_present(OPERATOR_GROUP)
+        service_user_missing = not self.system.service_user_present()
+        shared_worker_repo_identity = (
+            None if service_user_missing else self.system.shared_worker_repo_identity()
+        )
 
         def record_value(
             state: str,
@@ -3242,6 +3540,8 @@ class HostInstaller:
                 ]
             if legacy_trust_source_sha is not None:
                 value["trust_legacy_source_sha"] = legacy_trust_source_sha
+            if shared_worker_repo_identity is not None:
+                value["shared_worker_repo"] = shared_worker_repo_identity
             return value
 
         def persist_record(
@@ -3265,8 +3565,6 @@ class HostInstaller:
             owner_changed = self.system.install_owner(INSTALL_RECORD, "root", 0o600)
             return changed or owner_changed
 
-        group_missing = not self.system.group_present(OPERATOR_GROUP)
-        service_user_missing = not self.system.service_user_present()
         install_source_ready = self.system.install_source_ready(source_sha)
         service_directories_ready = not service_user_missing and all(
             self.system.owned_directory_ready(directory, owner=SERVICE_USER, mode=mode)
@@ -3277,6 +3575,9 @@ class HostInstaller:
             )
         )
         candidate_ready = service_directories_ready and self.system.candidate_ready(source_sha)
+        shared_worker_repo_ready = (
+            not service_user_missing and self.system.shared_worker_repo_root_ready()
+        )
         venv_lock_requires_hardening = self.system.venv_lock_requires_hardening()
         venv_ready = not venv_lock_requires_hardening and self.system.venv_ready()
         package_runtime_ready = (
@@ -3347,6 +3648,9 @@ class HostInstaller:
             or service_key_missing
             or acl_plans
             or not service_directories_ready
+            or not shared_worker_repo_ready
+            or generated_env_error is not None
+            or not generated_env_templates_ready
             or not candidate_ready
             or venv_lock_requires_hardening
             or not venv_ready
@@ -3394,6 +3698,7 @@ class HostInstaller:
             changes.append(f"group:{OPERATOR_GROUP}")
         if self.system.ensure_service_user():
             changes.append(f"user:{SERVICE_USER}")
+        shared_worker_repo_identity = self.system.shared_worker_repo_identity()
         for username in OPERATORS:
             if self.system.ensure_operator_membership(username):
                 added_operator_memberships.add(username)
@@ -3402,6 +3707,10 @@ class HostInstaller:
             added_docker_membership = True
             changes.append("service-group:docker")
 
+        if self.system.ensure_shared_worker_repo_root():
+            changes.append(f"directory:{SHARED_WORKER_REPO_ROOT}")
+        shared_worker_repo_identity = self.system.shared_worker_repo_identity()
+
         for directory, mode in (
             (STATE_ROOT, 0o700),
             (GENERATED_ROOT, 0o700),
@@ -3409,6 +3718,32 @@ class HostInstaller:
         ):
             if self.system.ensure_owned_directory(directory, owner=SERVICE_USER, mode=mode):
                 changes.append(f"directory:{directory}")
+
+        if generated_env_error is not None:
+            raise generated_env_error
+        if not generated_env_templates:
+            worker_env_payload = self.filesystem.legacy_gb10_env_template_payload()
+            if self.filesystem.atomic_write(
+                GENERATED_GB10_ENV_SEED,
+                worker_env_payload,
+                0o600,
+                expected_nlink=1,
+            ):
+                changes.append(f"worker-env-template:{GENERATED_GB10_ENV_SEED}")
+            generated_env_templates = (GENERATED_GB10_ENV_SEED,)
+        for path in generated_env_templates:
+            if self.system.install_owner(path, SERVICE_USER, 0o600):
+                changes.append(f"ownership:{path}")
+        if not all(
+            self.system.file_owner_ready(
+                path,
+                owner=SERVICE_USER,
+                mode=0o600,
+                nlink=1,
+            )
+            for path in self.filesystem.generated_gb10_env_templates()
+        ):
+            raise InstallError("generated GB10 worker env template authority is unsafe")
 
         if self.system.ensure_candidate(source_sha, refresh=refresh_runtime):
             changes.append("candidate-checkout")
@@ -3591,6 +3926,17 @@ class HostInstaller:
             failures.append(str(KUBECONFIG_PATH))
         if not self.filesystem.exists(SERVICE_KEY):
             failures.append(str(SERVICE_KEY))
+        generated_env_templates = self.filesystem.generated_gb10_env_templates()
+        if not generated_env_templates or not all(
+            self.system.file_owner_ready(
+                path,
+                owner=SERVICE_USER,
+                mode=0o600,
+                nlink=1,
+            )
+            for path in generated_env_templates
+        ):
+            failures.append("generated-gb10-worker-env-template")
         source_sha = record.get("source_sha")
         if not isinstance(source_sha, str):  # _bind_existing_source has already validated this
             raise InstallError("install record source SHA is invalid")

@@ -38,7 +38,7 @@ async def gateway_app(
         s.execute(insert(Team).values(id=team_id, name=f"th-{team_id}"))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw_token.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_id,
+            type="team", scopes=["submit", "llm:call"], team_id=team_id,
             issued_at=datetime.now(UTC), expires_at=None,
         ))
         s.execute(insert(RateCard).values(

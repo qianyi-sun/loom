@@ -175,13 +175,10 @@ filename shards and start directly after the planner, in parallel with the
 fast tier. The local commands remain serial equivalents so they are easy to
 reproduce.
 
-PR CI has two execution levels. Ordinary, non-draft PRs run the fast
-`repository-checks-preflight` lane and do not emit any branch-protection
-context. The merge coordinator applies the single-owner `ci:merge-ready` label
-only to the queue head; that candidate runs all selected validations and emits
-the four protected contexts. Removing that label or converting the candidate
-back to draft explicitly invalidates its protected contexts. Unrelated label
-changes and PR title/body edits run only the planner and a `*-filtered` check.
+Every relevant non-draft PR runs its path-selected validation plan and emits
+the four protected contexts. Drafts and unrelated metadata events use only a
+`*-filtered` context. No label, author, reviewer, or merge coordinator grants
+gate authority; validation labels only add work to the path-inferred plan.
 
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
@@ -229,8 +226,8 @@ pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
 dispatch is build-only. Only the checked-in `publish` job on a push to `dev` or
 `main` requests job-scoped `packages: write` authority and publishes multi-arch
-images. Advisory CODEOWNERS on `dev` does not stop a same-repository branch
-workflow from running; autonomous-agent hard isolation still requires
+images. Same-repository branch workflow code still runs on the read-only PR
+path; autonomous-agent hard isolation requires
 fork-only execution or an external trusted workflow/App.
 
 `staging-smoke-gate` proves the credential-free kind deployment smoke only. It
@@ -291,46 +288,38 @@ and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
 and follow the normal `dev` auto-merge policy.
 
-Only the current `dev` queue head carries `ci:merge-ready` and uses squash
-auto-merge. GitHub keeps that candidate queued until `repository-checks`, `images-gate`,
+Every non-draft `dev` PR uses squash auto-merge. The trusted base-branch
+controller enables it without checking out PR code or considering author or
+reviewer identity. GitHub keeps each candidate queued until `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate` are visible and successful on
 the current head SHA. Those four strict, GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
 approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
 
-`main` accepts only a production release promotion from `dev`. Qianyi
-(`@qianyi-sun`) personally reviews the fixed candidate and evidence and
-performs the manual squash merge. Never enable auto-merge for that PR. The
-repository-wide `allow_auto_merge` capability cannot express a `main`-only
-prohibition, so the release operator enforces this rule.
+`main` accepts only a production release promotion from `dev`. The same trusted
+controller enables squash auto-merge after release evidence is attached. The
+four current-head gates are the only merge authority; no human or CODEOWNER
+approval is required.
 
 Current `dev` branch-protection settings (verified by Task 6):
 - Squash-only (no rebase merge, no merge commits)
 - `required_linear_history: true`
 - `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate` are the required stable status checks
-- `allow_auto_merge: true`; the coordinator enables it together with
-  `ci:merge-ready` only for the queue head, and GitHub holds that candidate
-  until the policy above passes
+- `allow_auto_merge: true`; the trusted controller enables it for every
+  non-draft PR, and GitHub holds each candidate until the policy above passes
 - `enforce_admins: true` on `dev` - admins go through the gate too
-- no human approval, no CODEOWNER approval, and no conversation resolution;
-  CODEOWNERS is advisory routing on `dev`, not a merge gate
+- no human approval, no CODEOWNER approval, and no conversation resolution
 
 Current `main` promotion policy:
 
-- the four strict current-head checks remain required, along with the existing
-  generic one-approval, CODEOWNER-review, conversation-resolution, admin, and
-  linear-history protections;
-- Qianyi reviews the candidate/evidence and manually squash merges; auto-merge
-  is never enabled;
-- GitHub evaluates the target branch's CODEOWNERS. The first promotion that
-  carries the Qianyi-only catch-all still sees `main`'s invalid legacy
-  `@carinrc` owners, so its generic one-approval rule and Qianyi's manual
-  process are the bootstrap controls. A non-Qianyi identity or future
-  restricted bot should author that PR because GitHub users cannot approve
-  their own pull requests. Later promotions require Qianyi's CODEOWNER
-  approval.
+- the four strict current-head checks, admin enforcement, and linear history
+  remain required;
+- human approval, CODEOWNER review, and conversation resolution are not merge
+  gates;
+- only a same-repository `dev` -> `main` promotion is eligible for the trusted
+  auto-merge controller.
 
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and

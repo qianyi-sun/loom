@@ -28,7 +28,12 @@ on:
 # cancelled by this workflow.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
+         (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+          contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+         (github.event.action == 'edited' && github.event.changes.base != null)) }}
 
 permissions:
   contents: read
@@ -143,8 +148,7 @@ jobs:
     timeout-minutes: 12
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
-      (needs.workflow-plan.outputs.gate_mode == 'full' ||
-       needs.workflow-plan.outputs.gate_mode == 'preflight')
+      needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -208,8 +212,7 @@ jobs:
     timeout-minutes: 15
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
-      (needs.workflow-plan.outputs.gate_mode == 'full' ||
-       needs.workflow-plan.outputs.gate_mode == 'preflight')
+      needs.workflow-plan.outputs.gate_mode == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -356,8 +359,7 @@ jobs:
     timeout-minutes: 10
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
-      (needs.workflow-plan.outputs.gate_mode == 'full' ||
-       needs.workflow-plan.outputs.gate_mode == 'preflight')
+      needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -422,8 +424,7 @@ jobs:
     if: >-
       always() &&
       (github.event_name != 'push' || github.ref != 'refs/heads/dev') &&
-      (needs.workflow-plan.outputs.gate_mode == 'full' ||
-       needs.workflow-plan.outputs.gate_mode == 'preflight')
+      needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -450,15 +451,13 @@ jobs:
       - name: Install coverage
         if: >-
           needs.workflow-plan.outputs.docs_only != 'true' &&
-          (needs.workflow-plan.outputs.gate_mode == 'full' ||
-           needs.workflow-plan.outputs.gate_mode == 'preflight')
+          needs.workflow-plan.outputs.gate_mode == 'full'
         run: python3 -m pip install --user 'coverage>=7'
 
       - name: Download root coverage shards
         if: >-
           needs.workflow-plan.outputs.docs_only != 'true' &&
-          (needs.workflow-plan.outputs.gate_mode == 'full' ||
-           needs.workflow-plan.outputs.gate_mode == 'preflight')
+          needs.workflow-plan.outputs.gate_mode == 'full'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: coverage-data-root-*
@@ -468,8 +467,7 @@ jobs:
       - name: Download package coverage
         if: >-
           needs.workflow-plan.outputs.docs_only != 'true' &&
-          (needs.workflow-plan.outputs.gate_mode == 'full' ||
-           needs.workflow-plan.outputs.gate_mode == 'preflight')
+          needs.workflow-plan.outputs.gate_mode == 'full'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-data-packages
@@ -478,8 +476,7 @@ jobs:
       - name: Combine fast-tier coverage
         if: >-
           needs.workflow-plan.outputs.docs_only != 'true' &&
-          (needs.workflow-plan.outputs.gate_mode == 'full' ||
-           needs.workflow-plan.outputs.gate_mode == 'preflight')
+          needs.workflow-plan.outputs.gate_mode == 'full'
         run: |
           cp cov-packages/.coverage .coverage.packages
           cp .coverage.packages cov-root/.coverage.packages
@@ -489,8 +486,7 @@ jobs:
       - name: Upload coverage.xml
         if: >-
           always() && needs.workflow-plan.outputs.docs_only != 'true' &&
-          (needs.workflow-plan.outputs.gate_mode == 'full' ||
-           needs.workflow-plan.outputs.gate_mode == 'preflight')
+          needs.workflow-plan.outputs.gate_mode == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-xml-fast
@@ -502,8 +498,7 @@ jobs:
       - name: Upload fast-tier coverage data
         if: >-
           always() && needs.workflow-plan.outputs.docs_only != 'true' &&
-          (needs.workflow-plan.outputs.gate_mode == 'full' ||
-           needs.workflow-plan.outputs.gate_mode == 'preflight')
+          needs.workflow-plan.outputs.gate_mode == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-data-fast
@@ -519,8 +514,7 @@ jobs:
       - name: Coverage gate + summary (fast tier)
         if: >-
           needs.workflow-plan.outputs.docs_only != 'true' &&
-          (needs.workflow-plan.outputs.gate_mode == 'full' ||
-           needs.workflow-plan.outputs.gate_mode == 'preflight')
+          needs.workflow-plan.outputs.gate_mode == 'full'
         run: |
           set +e
           python3 -m coverage report --fail-under=70 | tee coverage-report.txt
@@ -548,9 +542,7 @@ jobs:
     name: go-checks
     runs-on: ubuntu-latest
     needs: workflow-plan
-    if: >-
-      needs.workflow-plan.outputs.gate_mode == 'full' ||
-      needs.workflow-plan.outputs.gate_mode == 'preflight'
+    if: needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Set up Go
@@ -859,13 +851,12 @@ jobs:
             echo "Per-file XML attached as the \`coverage-xml-fast\` workflow artifact. Tracking #260."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Only merge groups, pushes, and coordinator-selected PRs report the exact
-  # protected context. Other PRs use non-protected preflight/filtered names.
+  # Every relevant non-draft PR reports the exact protected context. Drafts and
+  # unrelated metadata events use a non-protected filtered name.
   repository-checks:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' ||
-          (needs.workflow-plan.outputs.gate_mode == 'full' || needs.workflow-plan.outputs.gate_mode == 'invalidate') && 'repository-checks' ||
-          needs.workflow-plan.outputs.gate_mode == 'preflight' && 'repository-checks-preflight' ||
+          needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' ||
           'repository-checks-filtered' }}
     runs-on: ubuntu-latest
     if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/dev')
@@ -896,14 +887,10 @@ jobs:
         run: |
           set -euo pipefail
           case "$GATE_MODE" in
-            full|preflight|filtered|invalidate) ;;
+            full|filtered) ;;
             *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
           esac
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
-          if [[ "$GATE_MODE" == "invalidate" ]]; then
-            echo "FAIL: merge-ready authority was removed from this candidate" >&2
-            exit 1
-          fi
           if [[ "$GATE_MODE" == "filtered" ]]; then
             echo "Metadata-only event filtered."
             exit 0
@@ -940,10 +927,6 @@ jobs:
           require_success fast-checks "$FAST_RESULT"
           require_success go-checks "$GO_RESULT"
           require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
-          if [[ "$GATE_MODE" == "preflight" ]]; then
-            echo "Fast preflight passed; protected contexts are reserved for the queue head."
-            exit 0
-          fi
           require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"
           require_selected "$DOCKER_SELECTED" integration-docker "$DOCKER_RESULT"
           require_selected "$COVERAGE_SELECTED" coverage-summary "$COVERAGE_RESULT"

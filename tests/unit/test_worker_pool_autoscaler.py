@@ -33,8 +33,100 @@ from loom_control_plane.worker_pool_autoscaler import (
     autoscaler_policy_to_dict,
     compute_autoscaler_decision,
     fetch_autoscaler_status,
+    select_slurm_qos,
     upsert_autoscaler_policy,
 )
+
+
+def test_select_slurm_qos_uses_boost_below_min() -> None:
+    assert (
+        select_slurm_qos(
+            active_plus_pending=2,
+            min_slots=6,
+            qos_boost="loom-boost",
+            qos_normal="loom-normal",
+        )
+        == "loom-boost"
+    )
+
+
+def test_select_slurm_qos_uses_normal_at_or_above_min() -> None:
+    assert (
+        select_slurm_qos(
+            active_plus_pending=6,
+            min_slots=6,
+            qos_boost="loom-boost",
+            qos_normal="loom-normal",
+        )
+        == "loom-normal"
+    )
+    assert (
+        select_slurm_qos(
+            active_plus_pending=9,
+            min_slots=6,
+            qos_boost="loom-boost",
+            qos_normal="loom-normal",
+        )
+        == "loom-normal"
+    )
+
+
+def test_select_slurm_qos_without_boost_returns_normal() -> None:
+    assert (
+        select_slurm_qos(
+            active_plus_pending=0,
+            min_slots=6,
+            qos_boost="",
+            qos_normal="loom-normal",
+        )
+        == "loom-normal"
+    )
+
+
+def test_policy_to_config_reads_qos_boost_and_normal() -> None:
+    row = _policy_row(
+        actuator_config={
+            "backend": "docker",
+            "cpu_arch": "x86_64",
+            "allowed_nodes": ["oldlab-1"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 6,
+            "requested_cpus": 12,
+            "requested_memory_mib": 58000,
+            "max_jobs": 1,
+            "pending_job_cap": 1,
+            "qos_boost": "loom-boost",
+            "qos_normal": "loom-staging-normal",
+        },
+    )
+    config = _policy_to_config(row)
+    assert config.qos_boost == "loom-boost"
+    assert config.qos_normal == "loom-staging-normal"
+
+
+def test_slurm_config_from_policy_threads_account_qos_reservation() -> None:
+    row = _policy_row(
+        actuator_config={
+            "backend": "docker",
+            "cpu_arch": "x86_64",
+            "allowed_nodes": ["oldlab-1"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 6,
+            "requested_cpus": 12,
+            "requested_memory_mib": 58000,
+            "max_jobs": 1,
+            "pending_job_cap": 1,
+            "slurm_account": "loom-staging",
+            "slurm_qos": "loom-staging-normal",
+            "slurm_reservation": "loom-staging-min",
+        },
+    )
+    config = _slurm_config_from_policy(row)
+    assert config.slurm_account == "loom-staging"
+    assert config.slurm_qos == "loom-staging-normal"
+    assert config.slurm_reservation == "loom-staging-min"
 
 
 def _policy(**overrides: object) -> AutoscalerPolicyConfig:

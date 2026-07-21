@@ -33,12 +33,12 @@ across rows.
 | Environment | Git branch / ref | GitHub Environment | Namespace | Public route | API base | DB name | Object buckets |
 |---|---|---|---|---|---|---|---|
 | `development` | `dev` only | `development` | `loom-dev` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_dev` | `loom-dev-trajectories`, `loom-dev-artifacts` |
-| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `https://yylx.world/dev` | `https://yylx.world/dev/api` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
+| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `https://yylx.world/staging` | `https://yylx.world/staging/api` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
 | `production` | `main` only; immutable `vX.Y.Z` tags are records | `production` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
 
-The public `/dev` route is the single non-production frontend surface. For
-v1.0 validation, physical `staging` owns that surface; do not deploy
-`development` and `staging` concurrently to claim `https://yylx.world/dev`.
+Staging owns `https://yylx.world/staging`; development owns
+`https://yylx.world/dev`. These are distinct public surfaces (the earlier
+`/dev` collision, where both claimed `/dev`, is resolved).
 They remain separate GitHub/Kubernetes/storage identities for controlled
 workflow isolation, but prod-vs-non-prod browser separation is `/prod` vs
 `/dev`.
@@ -102,25 +102,15 @@ the heavy staging evidence, encode it as a release gate manifest, and run
 `.github/workflows/release-promotion-gate.yml` before opening or merging the
 release PR.
 
-`main` accepts only a production release promotion from `dev`. Qianyi
-(`@qianyi-sun`) personally reviews the fixed candidate and evidence and
-performs the manual squash merge. Never enable auto-merge for the promotion
-PR. GitHub's `allow_auto_merge` capability is repository-wide and cannot
-encode a `main`-only prohibition, so the operator must enforce this rule.
+`main` accepts only a same-repository production release promotion from `dev`.
+The trusted base-branch controller enables squash auto-merge after the release
+evidence is attached. The four current-head CI gates are the only merge
+authority; author and reviewer identities do not affect eligibility.
 
-GitHub evaluates the target branch's CODEOWNERS. For the first promotion that
-introduces the Qianyi-only catch-all, current `main` still has invalid legacy
-`@carinrc` owners; its generic one-approval rule and Qianyi's manual process
-are the only bootstrap controls. Prefer a non-Qianyi identity or future
-restricted bot as the PR author because GitHub users cannot approve their own
-pull request. Once the catch-all lands, Qianyi CODEOWNER approval is required
-for subsequent promotions.
-
-Do not conflate three separate decisions: manifest
+Do not conflate separate decisions: manifest
 `release_owner_approval` records acceptance of a particular candidate and
-evidence package; GitHub PR review controls the `main` merge; Production
-Environment approval releases deployment secrets. They are distinct controls
-and are not interchangeable.
+evidence package, while Production Environment approval releases deployment
+secrets. They are distinct from CI merge authority and are not interchangeable.
 
 Production tags are immutable SemVer Git tags on `main`, for example
 `v1.0.0`. Pick the exact `prod_tag` in the release issue before opening the
@@ -128,8 +118,8 @@ release PR, record it in the release gate manifest and PR template, and never
 move it after publication. If the same code must be re-released, create a new
 SemVer tag. A workflow-driven rollback first restores the previous validated
 tree on `dev` through its normal CI gate, then promotes that exact `dev`
-candidate through a new Qianyi-reviewed, manually squash-merged `main` release
-PR and deploys from `main`; never force-move a tag or open a direct rollback
+candidate through a new CI-gated auto-merged `main` release PR and deploys from
+`main`; never force-move a tag or open a direct rollback
 branch -> `main` PR.
 
 Production deployment dispatches use `main` only. Immutable SemVer tags remain
@@ -188,9 +178,8 @@ Normal flow:
    candidate SHA, prod tag, image digests, frontend route evidence,
    worker-isolation evidence, raw-delivery/export requirement status, and
    rollback notes to the release PR from `dev` to `main`.
-9. Confirm auto-merge was never enabled. Qianyi (`@qianyi-sun`) personally
-   reviews the fixed candidate and evidence, records the GitHub approval when
-   author identity permits, and performs the manual squash merge.
+9. Confirm squash auto-merge is enabled and the four protected current-head CI
+   gates are the only merge authority.
 10. Tag the merged `main` commit with the recorded immutable `prod_tag`.
 11. Deploy production from `main` with the same candidate SHA, image tag, and
    release gate workflow run id. The production deploy preflight downloads the
@@ -215,9 +204,10 @@ in the manifest.
 Hotfix path: branch from `dev`, apply the minimal fix, and land it through the
 normal CI-only `dev` auto-merge path. Run the same release gate against the
 exact merged `dev` SHA, choose a new SemVer prod tag, then open the only
-permitted `dev` -> `main` release-promotion PR. Qianyi reviews and manually
-squash merges it before deploying production with that candidate SHA and gate
-run id. Do not open a direct hotfix branch -> `main` PR.
+permitted `dev` -> `main` release-promotion PR. Let the trusted controller
+enable squash auto-merge and wait for all protected gates before deploying
+production with that candidate SHA and gate run id. Do not open a direct
+hotfix branch -> `main` PR.
 
 ### Deploy, inspect, and rollback by environment
 
@@ -533,8 +523,8 @@ knob you need.
    - For first production, use the committed route split instead of separate
      user-facing hosts: production renders `https://yylx.world/prod` with API
      calls under `https://yylx.world/prod/api`, and staging
-     renders `https://yylx.world/dev` with API calls under
-     `https://yylx.world/dev/api`. The web pod writes
+     renders `https://yylx.world/staging` with API calls under
+     `https://yylx.world/staging/api`. The web pod writes
      `loom-frontend-config.json` from runtime environment variables on startup
      and nginx serves it with `Cache-Control: no-store`, so a stale Vite build
      or browser-cached config cannot silently keep pointing at the wrong API.
@@ -857,7 +847,13 @@ knob you need.
    environment-state profile to
    `/data/loom-staging/environment-state/staging.toml` with mode `0600`,
    recording source/target sha256 evidence, then applies the candidate profile
-   once and retries the immediate check once. Pure
+   once and retries the immediate check once. A legacy operator-owned `0600`
+   leaf can be unreadable by `loom-rollout` even when the directory's reviewed
+   access/default ACL grants atomic replacement. Step 11 treats that leaf as
+   stale and replaces it from the candidate; it does not broaden the legacy
+   leaf ACL or use it as rollout input. Before comparison it inspects the
+   destination entry without following links; symlinks and all other
+   non-regular entries fail closed before read, chmod, or replacement. Pure
    `gb10_worker_node_status[...]` drift is recorded but deferred because step
    12 has not started the host-local node-agent yet; mixed drift, such as
    OLDLAB jobs or missing external-runner prerequisites, still fails before
@@ -1496,6 +1492,18 @@ symlinks, hard links, special files, traversal-limit drift, and every root conta
 request-scoped and idempotent; it never deletes a valid manifest-backed restore
 point and leaves the request status failed for audit.
 
+Before starting the expensive PostgreSQL dump, the broker opens its own
+localhost-only MinIO transport with `kubectl port-forward --address 127.0.0.1
+service/loom-minio :9000` and derives the ephemeral local port only from that
+child process's exact readiness line. It never claims, probes, reuses, or stops
+the historical local port `19000`, so an operator-owned or concurrent tunnel
+on that port is outside the broker lifecycle. The broker keeps its child alive
+through the bounded MinIO mirror and confirms that exact child has exited
+before any manifest can be published. Startup or cleanup failure is reported
+as the non-secret public reason `backup_transport_failed`; it publishes no
+envelope or rollout unit and remains eligible for the same request-scoped
+incomplete-backup cleanup path.
+
 Only one full staging request may be pending or running. A second `start` or
 `resume` fails instead of queueing or preempting and reports only safe active
 request metadata. `status` and `logs` are available to every operator; a
@@ -1635,7 +1643,23 @@ the declared rollout, Postgres, MinIO, backup, and pre-existing
 `environment-state` subdirectories. Each receives access/default `rwx`; the
 staging root remains read/traverse-only. This explicit environment-state grant
 is required because a new parent default ACL does not retrofit an existing
-directory, and step 10 atomically replaces `environment-state/staging.toml`.
+directory. It also does not retrofit a pre-existing operator-owned leaf, so
+step 11 must atomically replace `environment-state/staging.toml` without
+requiring that stale leaf to be readable by the service account. It accepts
+only a real regular destination entry; symlinks and other non-regular entries
+are never followed or replaced.
+
+The service-private `generated/` directory must contain at least one validated
+GB10 worker env template before rollout admission is restored. On first install
+or repair of an empty directory, the installer performs the one-way bootstrap
+from the newest fixed-name legacy file under
+`/shared_work/qianyi/loom-worker-capacity/`. The source must be a bounded,
+single-link regular UTF-8 dotenv file that is not group- or world-writable and contains the complete
+control-plane, Gateway, worker-token, and MinIO key set. The copied bootstrap is
+owned by `loom-rollout`, mode `0600`, and its values are never printed. Existing
+private templates are not refreshed from legacy state. `check` reports
+`generated-gb10-worker-env-template` and installation remains admission-closed
+when no safe template can be proven; do not create an ad-hoc empty env file.
 
 Create the fixed invocation checkout as root with a deterministic umask. On a
 later update, require a clean checkout, fetch `dev`, and detach at the fetched
@@ -1839,6 +1863,38 @@ and redacted worker-token fingerprint only. Profiles that do not opt in to
 `materialize = true` remain operator-owned prerequisites and must be created
 before rerunning step 11.
 
+For staging GB10, `repo_dir` is an exact image-tagged direct child of
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos`. The root installer
+converges that authority only with admission closed and the service inactive,
+records the resolved `loom-rollout` and `qianyi` UID plus service/sharedwork
+GID values, and verifies effective access: the service owns and writes only
+the dedicated root; the Slurm submitter reads/searches but cannot write it.
+Do not add `loom-rollout` to `sharedwork` or widen the existing traverse-only
+ACL on `/shared_work/qianyi`.
+
+Repository materialization always clones with `--no-hardlinks` inside a
+service-created unpredictable temp container that inherited the sharedwork
+group and setgid bit from the dedicated root. Before atomic publication it
+rejects authority symlinks, foreign ownership, group/other write, hard-linked
+or special files, extra directories, and non-exact candidate HEADs while
+allowing tracked git symlinks. Publication uses Linux
+`renameat2(RENAME_NOREPLACE)`: an existing exact target is reused only after a
+complete immutable-tree validation, while any drift or different HEAD fails
+closed without replacement, cleanup, or takeover.
+
+Before request creation the broker also checks the exact 14 active GB10 SSH
+targets as `qianyi`: the shared root must have the fixed owner/group/mode and
+be readable/searchable but not writable. Immediately after the one-time
+checkout publish, and before environment-state apply, step 11 streams trusted
+candidate verifier bytes over the protected SSH stdin path to
+`/usr/bin/python3 -`; verifier code is never loaded from the target under test.
+All 14 nodes must independently observe the exact HEAD, a zero status including
+ignored and untracked entries, the complete index-derived file/directory modes,
+a readable deterministically selected tracked file, and non-writable
+root/target. Content digests and tracked-entry counts must agree across nodes.
+NFS device/inode
+values are recorded per node only and are not compared across nodes.
+
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.
 It is separate from the Control Plane admin token. Step 13 resolves this source
@@ -1847,7 +1903,7 @@ there for the duration of `loom admin rate-cards sync-yibuapi` and
 `loom providers update/show`; rollout logs and inputs retain only the source
 reference. Provider default mutations set `X-Loom-Admin-Actor:
 rollout-production-defaults` for the service audit trail. The server URL is
-derived from the rollout cluster config, for example `https://yylx.world/dev`
+derived from the rollout cluster config, for example `https://yylx.world/staging`
 for staging and `https://yylx.world/prod` for first prod. Do not use stdin
 `-`; the source must be replayable as `env:VAR` or `file:PATH`.
 
@@ -2024,12 +2080,12 @@ desired state.
 | 02 | build-images | `docker build` × every rollout-critical image (#365) |
 | 03 | kind-cluster | Ensure the staging kind cluster, kubeconfig, fixed-candidate pinned ingress-nginx IngressClass/controller (`deploy/k8s/ingress-nginx-kind.yaml` at the resolved candidate SHA), namespace, static worker trajectory Retain PV/PVC, and backup-manifest Kubernetes secrets exist before any image load or migration. Every run labels the control-plane node `ingress-ready=true`, validates the candidate worktree identity and cleanliness, materializes the manifest's commit-bound Git blob into the step evidence path, applies that evidence copy, reads back the live controller ConfigMap against values parsed from the same bytes, waits for the controller pod plus admission endpoint, and records `installed` only for an absent pre-apply Deployment or `reconciled` for an existing Deployment; the candidate SHA plus manifest SHA-256 invalidate stale completed-step evidence. Artifacts record the commit-bound evidence path, candidate source path, and hash. Missing candidate inputs fail closed without an ambient-checkout fallback. Recreated clusters still bind the protected `/data/...` root. Secret restore sanitizes runtime metadata/client-side apply annotations and uses server-side apply so reruns converge after partial restores. This restores the cluster substrate needed for step 08 preflight, not only the kube API (#206). |
 | 04 | kind-load-images | candidate-source `loom cluster load-images` (#96) |
-| 05 | backup | candidate-source `loom cluster backup check --manifest <path> --min-remaining-hours <N>` (#363, #619 freshness buffer) |
+| 05 | backup | candidate-source `loom cluster backup check --manifest <path> --min-remaining-hours <N>` with the broker-bound reviewed traversal ceilings (#363, #619 freshness buffer) |
 | 06 | audit | candidate-source `loom cluster audit` |
 | 07 | render | candidate-source `loom cluster render` → `rendered.yaml` |
-| 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest verified by step 05 |
+| 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest and broker-bound traversal ceilings verified by step 05 |
 | 09 | migrate | candidate-source `loom cluster render-migration`, apply the rendered Postgres/MinIO stateful substrate plus static worker trajectory PV/PVC from step 07 and wait for those StatefulSets, then apply/wait for the migration Job (#332, #206). This keeps missing-kind recovery restartable without starting application Deployments before Alembic and without leaving protected preflight with a partial critical PVC set. |
-| 10 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest verified by step 05 and preflighted by step 08. Running this immediately after migration recreates the Control Plane before env-state uses the CP API during missing-kind recovery (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry). |
+| 10 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest and broker-bound traversal ceilings verified by step 05 and preflighted by step 08. Running this immediately after migration recreates the Control Plane before env-state uses the CP API during missing-kind recovery (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry). |
 | 11 | env-state | candidate-source `loom admin environment-state apply`, then required profile `catalog_provisioning.command` via protected env/env-source inputs, then `loom admin environment-state check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift, #543 catalog-owned GB10 smoke task provisioning). Before the apply, rollout waits for the private CP URL's `/healthz` and records `control-plane-readiness.json`, so cluster-up pod recreation and managed tunnel restarts cannot race the env-state mutation. Pure GB10 node-status convergence drift is recorded and deferred because step 12 has not started node-agent apply yet; mixed drift still fails immediately. |
 | 12 | gb10-prep | SSH ×N hosts after desired-state apply: require `Linger=yes` before any unit mutation; fetch, checkout, write env file, retire the legacy `loom-gb10-worker.service`; install the candidate service+timer; daemon-reload; start the node-agent once; enable/restart its timer; then verify installed bytes and live systemd state. The node-agent service is `Type=oneshot`, so success is `Result=success` / `ExecMainStatus=0` even when it is `inactive/dead`; the timer must be loaded, enabled, active/waiting, point at that service, and need no daemon reload. This step intentionally runs after step 11 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). Under #822, prep targets the exact 14-host active set and leaves node 7 stopped/unreachable. After rollout, disconnect SSH, wait more than one timer period, stop one active canary worker, and require periodic recovery plus a fresh heartbeat while node 7 remains absent. |
 | 13 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
@@ -2126,6 +2182,14 @@ path. If readiness times out and the classifier finds sandbox-deadline pods, it
 deletes at most four classified pods and retries readiness once. It does not
 delete PVCs, namespaces, kind clusters, Docker volumes, or arbitrary unready
 pods.
+
+Brokered staging rollouts bind the reviewed operator backup ceilings into the
+immutable rollout inputs and pass them explicitly to the candidate CLI in steps
+05, 08, and 10: `--backup-max-files`, `--backup-max-entries`, and
+`--backup-max-total-bytes`. The file ceiling is the reviewed MinIO object limit
+plus the fixed non-MinIO allowance. Omitting these flags from a manual or
+standalone CLI check retains the conservative generic defaults; the protected
+runner does not read ambient environment overrides.
 
 For a staging retry, use `loom-staging-rollout resume REQUEST_ID`. The broker
 revalidates the original pinned candidate and backup envelope, and the driver
@@ -4496,8 +4560,8 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `curl -sf https://<ingress_host>/` returns the SPA index when `loom-web`
    replicas > 0. For first prod route-split deployments, check
    `https://yylx.world/prod/api/v1/health`,
-   `https://yylx.world/dev/api/v1/health`, `https://yylx.world/prod`, and
-   `https://yylx.world/dev`.
+   `https://yylx.world/staging/api/v1/health`, `https://yylx.world/prod`, and
+   `https://yylx.world/staging`.
 3. **Boundary holds.** `loom cluster audit` exits 0. `kubectl get svc -n loom`
    shows no `LoadBalancer` / `NodePort` services. `kubectl get ingress -n loom`
    shows TLS enabled and backends only for `loom-service` at `/api/v1` and
@@ -4510,12 +4574,12 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    ```bash
    python scripts/ops/frontend_route_smoke.py \
      --route production=https://yylx.world/prod=https://yylx.world/prod/api \
-     --route development=https://yylx.world/dev=https://yylx.world/dev/api \
+     --route staging=https://yylx.world/staging=https://yylx.world/staging/api \
      --json
 
    python scripts/ops/frontend_security_headers.py \
      --route production=https://yylx.world/prod \
-     --route development=https://yylx.world/dev \
+     --route staging=https://yylx.world/staging \
      --json
    ```
    Both route documents must report the expected `environment`,
@@ -4535,7 +4599,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
      npx --no-install playwright install chromium
      npm run smoke:routes -- \
        --route https://yylx.world/prod \
-       --route https://yylx.world/dev \
+       --route https://yylx.world/staging \
        --trace ../frontend-route-browser-trace.zip
    )
    ```
@@ -4599,7 +4663,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    DEPLOYED_SHA="$(kubectl --context kind-loom-staging -n loom \
      exec deploy/loom-service -- cat /opt/loom/build-sha | tr -d '\r\n')"
    npm --prefix web run smoke:staging-admin -- \
-     --route https://yylx.world/dev \
+     --route https://yylx.world/staging \
      --expected-deployed-sha "$DEPLOYED_SHA" \
      --admin-token-source file:/absolute/path/to/mounted/staging-admin-token \
      --username qianyi \
@@ -4640,7 +4704,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    lands in the selected team without seeing raw API credentials. Generated
    setup/reset links must already use the public HTTPS route base from
    `LOOM_SVC_PUBLIC_BASE_URL` or ingress forwarded headers, for example
-   `https://yylx.world/dev` in staging or `https://yylx.world/prod` in
+   `https://yylx.world/staging` in staging or `https://yylx.world/prod` in
    production; fix that configuration before sharing any one-time link. Capture
    only safe prefixes and redacted links in shared evidence.
 6. **CLI login.** In a fresh shell, sign in with the approved account:
@@ -4959,7 +5023,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     `GET /api/v1/batches/{id}/delivery-export` and the returned
     route-aware `/api/v1/batches/{id}/delivery-export/{artifact_id}/download`
     URL. On hosted staging/prod the returned URL must include the environment
-    route prefix, for example `https://yylx.world/dev/api/v1/...` or
+    route prefix, for example `https://yylx.world/staging/api/v1/...` or
     `https://yylx.world/prod/api/v1/...`; users must not need to manually
     rewrite `/api` links. The SPA Batch Detail page should show the same
     Delivery bundle status, selected trial count, object counts, checksum, and
@@ -5908,44 +5972,64 @@ migrations (`batches.family_run_spec`, `trials.family_key`,
 submit seeder, and worker pre-start helper. The orchestrator service
 and `skill_patcher_llm` adapter ship in PR-2.
 
-### Orchestrator gateway credentials (#697)
+### Orchestrator gateway credential and BYO routing (#695)
 
 `skill_patcher_llm` (the reference LLM-driven adapter) evolves the
 shared-skill directory between trials by calling the LLM gateway.
-Because the orchestrator runs as a service account — not a real trial
-— it cannot mint a step-JWT, so it uses a team-scoped token instead.
-Provision two secrets on the target namespace (both keys live on
-`loom-secrets`):
+The Deployment uses one dedicated, teamless family-orchestrator worker
+credential, not a represented team identity. An administrator with
+`admin:tokens` issues it through Control Plane
+`POST /admin/family-orchestrator-tokens`; the returned token has only the
+internal `family:evolve` scope and must be stored as the
+`family-orchestrator-token` key in `loom-secrets`:
 
 ```
 kubectl -n <ns> patch secret loom-secrets --type=merge -p '{
   "data": {
-    "family-orchestrator-team-id": "<b64-team-UUID>",
-    "family-orchestrator-token": "<b64-loom_team_...-token>"
+    "family-orchestrator-token": "<b64-loom_fo_...-token>"
   }
 }'
 kubectl -n <ns> rollout restart deploy/loom-family-orchestrator
 ```
 
-The keys are schema-owned so `loom cluster preflight` does not report
-them as orphan secrets, but `loom cluster bootstrap-secrets` intentionally
-does not emit placeholder values for them. Leave them absent until the
-operator is ready to enable an LLM-backed family adapter, then patch the
-real team id/token as above.
+Treat the one-time token response as a credential: do not print it to logs,
+paste it into issue comments, or retain it in evidence. The key is schema-owned
+so `loom cluster preflight` does not report it as an orphan, but
+`loom cluster bootstrap-secrets` intentionally does not emit a placeholder.
+Leave it absent until the operator is ready to enable an LLM-backed family
+adapter.
 
-Both keys are marked `optional: true` on the Deployment so the
-orchestrator boots without them — it just logs
+The key is marked `optional: true` on the Deployment so the orchestrator boots
+without it — it just logs
 `family_orchestrator_gateway_unconfigured` and refuses to call
 `SkillPatcherLLMAdapter.evolve` (non-LLM adapters still advance).
 
-Reuse an existing team with `llm:call` scope (e.g. the batch-runner
-service team) or create a dedicated `family-orchestrator` team via
-`loom admin teams create --name family-orchestrator` + `loom tokens
-issue --team family-orchestrator --scopes llm:call,batches:write`.
+The `family:evolve` credential cannot call the Gateway directly. For each
+evolve operation, `OrchestratorGatewayClient` sends the real completed trial
+id, represented batch team, `step_id="family_evolver"`, and an explicit
+`provider_connection_id` value (including null) to Control Plane
+`POST /admin/step-tokens`. The Control Plane loads the trial, requires its team
+to match the represented batch team, verifies that a configured provider is
+owned by or shared with that team, and returns a short-lived `llm:call` step
+JWT. That JWT binds the trial, team, family-evolver step, and provider before
+the request reaches the Gateway.
 
 For BYO provider routing (the operator wants the evolver to call
-their own upstream, not the platform default), the adapter forwards
-`provider_connection_id` from `family_run.adapter.params` to the
-gateway (both as `loom.provider_connection_id` in the body and the
-`x-loom-provider-connection-id` header). Callers set this on the
-batch's resolved family_run spec — no cluster-side change needed.
+their own upstream, not the platform default), set only
+`family_run.adapter.params.provider_connection_id`. At batch acceptance,
+`normalize_evolver_provider_connection()` canonicalizes the UUID and validates
+the connection against the represented batch team's owner/share boundary.
+Secret-like adapter parameter keys fail closed recursively; never put an API
+key, bearer token, authorization header, credential, password, cookie, or
+secret reference in `family_run.adapter.params`.
+
+The Gateway treats the step-JWT provider claim as authoritative. If the client
+also sends `x-loom-provider-connection-id` or
+`loom.provider_connection_id`, both must match the JWT or the request is
+rejected before dispatch. If the adapter has no configured evolver provider,
+the Control Plane receives an explicit null, the JWT carries an authoritative
+null provider claim, the header and body field are omitted, and the Gateway
+uses the platform path;
+it does not inherit the completed trial's provider. Cross-team provider ids
+remain existence-hiding failures, and errors/evidence must not record or echo
+credentials or secret references.

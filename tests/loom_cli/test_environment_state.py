@@ -8,6 +8,7 @@ import pytest
 
 from loom_cli.environment_state import (
     EnvironmentStateProfileError,
+    _normalize_autoscaler_policy,
     apply_external_slurm_autoscaler_supervisors,
     diff_environment_state,
     diff_external_slurm_autoscaler_supervisors,
@@ -16,6 +17,35 @@ from loom_cli.environment_state import (
     render_external_slurm_autoscaler_service,
     render_external_slurm_autoscaler_timer,
 )
+
+
+def test_normalize_autoscaler_policy_passes_through_qos_and_slurm_scheduler_fields() -> None:
+    normalized = _normalize_autoscaler_policy(
+        {
+            "pool_name": "gb10-arm64",
+            "actuator": "slurm",
+            "max_slots": 10,
+            "actuator_config": {
+                "backend": "docker",
+                "qos_boost": "loom-boost",
+                "qos_normal": "loom-staging-normal",
+                "slurm_account": "loom-staging",
+                "slurm_qos": "loom-staging-normal",
+                "slurm_reservation": "loom-staging-min",
+            },
+        },
+        environment="staging",
+        index=0,
+    )
+
+    assert normalized["actuator_config"] == {
+        "backend": "docker",
+        "qos_boost": "loom-boost",
+        "qos_normal": "loom-staging-normal",
+        "slurm_account": "loom-staging",
+        "slurm_qos": "loom-staging-normal",
+        "slurm_reservation": "loom-staging-min",
+    }
 
 
 def _write_profile(path: Path, *, host1_intent: str = "active") -> None:
@@ -1760,6 +1790,157 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         profile.external_slurm_runner_prerequisites["env_template_glob"]
         == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
     )
+
+
+def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/development.toml"),
+        variables={
+            "IMAGE_TAG": "development-test",
+            "ENV_CONFIG_VERSION": "development-test",
+        },
+        expected_environment="development",
+    )
+
+    supervisors = {
+        supervisor["name"]: supervisor
+        for supervisor in profile.external_slurm_autoscaler_supervisors
+    }
+    assert set(supervisors) == {"oldlab-development", "gb10-arm64-development"}
+
+    oldlab = supervisors["oldlab-development"]
+    assert oldlab["pool_name"] == "oldlab"
+    assert oldlab["service_name"] == "loom-autoscaler-oldlab-dev.service"
+    assert oldlab["timer_name"] == "loom-autoscaler-oldlab-dev.timer"
+    assert oldlab["enabled"] is False
+    assert oldlab["active"] is False
+    assert "15447" in oldlab["args"]
+
+    gb10 = supervisors["gb10-arm64-development"]
+    assert gb10["pool_name"] == "gb10-arm64"
+    assert gb10["service_name"] == "loom-autoscaler-gb10-dev.service"
+    assert gb10["timer_name"] == "loom-autoscaler-gb10-dev.timer"
+    assert gb10["enabled"] is False
+    assert gb10["active"] is False
+    assert "15450" in gb10["args"]
+
+    # Both dev supervisors are fail-closed: neither is enabled nor active.
+    assert not any(
+        supervisor["enabled"] or supervisor["active"]
+        for supervisor in profile.external_slurm_autoscaler_supervisors
+    )
+
+
+def test_committed_staging_profile_ships_active_gb10_supervisor() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/staging.toml"),
+        variables={
+            "IMAGE_TAG": "staging-test",
+            "ENV_CONFIG_VERSION": "staging-test",
+            "GIT_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+        expected_environment="staging",
+    )
+
+    supervisors = profile.external_slurm_autoscaler_supervisors
+    assert len(supervisors) == 1
+    gb10 = supervisors[0]
+    assert gb10["name"] == "gb10-arm64-staging"
+    assert gb10["pool_name"] == "gb10-arm64"
+    assert gb10["service_name"] == "loom-autoscaler-gb10-staging.service"
+    assert gb10["timer_name"] == "loom-autoscaler-gb10-staging.timer"
+    assert gb10["enabled"] is True
+    assert gb10["active"] is True
+    assert "15451" in gb10["args"]
+
+
+def _supervisor_profile_payload(*, second_service: str, second_port: str) -> str:
+    return f"""
+environment = "development"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab-development"
+pool_name = "oldlab"
+service_name = "loom-autoscaler-oldlab-dev.service"
+timer_name = "loom-autoscaler-oldlab-dev.timer"
+working_directory = "/opt/loom-development-runner/repo"
+python_path = "/opt/loom-development-runner/venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "oldlab", "--db-local-port", "15447"]
+enabled = false
+active = false
+
+[[external_slurm_autoscaler_supervisors]]
+name = "gb10-arm64-development"
+pool_name = "gb10-arm64"
+service_name = "{second_service}"
+timer_name = "loom-autoscaler-gb10-dev.timer"
+working_directory = "/opt/loom-development-runner/repo"
+python_path = "/opt/loom-development-runner/venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "gb10-arm64", "--db-local-port", "{second_port}"]
+enabled = false
+active = false
+""".strip() + "\n"
+
+
+def test_supervisor_collision_rejects_duplicate_service_name(tmp_path: Path) -> None:
+    profile_path = tmp_path / "development.state.toml"
+    profile_path.write_text(
+        _supervisor_profile_payload(
+            second_service="loom-autoscaler-oldlab-dev.service",
+            second_port="15450",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EnvironmentStateProfileError,
+        match=r"duplicate service_name 'loom-autoscaler-oldlab-dev.service'",
+    ):
+        load_environment_state_profile(profile_path)
+
+
+def test_supervisor_collision_rejects_duplicate_db_local_port(tmp_path: Path) -> None:
+    profile_path = tmp_path / "development.state.toml"
+    profile_path.write_text(
+        _supervisor_profile_payload(
+            second_service="loom-autoscaler-gb10-dev.service",
+            second_port="15447",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EnvironmentStateProfileError,
+        match=r"duplicate --db-local-port '15447'",
+    ):
+        load_environment_state_profile(profile_path)
+
+
+def test_render_supervisor_service_and_timer_contain_full_execstart() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/staging.toml"),
+        variables={
+            "IMAGE_TAG": "staging-test",
+            "ENV_CONFIG_VERSION": "staging-test",
+            "GIT_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+        expected_environment="staging",
+    )
+    supervisor = profile.external_slurm_autoscaler_supervisors[0]
+
+    service_unit = render_external_slurm_autoscaler_service(supervisor)
+    assert "ExecStart=" in service_unit
+    assert "worker_pool_autoscaler_external_once.py" in service_unit
+    assert "--pool-name gb10-arm64" in service_unit
+    assert "--namespace loom-staging" in service_unit
+    assert "--db-local-port 15451" in service_unit
+    assert "WorkingDirectory=/opt/loom-staging-runner/repo" in service_unit
+
+    timer_unit = render_external_slurm_autoscaler_timer(supervisor)
+    assert "Unit=loom-autoscaler-gb10-staging.service" in timer_unit
+    assert "OnUnitActiveSec=30" in timer_unit
 
 
 def test_staging_profile_is_gb10_only_for_first_prod_validation() -> None:

@@ -216,6 +216,44 @@ async def issue_batch_runner_token(
     }
 
 
+@router.post("/family-orchestrator-tokens", status_code=201)
+async def issue_family_orchestrator_token(
+    request: Request,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    """Issue the teamless credential that may request family-evolver JWTs.
+
+    The credential cannot call the Gateway directly.  It can only ask the
+    Control Plane to mint a JWT for an existing trial and a provider owned by
+    or shared with that trial's team.
+    """
+    await _require_admin_scope(request, authorization, "admin:tokens")
+
+    raw = "loom_fo_" + secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    expires_at: datetime | None = None
+    days = payload.get("expires_in_days")
+    if days is not None:
+        expires_at = datetime.now(UTC) + timedelta(days=int(days))
+
+    async with request.app.state.session_factory() as session:
+        await session.execute(insert(Token).values(
+            token_hash=token_hash,
+            type="family_orchestrator",
+            scopes=["family:evolve"],
+            team_id=None,
+            issued_at=datetime.now(UTC),
+            expires_at=expires_at,
+        ))
+        await session.commit()
+
+    return {
+        "token": raw,
+        "token_hash_prefix": token_hash.hex()[:8],
+    }
+
+
 @router.delete("/worker-tokens/{prefix}")
 async def revoke_token(
     prefix: str,

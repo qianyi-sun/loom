@@ -58,6 +58,7 @@ _KNOWN_SCOPES = frozenset({
     "tokens:manage",
     "team:manage",
     "submit:batch",
+    "family:evolve",
     "admin:platform",
     "admin:tokens",
     "admin:rate_cards",
@@ -68,6 +69,7 @@ _KNOWN_SCOPES = frozenset({
 
 _INTERNAL_SCOPES = frozenset({
     "submit:batch",
+    "family:evolve",
     "worker:claim",
     "worker:report",
     "worker:index",

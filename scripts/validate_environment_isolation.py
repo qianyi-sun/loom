@@ -31,8 +31,8 @@ EXPECTED_ENVIRONMENTS = {
     "staging": {
         "namespace": "loom-staging",
         "ingress_host": "yylx.world",
-        "frontend_route": "https://yylx.world/dev",
-        "frontend_api_base": "https://yylx.world/dev/api",
+        "frontend_route": "https://yylx.world/staging",
+        "frontend_api_base": "https://yylx.world/staging/api",
         "github_environment": "staging",
         "allowed_refs": ("refs/heads/dev",),
         "allowed_tag_prefixes": (),
@@ -239,14 +239,15 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
 
     if set(by_env) == set(EXPECTED_ENVIRONMENTS):
         for field in ("frontend_route", "frontend_api_base"):
-            prod_value = getattr(by_env["production"], field)
-            dev_value = getattr(by_env["development"], field)
-            staging_value = getattr(by_env["staging"], field)
-            if prod_value in {dev_value, staging_value}:
-                errors.append(f"production {field} must differ from non-production")
-            if dev_value != staging_value:
+            route_values = {
+                env: getattr(by_env[env], field)
+                for env in ("development", "staging", "production")
+            }
+            # Each environment owns a distinct public surface: /dev, /staging, /prod.
+            if len(set(route_values.values())) != len(route_values):
                 errors.append(
-                    f"development and staging {field} must share the canonical /dev surface",
+                    f"development, staging, and production {field} must each be distinct "
+                    f"(got {route_values})",
                 )
 
     for profile in profiles:

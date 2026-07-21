@@ -41,6 +41,7 @@ FIXED_NOW = datetime(2026, 7, 13, 20, 0, tzinfo=UTC)
 POSTGRES_BYTES = b"pg\x00dump\xffbytes"
 MINIO_ACCESS_KEY = "minio-access-sensitive"
 MINIO_SECRET_KEY = "minio-secret-sensitive"
+TEST_MINIO_PORT = 39123
 
 
 def make_config(tmp_path: Path) -> OperatorConfig:
@@ -109,11 +110,14 @@ def make_request() -> RolloutRequest:
 
 
 class RecordingPortForward:
-    def __init__(self) -> None:
+    def __init__(self, *, selected_port: int = TEST_MINIO_PORT) -> None:
         self.events: list[str] = []
+        self.selected_port = selected_port
 
-    def wait_ready(self, host: str, port: int, timeout_seconds: float) -> None:
-        self.events.append(f"ready:{host}:{port}:{timeout_seconds}")
+    def wait_ready(self, host: str, timeout_seconds: float) -> int:
+        selected_port = getattr(self, "selected_port", TEST_MINIO_PORT)
+        self.events.append(f"ready:{host}:{timeout_seconds}:{selected_port}")
+        return selected_port
 
     def terminate(self) -> None:
         self.events.append("terminate")
@@ -223,7 +227,7 @@ class SuccessfulMinioMirror:
         cancel_on_timeout: Callable[[], None],
         resources: backup_module._BackupResourceBudget,
     ) -> None:
-        assert endpoint_url == "http://127.0.0.1:19000"
+        assert endpoint_url == f"http://127.0.0.1:{TEST_MINIO_PORT}"
         assert buckets == (
             "loom-staging-trajectories",
             "loom-staging-artifacts",
@@ -265,7 +269,7 @@ def test_partial_backup_never_publishes_latest_or_returns_manifest(tmp_path: Pat
     assert failed_root.is_dir()
     assert failed_root.stat().st_mode & 0o777 == 0o700
     assert runner.port_forward.events == [
-        "ready:127.0.0.1:19000:15.0",
+        f"ready:127.0.0.1:15.0:{TEST_MINIO_PORT}",
         "terminate",
         "wait:5.0",
     ]
@@ -283,6 +287,14 @@ def test_binary_dump_and_exact_secret_allowlist_never_expose_credentials(tmp_pat
     )
 
     backup = creator.create(make_request())
+
+    port_forward_index = next(
+        index for index, argv in enumerate(runner.argvs) if "port-forward" in argv
+    )
+    postgres_index = next(
+        index for index, argv in enumerate(runner.argvs) if any("pg_dump" in arg for arg in argv)
+    )
+    assert port_forward_index < postgres_index
 
     bundle_root = config.rollout_root / "backups" / "20260713T200000Z-stg-20260713-abcdef12"
     assert (bundle_root / "postgres" / "loom.dump").read_bytes() == POSTGRES_BYTES
@@ -579,6 +591,38 @@ class OneObjectS3:
 
     def close(self) -> None:
         self.closed = True
+
+
+@pytest.mark.parametrize(
+    "endpoint_url",
+    [
+        "http://localhost:39123",
+        "http://127.0.0.1:0",
+        "http://127.0.0.1:65536",
+        "https://127.0.0.1:39123",
+        "http://127.0.0.1:39123/path",
+    ],
+)
+def test_boto3_minio_mirror_rejects_non_child_local_endpoints(
+    tmp_path: Path,
+    endpoint_url: str,
+) -> None:
+    destination = tmp_path / "minio"
+    destination.mkdir(mode=0o700)
+    mirror = Boto3MinioMirror(
+        client_factory=lambda *_args, **_kwargs: pytest.fail(
+            "client must not be created for an unapproved endpoint"
+        )
+    )
+
+    with pytest.raises(ValueError, match="endpoint is not approved"):
+        mirror.mirror(
+            endpoint_url=endpoint_url,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            destination=destination,
+        )
 
 
 def test_boto3_minio_mirror_paginates_both_buckets_with_bounded_client_config(
@@ -1024,7 +1068,23 @@ def test_shared_entry_cap_stops_before_starting_postgres_command(tmp_path: Path)
     with pytest.raises(BackupError, match="postgres_dump_failed"):
         creator.create(make_request())
 
-    assert runner.argvs == []
+    assert runner.argvs == [
+        [
+            "kubectl",
+            "-n",
+            "loom-staging",
+            "port-forward",
+            "--address",
+            "127.0.0.1",
+            "service/loom-minio",
+            ":9000",
+        ]
+    ]
+    assert runner.port_forward.events == [
+        f"ready:127.0.0.1:15.0:{TEST_MINIO_PORT}",
+        "terminate",
+        "wait:5.0",
+    ]
     backups_root = config.rollout_root / "backups"
     assert not (backups_root / "latest").exists()
     assert not list(backups_root.glob("*/backup-manifest.json"))
@@ -1050,11 +1110,11 @@ def test_port_forward_cleanup_must_confirm_exit_before_manifest_publication(
         now=lambda: FIXED_NOW,
     )
 
-    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+    with pytest.raises(BackupError, match="minio_transport_cleanup_failed"):
         creator.create(make_request())
 
     assert port_forward.events == [
-        "ready:127.0.0.1:19000:15.0",
+        f"ready:127.0.0.1:15.0:{TEST_MINIO_PORT}",
         "terminate",
         "wait:5.0",
         "kill",
@@ -1320,8 +1380,8 @@ def test_new_backups_fd_is_closed_when_parent_fsync_fails(
 
 
 class FailingReadinessPortForward(RecordingPortForward):
-    def wait_ready(self, host: str, port: int, timeout_seconds: float) -> None:
-        self.events.append(f"ready:{host}:{port}:{timeout_seconds}")
+    def wait_ready(self, host: str, timeout_seconds: float) -> int:
+        self.events.append(f"ready:{host}:{timeout_seconds}")
         raise RuntimeError("untrusted-stage-detail")
 
 
@@ -1378,7 +1438,7 @@ class StageFailingRunner(RecordingRunner):
         )
 
 
-def test_port_forward_is_localhost_only_and_readiness_conflict_fails_closed(
+def test_port_forward_is_localhost_only_and_readiness_failure_is_explicit(
     tmp_path: Path,
 ) -> None:
     config = make_config(tmp_path)
@@ -1391,8 +1451,9 @@ def test_port_forward_is_localhost_only_and_readiness_conflict_fails_closed(
         now=lambda: FIXED_NOW,
     )
 
-    with pytest.raises(BackupError, match="minio_snapshot_failed"):
+    with pytest.raises(BackupError, match="minio_transport_failed") as exc_info:
         creator.create(make_request())
+    assert exc_info.value.public_reason == "backup_transport_failed"
 
     port_forward_argv = next(argv for argv in runner.argvs if "port-forward" in argv)
     assert port_forward_argv == [
@@ -1403,16 +1464,81 @@ def test_port_forward_is_localhost_only_and_readiness_conflict_fails_closed(
         "--address",
         "127.0.0.1",
         "service/loom-minio",
-        "19000:9000",
+        ":9000",
     ]
     assert runner.port_forward.events == [
-        "ready:127.0.0.1:19000:15.0",
+        "ready:127.0.0.1:15.0",
         "terminate",
         "wait:5.0",
     ]
     backups_root = config.rollout_root / "backups"
     assert not (backups_root / "latest").exists()
     assert list(backups_root.glob("*/backup-manifest.json")) == []
+    assert not any(argv[:2] == ["kubectl", "exec"] for argv in runner.argvs)
+
+
+def test_unrelated_legacy_tunnel_handle_is_untouched_during_backup(tmp_path: Path) -> None:
+    legacy_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        try:
+            legacy_listener.bind(("127.0.0.1", 19000))
+            legacy_listener.listen(1)
+        except OSError:
+            # A real operator-owned tunnel may already occupy the historical port.
+            legacy_listener.close()
+
+        unrelated = RecordingPortForward(selected_port=19000)
+        runner = RecordingRunner()
+        config = make_config(tmp_path)
+        creator = BackupCreator(
+            config,
+            service_uid=os.getuid(),
+            runner=runner,
+            minio=SuccessfulMinioMirror(),
+            now=lambda: FIXED_NOW,
+        )
+
+        creator.create(make_request())
+
+        port_forward_argv = next(argv for argv in runner.argvs if "port-forward" in argv)
+        assert port_forward_argv[-1] == ":9000"
+        assert "19000" not in " ".join(port_forward_argv)
+        assert unrelated.events == []
+    finally:
+        legacy_listener.close()
+
+
+def test_concurrent_transports_keep_distinct_child_ports_and_cleanup(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "first-rollout"
+    second_root = tmp_path / "second-rollout"
+    first_root.mkdir()
+    second_root.mkdir()
+    first_handle = RecordingPortForward(selected_port=39123)
+    second_handle = RecordingPortForward(selected_port=39124)
+    first = BackupCreator(
+        make_config(first_root),
+        service_uid=os.getuid(),
+        runner=RecordingRunner(port_forward=first_handle),
+        minio=SuccessfulMinioMirror(),
+    )
+    second = BackupCreator(
+        make_config(second_root),
+        service_uid=os.getuid(),
+        runner=RecordingRunner(port_forward=second_handle),
+        minio=SuccessfulMinioMirror(),
+    )
+
+    first_port, stop_first = first._start_minio_transport()
+    second_port, stop_second = second._start_minio_transport()
+
+    assert (first_port, second_port) == (39123, 39124)
+    stop_first()
+    assert first_handle.events[-2:] == ["terminate", "wait:5.0"]
+    assert second_handle.events == ["ready:127.0.0.1:15.0:39124"]
+    stop_second()
+    assert second_handle.events[-2:] == ["terminate", "wait:5.0"]
 
 
 @pytest.mark.parametrize(
@@ -1420,7 +1546,7 @@ def test_port_forward_is_localhost_only_and_readiness_conflict_fails_closed(
     [
         ("postgres", "postgres_dump_failed"),
         ("credentials", "minio_credentials_failed"),
-        ("port_forward_readiness", "minio_snapshot_failed"),
+        ("port_forward_readiness", "minio_transport_failed"),
         ("minio", "minio_snapshot_failed"),
         ("secret:loom-secrets", "secret_export_failed"),
         ("secret:loom-admin-secret", "secret_export_failed"),
@@ -1859,25 +1985,23 @@ class StartupOutputProcess:
         return None
 
 
-def test_prebound_port_cannot_impersonate_kubectl_readiness() -> None:
-    listener = socket.socket(
-        socket.AF_INET,
-        socket.SOCK_STREAM,
-    )
-    listener.bind(("127.0.0.1", 19000))
-    listener.listen(1)
+def test_child_selected_port_is_independent_of_legacy_port() -> None:
     with tempfile.TemporaryFile(mode="w+b") as output:
-        output.write(b"error: unable to listen on port 19000\n")
+        output.write(f"Forwarding from 127.0.0.1:{TEST_MINIO_PORT} -> 9000\n".encode())
         output.flush()
         output.seek(0)
         process = StartupOutputProcess(output)
         handle = backup_module._SubprocessPortForward(process)  # type: ignore[arg-type]
 
-        try:
-            with pytest.raises(RuntimeError, match="readiness"):
-                handle.wait_ready("127.0.0.1", 19000, 0.1)
-        finally:
-            listener.close()
+        assert handle.wait_ready("127.0.0.1", 0.1) == TEST_MINIO_PORT
+
+
+def test_subprocess_port_forward_rejects_untrusted_startup_output() -> None:
+    process = StartupOutputProcess(io.BytesIO(b"Forwarding from 0.0.0.0:39123 -> 9000\n"))
+    handle = backup_module._SubprocessPortForward(process)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="readiness"):
+        handle.wait_ready("127.0.0.1", 0.1)
 
 
 def test_subprocess_port_forward_accepts_exact_child_ready_line(
@@ -1887,7 +2011,9 @@ def test_subprocess_port_forward_accepts_exact_child_ready_line(
 
     def fake_popen(argv: list[str], **kwargs: object) -> StartupOutputProcess:
         popen_calls.append((argv, dict(kwargs)))
-        return StartupOutputProcess(io.BytesIO(b"Forwarding from 127.0.0.1:19000 -> 9000\n"))
+        return StartupOutputProcess(
+            io.BytesIO(f"Forwarding from 127.0.0.1:{TEST_MINIO_PORT} -> 9000\n".encode())
+        )
 
     monkeypatch.setattr(backup_module.subprocess, "Popen", fake_popen)
     runner = SubprocessBackupCommandRunner()
@@ -1899,11 +2025,11 @@ def test_subprocess_port_forward_accepts_exact_child_ready_line(
         "--address",
         "127.0.0.1",
         "service/loom-minio",
-        "19000:9000",
+        ":9000",
     ]
 
     handle = runner.start(argv, env={"PATH": "/usr/bin"})
-    handle.wait_ready("127.0.0.1", 19000, 0.1)
+    assert handle.wait_ready("127.0.0.1", 0.1) == TEST_MINIO_PORT
     handle.close()
 
     assert len(popen_calls) == 1
@@ -2738,12 +2864,18 @@ def test_boto_client_closes_before_port_forward_cleanup(tmp_path: Path) -> None:
         now=lambda: FIXED_NOW,
     )
 
-    creator._mirror_minio(
-        minio_root,
-        buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-    )
+    local_port, stop_port_forward = creator._start_minio_transport()
+    try:
+        creator._mirror_minio(
+            minio_root,
+            local_port=local_port,
+            stop_port_forward=stop_port_forward,
+            buckets=("loom-staging-trajectories", "loom-staging-artifacts"),
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+        )
+    finally:
+        stop_port_forward()
 
     assert events.index("client_close") < events.index("terminate")
 
@@ -3001,7 +3133,7 @@ def test_deadline_cleanup_failure_is_fail_closed_without_publication(
         now=lambda: FIXED_NOW,
     )
 
-    with pytest.raises(BackupError, match="minio_snapshot_failed") as exc_info:
+    with pytest.raises(BackupError, match="minio_transport_cleanup_failed") as exc_info:
         creator.create(make_request())
 
     assert "sensitive" not in str(exc_info.value)
@@ -3273,6 +3405,69 @@ def test_reviewed_policy_crosses_old_99996_object_boundary(
 
     assert config.backup_max_objects == 1_000_000
     assert events == ["client_close"]
+
+
+def test_stage_maps_code_to_durable_public_reason() -> None:
+    def boom() -> None:
+        raise ValueError("secret-bearing detail must not leak")
+
+    for code, expected in (
+        ("postgres_dump_failed", "backup_postgres_failed"),
+        ("minio_snapshot_failed", "backup_minio_failed"),
+        ("minio_credentials_failed", "backup_minio_failed"),
+        ("secret_export_failed", "backup_secrets_failed"),
+        ("manifest_write_failed", "backup_manifest_failed"),
+        ("manifest_publish_failed", "backup_manifest_failed"),
+        ("backup_capacity_unavailable", "backup_capacity_exhausted"),
+        ("minio_bucket_config_invalid", "backup_config_invalid"),
+        ("backup_clock_invalid", "backup_precondition_failed"),
+    ):
+        with pytest.raises(backup_module.BackupError) as exc_info:
+            backup_module._stage(code, boom)
+        assert exc_info.value.code == code
+        assert exc_info.value.public_reason == expected
+        # The stage discards the underlying secret-bearing cause.
+        assert "secret-bearing detail" not in str(exc_info.value)
+
+
+def test_stage_unknown_code_defaults_to_backup_failed() -> None:
+    def boom() -> None:
+        raise RuntimeError("x")
+
+    with pytest.raises(backup_module.BackupError) as exc_info:
+        backup_module._stage("some_unmapped_code", boom)
+    assert exc_info.value.public_reason == "backup_failed"
+
+
+def test_stage_reraises_specific_backup_error_unchanged() -> None:
+    def limit() -> None:
+        raise backup_module.BackupPolicyLimitError(
+            "minio_object_limit_exceeded",
+            public_reason="backup_object_limit_exceeded",
+            message="MinIO mirror exceeded object limit",
+        )
+
+    with pytest.raises(backup_module.BackupError) as exc_info:
+        backup_module._stage("postgres_dump_failed", limit)
+    # An already-coded BackupError propagates with its own reason, not the
+    # wrapping stage's reason.
+    assert exc_info.value.public_reason == "backup_object_limit_exceeded"
+
+
+def test_all_stage_public_reasons_are_approved() -> None:
+    for reason in backup_module._STAGE_PUBLIC_REASONS.values():
+        assert reason in backup_module._BACKUP_PUBLIC_REASONS
+
+
+def test_backup_public_reason_literal_matches_approved_event_tokens() -> None:
+    # The Literal type, the backup module's runtime set, and the event-model
+    # allowlist must all agree, or a raised reason gets rejected at append time.
+    from typing import get_args
+
+    from loom_cli.rollout.operator.model import APPROVED_BACKUP_EVENT_REASONS
+
+    assert set(get_args(backup_module.BackupPublicReason)) == APPROVED_BACKUP_EVENT_REASONS
+    assert backup_module._BACKUP_PUBLIC_REASONS == APPROVED_BACKUP_EVENT_REASONS
 
 
 def _incomplete_bundle(tmp_path: Path) -> tuple[BackupCreator, Path]:

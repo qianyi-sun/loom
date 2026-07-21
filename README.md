@@ -32,12 +32,12 @@ shared-provider audit, usage and cost accounting, verifier evidence, and
 reproducible result exports. That lets researchers focus on tasks, agents, and
 models while Loom keeps the execution trail and operational boundary explicit.
 
-Current shared staging route: [https://yylx.world/dev](https://yylx.world/dev)
+Current shared staging route: [https://yylx.world/staging](https://yylx.world/staging)
 
 Planned first production route: [https://yylx.world/prod](https://yylx.world/prod)
 
 The `/prod` route is the target for the first `main`-based production release.
-Until the v1.0.0 release gates are complete, use `/dev` for shared staging
+Until the v1.0.0 release gates are complete, use `/staging` for shared staging
 validation and do not treat `/prod` as the production-ready entrypoint.
 
 ## Current Release Posture
@@ -226,7 +226,7 @@ Start with the user guide rather than copying commands from this README:
 Current shared staging login should use:
 
 ```bash
-loom auth login --server https://yylx.world/dev --username <user> --password env:LOOM_PASSWORD
+loom auth login --server https://yylx.world/staging --username <user> --password env:LOOM_PASSWORD
 ```
 
 First production will use the same CLI shape with `https://yylx.world/prod`

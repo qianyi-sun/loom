@@ -76,6 +76,7 @@ async def test_seed_helper_returns_none_when_family_run_disabled() -> None:
     result = await prepare_family_run_state(
         session=session,  # type: ignore[arg-type]
         batch_id=uuid4(),
+        submission_team_id=uuid4(),
         tasks=[_FakeTask(id="benchmarks/x/task-1-a", tags={})],
         catalog_default=None,
         override=None,
@@ -99,6 +100,7 @@ async def test_seed_helper_seeds_families_and_returns_mapping() -> None:
     result = await prepare_family_run_state(
         session=session,  # type: ignore[arg-type]
         batch_id=batch_id,
+        submission_team_id=uuid4(),
         tasks=tasks,
         catalog_default=None,
         override=_default_override(),
@@ -128,6 +130,7 @@ async def test_seed_helper_translates_partial_spec_error() -> None:
         await prepare_family_run_state(
             session=_FakeSession(),  # type: ignore[arg-type]
             batch_id=uuid4(),
+            submission_team_id=uuid4(),
             tasks=[_FakeTask(id="benchmarks/x/task-1", tags={})],
             catalog_default=None,
             override=partial,

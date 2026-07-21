@@ -115,6 +115,7 @@ from uuid import UUID, uuid4  # noqa: E402
 
 from loom.auth import AuthContext  # noqa: E402
 from loom_llm_gateway.routes._facade_common import (  # noqa: E402
+    resolve_optional_provider_connection_id,
     resolve_provider_connection_id,
 )
 
@@ -133,31 +134,36 @@ def _step_ctx(provider_connection_id: UUID | None) -> AuthContext:
     )
 
 
+def _platform_bound_step_ctx() -> AuthContext:
+    return AuthContext(
+        token_hash=b"",
+        type="step_session",
+        scopes=["llm:call"],
+        team_id=uuid4(),
+        expires_at=datetime.now(UTC),
+        trial_id=uuid4(),
+        step_id="family_evolver",
+        provider_connection_id=None,
+        provider_connection_id_bound=True,
+    )
+
+
 def test_resolve_jwt_only() -> None:
     """No header, JWT-only path (post-transition shape)."""
     conn = uuid4()
-    assert (
-        resolve_provider_connection_id(_step_ctx(conn), None)
-        == conn
-    )
+    assert resolve_provider_connection_id(_step_ctx(conn), None) == conn
 
 
 def test_resolve_header_only() -> None:
     """Legacy path: JWT scope has no connection_id, header is used."""
     conn = uuid4()
-    assert (
-        resolve_provider_connection_id(_step_ctx(None), str(conn))
-        == conn
-    )
+    assert resolve_provider_connection_id(_step_ctx(None), str(conn)) == conn
 
 
 def test_resolve_both_match() -> None:
     """Canonical transition case: sandbox sends both, they agree."""
     conn = uuid4()
-    assert (
-        resolve_provider_connection_id(_step_ctx(conn), str(conn))
-        == conn
-    )
+    assert resolve_provider_connection_id(_step_ctx(conn), str(conn)) == conn
 
 
 def test_resolve_both_mismatch_400_with_authoritative_message() -> None:
@@ -167,7 +173,8 @@ def test_resolve_both_mismatch_400_with_authoritative_message() -> None:
     header_conn = uuid4()
     with pytest.raises(HTTPException) as exc:
         resolve_provider_connection_id(
-            _step_ctx(jwt_conn), str(header_conn),
+            _step_ctx(jwt_conn),
+            str(header_conn),
         )
     assert exc.value.status_code == 400
     assert "JWT scope is authoritative" in exc.value.detail
@@ -197,13 +204,97 @@ def test_resolve_empty_string_header_treated_as_absent() -> None:
     400 if JWT also empty), not 400 on parse."""
     conn = uuid4()
     # JWT has it, header is empty ⇒ JWT wins.
-    assert (
-        resolve_provider_connection_id(_step_ctx(conn), "")
-        == conn
-    )
+    assert resolve_provider_connection_id(_step_ctx(conn), "") == conn
     # Both empty/None ⇒ 400.
     with pytest.raises(HTTPException):
         resolve_provider_connection_id(_step_ctx(None), "")
+
+
+def test_resolve_optional_neither_returns_none() -> None:
+    assert (
+        resolve_optional_provider_connection_id(
+            _step_ctx(None),
+            header_value=None,
+            body_value=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("source", ["header", "body"])
+def test_resolve_optional_platform_bound_jwt_rejects_provider_override(
+    source: str,
+) -> None:
+    conn = str(uuid4())
+    with pytest.raises(HTTPException) as exc:
+        resolve_optional_provider_connection_id(
+            _platform_bound_step_ctx(),
+            header_value=conn if source == "header" else None,
+            body_value=conn if source == "body" else None,
+        )
+    assert exc.value.status_code == 400
+    assert "JWT scope says platform" in exc.value.detail
+    assert "JWT scope is authoritative" in exc.value.detail
+
+
+def test_resolve_optional_body_only() -> None:
+    conn = uuid4()
+    assert (
+        resolve_optional_provider_connection_id(
+            _step_ctx(None),
+            header_value=None,
+            body_value=str(conn),
+        )
+        == conn
+    )
+
+
+def test_resolve_optional_header_and_body_match() -> None:
+    conn = uuid4()
+    assert (
+        resolve_optional_provider_connection_id(
+            _step_ctx(None),
+            header_value=str(conn),
+            body_value=str(conn),
+        )
+        == conn
+    )
+
+
+def test_resolve_optional_header_and_body_mismatch() -> None:
+    with pytest.raises(HTTPException) as exc:
+        resolve_optional_provider_connection_id(
+            _step_ctx(None),
+            header_value=str(uuid4()),
+            body_value=str(uuid4()),
+        )
+    assert exc.value.status_code == 400
+    assert "body says" in exc.value.detail
+    assert "header says" in exc.value.detail
+
+
+def test_resolve_optional_jwt_rejects_body_mismatch() -> None:
+    jwt_conn = uuid4()
+    with pytest.raises(HTTPException) as exc:
+        resolve_optional_provider_connection_id(
+            _step_ctx(jwt_conn),
+            header_value=str(jwt_conn),
+            body_value=str(uuid4()),
+        )
+    assert exc.value.status_code == 400
+    assert "JWT scope is authoritative" in exc.value.detail
+    assert "body says" in exc.value.detail
+
+
+def test_resolve_optional_malformed_body_400() -> None:
+    with pytest.raises(HTTPException) as exc:
+        resolve_optional_provider_connection_id(
+            _step_ctx(None),
+            header_value=None,
+            body_value="not-a-uuid",
+        )
+    assert exc.value.status_code == 400
+    assert "loom.provider_connection_id is not a valid UUID" in exc.value.detail
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -234,6 +325,7 @@ class _StubStore:
     """Replaces LocalEncryptedSecretStore in the helper for these
     tests so we can drive each error class without standing up a real
     session/DB. Patched via monkeypatch in the test below."""
+
     def __init__(self, exc: Exception | None = None, value: str = "sk-x"):
         self._exc = exc
         self._value = value
@@ -256,7 +348,8 @@ async def test_decrypt_facade_api_key_happy_returns_decrypted_key(
         stub,
     )
     out = await decrypt_facade_api_key(
-        object(), _row_with_ref("loom://team:abc/" + str(uuid4())),
+        object(),
+        _row_with_ref("loom://team:abc/" + str(uuid4())),
     )
     assert out == "sk-decrypted"
 
@@ -276,41 +369,55 @@ async def test_decrypt_facade_api_key_malformed_ref_returns_controlled_502(
     )
     with pytest.raises(HTTPException) as exc:
         await decrypt_facade_api_key(
-            object(), _row_with_ref("env:LEGACY"),
+            object(),
+            _row_with_ref("env:LEGACY"),
         )
     assert exc.value.status_code == 502
     assert "malformed_ref" in exc.value.detail
     assert "rotate-key" in exc.value.detail
+    assert "env:LEGACY" not in exc.value.detail
+    assert "ref missing scheme separator" not in exc.value.detail
+    assert exc.value.__cause__ is None
 
 
 async def test_decrypt_facade_api_key_missing_secret_returns_controlled_502(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stub = _StubStore(exc=SecretNotFoundError("no row for that ref"))
+    raw_ref = "loom://team:secret/00000000-0000-0000-0000-000000000001"
+    stub = _StubStore(exc=SecretNotFoundError(f"no secret for ref {raw_ref!r}"))
     monkeypatch.setattr(
         "loom_llm_gateway.routes._facade_common.LocalEncryptedSecretStore",
         stub,
     )
     with pytest.raises(HTTPException) as exc:
         await decrypt_facade_api_key(
-            object(), _row_with_ref("loom://team:abc/" + str(uuid4())),
+            object(),
+            _row_with_ref("loom://team:abc/" + str(uuid4())),
         )
     assert exc.value.status_code == 502
     assert "missing_secret" in exc.value.detail
+    assert raw_ref not in exc.value.detail
+    assert "no secret for ref" not in exc.value.detail
+    assert exc.value.__cause__ is None
 
 
 async def test_decrypt_facade_api_key_decrypt_failed_returns_controlled_502(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stub = _StubStore(exc=DecryptError("AEAD verification failed"))
+    raw_ref = "loom://team:secret/00000000-0000-0000-0000-000000000002"
+    stub = _StubStore(exc=DecryptError(f"AEAD verification failed for {raw_ref!r}"))
     monkeypatch.setattr(
         "loom_llm_gateway.routes._facade_common.LocalEncryptedSecretStore",
         stub,
     )
     with pytest.raises(HTTPException) as exc:
         await decrypt_facade_api_key(
-            object(), _row_with_ref("loom://team:abc/" + str(uuid4())),
+            object(),
+            _row_with_ref("loom://team:abc/" + str(uuid4())),
         )
     assert exc.value.status_code == 502
     assert "decrypt_failed" in exc.value.detail
     assert "master key" in exc.value.detail
+    assert raw_ref not in exc.value.detail
+    assert "AEAD verification failed" not in exc.value.detail
+    assert exc.value.__cause__ is None

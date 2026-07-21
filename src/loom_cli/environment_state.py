@@ -216,6 +216,49 @@ def _args_include_pool_name(args: list[str], pool_name: str) -> bool:
     return False
 
 
+def _args_db_local_port(args: list[str]) -> str | None:
+    for idx, arg in enumerate(args):
+        if arg == "--db-local-port" and idx + 1 < len(args):
+            return args[idx + 1]
+        if arg.startswith("--db-local-port="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _validate_supervisor_collisions(
+    supervisors: list[dict[str, Any]],
+) -> None:
+    """Reject cross-entry supervisor collisions within a single profile (#875).
+
+    Two supervisors on the same host that share a systemd unit name would
+    overwrite each other's unit file, and a shared --db-local-port would
+    make their port-forwards fight for the same local socket. Enforce
+    uniqueness of the identity fields plus the DB tunnel port so a mistyped
+    copy-paste in the env-state TOML fails loudly at load time.
+    """
+    for field in ("name", "service_name", "timer_name"):
+        seen: set[str] = set()
+        for supervisor in supervisors:
+            value = str(supervisor[field])
+            if value in seen:
+                raise EnvironmentStateProfileError(
+                    "external_slurm_autoscaler_supervisors: duplicate "
+                    f"{field} {value!r}",
+                )
+            seen.add(value)
+    seen_ports: set[str] = set()
+    for supervisor in supervisors:
+        port = _args_db_local_port(supervisor.get("args", []))
+        if port is None:
+            continue
+        if port in seen_ports:
+            raise EnvironmentStateProfileError(
+                "external_slurm_autoscaler_supervisors: duplicate "
+                f"--db-local-port {port!r}",
+            )
+        seen_ports.add(port)
+
+
 def _normalize_autoscaler_policy(
     item: dict[str, Any],
     *,
@@ -446,6 +489,7 @@ def load_environment_state_profile(
             ),
         )
     ]
+    _validate_supervisor_collisions(external_slurm_autoscaler_supervisors)
     return EnvironmentStateProfile(
         environment=environment,
         control_plane_environment=control_plane_environment,
