@@ -455,13 +455,13 @@ For release evidence against canonical public routes:
 ```bash
 uv run python scripts/ops/frontend_route_smoke.py \
   --route production=https://yylx.world/prod=https://yylx.world/prod/api \
-  --route development=https://yylx.world/dev=https://yylx.world/dev/api \
+  --route staging=https://yylx.world/staging=https://yylx.world/staging/api \
   --json \
   > "$ROLLOUT_DIR/frontend-route-smoke.json"
 
 uv run python scripts/ops/frontend_security_headers.py \
   --route production=https://yylx.world/prod \
-  --route development=https://yylx.world/dev \
+  --route staging=https://yylx.world/staging \
   --json \
   > "$ROLLOUT_DIR/frontend-security-headers.json"
 ```
@@ -477,7 +477,7 @@ Treat `www.yylx.world` as a redirect-only alias, not a second release route.
 The cluster profiles bind it to the same TLS secret through
 `ingress_redirect_hosts` and ingress-nginx `from-to-www-redirect` handling.
 Frontend route smoke and release-gate evidence should continue to use only the
-canonical `https://yylx.world/prod` and `https://yylx.world/dev` routes.
+canonical `https://yylx.world/prod` and `https://yylx.world/staging` routes.
 
 Expected success output:
 
@@ -504,7 +504,7 @@ Expected failure output:
     {
       "status": "fail",
       "errors": [
-        "apiRouteBase must be https://yylx.world/dev/api",
+        "apiRouteBase must be https://yylx.world/staging/api",
         "runtime config response must be no-store"
       ]
     }
@@ -631,7 +631,7 @@ manifest = {
     "candidate_sha": candidate,
     "image_tag": image_tag,
     "prod_tag": os.environ["PROD_TAG"],
-    "staging_url": "https://yylx.world/dev",
+    "staging_url": "https://yylx.world/staging",
     "image_digests": {
         "loom-control-plane": digest("loom-control-plane", "1"),
         "loom-llm-gateway": digest("loom-llm-gateway", "2"),
@@ -658,16 +658,16 @@ manifest = {
             "url": "https://example.invalid/smoke",
             "batch_id": "batch-release-smoke",
             "trial_id": "trial-release-smoke",
-            "artifact_url": "https://yylx.world/dev/api/v1/trials/trial-release-smoke/atif",
+            "artifact_url": "https://yylx.world/staging/api/v1/trials/trial-release-smoke/atif",
             "service_no_oom_restarts_row": "final service.no_oom_restarts row after route probes passed",
         },
         "frontend_route_evidence": {
             "status": "pass",
             "url": "https://example.invalid/frontend-route-smoke",
             "production_route": "https://yylx.world/prod",
-            "development_route": "https://yylx.world/dev",
+            "staging_route": "https://yylx.world/staging",
             "production_api_base": "https://yylx.world/prod/api",
-            "development_api_base": "https://yylx.world/dev/api",
+            "staging_api_base": "https://yylx.world/staging/api",
         },
         "secret_redaction": {"status": "pass", "url": "https://example.invalid/redaction"},
         "provider_smoke": {
@@ -786,8 +786,8 @@ manifest = {
                 },
                 "staging": {
                     "environment": "staging",
-                    "route": "https://yylx.world/dev",
-                    "api_base": "https://yylx.world/dev/api",
+                    "route": "https://yylx.world/staging",
+                    "api_base": "https://yylx.world/staging/api",
                     "environment_label": "Staging",
                 },
             },
@@ -803,7 +803,7 @@ manifest = {
                 },
                 "staging": {
                     "environment": "staging",
-                    "api_url": "https://yylx.world/dev/api",
+                    "api_url": "https://yylx.world/staging/api",
                     "image": "ghcr.io/qianyi-sun/loom-worker:staging-abcdef0",
                     "image_digest": digest("loom-worker", "6"),
                     "source_commit": os.environ["STAGING_RELEASE_SHA"],
@@ -1112,7 +1112,7 @@ Before declaring the first production release ready:
   `"new_staging_claims_allowed": false`, and no active lease unless the release
   owner approved a documented override.
 - Frontend route smoke proves `https://yylx.world/prod` resolves production
-  metadata/API base and `https://yylx.world/dev` resolves staging metadata/API
+  metadata/API base and `https://yylx.world/staging` resolves staging metadata/API
   base.
 - Staging smoke evidence includes the final `service.no_oom_restarts` row
   after route probes and security scanning, not only the pre-route baseline.
