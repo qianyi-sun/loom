@@ -34,9 +34,10 @@ environments. `docs/index.md` at the repo docs root is the task-router.
    staging capacity before moving to full Kubernetes cluster mode.
 
 7. **[local-dev-workflow.md](local-dev-workflow.md)** — developer-facing
-   setup for pre-push testing on a laptop. Single-node kind/k3s, external
-   Slurm by default with an in-cluster `k8s_worker` fallback. Local is not a
-   formal environment; it is not in the identity contract or on `yylx.world`.
+   setup for pre-push testing on a laptop. Single-node kind, in-cluster
+   `k8s_worker` by default with external Slurm as an advanced option. Local is
+   not a formal environment; it is not in the identity contract or on
+   `yylx.world`.
 
 ## When to open a new runbook
 
