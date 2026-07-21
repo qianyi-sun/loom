@@ -32,6 +32,8 @@ from loom.family_run.protocols import TaskLike
 from loom.family_run.resolve import FamilyRunNotEnabledError, resolve_family_run_spec
 from loom.family_run.spec import FamilyRunSpec, ResolvedFamilyRunSpec
 from loom.family_run.submit import seed_family_state
+from loom.family_run.validation import normalize_evolver_provider_connection
+from loom_service.provider_connection_lookup import validate_provider_connection
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ async def prepare_family_run_state(
     *,
     session: AsyncSession,
     batch_id: UUID,
+    submission_team_id: UUID,
     tasks: list[Any],
     catalog_default: FamilyRunSpec | None,
     override: FamilyRunSpec | None,
@@ -81,6 +84,16 @@ async def prepare_family_run_state(
         )
     except FamilyRunNotEnabledError:
         return None
+
+    resolved, evolver_provider_connection_id = normalize_evolver_provider_connection(
+        resolved,
+    )
+    if evolver_provider_connection_id is not None:
+        await validate_provider_connection(
+            session,
+            evolver_provider_connection_id,
+            team_id=submission_team_id,
+        )
 
     task_shims: list[TaskLike] = [
         _TaskShim(task_id=str(t.id), tags=getattr(t, "tags", None))

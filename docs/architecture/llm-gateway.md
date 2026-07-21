@@ -54,11 +54,40 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
 | Route                    | Dialect             | Forwarded to                       |
 |--------------------------|---------------------|------------------------------------|
 | `POST /v1/messages`      | Anthropic native    | `anthropic.AsyncAnthropic.messages.create` |
-| `POST /v1/chat/completions` | OpenAI Chat / BYO OpenAI-compatible chat | Native OpenAI path or direct httpx through `EgressClientPool` when `loom.provider_connection_id` resolves to `openai-compatible` / `custom` |
+| `POST /v1/chat/completions` | OpenAI Chat / BYO chat | Provider connection resolved from the authoritative step-JWT claim, with any header/body values required to match; `openai-compatible` / `custom` use `EgressClientPool`, while native Anthropic / Google connections use their LiteLLM transport |
 | `POST /v1/responses`     | OpenAI Responses / BYO OpenAI-compatible Responses | Native OpenAI path or direct httpx through `EgressClientPool` when the step JWT or `x-loom-provider-connection-id` resolves to `openai-compatible` / `custom`; if a BYO endpoint exposes only Chat Completions and returns the chat-style "messages required" 400 from `/responses`, the provider facade retries once through `/chat/completions` and synthesizes a Responses body/SSE for Codex |
 | `POST /v1/models/{model}:generateContent` | Gemini  | `google.generativeai.GenerativeModel.generate_content_async` |
 | `POST /v1/chat/completions` *(via litellm)* | Tail-provider shim | non-BYO and non-OpenAI-compatible fallback providers |
 | `POST /openai/v1/chat/completions`, `/openai/v1/responses`, `/anthropic/v1/messages`, `/google/v1beta/...` | Sandbox provider facade | Direct httpx through `EgressClientPool` |
+
+### Provider-connection authority
+
+`POST /v1/chat/completions` resolves an optional provider connection across the
+step JWT, `x-loom-provider-connection-id` header, and
+`loom.provider_connection_id` body field. A provider claim in the verified
+step JWT is authoritative. Every non-empty header or body value must match that
+claim; a mismatch is rejected before provider lookup or upstream dispatch. For
+legacy non-JWT callers, header and body are equivalent transports and must
+match when both are present. When all three sources are empty, the request uses
+the platform-credentialed path.
+
+The family-run orchestrator does not choose a team by writing `loom.team_id`
+and does not use its long-lived credential at the Gateway. For every
+`skill_patcher_llm` call it presents its dedicated, teamless family-orchestrator
+worker credential (scoped only to `family:evolve`) to Control Plane
+`/admin/step-tokens`, explicitly supplies the
+configured evolver provider (including null), and receives a short-lived
+`llm:call` step JWT bound to the real completed trial, its represented team,
+`step_id="family_evolver"`, and the authorized provider. The Control Plane
+loads the trial team and repeats the provider owner/share check before minting
+the JWT. The Gateway then authorizes provider lookup against the JWT team and
+rejects caller-controlled attribution or routing that disagrees with it.
+
+Provider API keys and secret references remain inside the SecretStore/provider
+connection boundary. Family-run adapter parameters containing secret-like keys
+fail closed before persistence, and Gateway failures must not log or echo
+credentials, authorization values, secret references, or decryption exception
+text.
 
 The Gateway is **not** a single unified shape — each dialect's
 response is forwarded verbatim. Agents see exactly the native
