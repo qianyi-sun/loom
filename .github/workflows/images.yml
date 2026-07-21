@@ -21,8 +21,8 @@ name: images
 
 on:
   pull_request:
-    # Protected names are reserved for the queue head; other PR events report
-    # distinct preflight/filtered contexts.
+    # Every relevant non-draft PR reports the protected gate name; drafts and
+    # unrelated metadata events report a distinct filtered context.
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
   merge_group:
     types: [checks_requested]
@@ -35,7 +35,12 @@ permissions:
 
 concurrency:
   group: images-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
+         (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+          contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+         (github.event.action == 'edited' && github.event.changes.base != null)) }}
 
 jobs:
   plan:
@@ -369,8 +374,7 @@ jobs:
   images-gate:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
-          (needs.plan.outputs.gate_mode == 'full' || needs.plan.outputs.gate_mode == 'invalidate') && 'images-gate' ||
-          needs.plan.outputs.gate_mode == 'preflight' && 'images-gate-preflight' ||
+          needs.plan.outputs.gate_mode == 'full' && 'images-gate' ||
           'images-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
@@ -388,14 +392,10 @@ jobs:
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
           case "$GATE_MODE" in
-            full|preflight|filtered|invalidate) ;;
+            full|filtered) ;;
             *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
           esac
-          if [[ "$GATE_MODE" == "invalidate" ]]; then
-            echo "FAIL: merge-ready authority was removed from this candidate" >&2
-            exit 1
-          fi
-          if [[ "$GATE_MODE" == "filtered" || "$GATE_MODE" == "preflight" ]]; then
+          if [[ "$GATE_MODE" == "filtered" ]]; then
             [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
             [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
             exit 0
