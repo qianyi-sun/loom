@@ -1078,11 +1078,14 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clone_commands: list[list[str]] = []
+    shared_git_environments: list[dict[str, str]] = []
     original_run_captured = env_state_module.run_captured
 
     def record_git_commands(argv: list[str], **kwargs: Any) -> SubprocessResult:
         if argv[:3] == ["git", "--no-replace-objects", "clone"]:
             clone_commands.append(argv)
+        if argv[:1] == ["/usr/bin/git"]:
+            shared_git_environments.append(dict(kwargs["env"]))
         return original_run_captured(argv, **kwargs)
 
     monkeypatch.setattr(env_state_module, "run_captured", record_git_commands)
@@ -1140,6 +1143,144 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     )
     assert clone_commands
     assert all("--no-hardlinks" in command for command in clone_commands)
+    assert shared_git_environments
+    assert all(
+        environment["GIT_INDEX_FILE"] == "/dev/null" for environment in shared_git_environments
+    )
+
+
+def test_published_repo_verification_never_asks_git_to_refresh_the_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+    index = repo_dir / ".git" / "index"
+    before = index.stat()
+    calls: list[tuple[str, ...]] = []
+    original_git = env_state_module._shared_repo_git
+
+    def reject_index_git(_repo: Path, *arguments: str) -> str:
+        calls.append(arguments)
+        if arguments[:1] == ("ls-files",):
+            raise AssertionError("published index must be parsed without Git")
+        return original_git(_repo, *arguments)
+
+    monkeypatch.setattr(env_state_module, "_shared_repo_git", reject_index_git)
+
+    verified = env_state_module.verify_external_runner_repo(
+        repo_dir=repo_dir,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+    after = index.stat()
+
+    assert verified["repo_action"] == "matched"
+    assert all(arguments[:1] != ("ls-files",) for arguments in calls)
+    assert (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_size,
+        stat.S_IMODE(after.st_mode),
+    ) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+        0o640,
+    )
+
+
+def test_published_repo_rejects_noncanonical_index_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "update-index", "--index-version", "4"],
+        check=True,
+    )
+    (repo_dir / ".git" / "index").chmod(0o640)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="index is unsupported",
+    ):
+        env_state_module.verify_external_runner_repo(
+            repo_dir=repo_dir,
+            resolved_sha=head,
+            expected_ref="staging-abc123",
+        )
 
 
 def test_materialize_repo_dir_keeps_final_claim_private_until_validation(
@@ -1938,6 +2079,7 @@ def test_shared_repo_git_uses_exact_safe_directory_argv_and_environment(
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_CONFIG_SYSTEM": "/dev/null",
         "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_INDEX_FILE": "/dev/null",
         "GIT_ATTR_NOSYSTEM": "1",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0",

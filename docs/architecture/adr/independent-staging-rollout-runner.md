@@ -240,9 +240,14 @@ immutable target as already matched. Both paths verify every authority path
 with no-follow metadata and atomically claim an absent final child with
 no-replace `mkdir` at private mode `2700`, inheriting sharedwork/setgid from the
 authority root. Neither installer publication nor its read-only check installs
-or activates GB10 units. All installer-side Git identity/status probes disable
-optional locks and replacement refs so a nominal read cannot refresh or
-rewrite the protected index. The materializer clones with `--no-hardlinks` while
+or activates GB10 units. All installer-side Git identity probes disable
+optional locks and replacement refs. Published-index validation does not
+invoke Git at all: it performs one bounded, no-follow, stable read, verifies
+the index checksum and canonical v2/v3 entries plus optional cache-tree
+extension, and compares those entries to the exact commit tree. This prevents
+Git's optional index refresh from rewriting ownership or mode on the
+NFS-backed checkout during a nominal read-only install check. The materializer
+clones with `--no-hardlinks` while
 consumers cannot search the claimed directory. It permits tracked git symlinks
 but rejects authority symlinks,
 foreign ownership, group/other write, hard-linked or special files, and a

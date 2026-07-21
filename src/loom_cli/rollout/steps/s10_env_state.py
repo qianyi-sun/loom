@@ -21,6 +21,7 @@ import re
 import shlex
 import socket
 import stat
+import struct
 import subprocess
 import threading
 import time
@@ -78,6 +79,7 @@ _MAX_PORT_FORWARD_LOG_CHARS = 64 * 1024
 _SHARED_WORKER_REPO_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
 _SHARED_WORKER_REPO_CONSUMER = PurePosixPath("scripts/ops/staging_rollout_shared_repo_consumer.py")
 _GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
+_MAX_SHARED_REPO_INDEX_BYTES = 64 * 1024 * 1024
 _CANONICAL_SHARED_REPO_GIT_CONFIG = (
     b"[core]\n"
     b"\trepositoryformatversion = 0\n"
@@ -1543,6 +1545,7 @@ def _shared_repo_git(repo_dir: Path, *arguments: str) -> str:
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_CONFIG_SYSTEM": "/dev/null",
             "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_INDEX_FILE": "/dev/null",
             "GIT_ATTR_NOSYSTEM": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_TERMINAL_PROMPT": "0",
@@ -1662,19 +1665,115 @@ def _open_child_directory(parent_fd: int, name: str) -> int:
     )
 
 
-def _index_entries(repo_dir: Path) -> dict[str, tuple[str, str]]:
-    raw = _shared_repo_git(repo_dir, "ls-files", "--stage", "-z")
-    entries: dict[str, tuple[str, str]] = {}
-    for raw_entry in raw.split("\0"):
-        if not raw_entry:
-            continue
-        metadata, separator, relative = raw_entry.partition("\t")
-        fields = metadata.split()
-        if separator != "\t" or len(fields) != 3 or fields[2] != "0":
+def _read_shared_repo_index(git_fd: int) -> bytes:
+    """Read the exact index without letting Git refresh the published file."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open("index", flags, dir_fd=git_fd)
+    except OSError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is unavailable",
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or not 32 <= before.st_size <= _MAX_SHARED_REPO_INDEX_BYTES
+        ):
             raise ExternalSlurmPrereqMaterializationError(
                 "external runner repository index is invalid",
             )
-        mode, object_id = fields[:2]
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository index is truncated",
+                )
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_size,
+        ) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_mtime_ns,
+            before.st_size,
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index changed while read",
+            )
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _index_entries(git_fd: int) -> dict[str, tuple[str, str]]:
+    raw = _read_shared_repo_index(git_fd)
+    if raw[:4] != b"DIRC" or hashlib.sha1(raw[:-20], usedforsecurity=False).digest() != raw[-20:]:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is invalid",
+        )
+    try:
+        version, entry_count = struct.unpack(">II", raw[4:12])
+    except struct.error as exc:  # pragma: no cover - guarded by the size bound
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is invalid",
+        ) from exc
+    if version not in {2, 3} or not 1 <= entry_count <= 1_000_000:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is unsupported",
+        )
+
+    entries: dict[str, tuple[str, str]] = {}
+    offset = 12
+    payload_end = len(raw) - 20
+    for _entry_number in range(entry_count):
+        entry_start = offset
+        if offset + 62 > payload_end:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index is invalid",
+            )
+        mode_value = struct.unpack(">I", raw[offset + 24 : offset + 28])[0]
+        object_id = raw[offset + 40 : offset + 60].hex()
+        flags_value = struct.unpack(">H", raw[offset + 60 : offset + 62])[0]
+        if (flags_value >> 12) & 0x3:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index contains an unmerged entry",
+            )
+        offset += 62
+        if flags_value & 0x4000:
+            if version != 3 or offset + 2 > payload_end:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository index is invalid",
+                )
+            offset += 2
+        try:
+            terminator = raw.index(b"\0", offset, payload_end)
+            relative = raw[offset:terminator].decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index path is invalid",
+            ) from exc
+        encoded_length = terminator - offset
+        if (flags_value & 0x0FFF) != min(encoded_length, 0x0FFF):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index path length is invalid",
+            )
+        entry_length = terminator + 1 - entry_start
+        offset = entry_start + ((entry_length + 7) // 8) * 8
+        if offset > payload_end or any(raw[terminator + 1 : offset]):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index padding is invalid",
+            )
+
+        mode = f"{mode_value:o}"
         relative_path = PurePosixPath(relative)
         if (
             mode not in {"100644", "100755", "120000"}
@@ -1689,6 +1788,26 @@ def _index_entries(repo_dir: Path) -> dict[str, tuple[str, str]]:
                 "external runner repository index contains an unsupported entry",
             )
         entries[relative] = (mode, object_id)
+
+    extensions: set[bytes] = set()
+    while offset < payload_end:
+        if offset + 8 > payload_end:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index extension is invalid",
+            )
+        signature = raw[offset : offset + 4]
+        extension_size = struct.unpack(">I", raw[offset + 4 : offset + 8])[0]
+        offset += 8
+        if signature != b"TREE" or signature in extensions or offset + extension_size > payload_end:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index extension is unsupported",
+            )
+        extensions.add(signature)
+        offset += extension_size
+    if offset != payload_end:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is invalid",
+        )
     if not entries:
         raise ExternalSlurmPrereqMaterializationError(
             "external runner repository index is empty",
@@ -2202,7 +2321,7 @@ def _validate_repo_tree(
                 raise ExternalSlurmPrereqMaterializationError(
                     "external runner repository does not exactly match the resolved candidate",
                 )
-            index_entries = _index_entries(repo_dir)
+            index_entries = _index_entries(git_fd)
             tree_entries = _commit_tree_entries(repo_dir, resolved_sha)
             if index_entries != tree_entries:
                 raise ExternalSlurmPrereqMaterializationError(
@@ -2287,22 +2406,22 @@ def _normalize_repo_tree(
                 uid=os.geteuid(),
                 gid=root.identity.st_gid,
             )
+            if _shared_repo_git(repo_dir, "rev-parse", "--show-object-format").strip() != "sha1":
+                raise ExternalSlurmPrereqMaterializationError(
+                    "fresh external runner checkout object format is unsupported",
+                )
+            head = _shared_repo_git(repo_dir, "rev-parse", "HEAD^{commit}").strip()
+            if head != resolved_sha:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "fresh external runner checkout does not match the resolved candidate",
+                )
+            index_entries = _index_entries(git_fd)
+            if index_entries != _commit_tree_entries(repo_dir, resolved_sha):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "fresh external runner checkout index does not match its commit tree",
+                )
         finally:
             os.close(git_fd)
-        if _shared_repo_git(repo_dir, "rev-parse", "--show-object-format").strip() != "sha1":
-            raise ExternalSlurmPrereqMaterializationError(
-                "fresh external runner checkout object format is unsupported",
-            )
-        head = _shared_repo_git(repo_dir, "rev-parse", "HEAD^{commit}").strip()
-        if head != resolved_sha:
-            raise ExternalSlurmPrereqMaterializationError(
-                "fresh external runner checkout does not match the resolved candidate",
-            )
-        index_entries = _index_entries(repo_dir)
-        if index_entries != _commit_tree_entries(repo_dir, resolved_sha):
-            raise ExternalSlurmPrereqMaterializationError(
-                "fresh external runner checkout index does not match its commit tree",
-            )
         index_modes = {relative: entry[0] for relative, entry in index_entries.items()}
         expected_directories = _expected_worktree_directories(index_entries)
         materialized, directories = _normalize_worktree(
