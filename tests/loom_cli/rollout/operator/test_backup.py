@@ -292,9 +292,7 @@ def test_binary_dump_and_exact_secret_allowlist_never_expose_credentials(tmp_pat
         index for index, argv in enumerate(runner.argvs) if "port-forward" in argv
     )
     postgres_index = next(
-        index
-        for index, argv in enumerate(runner.argvs)
-        if any("pg_dump" in arg for arg in argv)
+        index for index, argv in enumerate(runner.argvs) if any("pg_dump" in arg for arg in argv)
     )
     assert port_forward_index < postgres_index
 
@@ -3407,6 +3405,58 @@ def test_reviewed_policy_crosses_old_99996_object_boundary(
 
     assert config.backup_max_objects == 1_000_000
     assert events == ["client_close"]
+
+
+def test_stage_maps_code_to_durable_public_reason() -> None:
+    def boom() -> None:
+        raise ValueError("secret-bearing detail must not leak")
+
+    for code, expected in (
+        ("postgres_dump_failed", "backup_postgres_failed"),
+        ("minio_snapshot_failed", "backup_minio_failed"),
+        ("minio_credentials_failed", "backup_minio_failed"),
+        ("secret_export_failed", "backup_secrets_failed"),
+        ("manifest_write_failed", "backup_manifest_failed"),
+        ("manifest_publish_failed", "backup_manifest_failed"),
+        ("backup_capacity_unavailable", "backup_capacity_exhausted"),
+        ("minio_bucket_config_invalid", "backup_config_invalid"),
+        ("backup_clock_invalid", "backup_precondition_failed"),
+    ):
+        with pytest.raises(backup_module.BackupError) as exc_info:
+            backup_module._stage(code, boom)
+        assert exc_info.value.code == code
+        assert exc_info.value.public_reason == expected
+        # The stage discards the underlying secret-bearing cause.
+        assert "secret-bearing detail" not in str(exc_info.value)
+
+
+def test_stage_unknown_code_defaults_to_backup_failed() -> None:
+    def boom() -> None:
+        raise RuntimeError("x")
+
+    with pytest.raises(backup_module.BackupError) as exc_info:
+        backup_module._stage("some_unmapped_code", boom)
+    assert exc_info.value.public_reason == "backup_failed"
+
+
+def test_stage_reraises_specific_backup_error_unchanged() -> None:
+    def limit() -> None:
+        raise backup_module.BackupPolicyLimitError(
+            "minio_object_limit_exceeded",
+            public_reason="backup_object_limit_exceeded",
+            message="MinIO mirror exceeded object limit",
+        )
+
+    with pytest.raises(backup_module.BackupError) as exc_info:
+        backup_module._stage("postgres_dump_failed", limit)
+    # An already-coded BackupError propagates with its own reason, not the
+    # wrapping stage's reason.
+    assert exc_info.value.public_reason == "backup_object_limit_exceeded"
+
+
+def test_all_stage_public_reasons_are_approved() -> None:
+    for reason in backup_module._STAGE_PUBLIC_REASONS.values():
+        assert reason in backup_module._BACKUP_PUBLIC_REASONS
 
 
 def _incomplete_bundle(tmp_path: Path) -> tuple[BackupCreator, Path]:
