@@ -99,7 +99,7 @@ def ingress_controller_ip(observed: Mapping[str, object]) -> str | None:
         or observed.get("kind") != "Service"
         or metadata.get("name") != INGRESS_CONTROLLER_SERVICE
         or metadata.get("namespace") != INGRESS_CONTROLLER_NAMESPACE
-        or spec.get("type") != "ClusterIP"
+        or spec.get("type") not in {"ClusterIP", "NodePort"}
     ):
         return None
     value = spec.get("clusterIP")

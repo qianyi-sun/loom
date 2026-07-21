@@ -144,6 +144,9 @@ def test_ingress_controller_service_requires_exact_ipv4_cluster_identity() -> No
         "spec": {"clusterIP": "10.96.12.34", "type": "ClusterIP"},
     }
     assert ingress_controller_ip(value) == "10.96.12.34"
+    node_port = deepcopy(value)
+    node_port["spec"]["type"] = "NodePort"
+    assert ingress_controller_ip(node_port) == "10.96.12.34"
     for drift in (
         {"metadata": {"name": "other", "namespace": "ingress-nginx"}},
         {"metadata": {"name": "ingress-nginx-controller", "namespace": "loom-staging"}},

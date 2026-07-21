@@ -650,6 +650,10 @@ synthetic row never registers with or grants authority over protected staging.
 The admission readback accepts the service's persisted `submitted` state as
 well as later pending/running/finished states; terminal success remains a
 separate final smoke predicate.
+The browser rehearsal binds its restricted egress and host alias to the exact
+IPv4 ClusterIP of the fixed ingress-nginx controller Service. Both ClusterIP
+and NodePort exposure are accepted because NodePort retains that same in-cluster
+service identity; LoadBalancer, ExternalName and identity drift fail closed.
 An HTTP rejection from the admission probe is normalized to an allowlisted
 request identity and reason code. The terminal blocker retains those values
 and the response SHA-256, but never the response body, token or free-form server
