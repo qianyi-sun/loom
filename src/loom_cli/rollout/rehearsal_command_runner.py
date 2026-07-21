@@ -27,7 +27,7 @@ _TIMEOUTS = {
     "rehearsal.release": 900,
     "rehearsal.production-defaults": 300,
     "rehearsal.api-smoke": 600,
-    "rehearsal.browser": 900,
+    "rehearsal.browser": 2400,
     "rehearsal.cleanup": 900,
 }
 

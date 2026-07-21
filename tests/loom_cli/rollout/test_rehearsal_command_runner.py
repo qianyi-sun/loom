@@ -135,8 +135,12 @@ def test_runner_uses_fixed_argv_environment_timeout_and_strict_json(tmp_path: Pa
 
 
 def test_runner_accepts_normalized_failure_without_stderr(tmp_path: Path) -> None:
+    observed_timeout = 0
+
     def run(argv, environment, timeout):
-        del environment, timeout
+        nonlocal observed_timeout
+        del environment
+        observed_timeout = timeout
         payload = {
             "blockers": {"route": "candidate-mismatch"},
             "check_id": "rehearsal.browser",
@@ -151,6 +155,7 @@ def test_runner_accepts_normalized_failure_without_stderr(tmp_path: Path) -> Non
     authority, plan = _authority(tmp_path, run)
 
     assert authority("rehearsal.browser", plan).blockers == {"route": "candidate-mismatch"}
+    assert observed_timeout == 2400
 
 
 @pytest.mark.parametrize(

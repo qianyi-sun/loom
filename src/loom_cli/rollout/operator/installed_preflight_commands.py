@@ -193,7 +193,7 @@ class InstalledPreflightCommands:
             "PATH",
             "XDG_RUNTIME_DIR",
         }
-        if set(environment) != expected or not 1 <= timeout <= 1800:
+        if set(environment) != expected or not 1 <= timeout <= 2400:
             raise ValueError("rehearsal helper execution authority is invalid")
         return self._execute(argv, environment=environment, timeout=timeout)
 

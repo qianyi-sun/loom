@@ -117,6 +117,18 @@ def test_image_and_rehearsal_adapters_reject_authority_drift(tmp_path: Path) -> 
         commands.image(("docker", "build"), tmp_path / "other")
     with pytest.raises(ValueError, match="rehearsal helper execution authority"):
         commands.rehearsal_helper(("helper",), {"PATH": "/usr/bin"}, 10)
+    with pytest.raises(ValueError, match="rehearsal helper execution authority"):
+        commands.rehearsal_helper(
+            ("helper",),
+            {
+                "HOME": "/var/lib/loom-staging-rollout",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/bin:/bin",
+                "XDG_RUNTIME_DIR": "/run/user/501",
+            },
+            2401,
+        )
     with pytest.raises(ValueError, match="command environment is invalid"):
         InstalledPreflightCommands(config, {**_environment(), "TOKEN": "forbidden"})
     with pytest.raises(ValueError, match="Job name"):

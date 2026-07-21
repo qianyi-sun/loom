@@ -658,6 +658,10 @@ Ingress regex paths remain absolute Kubernetes paths (the ingress controller
 adds regex anchoring), and the 64-byte rehearsal plan digest is carried in a
 pod annotation rather than an overlong label. Candidate and workload selector
 labels remain bounded and exact.
+The installed browser helper budget covers both the bounded kind image load and
+the 900-second Job completion wait. The outer helper therefore cannot expire
+before the inner wait publishes either success or a normalized terminal
+browser blocker; the acceptance wait itself is not weakened.
 An HTTP rejection from the admission probe is normalized to an allowlisted
 request identity and reason code. The terminal blocker retains those values
 and the response SHA-256, but never the response body, token or free-form server
