@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import logging
 import os
 import pwd
 import re
@@ -48,6 +49,8 @@ from .config import (
     OperatorConfig,
 )
 from .model import APPROVED_BACKUP_EVENT_REASONS, RolloutRequest
+
+logger = logging.getLogger(__name__)
 
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIRECTORY_MODE = 0o700
@@ -1405,6 +1408,7 @@ class _MirrorBudget:
     objects: int = 0
     total_bytes: int = 0
     entries: int = 0
+    objects_warned: bool = False
 
     def check_deadline(self) -> None:
         if self.monotonic() >= self.deadline:
@@ -1417,12 +1421,20 @@ class _MirrorBudget:
         self.pages += 1
 
     def consume_object(self) -> None:
+        # Object count is a *caution* signal, not a fail-closed bound: crossing
+        # ``max_objects`` warns once and the backup continues. The resources that
+        # actually threaten the backup — total bytes, filesystem entries/inodes,
+        # list pages, and the elapsed-time deadline — remain fail-closed below and
+        # still ultimately bound the object count. A hard object-count ceiling
+        # otherwise blocks every rollout on normal data growth without adding
+        # safety the other bounds do not already provide.
         self.check_deadline()
-        if self.objects >= self.max_objects:
-            raise BackupPolicyLimitError(
-                "minio_object_limit_exceeded",
-                public_reason="backup_object_limit_exceeded",
-                message="MinIO mirror exceeded object limit",
+        if not self.objects_warned and self.objects >= self.max_objects:
+            self.objects_warned = True
+            logger.warning(
+                "MinIO backup object count reached caution threshold (%d); "
+                "continuing under byte, inode, page, and deadline bounds",
+                self.max_objects,
             )
         self.objects += 1
 
