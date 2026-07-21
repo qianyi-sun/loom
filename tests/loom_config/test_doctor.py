@@ -92,10 +92,7 @@ def test_family_orchestrator_gateway_secrets_are_schema_owned() -> None:
             continue
         for svc in e.used_by:
             secret_keys.add(e.secret_key_for(svc))
-    secret_keys.update({
-        "family-orchestrator-team-id",
-        "family-orchestrator-token",
-    })
+    secret_keys.add("family-orchestrator-token")
     core = _fake_clients(secret_keys, {})
 
     report = reconcile(schema, core, namespace="loom")
@@ -105,7 +102,6 @@ def test_family_orchestrator_gateway_secrets_are_schema_owned() -> None:
         for v in report.violations
         if v.kind == "orphan_secret"
     }
-    assert "family-orchestrator-team-id" not in orphan_entries
     assert "family-orchestrator-token" not in orphan_entries
 
 

@@ -46,6 +46,7 @@ from loom_llm_gateway.routes._facade_common import (
     decrypt_facade_api_key,
     redact_api_key,
     resolve_facade_connection,
+    resolve_optional_provider_connection_id,
     token_usage_with_cost_metadata,
 )
 
@@ -138,6 +139,10 @@ class ChatRequest(BaseModel):
 async def chat_completions(
     request: Request,
     authorization: str | None = Header(default=None),
+    x_loom_provider_connection_id: str | None = Header(
+        default=None,
+        alias="x-loom-provider-connection-id",
+    ),
 ) -> dict[str, Any]:
     raw_body = await request.json()
     # Bugs 3 + 4 fix: validate shape upfront → 400 with structured detail
@@ -147,66 +152,59 @@ async def chat_completions(
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
+    settings = request.app.state.settings
+    signing_key = settings.step_jwt_signing_key.get_secret_value()
+
     # Authentication. The session also covers the BYO provider-
     # connection lookup + api_key decrypt below; keep it open through
     # those reads so we don't pay an extra connection round-trip.
     byo_row = None
     byo_api_key: str | None = None
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            signing_key=signing_key,
+        )
         if ctx is None:
             raise HTTPException(
                 status_code=401,
                 detail="invalid bearer token",
             )
+        if "llm:call" not in ctx.scopes:
+            raise HTTPException(status_code=401, detail="not authorized")
 
-        # BYO routing (#178): if the request carries a
-        # ``provider_connection_id``, resolve + decrypt now while the
-        # session is open. The connection row + decrypted key feed the
-        # dispatch logic below.
-        if req.loom.provider_connection_id:
-            try:
-                conn_uuid = UUID(req.loom.provider_connection_id)
-            except ValueError as exc:
+        # The token/JWT team is authoritative. A caller-supplied body team may
+        # provide legacy attribution only for a team-less platform request; it
+        # must never grant access to a BYO provider connection.
+        if ctx.team_id is not None and req.loom.team_id != str(ctx.team_id):
+            raise HTTPException(
+                status_code=403,
+                detail="loom.team_id does not match token's team",
+            )
+
+        conn_uuid = resolve_optional_provider_connection_id(
+            ctx,
+            header_value=x_loom_provider_connection_id,
+            body_value=req.loom.provider_connection_id,
+        )
+
+        # BYO routing (#178): resolve + decrypt now while the session is
+        # open. The connection row + decrypted key feed dispatch below.
+        if conn_uuid is not None:
+            if ctx.team_id is None:
                 raise HTTPException(
-                    status_code=400,
-                    detail=(f"loom.provider_connection_id is not a valid UUID: {exc}"),
-                ) from exc
-            # Use body.loom.team_id as the team identity when the token
-            # is worker-scoped (ctx.team_id is None) — matches the
-            # existing trust model on this route (workers are operator-
-            # trusted; the team-id mismatch check above is the only
-            # tightening for team-scoped callers). The connection
-            # lookup is itself team-scoped (404 on cross-team), so a
-            # caller lying about loom.team_id can only reach connections
-            # they already control.
-            byo_team_id = ctx.team_id
-            if byo_team_id is None:
-                try:
-                    byo_team_id = UUID(req.loom.team_id)
-                except ValueError as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(f"loom.team_id is not a valid UUID: {exc}"),
-                    ) from exc
+                    status_code=403,
+                    detail="team-scoped token required for BYO provider routing",
+                )
             byo_row = await resolve_facade_connection(
                 session,
                 conn_uuid,
-                byo_team_id,
+                ctx.team_id,
                 supported_types=_BYO_SUPPORTED_TYPES,
                 dialect_label="chat-completions",
             )
             byo_api_key = await decrypt_facade_api_key(session, byo_row)
-
-    # Bug 1 fix: the bearer token's team_id is the source of truth. If the
-    # token is team-scoped (ctx.team_id is not None), the client-supplied
-    # loom.team_id must match — otherwise team A could attribute spend to
-    # team B by lying in the body.
-    if ctx.team_id is not None and req.loom.team_id != str(ctx.team_id):
-        raise HTTPException(
-            status_code=403,
-            detail="loom.team_id does not match token's team",
-        )
 
     try:
         audit_team_id = ctx.team_id if ctx.team_id is not None else UUID(req.loom.team_id)
@@ -258,8 +256,6 @@ async def chat_completions(
                 "the gateway by mistake."
             ),
         )
-
-    settings = request.app.state.settings
 
     # PR-D: per-provider dispatch. Three paths converge into a single
     # acompletion call with different (model_string, api_key, api_base,

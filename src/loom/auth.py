@@ -78,6 +78,11 @@ class AuthContext:
     # - Trials whose Trial.provider_connection_id is NULL (e.g. local
     #   adapters that don't route through the gateway facade)
     provider_connection_id: UUID | None = None
+    # True when the JWT explicitly carried the provider claim. This remains
+    # meaningful when the claim value is null: an explicit null binds the
+    # bearer to the platform route and must not be overridden by a header/body
+    # connection id. Older JWTs with no claim keep the legacy fallback path.
+    provider_connection_id_bound: bool = False
     # Browser-session principal fields (#326). They stay None for
     # bearer/worker/step auth so the existing token path remains stable.
     user_id: UUID | None = None
@@ -95,16 +100,16 @@ def mint_step_jwt(
     ttl_sec: int,
     signing_key: str,
     provider_connection_id: UUID | None = None,
+    provider_connection_id_bound: bool = False,
 ) -> str:
     """Mint a step-scoped JWT carrying `(team_id, trial_id, step_id)`
     and optionally `provider_connection_id` (cluster-deploy.md /
     issue #72). Used by the Control Plane's POST /admin/step-tokens.
 
-    When `provider_connection_id` is set, the JWT scope binds the
-    bearer to one specific connection — the facade routes prefer the
-    JWT-supplied value over the `x-loom-provider-connection-id`
-    header (and 400 on mismatch). When None, the field is omitted
-    from the payload so legacy verifiers see no change."""
+    A concrete `provider_connection_id` binds the bearer to one connection.
+    Set `provider_connection_id_bound=True` with None to bind it to the
+    platform route. Facade routes treat either bound value as authoritative
+    over header/body transport and reject mismatches."""
     now = datetime.now(UTC)
     payload: dict[str, object] = {
         "iss": "loom-control-plane",
@@ -116,8 +121,10 @@ def mint_step_jwt(
         "iat": int(now.timestamp()),
         "scopes": ["llm:call"],
     }
-    if provider_connection_id is not None:
-        payload["provider_connection_id"] = str(provider_connection_id)
+    if provider_connection_id is not None or provider_connection_id_bound:
+        payload["provider_connection_id"] = (
+            str(provider_connection_id) if provider_connection_id is not None else None
+        )
     body = jwt.encode(payload, signing_key, algorithm="HS256")
     return _STEP_JWT_PREFIX + body
 
@@ -127,13 +134,14 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
     failure (ExpiredSignatureError, InvalidSignatureError,
     InvalidTokenError, etc.) — caller decides how to surface them.
 
-    `provider_connection_id` is decoded when present; a missing
-    claim leaves the field None so JWTs minted before issue #72
-    keep verifying (graceful rollout)."""
+    `provider_connection_id` is decoded when present. A missing claim leaves
+    the value unbound so JWTs minted before issue #72 retain their legacy
+    header fallback during a rolling upgrade."""
     if not token.startswith(_STEP_JWT_PREFIX):
         raise jwt.InvalidTokenError("not a step JWT")
     body = token[len(_STEP_JWT_PREFIX):]
     payload = jwt.decode(body, signing_key, algorithms=["HS256"])
+    provider_connection_id_bound = "provider_connection_id" in payload
     raw_conn_id = payload.get("provider_connection_id")
     provider_connection_id: UUID | None = (
         UUID(raw_conn_id) if isinstance(raw_conn_id, str) else None
@@ -147,6 +155,7 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
         trial_id=UUID(payload["trial_id"]),
         step_id=payload["step_id"],
         provider_connection_id=provider_connection_id,
+        provider_connection_id_bound=provider_connection_id_bound,
     )
 
 

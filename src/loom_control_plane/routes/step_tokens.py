@@ -15,7 +15,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from loom.auth import mint_step_jwt, verify_bearer_token
-from loom.db.schema import Trial as TrialRow
+from loom.db.schema import (
+    ProviderConnection,
+    ProviderConnectionShare,
+)
+from loom.db.schema import (
+    Trial as TrialRow,
+)
 
 router = APIRouter(prefix="/admin")
 
@@ -25,6 +31,10 @@ class _IssueStepTokenRequest(BaseModel):
     trial_id: UUID
     step_id: str = Field(min_length=1, max_length=64)
     ttl_sec: int = Field(gt=0, le=7200)
+    # Only the dedicated family-orchestrator credential may set this field.
+    # Presence is significant: explicit null means the evolver must use the
+    # platform route even when the completed trial used a BYO connection.
+    provider_connection_id: UUID | None = None
 
 
 @router.post("/step-tokens", status_code=201)
@@ -40,9 +50,25 @@ async def issue_step_token(
         ctx = await verify_bearer_token(
             session, authorization, signing_key=signing_key,
         )
-    if ctx is None or "worker:report" not in ctx.scopes:
+    explicit_provider = "provider_connection_id" in payload.model_fields_set
+    family_evolver_request = payload.step_id == "family_evolver"
+    if ctx is None:
         raise HTTPException(
-            status_code=403, detail="missing scope worker:report",
+            status_code=403, detail="missing step-token scope",
+        )
+    if family_evolver_request:
+        if "family:evolve" not in ctx.scopes or not explicit_provider:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "family_evolver step tokens require family:evolve and an "
+                    "explicit provider_connection_id field"
+                ),
+            )
+    elif explicit_provider or "worker:report" not in ctx.scopes:
+        raise HTTPException(
+            status_code=403,
+            detail="provider override requires the family:evolve scope",
         )
 
     # Plan 9 audit fix: verify the trial exists and matches the team
@@ -51,11 +77,10 @@ async def issue_step_token(
     # trial_ids and the Gateway would silently attribute orphan
     # llm_calls rows.
     #
-    # Issue #72: also pull `provider_connection_id` from the trial row
-    # so the JWT scope binds the bearer to one specific connection.
-    # The worker doesn't supply it — the CP is the source of truth
-    # (defense against a compromised worker forging an unrelated
-    # connection_id and routing through another team's credentials).
+    # Pull the agent provider from the trial row by default. Only a dedicated
+    # family:evolve credential may override this value (explicit null selects
+    # the platform route); the CP still authorizes a configured override
+    # against the authoritative trial team before minting the JWT.
     async with request.app.state.session_factory() as session:
         trial_row = (await session.execute(
             select(TrialRow.team_id, TrialRow.provider_connection_id)
@@ -73,13 +98,42 @@ async def issue_step_token(
                    f"{payload.trial_id}",
         )
 
+    effective_provider_connection_id = trial_provider_connection_id
+    if family_evolver_request:
+        effective_provider_connection_id = payload.provider_connection_id
+        if effective_provider_connection_id is not None:
+            async with request.app.state.session_factory() as provider_session:
+                connection_team = (await provider_session.execute(
+                    select(ProviderConnection.team_id).where(
+                        ProviderConnection.id == effective_provider_connection_id,
+                        ProviderConnection.deleted_at.is_(None),
+                    ),
+                )).scalar_one_or_none()
+                if connection_team is None:
+                    raise HTTPException(
+                        status_code=404, detail="provider_connection not found",
+                    )
+                if connection_team != trial_team:
+                    shared = (await provider_session.execute(
+                        select(ProviderConnectionShare.provider_connection_id).where(
+                            ProviderConnectionShare.provider_connection_id
+                            == effective_provider_connection_id,
+                            ProviderConnectionShare.target_team_id == trial_team,
+                        ),
+                    )).scalar_one_or_none()
+                    if shared is None:
+                        raise HTTPException(
+                            status_code=404, detail="provider_connection not found",
+                        )
+
     token = mint_step_jwt(
         team_id=payload.team_id,
         trial_id=payload.trial_id,
         step_id=payload.step_id,
         ttl_sec=payload.ttl_sec,
         signing_key=signing_key,
-        provider_connection_id=trial_provider_connection_id,
+        provider_connection_id=effective_provider_connection_id,
+        provider_connection_id_bound=family_evolver_request,
     )
     expires_at = datetime.now(UTC) + timedelta(seconds=payload.ttl_sec)
     return {

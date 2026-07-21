@@ -114,6 +114,8 @@ class _CannedGateway:
         dialect: str,
         max_tokens: int,
         timeout_sec: float,
+        team_id: str,
+        trial_id: str,
         provider_connection_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.queue:

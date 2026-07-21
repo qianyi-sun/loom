@@ -13,7 +13,15 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.orm import sessionmaker
 
 from loom.auth import verify_step_jwt
-from loom.db.schema import Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import (
+    ProviderConnection,
+    ProviderConnectionShare,
+    Task,
+    Team,
+    TeamQuota,
+    Token,
+    Trial,
+)
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -36,12 +44,18 @@ def seed(postgres_url: str) -> Iterator[dict]:
     engine = create_engine(postgres_url)
     session_local = sessionmaker(engine)
     raw = f"loom_w_{uuid4().hex}"
+    family_raw = f"loom_fo_{uuid4().hex}"
     team_id = uuid4()
     trial_id = uuid4()
     with session_local() as s:
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="worker", scopes=["worker:report"], team_id=None,
+            issued_at=datetime.now(UTC), expires_at=None,
+        ))
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(family_raw.encode()).digest(),
+            type="family_orchestrator", scopes=["family:evolve"], team_id=None,
             issued_at=datetime.now(UTC), expires_at=None,
         ))
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
@@ -53,14 +67,19 @@ def seed(postgres_url: str) -> Iterator[dict]:
         ))
         s.commit()
     try:
-        yield {"token": raw, "team_id": team_id, "trial_id": trial_id}
+        yield {
+            "token": raw,
+            "family_token": family_raw,
+            "team_id": team_id,
+            "trial_id": trial_id,
+        }
     finally:
-        from loom.db.schema import ProviderConnection
         with session_local() as s:
             s.execute(delete(Trial))
             # Tests in this file may seed a ProviderConnection to
             # exercise issue #72; clean it up before Team to satisfy
             # the FK.
+            s.execute(delete(ProviderConnectionShare))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
@@ -228,9 +247,7 @@ def test_round_trip_with_jwt_can_be_decoded(app, seed):  # type: ignore[no-untyp
 def test_step_token_omits_provider_connection_id_when_trial_has_none(
     app, seed,
 ):  # type: ignore[no-untyped-def]
-    """Trial.provider_connection_id IS NULL (e.g. local adapter trial)
-    ⇒ JWT must NOT carry a provider_connection_id claim, and
-    ctx.provider_connection_id is None on verify."""
+    """The ordinary worker path retains its legacy unbound null shape."""
     with TestClient(app) as client:
         r = client.post(
             "/admin/step-tokens",
@@ -248,6 +265,7 @@ def test_step_token_omits_provider_connection_id_when_trial_has_none(
             signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
         )
         assert ctx.provider_connection_id is None
+        assert ctx.provider_connection_id_bound is False
 
 
 def test_step_token_carries_trial_provider_connection_id(
@@ -302,14 +320,10 @@ def test_step_token_carries_trial_provider_connection_id(
         assert ctx.provider_connection_id == conn_id
 
 
-def test_step_token_does_not_accept_provider_connection_id_in_payload(
+def test_worker_step_token_does_not_accept_provider_connection_id_in_payload(
     app, seed,
 ):  # type: ignore[no-untyped-def]
-    """Defense in depth (#72): the worker MUST NOT be able to supply
-    a different provider_connection_id in the request payload — the
-    CP looks it up from the trial row regardless. Pydantic's
-    extra="ignore" default silently drops the field; the issued JWT
-    carries the trial's value (or None), not the payload's."""
+    """Ordinary workers cannot select an evolver provider connection."""
     with TestClient(app) as client:
         r = client.post(
             "/admin/step-tokens",
@@ -317,21 +331,120 @@ def test_step_token_does_not_accept_provider_connection_id_in_payload(
             json={
                 "team_id": str(seed["team_id"]),
                 "trial_id": str(seed["trial_id"]),
-                "step_id": "main",
+                "step_id": "family_evolver",
                 "ttl_sec": 30,
                 # Attempt at forgery — trial has NULL connection_id.
                 "provider_connection_id": str(uuid4()),
             },
         )
-        # Either 201 (extras silently ignored — current Pydantic default
-        # for the route) or 422 (extras forbidden). Both are safe; the
-        # critical assertion is the JWT scope.
-        assert r.status_code in (201, 422)
-        if r.status_code == 201:
-            ctx = verify_step_jwt(
-                r.json()["token"],
-                signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
-            )
-            # MUST be None — trial has no connection_id; payload-supplied
-            # value was ignored.
-            assert ctx.provider_connection_id is None
+        assert r.status_code == 403
+
+
+def _insert_provider(
+    postgres_url: str,
+    *,
+    owner_team_id,
+    target_team_id=None,
+):
+    conn_id = uuid4()
+    engine = create_engine(postgres_url)
+    session_local = sessionmaker(engine)
+    with session_local() as s:
+        if s.get(Team, owner_team_id) is None:
+            s.execute(insert(Team).values(id=owner_team_id, name=f"owner-{owner_team_id}"))
+            s.execute(insert(TeamQuota).values(team_id=owner_team_id))
+        s.execute(insert(ProviderConnection).values(
+            id=conn_id,
+            team_id=owner_team_id,
+            provider_type="openai-compatible",
+            display_name=f"evolver-{conn_id}",
+            base_url="https://provider.example/v1",
+            upstream_host="provider.example",
+            encrypted_api_key_ref=f"loom://team:{owner_team_id}/{conn_id}",
+            created_by="test:family-evolver",
+        ))
+        if target_team_id is not None and target_team_id != owner_team_id:
+            s.execute(insert(ProviderConnectionShare).values(
+                provider_connection_id=conn_id,
+                target_team_id=target_team_id,
+                created_by_actor="test:family-evolver-share",
+            ))
+        s.commit()
+    engine.dispose()
+    return conn_id
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_family_evolver_token_binds_owned_or_shared_provider(
+    app, seed, postgres_url, shared,
+):  # type: ignore[no-untyped-def]
+    owner_team_id = uuid4() if shared else seed["team_id"]
+    conn_id = _insert_provider(
+        postgres_url,
+        owner_team_id=owner_team_id,
+        target_team_id=seed["team_id"] if shared else None,
+    )
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/step-tokens",
+            headers={"Authorization": f"Bearer {seed['family_token']}"},
+            json={
+                "team_id": str(seed["team_id"]),
+                "trial_id": str(seed["trial_id"]),
+                "step_id": "family_evolver",
+                "ttl_sec": 60,
+                "provider_connection_id": str(conn_id),
+            },
+        )
+    assert r.status_code == 201, r.text
+    ctx = verify_step_jwt(
+        r.json()["token"],
+        signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
+    )
+    assert ctx.team_id == seed["team_id"]
+    assert ctx.trial_id == seed["trial_id"]
+    assert ctx.provider_connection_id == conn_id
+
+
+def test_family_evolver_explicit_null_binds_platform_provider(
+    app, seed,
+):  # type: ignore[no-untyped-def]
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/step-tokens",
+            headers={"Authorization": f"Bearer {seed['family_token']}"},
+            json={
+                "team_id": str(seed["team_id"]),
+                "trial_id": str(seed["trial_id"]),
+                "step_id": "family_evolver",
+                "ttl_sec": 60,
+                "provider_connection_id": None,
+            },
+        )
+    assert r.status_code == 201, r.text
+    ctx = verify_step_jwt(
+        r.json()["token"],
+        signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
+    )
+    assert ctx.provider_connection_id is None
+    assert ctx.provider_connection_id_bound is True
+
+
+def test_family_evolver_rejects_unshared_cross_team_provider(
+    app, seed, postgres_url,
+):  # type: ignore[no-untyped-def]
+    conn_id = _insert_provider(postgres_url, owner_team_id=uuid4())
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/step-tokens",
+            headers={"Authorization": f"Bearer {seed['family_token']}"},
+            json={
+                "team_id": str(seed["team_id"]),
+                "trial_id": str(seed["trial_id"]),
+                "step_id": "family_evolver",
+                "ttl_sec": 60,
+                "provider_connection_id": str(conn_id),
+            },
+        )
+    assert r.status_code == 404
+    assert r.json()["detail"] == "provider_connection not found"
