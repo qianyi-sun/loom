@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 from scripts.ops import prod_pressure_worker_control as control
 
 from loom_control_plane.prod_pressure_control import ProdPressureSignal, _grace_evidence
@@ -39,8 +41,7 @@ def test_run_once_bridges_prod_pressure_to_staging_worker_control(monkeypatch) -
         prod_admin_token="prod-secret",
         staging_cp_url="http://staging-cp:8080",
         staging_admin_token="staging-secret",
-        staging_environment="staging",
-        pool_name="gb10-arm64",
+        targets=[("staging", "gb10-arm64")],
         preemptible=True,
         grace_period_seconds=600,
         freshness_seconds=120,
@@ -48,14 +49,20 @@ def test_run_once_bridges_prod_pressure_to_staging_worker_control(monkeypatch) -
     )
 
     assert report["status"] == "pass"
-    assert report["worker_control"]["new_staging_claims_allowed"] is False
+    assert report["artifact_type"] == "prod-pressure-worker-control"
+    assert len(report["targets"]) == 1
+    entry = report["targets"][0]
+    assert entry["environment"] == "staging"
+    assert entry["pool_name"] == "gb10-arm64"
+    assert entry["worker_control"]["new_staging_claims_allowed"] is False
     assert calls[0]["method"] == "GET"
     assert calls[0]["path"] == (
         "/admin/worker-pools/gb10-arm64/prod-pressure?freshness_sec=120"
     )
     assert calls[1]["method"] == "POST"
+    # #892: POST to the actuator-neutral route, not the GB10 lifecycle route.
     assert calls[1]["path"] == (
-        "/admin/gb10-worker-pools/staging/gb10-arm64/prod-pressure"
+        "/admin/worker-pools/staging/gb10-arm64/prod-pressure"
     )
     assert calls[1]["body"] == {
         "prod_pending_count": 3,
@@ -92,8 +99,7 @@ def test_run_once_forwards_clear_signal_for_recovery(monkeypatch) -> None:
         prod_admin_token="prod-secret",
         staging_cp_url="http://staging-cp:8080",
         staging_admin_token="staging-secret",
-        staging_environment="staging",
-        pool_name="gb10-arm64",
+        targets=[("staging", "gb10-arm64")],
         preemptible=False,
         grace_period_seconds=0,
         freshness_seconds=120,
@@ -102,7 +108,8 @@ def test_run_once_forwards_clear_signal_for_recovery(monkeypatch) -> None:
 
     assert posted["prod_pending_count"] == 0
     assert posted["preemptible"] is False
-    assert report["worker_control"]["action"] == "recovered"
+    assert report["status"] == "pass"
+    assert report["targets"][0]["worker_control"]["action"] == "recovered"
 
 
 def test_run_once_fails_closed_when_prod_pressure_source_is_unavailable(monkeypatch) -> None:
@@ -124,18 +131,200 @@ def test_run_once_fails_closed_when_prod_pressure_source_is_unavailable(monkeypa
         prod_admin_token="prod-secret",
         staging_cp_url="http://staging-cp:8080",
         staging_admin_token="staging-secret",
-        staging_environment="staging",
-        pool_name="gb10-arm64",
+        targets=[("staging", "gb10-arm64")],
         preemptible=True,
         grace_period_seconds=600,
         freshness_seconds=120,
         timeout=10.0,
     )
 
-    assert report["fail_closed"] is True
-    assert "loom_admin_secret" not in report["pressure_fetch_error"]
+    entry = report["targets"][0]
+    assert entry["fail_closed"] is True
+    assert "loom_admin_secret" not in entry["pressure_fetch_error"]
     assert posted["prod_capacity_shortfall"] == 1
     assert "fail-closed" in posted["source"]
+
+
+def test_run_once_fans_out_to_multiple_targets(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _http_json(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        if kwargs["method"] == "GET":
+            return {
+                "has_pressure": True,
+                "cause": "prod_capacity_pressure",
+                "prod_pending_count": 2,
+                "prod_active_count": 0,
+                "prod_capacity_shortfall": 2,
+                "source": "control-plane prod queue summary",
+            }
+        return {"action": "draining", "new_staging_claims_allowed": False}
+
+    monkeypatch.setattr(control, "_http_json", _http_json)
+
+    report = control.run_once(
+        prod_cp_url="http://prod-cp:8080",
+        prod_admin_token="prod-secret",
+        staging_cp_url="http://staging-cp:8080",
+        staging_admin_token="staging-secret",
+        targets=[("staging", "gb10-arm64"), ("staging", "oldlab")],
+        preemptible=True,
+        grace_period_seconds=600,
+        freshness_seconds=90,
+        timeout=10.0,
+    )
+
+    assert report["status"] == "pass"
+    assert [(t["environment"], t["pool_name"]) for t in report["targets"]] == [
+        ("staging", "gb10-arm64"),
+        ("staging", "oldlab"),
+    ]
+    # One GET + one POST per target, in order.
+    methods = [(c["method"], c["path"]) for c in calls]
+    assert methods == [
+        ("GET", "/admin/worker-pools/gb10-arm64/prod-pressure?freshness_sec=90"),
+        ("POST", "/admin/worker-pools/staging/gb10-arm64/prod-pressure"),
+        ("GET", "/admin/worker-pools/oldlab/prod-pressure?freshness_sec=90"),
+        ("POST", "/admin/worker-pools/staging/oldlab/prod-pressure"),
+    ]
+
+
+def test_run_once_marks_status_fail_when_one_target_errors(monkeypatch) -> None:
+    def _http_json(**kwargs):  # type: ignore[no-untyped-def]
+        if kwargs["method"] == "GET":
+            return {
+                "has_pressure": True,
+                "cause": "prod_capacity_pressure",
+                "prod_pending_count": 1,
+                "prod_active_count": 0,
+                "prod_capacity_shortfall": 1,
+                "source": "control-plane prod queue summary",
+            }
+        if kwargs["path"].endswith("/oldlab/prod-pressure"):
+            raise RuntimeError("POST failed token=loom_admin_secret")
+        return {"action": "draining", "new_staging_claims_allowed": False}
+
+    monkeypatch.setattr(control, "_http_json", _http_json)
+
+    report = control.run_once(
+        prod_cp_url="http://prod-cp:8080",
+        prod_admin_token="prod-secret",
+        staging_cp_url="http://staging-cp:8080",
+        staging_admin_token="staging-secret",
+        targets=[("staging", "gb10-arm64"), ("staging", "oldlab")],
+        preemptible=True,
+        grace_period_seconds=600,
+        freshness_seconds=120,
+        timeout=10.0,
+    )
+
+    assert report["status"] == "fail"
+    good, bad = report["targets"]
+    assert "worker_control" in good
+    assert "error" in bad
+    assert "loom_admin_secret" not in bad["error"]
+
+
+def test_main_defaults_to_single_target_backward_compatible(monkeypatch, capsys) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _http_json(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        if kwargs["method"] == "GET":
+            return {
+                "has_pressure": True,
+                "cause": "prod_capacity_pressure",
+                "prod_pending_count": 1,
+                "prod_active_count": 0,
+                "prod_capacity_shortfall": 1,
+                "source": "control-plane prod queue summary",
+            }
+        return {"action": "draining", "new_staging_claims_allowed": False}
+
+    monkeypatch.setattr(control, "_http_json", _http_json)
+    monkeypatch.setenv("PROD_TOKEN", "prod-secret")
+    monkeypatch.setenv("STAGING_TOKEN", "staging-secret")
+
+    rc = control.main(
+        [
+            "--prod-cp-url", "http://prod-cp:8080",
+            "--prod-admin-token", "env:PROD_TOKEN",
+            "--staging-cp-url", "http://staging-cp:8080",
+            "--staging-admin-token", "env:STAGING_TOKEN",
+        ],
+    )
+
+    assert rc == 0
+    methods = [(c["method"], c["path"]) for c in calls]
+    assert methods == [
+        ("GET", "/admin/worker-pools/gb10-arm64/prod-pressure?freshness_sec=120"),
+        ("POST", "/admin/worker-pools/staging/gb10-arm64/prod-pressure"),
+    ]
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "pass"
+    assert [(t["environment"], t["pool_name"]) for t in report["targets"]] == [
+        ("staging", "gb10-arm64"),
+    ]
+
+
+def test_main_fans_out_repeated_target_flags(monkeypatch, capsys) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _http_json(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        if kwargs["method"] == "GET":
+            return {
+                "has_pressure": False,
+                "cause": "none",
+                "prod_pending_count": 0,
+                "prod_active_count": 0,
+                "prod_capacity_shortfall": 0,
+            }
+        return {"action": "recovered", "new_staging_claims_allowed": True}
+
+    monkeypatch.setattr(control, "_http_json", _http_json)
+    monkeypatch.setenv("PROD_TOKEN", "prod-secret")
+    monkeypatch.setenv("STAGING_TOKEN", "staging-secret")
+
+    rc = control.main(
+        [
+            "--prod-cp-url", "http://prod-cp:8080",
+            "--prod-admin-token", "env:PROD_TOKEN",
+            "--staging-cp-url", "http://staging-cp:8080",
+            "--staging-admin-token", "env:STAGING_TOKEN",
+            "--target", "staging:gb10-arm64",
+            "--target", "staging:oldlab",
+        ],
+    )
+
+    assert rc == 0
+    posts = [c["path"] for c in calls if c["method"] == "POST"]
+    assert posts == [
+        "/admin/worker-pools/staging/gb10-arm64/prod-pressure",
+        "/admin/worker-pools/staging/oldlab/prod-pressure",
+    ]
+    report = json.loads(capsys.readouterr().out)
+    assert [(t["environment"], t["pool_name"]) for t in report["targets"]] == [
+        ("staging", "gb10-arm64"),
+        ("staging", "oldlab"),
+    ]
+
+
+def test_main_rejects_malformed_target(monkeypatch) -> None:
+    monkeypatch.setattr(control, "_http_json", lambda **kwargs: {})  # type: ignore[misc]
+    monkeypatch.setenv("PROD_TOKEN", "prod-secret")
+    monkeypatch.setenv("STAGING_TOKEN", "staging-secret")
+    with pytest.raises(SystemExit):
+        control.main(
+            [
+                "--prod-cp-url", "http://prod-cp:8080",
+                "--prod-admin-token", "env:PROD_TOKEN",
+                "--staging-cp-url", "http://staging-cp:8080",
+                "--staging-admin-token", "env:STAGING_TOKEN",
+                "--target", "no-colon-here",
+            ],
+        )
 
 
 def test_redact_text_removes_worker_control_credentials() -> None:
