@@ -337,6 +337,12 @@ Qianyi's checkout and linger, and permits stale or unbounded candidate inputs.
 Rejected. Child rollout steps acquire that lease themselves. The parent needs
 a separate lifecycle lock.
 
+The child CLI surfaces nevertheless share one security contract:
+`src/loom_cli/rollout_lock_cli.py` owns their rollout-lock argument tracking,
+broker-envelope loading, real-file checks, and fixed evidence-path validation.
+`loom cluster up` and `loom admin environment-state` import those helpers so
+their protected-step admission rules cannot drift independently.
+
 ## Consequences
 
 All three operators receive the same narrow staging command surface and can
