@@ -33,6 +33,8 @@ class BackupRotationRetentionPlan:
     rotation_generation: int
     rotation_sha256: str
     active_payload_id: str | None
+    active_bundle_name: str | None
+    latest_bundle: str | None
     retirements: tuple[BackupRetirementRecord, ...]
     environment: str = "staging"
     namespace: str = "loom-staging"
@@ -48,14 +50,27 @@ class BackupRotationRetentionPlan:
             or not self.retirements
             or len(set(payload_ids)) != len(payload_ids)
             or self.active_payload_id in set(payload_ids)
+            or (self.active_payload_id is None) != (self.active_bundle_name is None)
+            or any(
+                value is not None and (not value or "/" in value or value in {".", ".."})
+                for value in (self.active_bundle_name, self.latest_bundle)
+            )
+            or self.latest_bundle
+            not in {
+                None,
+                self.active_bundle_name,
+                *(record.bundle_name for record in self.retirements),
+            }
         ):
             raise ValueError("backup rotation retention plan is invalid")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "active_payload_id": self.active_payload_id,
+            "active_bundle_name": self.active_bundle_name,
             "environment": self.environment,
             "namespace": self.namespace,
+            "latest_bundle": self.latest_bundle,
             "retirements": [record.to_dict() for record in self.retirements],
             "rotation_generation": self.rotation_generation,
             "rotation_sha256": self.rotation_sha256,
@@ -66,8 +81,10 @@ class BackupRotationRetentionPlan:
     def from_dict(cls, data: dict[str, object]) -> BackupRotationRetentionPlan:
         expected = {
             "active_payload_id",
+            "active_bundle_name",
             "environment",
             "namespace",
+            "latest_bundle",
             "retirements",
             "rotation_generation",
             "rotation_sha256",
@@ -84,6 +101,11 @@ class BackupRotationRetentionPlan:
                 data["active_payload_id"] is not None
                 and not isinstance(data["active_payload_id"], str)
             )
+            or (
+                data["active_bundle_name"] is not None
+                and not isinstance(data["active_bundle_name"], str)
+            )
+            or (data["latest_bundle"] is not None and not isinstance(data["latest_bundle"], str))
             or not isinstance(data["retirements"], list)
             or not all(isinstance(item, dict) for item in data["retirements"])
         ):
@@ -92,6 +114,8 @@ class BackupRotationRetentionPlan:
             rotation_generation=data["rotation_generation"],
             rotation_sha256=data["rotation_sha256"],
             active_payload_id=data["active_payload_id"],
+            active_bundle_name=data["active_bundle_name"],
+            latest_bundle=data["latest_bundle"],
             retirements=tuple(
                 BackupRetirementRecord.from_dict(item) for item in data["retirements"]
             ),
@@ -141,6 +165,8 @@ class InstalledBackupRetentionService:
             rotation_generation=state.generation,
             rotation_sha256=state.evidence_digest,
             active_payload_id=(None if state.active is None else state.active.payload_id),
+            active_bundle_name=(None if state.active is None else state.active.bundle_name),
+            latest_bundle=self._read_latest_bundle(state),
             retirements=tuple(
                 self.store.resolve_backup_retirement(record) for record in state.retirements
             ),
@@ -175,7 +201,11 @@ class InstalledBackupRetentionService:
             self._validate_current(plan)
             return existing
         retired: list[str] = []
+        retained: list[str] = []
         for planned in plan.retirements:
+            if planned.bundle_name == plan.latest_bundle:
+                retained.append(planned.payload_id)
+                continue
             state = self.store.read_backup_rotation()
             self._validate_current(plan, state=state)
             present = tuple(
@@ -200,8 +230,14 @@ class InstalledBackupRetentionService:
             retired.append(planned.payload_id)
         final = self.store.read_backup_rotation()
         self._validate_current(plan, state=final)
+        protected_latest = {
+            record.payload_id
+            for record in plan.retirements
+            if record.bundle_name == plan.latest_bundle
+        }
         if any(
-            record.payload_id in {planned.payload_id for planned in plan.retirements}
+            record.payload_id
+            in {planned.payload_id for planned in plan.retirements} - protected_latest
             for record in final.retirements
         ):
             raise InstalledBackupRetentionError("backup retirements remain after convergence")
@@ -212,6 +248,7 @@ class InstalledBackupRetentionService:
             "final_rotation_sha256": final.evidence_digest,
             "namespace": self.config.namespace,
             "retired_payload_ids": retired,
+            "retained_payload_ids": retained,
             "schema_version": 1,
         }
         _publish_exact(
@@ -231,6 +268,7 @@ class InstalledBackupRetentionService:
             raise InstalledBackupRetentionError("active rollout blocks backup retirement")
         current = state or self.store.read_backup_rotation()
         active_id = None if current.active is None else current.active.payload_id
+        active_bundle = None if current.active is None else current.active.bundle_name
         planned = {record.payload_id: record for record in plan.retirements}
         observed = {
             record.payload_id: self.store.resolve_backup_retirement(record)
@@ -239,6 +277,8 @@ class InstalledBackupRetentionService:
         if (
             current.candidate is not None
             or active_id != plan.active_payload_id
+            or active_bundle != plan.active_bundle_name
+            or self._read_latest_bundle(current) != plan.latest_bundle
             or not set(observed).issubset(planned)
             or any(planned[payload_id] != record for payload_id, record in observed.items())
             or self.store.referenced_backup_payload_ids() & set(planned)
@@ -249,9 +289,38 @@ class InstalledBackupRetentionService:
             and current.evidence_digest != plan.rotation_sha256
         ):
             raise InstalledBackupRetentionError("backup rotation digest drifted")
-        missing = set(planned) - set(observed)
+        protected_latest = {
+            record.payload_id
+            for record in plan.retirements
+            if record.bundle_name == plan.latest_bundle
+        }
+        missing = set(planned) - set(observed) - protected_latest
         if any(not self.store.has_backup_retirement_receipt(payload_id) for payload_id in missing):
             raise InstalledBackupRetentionError("backup retirement receipt is missing")
+
+    def _read_latest_bundle(self, state: BackupRotationState) -> str | None:
+        latest = self.config.rollout_root / "backups" / "latest"
+        try:
+            metadata = latest.lstat()
+        except FileNotFoundError:
+            return None
+        if (
+            not stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != self.service_uid
+            or metadata.st_nlink != 1
+        ):
+            raise InstalledBackupRetentionError("latest backup pointer is unsafe")
+        target = os.readlink(latest)
+        observed = latest.lstat()
+        if (observed.st_dev, observed.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise InstalledBackupRetentionError("latest backup pointer changed during read")
+        known = {
+            *(record.bundle_name for record in state.retirements),
+            None if state.active is None else state.active.bundle_name,
+        }
+        if not target or "/" in target or target not in known:
+            raise InstalledBackupRetentionError("latest backup pointer is outside rotation")
+        return target
 
     def _plan_path(self, digest: str) -> Path:
         return self.evidence_root / f"{digest}.plan.json"

@@ -55,6 +55,7 @@ def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Pat
         )
     state = BackupRotationState(generation=1, retirements=tuple(records))
     store.replace_backup_rotation(state, expected_generation=0)
+    (backups / "latest").symlink_to(roots[0].name)
     creator = BackupCreator(config, service_uid=os.geteuid())
     return (
         InstalledBackupRetentionService(
@@ -78,16 +79,20 @@ def test_digest_approved_rotation_retirement_preserves_compact_evidence(
     retried = service.apply(loaded)
 
     assert loaded == plan
-    assert result["retired_payload_ids"] == ["payload-failed01", "payload-failed02"]
+    assert result["retired_payload_ids"] == ["payload-failed02"]
+    assert result["retained_payload_ids"] == ["payload-failed01"]
     assert retried == result
-    assert all(not root.exists() for root in roots)
-    assert service.store.read_backup_rotation().payload_count == 0
-    for payload_id in ("payload-failed01", "payload-failed02"):
-        assert service.store.has_backup_retirement_receipt(payload_id)
-        evidence = service.store.backup_retirements_root / f"{payload_id}.json"
-        receipt = service.store.backup_retirements_root / f"{payload_id}.deleted.json"
-        assert evidence.is_file()
-        assert receipt.is_file()
+    assert roots[0].is_dir()
+    assert not roots[1].exists()
+    rotation = service.store.read_backup_rotation()
+    assert rotation.payload_count == 1
+    assert tuple(record.payload_id for record in rotation.retirements) == ("payload-failed01",)
+    assert not service.store.has_backup_retirement_receipt("payload-failed01")
+    assert service.store.has_backup_retirement_receipt("payload-failed02")
+    evidence = service.store.backup_retirements_root / "payload-failed02.json"
+    receipt = service.store.backup_retirements_root / "payload-failed02.deleted.json"
+    assert evidence.is_file()
+    assert receipt.is_file()
 
 
 def test_rotation_retirement_rejects_unapproved_or_drifted_claim(tmp_path: Path) -> None:
@@ -106,6 +111,32 @@ def test_rotation_retirement_rejects_unapproved_or_drifted_claim(tmp_path: Path)
 
     with pytest.raises(InstalledBackupRetentionError, match="receipt"):
         service.load_claim(plan.plan_digest)
+
+
+def test_rotation_retirement_rejects_latest_drift_after_inventory(tmp_path: Path) -> None:
+    service, roots = _service(tmp_path)
+    plan = service.inventory()
+    latest = service.config.rollout_root / "backups" / "latest"
+
+    latest.unlink()
+    latest.symlink_to(roots[1].name)
+
+    with pytest.raises(InstalledBackupRetentionError, match="authority drifted"):
+        service.load_claim(plan.plan_digest)
+
+
+@pytest.mark.parametrize("target", ["/tmp/backup", "../backup", "unknown-backup"])
+def test_rotation_retirement_rejects_unsafe_or_unknown_latest(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    service, _roots = _service(tmp_path)
+    latest = service.config.rollout_root / "backups" / "latest"
+    latest.unlink()
+    latest.symlink_to(target)
+
+    with pytest.raises(InstalledBackupRetentionError, match="outside rotation"):
+        service.inventory()
 
 
 def test_rotation_retirement_rejects_candidate_before_inventory(tmp_path: Path) -> None:

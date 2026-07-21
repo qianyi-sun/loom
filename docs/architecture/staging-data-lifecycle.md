@@ -482,16 +482,21 @@ Persisted retirements already named by the rotation record use a separate
 installed maintenance surface, never the legacy directory inventory. An
 operator first enables the root-owned admission freeze, then runs
 `loom-staging-rollout backup-retention inventory`. The returned plan binds the
-rotation generation and digest, active payload identity, and every exact
-retirement record. `backup-retention apply --approved-plan-sha256 DIGEST`
-loads only that immutable service-owned plan. For each unreferenced record it
+rotation generation and digest, active payload identity, the exact no-follow
+`latest` symlink target, and every exact retirement record. The current
+`latest`-backed retirement remains protected so maintenance can free exactly
+one transient slot without deleting the known-good rollback point.
+`backup-retention apply --approved-plan-sha256 DIGEST` loads only that immutable
+service-owned plan. For each other unreferenced record it
 publishes compact evidence, removes only the exact bundle with the normal
 no-follow retirement implementation, publishes a deletion receipt, and then
 CAS-acknowledges that record. The active lease, old request/events, journals,
 latest pointer, and any unrelated or unresolved path remain untouched.
 Partial convergence is retryable from the same plan only when every missing
 record has its exact receipt; extra records, candidates, active attempts, or
-identity drift fail closed.
+identity drift fail closed. After a restore-verified replacement atomically
+moves `latest`, the normal worker retirement drain removes and acknowledges the
+former protected payload.
 
 The same rotation-capacity predicate is registered at Tier 0 as
 `backup.rotation-capacity`. It blocks before request publication when a
