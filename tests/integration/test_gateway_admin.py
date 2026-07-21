@@ -72,6 +72,79 @@ def test_admin_can_upsert_rate_card(admin_app):  # type: ignore[no-untyped-def]
         assert r.json()["id"] == "card-upsert-1"
 
 
+def test_authenticated_reader_can_list_and_get_rate_cards(
+    admin_app,
+    postgres_url: str,
+) -> None:  # type: ignore[no-untyped-def]
+    app, raw_admin = admin_app
+    raw_reader = f"loom_team_{uuid4().hex}"
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as session:
+        session.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_reader.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    payload = {
+        "id": "card-readable",
+        "entries": [
+            {
+                "provider": "anthropic",
+                "model": "claude-opus-4-7",
+                "input_per_mtok": 3.0,
+                "output_per_mtok": 15.0,
+                "cache_read_per_mtok": 0.3,
+                "cache_write_per_mtok": 3.75,
+            }
+        ],
+    }
+    with TestClient(app) as client:
+        created = client.post(
+            "/admin/rate-cards",
+            headers={"Authorization": f"Bearer {raw_admin}"},
+            json=payload,
+        )
+        listed = client.get(
+            "/admin/rate-cards",
+            headers={"Authorization": f"Bearer {raw_reader}"},
+        )
+        detail = client.get(
+            "/admin/rate-cards/card-readable",
+            headers={"Authorization": f"Bearer {raw_reader}"},
+        )
+
+    assert created.status_code == 201
+    assert listed.status_code == 200, listed.text
+    assert len(listed.json()["items"]) == 1
+    assert listed.json()["items"][0]["id"] == "card-readable"
+    assert listed.json()["items"][0]["table"] == payload
+    assert len(listed.json()["items"][0]["table_hash"]) == 64
+    assert detail.status_code == 200, detail.text
+    assert detail.json() == listed.json()["items"][0]
+
+
+def test_rate_card_reads_fail_closed(
+    admin_app,
+) -> None:  # type: ignore[no-untyped-def]
+    app, raw_admin = admin_app
+    with TestClient(app) as client:
+        unauthenticated = client.get("/admin/rate-cards")
+        missing = client.get(
+            "/admin/rate-cards/missing",
+            headers={"Authorization": f"Bearer {raw_admin}"},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert missing.status_code == 404
+
+
 def test_admin_can_sync_yibuapi_rate_card(
     admin_app,
     postgres_url: str,

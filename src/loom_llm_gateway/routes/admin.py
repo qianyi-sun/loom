@@ -8,11 +8,12 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import RateCard
-from loom_llm_gateway.rate_card import RateCardTable
+from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_llm_gateway.yibuapi_pricing import (
     DEFAULT_YIBUAPI_PRICING_URL,
     YIBUAPI_RATE_CARD_PROVIDER,
@@ -67,6 +68,72 @@ async def _require_rate_card_admin(
             status_code=403,
             detail="missing scope admin:rate_cards",
         )
+
+
+async def _require_rate_card_reader(
+    request: Request,
+    authorization: str | None,
+) -> None:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=getattr(
+                request.app.state,
+                "admin_secret_verifier",
+                None,
+            ),
+        )
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="invalid token")
+
+
+def _serialize_rate_card(row: RateCard) -> dict[str, Any]:
+    table = RateCardTable.model_validate(
+        {
+            **row.table,
+            "id": row.id,
+            "captured_at": row.captured_at,
+        }
+    )
+    return {
+        "id": row.id,
+        "captured_at": row.captured_at,
+        "table": row.table,
+        "table_hash": hash_table(table),
+    }
+
+
+@router.get("/rate-cards")
+async def list_rate_cards(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, list[dict[str, Any]]]:
+    await _require_rate_card_reader(request, authorization)
+    async with request.app.state.session_factory() as session:
+        rows = (
+            await session.scalars(
+                select(RateCard).order_by(
+                    RateCard.captured_at.desc(),
+                    RateCard.id.asc(),
+                )
+            )
+        ).all()
+    return {"items": [_serialize_rate_card(row) for row in rows]}
+
+
+@router.get("/rate-cards/{rate_card_id}")
+async def get_rate_card(
+    request: Request,
+    rate_card_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    await _require_rate_card_reader(request, authorization)
+    async with request.app.state.session_factory() as session:
+        row = await session.get(RateCard, rate_card_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="rate card not found")
+    return _serialize_rate_card(row)
 
 
 async def _store_rate_card(

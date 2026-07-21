@@ -491,6 +491,8 @@ hit them through a sandbox-facing Gateway URL):
 | POST | `/openai/v1/responses` | OpenAI-compatible Responses provider facade for stock SDKs and Codex CLI, including the same chat-only upstream compatibility fallback |
 | POST | `/v1beta/models/{model_path}` | Gemini dialect (Google's `v1beta` namespace) |
 | POST | `/admin/rate-cards` | Upsert rate card (gated on `admin:rate_cards` scope) |
+| GET | `/admin/rate-cards` | List rate cards for an authenticated reader |
+| GET | `/admin/rate-cards/{rate_card_id}` | Read one rate card for an authenticated reader |
 | GET | `/healthz` | Liveness |
 
 ## Auth tokens
