@@ -71,6 +71,10 @@ function normalizePath(raw: string, field: string): string {
 
 function detectRoutePath(location: Location | URL): string {
   const pathname = location.pathname.replace(/\/+$/u, "") || "/";
+  const rehearsal = pathname.match(
+    /^(\/dev\/rehearsal\/[0-9a-f]{24})(?:\/|$)/u,
+  );
+  if (rehearsal) return rehearsal[1];
   if (pathname === "/prod" || pathname.startsWith("/prod/")) return "/prod";
   if (pathname === "/dev" || pathname.startsWith("/dev/")) return "/dev";
   return "";

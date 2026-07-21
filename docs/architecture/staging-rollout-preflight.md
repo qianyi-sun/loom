@@ -579,7 +579,11 @@ success.
 The candidate web image accepts a nested route only when
 `LOOM_FRONTEND_REHEARSAL_ID` is present, the environment is exactly `staging`,
 and both frontend route fields equal `/dev/rehearsal/<24-hex-id>`. Normal
-staging and production route acceptance remains unchanged. Secret cloning also
+staging and production route acceptance remains unchanged. The runtime loader
+detects this exact nested route before the general `/dev` prefix, so it fetches
+the isolated web pod's runtime config and keeps API calls inside the rehearsal
+namespace. Invalid rehearsal identifiers fall back to the normal `/dev`
+contract and cannot claim isolated authority. Secret cloning also
 derives one in-namespace `admin-token` key from the validated singleton admin
 TOML for the browser Job; the raw value stays inside the sensitive apply
 artifact and is never written to the rehearsal plan or evidence.

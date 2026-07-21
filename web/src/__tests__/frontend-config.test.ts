@@ -175,5 +175,30 @@ describe("frontend runtime config", () => {
     expect(frontendHomePath(new URL("https://loom.test/prod/monitor"))).toBe(
       "/prod/",
     );
+  it("loads the exact isolated rehearsal runtime config", async () => {
+    const rehearsalId = "5".repeat(24);
+    const routePath = `/dev/rehearsal/${rehearsalId}`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          environment: "staging",
+          environmentLabel: "Staging rehearsal",
+          routePath,
+          apiBase: routePath,
+          apiRouteBase: `https://yylx.world${routePath}/api`,
+        }),
+        { status: 200 },
+      ),
+    );
+    window.history.replaceState(null, "", `${routePath}/admin/access`);
+
+    const config = await loadFrontendConfig();
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      `${routePath}/loom-frontend-config.json`,
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    expect(config.routePath).toBe(routePath);
+    expect(config.apiRouteBase).toBe(`https://yylx.world${routePath}/api`);
   });
 });
