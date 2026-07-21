@@ -129,6 +129,69 @@ def _live() -> list[dict[str, object]]:
     return live
 
 
+def _deployment_with_kubectl_set() -> tuple[ManifestArtifact, dict[str, object]]:
+    desired: dict[str, object] = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "loom-service", "namespace": "loom-staging"},
+        "spec": {
+            "selector": {"matchLabels": {"app": "loom-service"}},
+            "template": {
+                "metadata": {"labels": {"app": "loom-service"}},
+                "spec": {
+                    "containers": [
+                        {"name": "loom-service", "image": "loom-service:staging-1111111"}
+                    ]
+                },
+            },
+        },
+    }
+    rendered = yaml.safe_dump(desired, sort_keys=True)
+    artifact = ManifestArtifact(
+        rendered_yaml=rendered,
+        rendered_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
+        resource_count=1,
+        resource_set_digest="3" * 64,
+        image_identities={"loom-service": "sha256:" + "4" * 64},
+        artifact_digest="5" * 64,
+    )
+    live = copy.deepcopy(desired)
+    metadata = live["metadata"]
+    assert isinstance(metadata, dict)
+    metadata.update(
+        {
+            "uid": "uid-service",
+            "resourceVersion": "101",
+            "generation": 2,
+            "managedFields": [
+                {
+                    "manager": "loom-staging-rollout",
+                    "operation": "Apply",
+                    "apiVersion": "apps/v1",
+                    "fieldsType": "FieldsV1",
+                    "fieldsV1": {"f:spec": {}},
+                },
+                {
+                    "manager": "kubectl-set",
+                    "operation": "Update",
+                    "apiVersion": "apps/v1",
+                    "fieldsType": "FieldsV1",
+                    "fieldsV1": {
+                        "f:spec": {
+                            "f:template": {
+                                "f:spec": {
+                                    "f:containers": {'k:{"name":"loom-service"}': {"f:image": {}}}
+                                }
+                            }
+                        }
+                    },
+                },
+            ],
+        }
+    )
+    return artifact, live
+
+
 def _plan():
     return build_manifest_ownership_adoption_plan(
         artifact=_artifact(),
@@ -257,6 +320,61 @@ def test_plan_accepts_exact_partially_adopted_state_for_new_request() -> None:
 
     assert plan.mutation_epoch == 3
     assert len(plan.resources) == 4
+
+
+def test_plan_and_cleanup_accept_only_exact_kubectl_set_deployment_image_owner() -> None:
+    artifact, live = _deployment_with_kubectl_set()
+
+    plan = build_manifest_ownership_adoption_plan(
+        artifact=artifact,
+        live_resources=[live],
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        mutation_epoch=8,
+    )
+    cleanups = build_managed_fields_cleanups([live])
+
+    assert len(plan.resources) == 1
+    assert len(cleanups) == 1
+    assert [entry["manager"] for entry in cleanups[0].retained_fields] == ["loom-staging-rollout"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("operation", "Apply"),
+        ("apiVersion", "v1"),
+        ("fieldsType", "Unknown"),
+        (
+            "fieldsV1",
+            {
+                "f:spec": {
+                    "f:template": {
+                        "f:spec": {"f:containers": {'k:{"name":"loom-service"}': {"f:env": {}}}}
+                    }
+                }
+            },
+        ),
+    ),
+)
+def test_kubectl_set_owner_rejects_non_image_authority(field: str, value: object) -> None:
+    artifact, live = _deployment_with_kubectl_set()
+    metadata = live["metadata"]
+    assert isinstance(metadata, dict)
+    managed_fields = metadata["managedFields"]
+    assert isinstance(managed_fields, list)
+    manager = managed_fields[1]
+    assert isinstance(manager, dict)
+    manager[field] = value
+
+    with pytest.raises(ManifestOwnershipAdoptionError, match="unrecognized"):
+        build_manifest_ownership_adoption_plan(
+            artifact=artifact,
+            live_resources=[live],
+            candidate_sha=_SHA,
+            candidate_tree=_TREE,
+            mutation_epoch=8,
+        )
 
 
 def test_plan_covers_namespaced_and_cluster_scoped_rendered_resources() -> None:

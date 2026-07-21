@@ -40,6 +40,7 @@ _ALLOWED_MANAGERS = frozenset(
         "kubectl-client-side-apply",
         "kubectl-patch",
         "kubectl-rollout",
+        "kubectl-set",
         "loom-lifecycle-bootstrap",
         "nginx-ingress-controller",
     }
@@ -222,7 +223,7 @@ def build_manifest_ownership_adoption_plan(
             or not managed_fields
         ):
             raise ManifestOwnershipAdoptionError("live ownership identity is incomplete")
-        _validate_managed_fields(managed_fields)
+        _validate_managed_fields(managed_fields, identity=identity)
         overlay = _build_overlay(desired_resource, live_resource, identity=identity)
         resources.append(
             AdoptionResource(
@@ -499,7 +500,7 @@ def _project(desired: object, live: object) -> object:
     return copy.deepcopy(live)
 
 
-def _validate_managed_fields(fields: list[object]) -> None:
+def _validate_managed_fields(fields: list[object], *, identity: str) -> None:
     managers: set[str] = set()
     for entry in fields:
         if not isinstance(entry, dict):
@@ -510,6 +511,11 @@ def _validate_managed_fields(fields: list[object]) -> None:
             or manager not in _ALLOWED_MANAGERS
             or entry.get("operation") not in {"Apply", "Update"}
             or not isinstance(entry.get("fieldsV1"), dict)
+        ):
+            raise ManifestOwnershipAdoptionError("managed-field authority is unrecognized")
+        if manager == "kubectl-set" and not _is_exact_deployment_image_update(
+            entry,
+            identity=identity,
         ):
             raise ManifestOwnershipAdoptionError("managed-field authority is unrecognized")
         managers.add(manager)
@@ -529,7 +535,7 @@ def build_managed_fields_cleanups(
         fields = metadata.get("managedFields")
         if not isinstance(fields, list) or not fields:
             raise ManifestOwnershipAdoptionError("managed-field cleanup evidence is absent")
-        _validate_managed_fields(fields)
+        _validate_managed_fields(fields, identity=identity)
         managers = {entry.get("manager") for entry in fields if isinstance(entry, dict)}
         legacy = managers & _LEGACY_MANAGERS
         if not legacy:
@@ -559,6 +565,39 @@ def build_managed_fields_cleanups(
     return tuple(cleanups)
 
 
+def _is_exact_deployment_image_update(entry: Mapping[str, object], *, identity: str) -> bool:
+    if (
+        not identity.startswith("apps/v1|Deployment|loom-staging|")
+        or entry.get("operation") != "Update"
+        or entry.get("apiVersion") != "apps/v1"
+        or entry.get("fieldsType") != "FieldsV1"
+    ):
+        return False
+    fields = entry.get("fieldsV1")
+    if not isinstance(fields, dict) or set(fields) != {"f:spec"}:
+        return False
+    spec = fields["f:spec"]
+    if not isinstance(spec, dict) or set(spec) != {"f:template"}:
+        return False
+    template = spec["f:template"]
+    if not isinstance(template, dict) or set(template) != {"f:spec"}:
+        return False
+    pod_spec = template["f:spec"]
+    if not isinstance(pod_spec, dict) or set(pod_spec) != {"f:containers"}:
+        return False
+    containers = pod_spec["f:containers"]
+    if not isinstance(containers, dict) or not containers:
+        return False
+    for key, value in containers.items():
+        if (
+            not isinstance(key, str)
+            or re.fullmatch(r'k:\{"name":"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?"\}', key) is None
+            or value != {"f:image": {}}
+        ):
+            return False
+    return True
+
+
 def verify_managed_fields_cleanup(
     cleanup: ManagedFieldsCleanup,
     *,
@@ -578,7 +617,7 @@ def verify_managed_fields_cleanup(
     fields = metadata.get("managedFields")
     if not isinstance(fields, list) or not fields:
         raise ManifestOwnershipAdoptionError("managed-field cleanup evidence is absent")
-    _validate_managed_fields(fields)
+    _validate_managed_fields(fields, identity=cleanup.identity)
     managers = {entry.get("manager") for entry in fields if isinstance(entry, dict)}
     if MANIFEST_FIELD_MANAGER not in managers or managers & _LEGACY_MANAGERS:
         raise ManifestOwnershipAdoptionError("managed-field cleanup authority drifted")
