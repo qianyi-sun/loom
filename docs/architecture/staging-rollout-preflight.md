@@ -635,6 +635,11 @@ the generic evidence guard cannot erase the actionable cause.
 If `stop` garbage-collects the transient unit before `reset-failed` acquires
 it, the reset error is accepted only after a separate exact load-state readback
 proves `not-found`; loaded or unavailable state still fails closed.
+Namespace absence is likewise read through `kubectl get
+--ignore-not-found=true`: only a successful empty response proves absence.
+After deletion, a nonzero `kubectl wait` is accepted only when that independent
+readback proves the exact namespace is already gone; a present namespace stays
+a timeout and any transport or parse failure remains unavailable.
 
 The restored database snapshot necessarily contains frozen worker heartbeat
 timestamps. Before the isolated API admission probe, the rehearsal inserts or

@@ -27,7 +27,11 @@ from loom_cli.rollout.rehearsal_browser import (
     BROWSER_REPORT_CHECK_IDS,
     build_rehearsal_browser_artifact,
 )
-from loom_cli.rollout.rehearsal_executor import IsolatedRehearsalExecutor, _default_stream_run
+from loom_cli.rollout.rehearsal_executor import (
+    IsolatedRehearsalExecutor,
+    _default_stream_run,
+    _namespace_manifest,
+)
 from loom_cli.rollout.rehearsal_release import RehearsalReleaseArtifact
 from loom_cli.rollout.rehearsal_secret_restore import RehearsalSecretArtifact
 from tests.loom_cli.rollout.rehearsal_fixtures import (
@@ -1454,7 +1458,8 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
             return subprocess.CompletedProcess(argv, 0, "", "")
         if "get" in command and "namespace" in command:
             if not namespace_present:
-                return subprocess.CompletedProcess(argv, 1, "", "not found")
+                assert "--ignore-not-found=true" in command
+                return subprocess.CompletedProcess(argv, 0, "", "")
             return subprocess.CompletedProcess(argv, 0, json.dumps(namespace), "")
         if "delete" in command and "--raw" in command:
             options = json.loads(payload or b"{}")
@@ -1480,6 +1485,86 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
     delete = next(command for command, _payload in calls if "--raw" in command)
     assert delete[-2:] == ("-f", "-")
     assert plan.resources.namespace in delete[-3]
+
+
+@pytest.mark.parametrize(
+    ("final_returncode", "final_stdout", "final_stderr", "expected_blocker"),
+    [
+        (0, "", "", None),
+        (0, "present", "", "namespace-delete-timeout"),
+        (1, "", "transport unavailable", "namespace-final-readback-failed"),
+    ],
+)
+def test_cleanup_classifies_wait_race_with_exact_final_namespace_readback(
+    final_returncode: int,
+    final_stdout: str,
+    final_stderr: str,
+    expected_blocker: str | None,
+) -> None:
+    plan = _plan()
+    namespace = _namespace_manifest(plan)
+    metadata = namespace["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["resourceVersion"] = "42"
+    metadata["uid"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    get_count = 0
+
+    def run(argv, _payload, _timeout):
+        nonlocal get_count
+        command = tuple(argv)
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+            return subprocess.CompletedProcess(argv, 4, "", "")
+        if "get" in command and "namespace" in command:
+            assert "--ignore-not-found=true" in command
+            get_count += 1
+            if get_count == 1:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(namespace), "")
+            output = json.dumps(namespace) if final_stdout == "present" else final_stdout
+            return subprocess.CompletedProcess(
+                argv,
+                final_returncode,
+                output,
+                final_stderr,
+            )
+        if "delete" in command and "--raw" in command:
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        if "wait" in command:
+            return subprocess.CompletedProcess(argv, 1, "", "timed out")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    if expected_blocker is None:
+        assert outcome.passed and outcome.cleanup_verified
+    else:
+        assert outcome.blockers == {"cleanup": expected_blocker}
+
+
+def test_cleanup_does_not_treat_namespace_transport_failure_as_absence() -> None:
+    plan = _plan()
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+            return subprocess.CompletedProcess(argv, 4, "", "")
+        if "get" in command and "namespace" in command:
+            assert "--ignore-not-found=true" in command
+            return subprocess.CompletedProcess(argv, 1, "", "connection refused")
+        raise AssertionError("cleanup must stop before namespace deletion")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    assert outcome.blockers == {"cleanup": "namespace-readback-failed"}
 
 
 def test_cleanup_refuses_unknown_unit_or_namespace_identity() -> None:
@@ -1549,7 +1634,8 @@ def test_cleanup_accepts_reset_race_only_after_unit_is_absent() -> None:
         if command[:3] == ("systemctl", "--user", "reset-failed"):
             return subprocess.CompletedProcess(argv, 5, "", "unit not loaded")
         if "get" in command and "namespace" in command:
-            return subprocess.CompletedProcess(argv, 1, "", "not found")
+            assert "--ignore-not-found=true" in command
+            return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(command)
 
     outcome = IsolatedRehearsalExecutor(

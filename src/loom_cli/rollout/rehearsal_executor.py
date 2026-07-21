@@ -1623,23 +1623,12 @@ class IsolatedRehearsalExecutor:
         if not self._wait_systemd_absent(contract):
             return _blocked("cleanup", "systemd-remains")
 
-        observed = self._command(
-            (
-                "kubectl",
-                "--kubeconfig",
-                str(self.kubeconfig),
-                "get",
-                "namespace",
-                plan.resources.namespace,
-                "--request-timeout=15s",
-                "-o",
-                "json",
-            ),
-            None,
-            timeout=20,
-        )
-        if observed is None:
+        namespace_state, observed = self._namespace_observation(plan)
+        if namespace_state == "unavailable":
+            return _blocked("cleanup", "namespace-readback-failed")
+        if namespace_state == "absent":
             return _cleanup_ready(plan)
+        assert observed is not None
         if not _namespace_matches(observed, plan):
             return _blocked("cleanup", "namespace-identity-drift")
         metadata = observed.get("metadata")
@@ -1675,7 +1664,7 @@ class IsolatedRehearsalExecutor:
             timeout=30,
         ):
             return _blocked("cleanup", "namespace-delete-failed")
-        if not self._status(
+        wait_succeeded = self._status(
             (
                 "kubectl",
                 "--kubeconfig",
@@ -1686,26 +1675,57 @@ class IsolatedRehearsalExecutor:
                 "--timeout=300s",
             ),
             timeout=315,
-        ):
-            return _blocked("cleanup", "namespace-delete-timeout")
-        final = self._command(
-            (
-                "kubectl",
-                "--kubeconfig",
-                str(self.kubeconfig),
-                "get",
-                "namespace",
-                plan.resources.namespace,
-                "--request-timeout=15s",
-                "-o",
-                "json",
-            ),
-            None,
-            timeout=20,
         )
-        if final is not None:
-            return _blocked("cleanup", "namespace-remains")
-        return _cleanup_ready(plan)
+        final_state, _final = self._namespace_observation(plan)
+        if final_state == "absent":
+            return _cleanup_ready(plan)
+        if final_state == "unavailable":
+            return _blocked("cleanup", "namespace-final-readback-failed")
+        return _blocked(
+            "cleanup",
+            "namespace-remains" if wait_succeeded else "namespace-delete-timeout",
+        )
+
+    def _namespace_observation(
+        self,
+        plan: RehearsalPlan,
+    ) -> tuple[str, dict[str, object] | None]:
+        """Distinguish exact absence from namespace drift and transport failure."""
+        try:
+            result = self.run(
+                (
+                    "kubectl",
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "get",
+                    "namespace",
+                    plan.resources.namespace,
+                    "--ignore-not-found=true",
+                    "--request-timeout=15s",
+                    "-o",
+                    "json",
+                ),
+                None,
+                20,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return "unavailable", None
+        if (
+            result.returncode != 0
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or len(result.stdout.encode()) > _MAX_OUTPUT_BYTES
+            or len(result.stderr.encode()) > _MAX_OUTPUT_BYTES
+            or result.stderr.strip()
+        ):
+            return "unavailable", None
+        if not result.stdout.strip():
+            return "absent", None
+        try:
+            value = json.loads(result.stdout, object_pairs_hook=_reject_duplicate_keys)
+        except (json.JSONDecodeError, ValueError):
+            return "unavailable", None
+        return ("present", value) if isinstance(value, dict) else ("unavailable", None)
 
     def _wait_systemd_absent(self, contract: RehearsalSystemdActivation) -> bool:
         deadline = self.monotonic() + 5.0
