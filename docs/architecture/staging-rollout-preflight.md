@@ -650,7 +650,10 @@ synthetic row never registers with or grants authority over protected staging.
 An HTTP rejection from the admission probe is normalized to an allowlisted
 request identity and reason code. The terminal blocker retains those values
 and the response SHA-256, but never the response body, token or free-form server
-detail; malformed probe output falls back to the generic fail-closed blocker.
+detail. Non-HTTP failures likewise retain only an exact allowlisted request
+identity and fixed reason such as transport unavailable, invalid response, or
+contract drift; malformed or unapproved probe output falls back to the generic
+fail-closed blocker.
 
 Each concrete action is wrapped by `JournaledRehearsalBackend`. The
 service-owned mode-0700 root contains one mode-0700 directory per derived

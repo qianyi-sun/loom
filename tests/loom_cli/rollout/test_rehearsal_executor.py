@@ -31,6 +31,7 @@ from loom_cli.rollout.rehearsal_browser import (
 )
 from loom_cli.rollout.rehearsal_executor import (
     IsolatedRehearsalExecutor,
+    _api_smoke_failure,
     _default_stream_run,
     _namespace_manifest,
 )
@@ -1171,6 +1172,26 @@ def test_api_smoke_persists_normalized_nonzero_probe_evidence() -> None:
         "response-sha256": response_sha256,
         "status": "blocked",
     }
+
+
+def test_api_smoke_accepts_only_allowlisted_non_http_locus() -> None:
+    value = {
+        "failure_code": "rehearsal-api-smoke-failed",
+        "reason_code": "transport-unavailable",
+        "request_id": "health",
+        "response_sha256": None,
+        "schema_version": 1,
+        "status": "blocked",
+    }
+
+    assert _api_smoke_failure(value) == (
+        "rehearsal-api-smoke-failed",
+        "health",
+        "transport-unavailable",
+        None,
+    )
+    value["request_id"] = "probe"
+    assert _api_smoke_failure(value) is None
 
 
 @pytest.mark.parametrize(

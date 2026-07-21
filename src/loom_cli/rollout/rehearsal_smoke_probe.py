@@ -110,12 +110,16 @@ def load_rehearsal_admin_token(
 ) -> str:
     """Read one exact regular secret file without following any symlink."""
     if not path.is_absolute() or ".." in path.parts or path == Path("/"):
-        raise RehearsalSmokeProbeError("admin secret path authority is invalid")
+        raise RehearsalSmokeProbeError(
+            "admin secret path authority is invalid", reason_code="secret-authority"
+        )
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
     except OSError as exc:
-        raise RehearsalSmokeProbeError("admin secret cannot be opened safely") from exc
+        raise RehearsalSmokeProbeError(
+            "admin secret cannot be opened safely", reason_code="secret-authority"
+        ) from exc
     try:
         before = os.fstat(fd)
         effective_group = os.getegid() if allowed_group_gid is None else allowed_group_gid
@@ -127,7 +131,9 @@ def load_rehearsal_admin_token(
             or before.st_nlink != 1
             or not 1 <= before.st_size <= _MAX_SECRET_BYTES
         ):
-            raise RehearsalSmokeProbeError("admin secret metadata authority is invalid")
+            raise RehearsalSmokeProbeError(
+                "admin secret metadata authority is invalid", reason_code="secret-authority"
+            )
         chunks: list[bytes] = []
         remaining = _MAX_SECRET_BYTES + 1
         while remaining > 0:
@@ -141,21 +147,29 @@ def load_rehearsal_admin_token(
         if len(payload) > _MAX_SECRET_BYTES or any(
             getattr(before, field) != getattr(after, field) for field in _STABLE_STAT_FIELDS
         ):
-            raise RehearsalSmokeProbeError("admin secret changed while it was read")
+            raise RehearsalSmokeProbeError(
+                "admin secret changed while it was read", reason_code="secret-authority"
+            )
     finally:
         os.close(fd)
     try:
         record = tomllib.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise RehearsalSmokeProbeError("admin secret payload is invalid") from exc
+        raise RehearsalSmokeProbeError(
+            "admin secret payload is invalid", reason_code="secret-authority"
+        ) from exc
     admin = record.get("admin")
     token = admin.get("token") if isinstance(admin, Mapping) else None
     if not isinstance(token, str):
-        raise RehearsalSmokeProbeError("admin secret payload is incomplete")
+        raise RehearsalSmokeProbeError(
+            "admin secret payload is incomplete", reason_code="secret-authority"
+        )
     try:
         AdminSecretVerifier.from_token(token)
     except AdminSecretConfigError as exc:
-        raise RehearsalSmokeProbeError("admin secret token contract is invalid") from exc
+        raise RehearsalSmokeProbeError(
+            "admin secret token contract is invalid", reason_code="secret-authority"
+        ) from exc
     return token
 
 
@@ -168,7 +182,9 @@ def _http(
     headers: Mapping[str, str] | None = None,
 ) -> tuple[int, bytes]:
     if method not in {"GET", "POST"} or not path.startswith("/api/v1/"):
-        raise RehearsalSmokeProbeError("service request authority is invalid")
+        raise RehearsalSmokeProbeError(
+            "service request authority is invalid", reason_code="request-authority"
+        )
     body = None if payload is None else json.dumps(payload, sort_keys=True).encode()
     request = urllib.request.Request(_SERVICE_BASE + path, data=body, method=method)
     request.add_header("Authorization", f"Bearer {token}")
@@ -184,9 +200,13 @@ def _http(
         status = exc.code
         response_body = exc.read(_MAX_RESPONSE_BYTES + 1)
     except (OSError, urllib.error.URLError) as exc:
-        raise RehearsalSmokeProbeError("service request failed") from exc
+        raise RehearsalSmokeProbeError(
+            "service request failed", reason_code="transport-unavailable"
+        ) from exc
     if len(response_body) > _MAX_RESPONSE_BYTES:
-        raise RehearsalSmokeProbeError("service response exceeded evidence bound")
+        raise RehearsalSmokeProbeError(
+            "service response exceeded evidence bound", reason_code="response-too-large"
+        )
     return status, response_body
 
 
@@ -201,7 +221,9 @@ def run_probe(
 ) -> dict[str, object]:
     """Prove exact-candidate admission and cloned-DB persistence, not completion."""
     if len(plan_sha256) != 64 or any(item not in "0123456789abcdef" for item in plan_sha256):
-        raise RehearsalSmokeProbeError("rehearsal plan identity is invalid")
+        raise RehearsalSmokeProbeError(
+            "rehearsal plan identity is invalid", reason_code="plan-authority"
+        )
     contract = AdminSmokeContract(authority)
     token = load_rehearsal_admin_token(
         admin_secret_path,
@@ -219,7 +241,16 @@ def run_probe(
         headers: Mapping[str, str] | None = None,
         accepted: frozenset[int] = frozenset({200}),
     ) -> Mapping[str, object]:
-        status, body = _http(method, path, token=token, payload=payload, headers=headers)
+        try:
+            status, body = _http(method, path, token=token, payload=payload, headers=headers)
+        except RehearsalSmokeProbeError as exc:
+            raise RehearsalSmokeProbeError(
+                str(exc),
+                failure_code=exc.failure_code,
+                reason_code=exc.reason_code,
+                request_id=request_id,
+                response_sha256=exc.response_sha256,
+            ) from exc
         evidence[f"{method.lower()}:{path.split('?', 1)[0]}"] = hashlib.sha256(
             str(status).encode() + b"\0" + body
         ).hexdigest()
@@ -233,24 +264,36 @@ def run_probe(
             )
         decoded = decode_json_object(body)
         if decoded is None:
-            raise RehearsalSmokeProbeError("service response is not a JSON object")
+            raise RehearsalSmokeProbeError(
+                "service response is not a JSON object",
+                reason_code="response-invalid",
+                request_id=request_id,
+            )
         return decoded
 
     health = request("GET", "/api/v1/health", request_id="health")
     if health.get("status") not in {"ok", "healthy"}:
-        raise RehearsalSmokeProbeError("service health contract failed")
+        raise RehearsalSmokeProbeError(
+            "service health contract failed", reason_code="contract-invalid", request_id="health"
+        )
     whoami = request("GET", "/api/v1/auth/whoami", request_id="whoami")
     identity_error = contract.validate_admin_identity(whoami)
     if identity_error is not None:
-        raise RehearsalSmokeProbeError(identity_error)
+        raise RehearsalSmokeProbeError(
+            identity_error, reason_code="contract-invalid", request_id="whoami"
+        )
     catalog = request("GET", "/api/v1/benchmarks", request_id="benchmarks")
     catalog_error = contract.validate_benchmark_catalog(catalog)
     if catalog_error is not None:
-        raise RehearsalSmokeProbeError(catalog_error)
+        raise RehearsalSmokeProbeError(
+            catalog_error, reason_code="contract-invalid", request_id="benchmarks"
+        )
     quoted_task = urllib.parse.quote(authority.task_id, safe="/")
     task = request("GET", f"/api/v1/tasks/{quoted_task}", request_id="task")
     if task.get("id") not in {None, authority.task_id} and task.get("task_id") != authority.task_id:
-        raise RehearsalSmokeProbeError("service task identity drifted")
+        raise RehearsalSmokeProbeError(
+            "service task identity drifted", reason_code="contract-invalid", request_id="task"
+        )
 
     query = urllib.parse.urlencode({"team_id": authority.team_id, "q": batch_name, "limit": "20"})
     existing = request("GET", f"/api/v1/batches?{query}", request_id="batches-list")
@@ -267,7 +310,11 @@ def run_probe(
         )
         raw_batch_id = submitted.get("id") or submitted.get("batch_id")
         if not isinstance(raw_batch_id, str) or not raw_batch_id:
-            raise RehearsalSmokeProbeError("service submission returned no batch id")
+            raise RehearsalSmokeProbeError(
+                "service submission returned no batch id",
+                reason_code="contract-invalid",
+                request_id="batch-submit",
+            )
         batch_id = raw_batch_id
     persisted = request(
         "GET",
@@ -280,7 +327,9 @@ def run_probe(
         batch_name=batch_name,
     )
     if persisted_error is not None:
-        raise RehearsalSmokeProbeError(persisted_error)
+        raise RehearsalSmokeProbeError(
+            persisted_error, reason_code="contract-invalid", request_id="batch-readback"
+        )
     return {
         "batch_id": batch_id,
         "batch_name": batch_name,

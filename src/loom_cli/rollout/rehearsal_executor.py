@@ -98,12 +98,47 @@ _API_SMOKE_REASON_CODES = frozenset(
         "invalid-family-run",
         "invalid-task-config",
         "no-active-worker",
+        "contract-invalid",
+        "plan-authority",
         "probe-failed",
+        "request-authority",
+        "response-invalid",
+        "response-too-large",
+        "secret-authority",
         "staging-capacity-evidence-corrupt",
         "staging-capacity-evidence-missing",
         "staging-capacity-evidence-stale",
         "staging-capacity-high-water",
         "staging-capacity-policy-drift",
+        "transport-unavailable",
+    }
+)
+_API_SMOKE_NON_HTTP_FAILURES = frozenset(
+    {
+        ("probe", "plan-authority"),
+        ("probe", "probe-failed"),
+        ("probe", "secret-authority"),
+        *(
+            (request_id, reason_code)
+            for request_id in _API_SMOKE_REQUEST_IDS - {"probe"}
+            for reason_code in (
+                "request-authority",
+                "response-invalid",
+                "response-too-large",
+                "transport-unavailable",
+            )
+        ),
+        *(
+            (request_id, "contract-invalid")
+            for request_id in {
+                "batch-readback",
+                "batch-submit",
+                "benchmarks",
+                "health",
+                "task",
+                "whoami",
+            }
+        ),
     }
 )
 
@@ -2542,7 +2577,9 @@ def _api_smoke_failure(
             or request_id == "probe"
         ):
             return None
-    elif response_sha256 is not None or reason_code != "probe-failed" or request_id != "probe":
+    elif (
+        response_sha256 is not None or (request_id, reason_code) not in _API_SMOKE_NON_HTTP_FAILURES
+    ):
         return None
     return failure_code, request_id, reason_code, response_sha256
 

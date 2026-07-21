@@ -171,7 +171,7 @@ def test_probe_rejects_persisted_authority_drift(
         return 200, json.dumps(value).encode()
 
     monkeypatch.setattr("loom_cli.rollout.rehearsal_smoke_probe._http", http)
-    with pytest.raises(RehearsalSmokeProbeError, match="worker-pool"):
+    with pytest.raises(RehearsalSmokeProbeError, match="worker-pool") as captured:
         run_probe(
             plan_sha256="a" * 64,
             batch_name="rehearsal-abc123",
@@ -180,6 +180,37 @@ def test_probe_rejects_persisted_authority_drift(
             expected_owner_uid=os.geteuid(),
             allowed_group_gid=os.getegid(),
         )
+    assert captured.value.request_id == "batch-readback"
+    assert captured.value.reason_code == "contract-invalid"
+
+
+def test_probe_reports_safe_transport_locus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = _secret(tmp_path)
+
+    def http(method, path, *, token, payload=None, headers=None):
+        del method, path, token, payload, headers
+        raise RehearsalSmokeProbeError(
+            "secret-shaped transport detail",
+            reason_code="transport-unavailable",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_smoke_probe._http", http)
+    with pytest.raises(RehearsalSmokeProbeError) as captured:
+        run_probe(
+            plan_sha256="a" * 64,
+            batch_name="rehearsal-abc123",
+            authority=_authority(),
+            admin_secret_path=secret,
+            expected_owner_uid=os.geteuid(),
+            allowed_group_gid=os.getegid(),
+        )
+
+    assert captured.value.failure_code == "rehearsal-api-smoke-failed"
+    assert captured.value.request_id == "health"
+    assert captured.value.reason_code == "transport-unavailable"
+    assert captured.value.response_sha256 is None
 
 
 @pytest.mark.parametrize(
