@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import uuid
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -872,6 +873,17 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
                 ]
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        if "psql" in command:
+            worker_id = str(uuid.UUID(hex=plan.plan_digest[:32], version=4))
+            value = {
+                "backend": "docker",
+                "fresh": True,
+                "hostname": "rehearsal-" + "5" * 24,
+                "pool_name": "gb10-arm64",
+                "status": "ready",
+                "worker_id": worker_id,
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
         if "exec" in command:
             evidence = {
                 "get:/api/v1/auth/whoami": "1" * 64,
@@ -903,7 +915,14 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
 
     assert outcome.passed
     assert outcome.details["batch-id"] == batch_id
-    probe = next(command for command in calls if "exec" in command)
+    assert len(outcome.details["worker-authority-sha256"]) == 64
+    seed = next(command for command in calls if "psql" in command)
+    seed_sql = next(item for item in seed if item.startswith("--command="))
+    assert "ON CONFLICT (id) DO UPDATE" in seed_sql
+    assert "gb10-arm64" in seed_sql
+    probe = next(
+        command for command in calls if "loom_cli.rollout.rehearsal_smoke_probe" in command
+    )
     assert probe[:7] == (
         "kubectl",
         "--kubeconfig",
@@ -919,6 +938,52 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
         "loom_cli.rollout.rehearsal_smoke_probe",
     )
     assert "loom_admin_" not in " ".join(probe)
+
+
+def test_api_smoke_fails_closed_when_isolated_worker_seed_drifts() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if "get" in command and "pods" in command:
+            pod = {
+                "items": [
+                    {
+                        "metadata": {
+                            "annotations": {
+                                "loom.openai.dev/plan-sha256": plan.plan_digest,
+                            },
+                            "labels": {"app": "loom-service"},
+                            "name": "loom-service-abc123",
+                        },
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {
+                                    "imageID": "docker-pullable://loom-service@"
+                                    + plan.image_digests["loom-service"],
+                                    "name": "loom-service",
+                                    "ready": True,
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(pod), "")
+        if "psql" in command:
+            return subprocess.CompletedProcess(argv, 0, '{"status":"drift"}', "")
+        raise AssertionError("service probe must not run without exact worker authority")
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.api-smoke", plan)
+
+    assert outcome.blockers == {"api-smoke": "worker-authority-failed"}
 
 
 def test_production_defaults_streams_exact_artifact_to_candidate_probe(tmp_path: Path) -> None:

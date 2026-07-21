@@ -509,6 +509,9 @@ class IsolatedRehearsalExecutor:
         required_pool = authority.required_worker_pool
         if required_pool is None:
             return _blocked("api-smoke", "worker-pool-authority-missing")
+        worker_authority = self._seed_api_smoke_worker(plan, required_pool=required_pool)
+        if worker_authority is None:
+            return _blocked("api-smoke", "worker-authority-failed")
         suffix = plan.resources.namespace.removeprefix("loom-rehearsal-")
         batch_name = f"rehearsal-{suffix}"
         result = self._command(
@@ -564,9 +567,67 @@ class IsolatedRehearsalExecutor:
                     json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest(),
                 "status": "ready",
+                "worker-authority-sha256": hashlib.sha256(
+                    json.dumps(
+                        worker_authority,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
             },
             blockers={},
         )
+
+    def _seed_api_smoke_worker(
+        self,
+        plan: RehearsalPlan,
+        *,
+        required_pool: str,
+    ) -> dict[str, object] | None:
+        """Publish one deterministic worker only inside the restored clone.
+
+        A PostgreSQL dump freezes worker heartbeat timestamps. Without this
+        isolated authority, the candidate service correctly rejects every
+        rehearsal submission as having no fresh worker even though GB10 host
+        readiness was independently proven by the preceding systemd check.
+        The exact synthetic row enables only the Docker admission predicate;
+        it never registers with or reaches protected staging.
+        """
+        worker_id = str(uuid.UUID(hex=plan.plan_digest[:32], version=4))
+        hostname = "rehearsal-" + plan.resources.namespace.removeprefix("loom-rehearsal-")
+        version = "candidate-" + plan.candidate_sha[:12]
+        capabilities = '[{"backend":"docker","rehearsal":true}]'
+        sql = (
+            "WITH upserted AS ("
+            "INSERT INTO workers "
+            "(id,hostname,version,capabilities,max_concurrent,pool_name,"
+            "drain_state,registered_at,last_seen_at,status) VALUES ("
+            f"'{worker_id}'::uuid,'{hostname}','{version}',"
+            f"'{capabilities}'::jsonb,1,'{required_pool}','active',now(),now(),'active') "
+            "ON CONFLICT (id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at "
+            "WHERE workers.hostname=EXCLUDED.hostname "
+            "AND workers.version=EXCLUDED.version "
+            "AND workers.capabilities=EXCLUDED.capabilities "
+            "AND workers.max_concurrent=EXCLUDED.max_concurrent "
+            "AND workers.pool_name=EXCLUDED.pool_name "
+            "AND workers.drain_state='active' AND workers.status='active' "
+            "RETURNING id,hostname,version,capabilities,pool_name,"
+            "drain_state,last_seen_at,status) "
+            "SELECT json_build_object("
+            "'backend','docker','fresh',last_seen_at >= now()-interval '30 seconds',"
+            "'hostname',hostname,'pool_name',pool_name,'status','ready',"
+            "'worker_id',id::text)::text FROM upserted;"
+        )
+        observed = self._psql_json(plan, sql)
+        expected: dict[str, object] = {
+            "backend": "docker",
+            "fresh": True,
+            "hostname": hostname,
+            "pool_name": required_pool,
+            "status": "ready",
+            "worker_id": worker_id,
+        }
+        return expected if observed == expected else None
 
     def _service_pod_name(
         self,

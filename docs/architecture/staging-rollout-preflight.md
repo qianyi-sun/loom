@@ -633,6 +633,13 @@ fails closed before namespace deletion. Cleanup journaling retains the precise
 resource blocker and records incomplete verification under a separate key, so
 the generic evidence guard cannot erase the actionable cause.
 
+The restored database snapshot necessarily contains frozen worker heartbeat
+timestamps. Before the isolated API admission probe, the rehearsal inserts or
+refreshes one deterministic, plan-bound Docker worker row in the cloned
+database only. Exact id, hostname, candidate version, pool and capabilities
+must match on retry. GB10 host readiness remains a separate prerequisite; the
+synthetic row never registers with or grants authority over protected staging.
+
 Each concrete action is wrapped by `JournaledRehearsalBackend`. The
 service-owned mode-0700 root contains one mode-0700 directory per derived
 isolation identity and one immutable mode-0600 no-follow terminal record per
