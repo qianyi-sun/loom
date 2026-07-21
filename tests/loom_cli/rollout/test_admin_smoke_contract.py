@@ -147,6 +147,21 @@ def test_contract_validates_exact_admitted_batch_without_terminal_claim() -> Non
         )
         is None
     )
+    assert (
+        contract.validate_admitted_batch(
+            {**persisted, "state": "submitted"},
+            batch_id="batch-1",
+            batch_name="rehearsal-abc123",
+        )
+        is None
+    )
+    assert "state" in str(
+        contract.validate_admitted_batch(
+            {**persisted, "state": "created"},
+            batch_id="batch-1",
+            batch_name="rehearsal-abc123",
+        )
+    )
     assert "worker-pool" in str(
         contract.validate_admitted_batch(
             {**persisted, "required_worker_pools": []},

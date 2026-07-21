@@ -247,7 +247,7 @@ class AdminSmokeContract:
             return "admin smoke persisted task authority drifted"
         if required_worker_pools != expected_pools:
             return "admin smoke persisted worker-pool authority drifted"
-        if payload.get("state") not in {"pending", "running", "finished"}:
+        if payload.get("state") not in {"submitted", "pending", "running", "finished"}:
             return "admin smoke persisted batch state is invalid"
         return self.nonrecoverable_failure(payload)
 

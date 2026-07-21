@@ -647,6 +647,9 @@ refreshes one deterministic, plan-bound Docker worker row in the cloned
 database only. Exact id, hostname, candidate version, pool and capabilities
 must match on retry. GB10 host readiness remains a separate prerequisite; the
 synthetic row never registers with or grants authority over protected staging.
+The admission readback accepts the service's persisted `submitted` state as
+well as later pending/running/finished states; terminal success remains a
+separate final smoke predicate.
 An HTTP rejection from the admission probe is normalized to an allowlisted
 request identity and reason code. The terminal blocker retains those values
 and the response SHA-256, but never the response body, token or free-form server
