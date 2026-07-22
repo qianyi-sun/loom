@@ -14,6 +14,21 @@
     "default": "1.0",
     "required": false
   },
+  "container_cpus": {
+    "annotation": "<class 'float'>",
+    "default": "0.0",
+    "required": false
+  },
+  "container_memory_mib": {
+    "annotation": "<class 'int'>",
+    "default": "0",
+    "required": false
+  },
+  "container_pids": {
+    "annotation": "<class 'int'>",
+    "default": "0",
+    "required": false
+  },
   "control_plane_url": {
     "annotation": "<class 'pydantic.networks.HttpUrl'>",
     "default": "'http://loom-control-plane:8080'",

@@ -1034,6 +1034,10 @@ def _slurm_config_from_policy(
             actor_config.get("max_concurrency_per_node") or 8,
         ),
         max_cpu_load_ratio=float(actor_config.get("max_cpu_load_ratio") or 1.0),
+        # #896 per-container caps (0/unset = unbounded).
+        container_cpus=float(actor_config.get("container_cpus") or 0.0),
+        container_memory_mib=int(actor_config.get("container_memory_mib") or 0),
+        container_pids=int(actor_config.get("container_pids") or 0),
     )
     if config is None:
         raise ValueError("Slurm autoscaler policy unexpectedly disabled")
@@ -1049,6 +1053,13 @@ def _worker_env_from_slurm_config(
         "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
         "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
     }
+    # #896: propagate per-container caps when configured (0/unset = unbounded).
+    if config.container_cpus > 0:
+        env["LOOM_WORKER_CONTAINER_CPUS"] = str(config.container_cpus)
+    if config.container_memory_mib > 0:
+        env["LOOM_WORKER_CONTAINER_MEMORY_MIB"] = str(config.container_memory_mib)
+    if config.container_pids > 0:
+        env["LOOM_WORKER_CONTAINER_PIDS"] = str(config.container_pids)
     try:
         fingerprint = worker_token_fingerprint_from_env_file(Path(config.env_file))
     except OSError as exc:

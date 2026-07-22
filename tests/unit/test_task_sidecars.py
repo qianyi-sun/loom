@@ -402,6 +402,64 @@ async def test_sidecar_runtime_passes_docker_api_timeout(
     assert from_env_timeouts == [900.0]
 
 
+async def test_sidecar_runtime_applies_container_caps_when_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # #896: positive per-container caps map to nano_cpus / mem_limit /
+    # pids_limit on every setup-sidecar container this runtime creates.
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(task_sidecars.docker, "from_env", lambda: fake_client)
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+        container_cpus=2.0,
+        container_memory_mib=512,
+        container_pids=256,
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert fake_client.containers.create_calls, "expected sidecar containers"
+    for call in fake_client.containers.create_calls:
+        assert call["nano_cpus"] == 2_000_000_000
+        assert call["mem_limit"] == 512 * 1024 * 1024
+        assert call["pids_limit"] == 256
+
+
+async def test_sidecar_runtime_omits_container_caps_when_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # #896: default (0) caps leave sidecar creation unbounded.
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(task_sidecars.docker, "from_env", lambda: fake_client)
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert fake_client.containers.create_calls, "expected sidecar containers"
+    for call in fake_client.containers.create_calls:
+        assert "nano_cpus" not in call
+        assert "mem_limit" not in call
+        assert "pids_limit" not in call
+
+
 async def test_sidecar_health_wait_allows_probe_at_interval_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

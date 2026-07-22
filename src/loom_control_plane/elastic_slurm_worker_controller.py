@@ -87,6 +87,13 @@ class ElasticSlurmWorkerControllerConfig:
     reserved_memory_mib: int = 24_576
     max_concurrency_per_node: int = 8
     max_cpu_load_ratio: float = 1.0
+    # #896 per-container hard caps for non-exclusive (packed) workers. 0 = unset
+    # (unbounded, backward-compatible). When set, exported into the worker env so
+    # the compose worker + trial/sidecar containers get an absolute CPU/mem/pids
+    # ceiling, bounding an escaped container's contention on a double-duty node.
+    container_cpus: float = 0.0
+    container_memory_mib: int = 0
+    container_pids: int = 0
 
 
 @dataclass(frozen=True)
@@ -212,6 +219,9 @@ def build_controller_config(
     reserved_memory_mib: int = 24_576,
     max_concurrency_per_node: int = 8,
     max_cpu_load_ratio: float = 1.0,
+    container_cpus: float = 0.0,
+    container_memory_mib: int = 0,
+    container_pids: int = 0,
 ) -> ElasticSlurmWorkerControllerConfig | None:
     if not enabled:
         return None
@@ -251,6 +261,12 @@ def build_controller_config(
         raise ValueError("reserved_cpus must be non-negative")
     if reserved_memory_mib < 0:
         raise ValueError("reserved_memory_mib must be non-negative")
+    if container_cpus < 0:
+        raise ValueError("container_cpus must be non-negative")
+    if container_memory_mib < 0:
+        raise ValueError("container_memory_mib must be non-negative")
+    if container_pids < 0:
+        raise ValueError("container_pids must be non-negative")
 
     if max_jobs > len(allowed_nodes):
         raise ValueError("max_jobs cannot exceed the number of allowed nodes")
@@ -289,6 +305,9 @@ def build_controller_config(
         reserved_memory_mib=reserved_memory_mib,
         max_concurrency_per_node=max_concurrency_per_node,
         max_cpu_load_ratio=max_cpu_load_ratio,
+        container_cpus=container_cpus,
+        container_memory_mib=container_memory_mib,
+        container_pids=container_pids,
     )
 
 
@@ -506,15 +525,24 @@ def build_sbatch_request(
     node: str,
 ) -> SbatchRequest:
     job_node = _SAFE_JOB_NAME_RE.sub("-", node).strip("-") or "worker"
-    export = ",".join(
-        (
-            "ALL",
-            f"LOOM_WORKER_MAX_CONCURRENT={config.requested_concurrency}",
-            f"LOOM_WORKER_POOL_NAME={config.pool_name}",
-            f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
-            f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
+    export_vars = [
+        "ALL",
+        f"LOOM_WORKER_MAX_CONCURRENT={config.requested_concurrency}",
+        f"LOOM_WORKER_POOL_NAME={config.pool_name}",
+        f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
+        f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
+    ]
+    # #896: only export the per-container caps when configured (>0). Unset leaves
+    # the compose/driver defaults unbounded, so exclusive pools are unaffected.
+    if config.container_cpus > 0:
+        export_vars.append(f"LOOM_WORKER_CONTAINER_CPUS={config.container_cpus}")
+    if config.container_memory_mib > 0:
+        export_vars.append(
+            f"LOOM_WORKER_CONTAINER_MEMORY_MIB={config.container_memory_mib}",
         )
-    )
+    if config.container_pids > 0:
+        export_vars.append(f"LOOM_WORKER_CONTAINER_PIDS={config.container_pids}")
+    export = ",".join(export_vars)
     args = [
         config.sbatch_path,
         "--parsable",

@@ -210,3 +210,97 @@ async def test_docker_driver_passes_labels_to_container_create(
         "loom.trial_id": "00000000-0000-0000-0000-000000000001",
     }
     assert container.started is True
+
+
+async def test_docker_driver_applies_container_caps_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #896: positive per-container caps map to nano_cpus / mem_limit /
+    # pids_limit at container create for packed (non-exclusive) workers.
+    create_kwargs: dict[str, Any] = {}
+    container = _FakeContainer()
+
+    class _Containers:
+        def create(self, image: str, **kwargs: Any) -> object:
+            create_kwargs["image"] = image
+            create_kwargs.update(kwargs)
+            return container
+
+    class _Client:
+        containers = _Containers()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+
+    async def _noop_wait(self: DockerDriver) -> None:
+        return None
+
+    async def _noop_policy(self: DockerDriver, policy: object) -> None:
+        return None
+
+    monkeypatch.setattr(DockerDriver, "_wait_until_running", _noop_wait)
+    monkeypatch.setattr(DockerDriver, "set_network_policy", _noop_policy)
+
+    driver = DockerDriver(
+        image="loom-agent-sandbox:dev",
+        workspace=PurePosixPath("/workspace"),
+    )
+    await driver.start(
+        options=StartOptions(
+            container_cpus=2.0,
+            container_memory_mib=512,
+            container_pids=256,
+        )
+    )
+
+    assert create_kwargs["nano_cpus"] == 2_000_000_000
+    assert create_kwargs["mem_limit"] == 512 * 1024 * 1024
+    assert create_kwargs["pids_limit"] == 256
+    assert container.started is True
+
+
+async def test_docker_driver_omits_container_caps_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #896: default (0) caps leave the create call unbounded, so exclusive
+    # GB10 pools are byte-for-byte unchanged.
+    create_kwargs: dict[str, Any] = {}
+    container = _FakeContainer()
+
+    class _Containers:
+        def create(self, image: str, **kwargs: Any) -> object:
+            create_kwargs["image"] = image
+            create_kwargs.update(kwargs)
+            return container
+
+    class _Client:
+        containers = _Containers()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+
+    async def _noop_wait(self: DockerDriver) -> None:
+        return None
+
+    async def _noop_policy(self: DockerDriver, policy: object) -> None:
+        return None
+
+    monkeypatch.setattr(DockerDriver, "_wait_until_running", _noop_wait)
+    monkeypatch.setattr(DockerDriver, "set_network_policy", _noop_policy)
+
+    driver = DockerDriver(
+        image="loom-agent-sandbox:dev",
+        workspace=PurePosixPath("/workspace"),
+    )
+    await driver.start(options=StartOptions())
+
+    assert "nano_cpus" not in create_kwargs
+    assert "mem_limit" not in create_kwargs
+    assert "pids_limit" not in create_kwargs
+    assert container.started is True
