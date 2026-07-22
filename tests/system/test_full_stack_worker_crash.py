@@ -23,6 +23,8 @@ def test_worker_crash_then_retry(compose_stack: dict[str, str]) -> None:
         json={
             "task_id": "hello-world",
             "config": {
+                "agent_name": "oracle",
+                "agent_model": None,
                 "retry": {
                     "max_attempts": 3,
                     "retry_on": ["worker_crash"],

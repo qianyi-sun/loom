@@ -15,6 +15,7 @@ already exist; this test pins both paths."""
 from __future__ import annotations
 
 import pytest
+from loom_benchmarks.registry import REGISTRY
 from scripts.seed_test_data import _seed_benchmarks_from_entrypoints
 from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
@@ -26,25 +27,14 @@ from loom.db.schema import Benchmark
 def session(postgres_url: str):
     engine = create_engine(postgres_url, future=True)
     sl = sessionmaker(engine)
+    registry_ids = tuple(REGISTRY)
     with sl() as s:
-        s.execute(delete(Benchmark).where(
-            Benchmark.id.in_([
-                "aime-22", "aime-25",
-                "swe-bench", "swe-bench-multimodal",
-                "humaneval",
-            ]),
-        ))
+        s.execute(delete(Benchmark).where(Benchmark.id.in_(registry_ids)))
         s.commit()
     with sl() as s:
         yield s
     with sl() as s:
-        s.execute(delete(Benchmark).where(
-            Benchmark.id.in_([
-                "aime-22", "aime-25",
-                "swe-bench", "swe-bench-multimodal",
-                "humaneval",
-            ]),
-        ))
+        s.execute(delete(Benchmark).where(Benchmark.id.in_(registry_ids)))
         s.commit()
     engine.dispose()
 

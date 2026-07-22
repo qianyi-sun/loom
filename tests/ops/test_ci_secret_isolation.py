@@ -200,7 +200,7 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
 
     assert workflow["permissions"] == {"contents": "read"}
     assert "smoke-storage-aws-s3" not in jobs
-    assert set(gate["needs"]) == {"plan", "smoke"}
+    assert set(gate["needs"]) == {"plan", "smoke", "system-smoke"}
 
     gate_step = _named_step(gate, "Enforce selected staging smoke results")
     assert "AWS_S3_RESULT" not in gate_step["env"]

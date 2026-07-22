@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -20,6 +21,12 @@ import pytest
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory
+from loom_cli.rollout.image_readiness import (
+    AUXILIARY_ROLLOUT_IMAGES,
+    DEFAULT_ROLLOUT_IMAGE_PLAN,
+    ROLLOUT_IMAGES,
+    image_plan_digest,
+)
 from loom_cli.rollout.steps import candidate_source
 from loom_cli.rollout.steps.base import RunResult, VerifyOutcome
 from loom_cli.rollout.steps.candidate_source import (
@@ -187,6 +194,34 @@ def _control_plane_ready(monkeypatch: pytest.MonkeyPatch) -> None:
         "loom_cli.rollout.steps.s10_env_state._wait_for_control_plane",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.validate_candidate_worktree_identity",
+        lambda ctx: (
+            ctx.rollout_root
+            / "rollouts"
+            / ctx.metadata["rollout_id"]
+            / "01-worktree"
+            / "src"
+        ),
+    )
+
+    def fake_materialize(ctx, repo_path, target):
+        worktree = (
+            ctx.rollout_root
+            / "rollouts"
+            / ctx.metadata["rollout_id"]
+            / "01-worktree"
+            / "src"
+        )
+        data = (worktree / repo_path).read_bytes()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return candidate_source.MaterializedCandidateBlob(data, target.resolve())
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.materialize_candidate_blob",
+        fake_materialize,
+    )
 
 
 def _prepare_candidate_worktree(ev: EvidenceDirectory) -> Path:
@@ -194,6 +229,63 @@ def _prepare_candidate_worktree(ev: EvidenceDirectory) -> Path:
     package_dir = worktree / "src" / "loom_cli"
     package_dir.mkdir(parents=True)
     (package_dir / "__main__.py").write_text("raise SystemExit(0)\n")
+    ownership_script = worktree / "scripts" / "component_ownership.py"
+    ownership_script.parent.mkdir(parents=True)
+    primary = tuple((name, dockerfile, ".") for name, dockerfile in ROLLOUT_IMAGES)
+    auxiliary = tuple(
+        (name, dockerfile, ".") for name, dockerfile in AUXILIARY_ROLLOUT_IMAGES
+    )
+    primary_rows = [
+        {"image_name": name, "dockerfile": dockerfile, "context": context}
+        for name, dockerfile, context in primary
+    ]
+    auxiliary_rows = [
+        {"image_name": name, "dockerfile": dockerfile, "context": context}
+        for name, dockerfile, context in auxiliary
+    ]
+    role_payload = {
+        "auxiliary_images": auxiliary_rows,
+        "primary_images": primary_rows,
+    }
+    query_payload = {"primary": primary_rows, "auxiliary": auxiliary_rows}
+    ownership_script.write_text(
+        "import json\n"
+        "import sys\n"
+        f"payloads = {query_payload!r}\n"
+        "role = sys.argv[sys.argv.index('--rollout-role') + 1]\n"
+        "print(json.dumps(payloads[role]))\n",
+        encoding="utf-8",
+    )
+    manifest_path = worktree / "config" / "component-ownership.toml"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_data = b"schema_version = 2\n"
+    manifest_path.write_bytes(manifest_data)
+    matrix_sha256 = hashlib.sha256(
+        json.dumps(role_payload, separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+    image_ids = {
+        name: "sha256:" + f"{index:064x}"
+        for index, (name, _dockerfile, _context) in enumerate(
+            DEFAULT_ROLLOUT_IMAGE_PLAN,
+            start=1,
+        )
+    }
+    ev.step_dir(2, "build-images").artifact_path("image-matrix.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "resolved_sha": "a" * 40,
+                "component_manifest_sha256": hashlib.sha256(manifest_data).hexdigest(),
+                "matrix_sha256": matrix_sha256,
+                "image_plan_sha256": image_plan_digest(DEFAULT_ROLLOUT_IMAGE_PLAN),
+                "image_artifact_sha256": "b" * 64,
+                "primary_images": primary_rows,
+                "auxiliary_images": auxiliary_rows,
+                "image_ids": image_ids,
+            }
+        ),
+        encoding="utf-8",
+    )
     return worktree
 
 
@@ -3599,6 +3691,111 @@ spec:
     result = ReleaseGateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
+
+
+def test_release_gate_rejects_rendered_image_absent_from_candidate_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
+    rendered.write_text(
+        """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rendered-service
+spec:
+  template:
+    spec:
+      containers:
+        - name: rendered-service
+          image: loom-agent-sandbox:staging-abc123
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate.run_captured",
+        lambda *_args, **_kwargs: pytest.fail("docker inspect must not run"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="contains images absent from the candidate rollout matrix",
+    ):
+        ReleaseGateStep()._write_expected_image_identities(
+            ctx,
+            ev.step_dir(14, "release-gate"),
+        )
+
+
+def test_release_gate_rejects_render_without_release_managed_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
+    rendered.write_text(
+        """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+spec:
+  template:
+    spec:
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.30-latest
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate.run_captured",
+        lambda *_args, **_kwargs: pytest.fail("docker inspect must not run"),
+    )
+
+    with pytest.raises(ValueError, match="does not reference any release-managed images"):
+        ReleaseGateStep()._write_expected_image_identities(
+            ctx,
+            ev.step_dir(14, "release-gate"),
+        )
+
+
+def test_release_gate_allows_profile_disabled_candidate_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    _write_rendered_service(ev)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate.rollout_images",
+        lambda _ctx, _step_dir: (
+            ("loom-service", "deploy/Dockerfile.service", "."),
+            ("loom-worker", "deploy/Dockerfile.worker", "."),
+        ),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate.run_captured",
+        lambda argv, **_kwargs: _docker_inspect_success(list(argv)),
+    )
+
+    output = ReleaseGateStep()._write_expected_image_identities(
+        ctx,
+        ev.step_dir(14, "release-gate"),
+    )
+
+    identities = json.loads(output.read_text(encoding="utf-8"))
+    assert set(identities) == {"loom-service"}
 
 
 def test_release_gate_run_fails_fast_when_gb10_status_hard_fails(

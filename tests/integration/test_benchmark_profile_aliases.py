@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import sessionmaker
 
 from loom.benchmark_profiles import resolve_benchmark_selectors
-from loom.db.schema import Benchmark, BenchmarkAlias, Task
+from loom.db.schema import Benchmark, BenchmarkAlias, Task, Trial
 from loom_service.routes.benchmarks import get_benchmark, list_benchmarks
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 
@@ -38,6 +38,16 @@ async def session(postgres_url: str) -> AsyncIterator[AsyncSession]:
     sync_engine = create_engine(postgres_url)
     sync_session = sessionmaker(sync_engine)
     with sync_session() as sync:
+        # This suite asserts the *exact* benchmark catalog, so isolate it from
+        # any benchmark/task rows leaked by other tests sharing this DB (test
+        # order is not fixed across shards). FK-safe wipe order: dependents of
+        # benchmarks (aliases, then benchmark-referencing tasks and their
+        # trials) before the benchmarks themselves.
+        sync.execute(delete(Trial))
+        sync.execute(delete(BenchmarkAlias))
+        sync.execute(delete(Task))
+        sync.execute(delete(Benchmark))
+        sync.commit()
         for benchmark_id, execution_state in (
             (ACTIVE_PROFILE, "runnable"),
             (HISTORICAL_PROFILE, "historical"),

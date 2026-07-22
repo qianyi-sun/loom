@@ -1,3 +1,3 @@
 FROM python:3.11-alpine
-RUN pip install --no-cache-dir pytest pytest-jsonreport
+RUN pip install --no-cache-dir pytest pytest-json-report
 WORKDIR /workspace

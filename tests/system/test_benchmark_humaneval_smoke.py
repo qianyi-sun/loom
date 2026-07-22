@@ -92,7 +92,10 @@ async def test_humaneval_end_to_end(
         r = httpx.post(
             f"{cp}/trials",
             headers={"Authorization": f"Bearer {token}"},
-            json={"task_id": f"humaneval/HumanEval/{i}", "config": {}},
+            json={
+                "task_id": f"humaneval/HumanEval/{i}",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
             timeout=10,
         )
         assert r.status_code == 201, r.text

@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+import scripts.component_ownership as component_ownership
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -121,6 +123,34 @@ def test_images_multi_arch_jobs_have_bounded_build_budgets() -> None:
 
     assert jobs["build"]["timeout-minutes"] == 45
     assert jobs["publish"]["timeout-minutes"] == 45
+
+
+@pytest.mark.parametrize(
+    ("job_name", "lane"),
+    [
+        ("tests-root", "tests-root"),
+        ("tests-packages", "tests-packages"),
+        ("integration", "integration"),
+        ("integration-docker", "integration-docker"),
+    ],
+)
+def test_pytest_jobs_consume_manifest_owned_lane_paths(job_name: str, lane: str) -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    scripts = "\n".join(step.get("run", "") for step in workflow["jobs"][job_name]["steps"])
+
+    assert f"uv run python scripts/component_ownership.py test-paths --lane {lane}" in scripts
+    assert 'uv run pytest "${test_paths[@]}"' in scripts
+
+
+def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
+    workflow = _workflow(".github/workflows/cluster-smoke.yml")
+    smoke = workflow["jobs"]["smoke"]
+    scripts = "\n".join(step.get("run", "") for step in smoke["steps"])
+
+    assert "uv run python scripts/component_ownership.py test-paths --lane cluster-smoke" in scripts
+    assert "uv sync --extra dev --extra cluster --extra rollout" in scripts
+    assert 'uv run pytest "${test_paths[@]}"' in scripts
+    assert smoke["timeout-minutes"] >= 25
 
 
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
@@ -395,7 +425,7 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
         (
             ".github/workflows/staging-smoke.yml",
             "staging-smoke-gate",
-            {"SMOKE_RESULT": "skipped"},
+            {"SMOKE_RESULT": "skipped", "SYSTEM_SMOKE_RESULT": "skipped"},
         ),
     ],
 )
@@ -438,7 +468,7 @@ def test_optional_gate_scripts_fail_closed_for_invalid_required(
         (
             ".github/workflows/staging-smoke.yml",
             "staging-smoke-gate",
-            ["SMOKE_RESULT"],
+            ["SMOKE_RESULT", "SYSTEM_SMOKE_RESULT"],
         ),
     ],
 )
@@ -630,7 +660,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         ".github/workflows/staging-smoke.yml": (
             "staging-smoke-gate",
             "staging-smoke-gate",
-            {"smoke": "SMOKE_RESULT"},
+            {"smoke": "SMOKE_RESULT", "system-smoke": "SYSTEM_SMOKE_RESULT"},
         ),
     }
 
@@ -679,6 +709,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert set(jobs["fast-checks"]["needs"]) == {
         "workflow-plan",
         "lint-and-static",
+        "runtime-payload",
         "tests-root",
         "tests-packages",
     }
@@ -702,6 +733,15 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert jobs["lint-and-static"]["needs"] == "workflow-plan"
     assert jobs["tests-root"]["needs"] == "workflow-plan"
     assert jobs["tests-packages"]["needs"] == "workflow-plan"
+    assert jobs["runtime-payload"]["needs"] == "workflow-plan"
+    assert "gate_mode == 'full'" in jobs["runtime-payload"]["if"]
+    assert "gate_mode == 'preflight'" in jobs["runtime-payload"]["if"]
+
+    runtime_payload_scripts = "\n".join(
+        step.get("run", "") for step in jobs["runtime-payload"]["steps"]
+    ).strip()
+    assert runtime_payload_scripts == "python3 scripts/runtime_payload_conformance.py"
+    assert "continue-on-error" not in jobs["runtime-payload"]
 
     assert {
         "docs_only",
@@ -770,31 +810,61 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
 
     root_matrix = jobs["tests-root"]["strategy"]["matrix"]["include"]
     assert root_matrix == [
-        {"shard": "unit-ops", "test_paths": "tests/unit tests/ops"},
-        {
-            "shard": "cli-contract-property",
-            "test_paths": "tests/loom_cli tests/contract tests/property",
-        },
+        {"shard": "1-of-2", "shard_index": 0},
+        {"shard": "2-of-2", "shard_index": 1},
     ]
-    root_paths = [path for shard in root_matrix for path in shard["test_paths"].split()]
-    assert len(root_paths) == len(set(root_paths))
-    assert set(root_paths) == {
-        "tests/unit",
-        "tests/ops",
-        "tests/loom_cli",
-        "tests/contract",
-        "tests/property",
-    }
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    tracked_paths = component_ownership._tracked_paths(REPO_ROOT)
+    root_paths = component_ownership.test_paths_for_lane(
+        manifest,
+        tracked_paths=tracked_paths,
+        lane="tests-root",
+    )
+    root_shards = [
+        set(
+            component_ownership.shard_paths(
+                root_paths,
+                shard_index=shard["shard_index"],
+                shard_count=len(root_matrix),
+            )
+        )
+        for shard in root_matrix
+    ]
+    assert root_shards[0].isdisjoint(root_shards[1])
+    assert set().union(*root_shards) == set(root_paths)
 
     integration_matrix = jobs["integration"]["strategy"]["matrix"]["include"]
     assert integration_matrix == [
-        {"shard": "a-r", "test_glob": "tests/integration/test_[a-r]*.py"},
-        {"shard": "s-z", "test_glob": "tests/integration/test_[s-z]*.py"},
+        {"shard": "1-of-2", "shard_index": 0},
+        {"shard": "2-of-2", "shard_index": 1},
     ]
-    all_tests = set((REPO_ROOT / "tests/integration").glob("test_*.py"))
-    expanded = [set(REPO_ROOT.glob(shard["test_glob"])) for shard in integration_matrix]
-    assert expanded[0].isdisjoint(expanded[1])
-    assert expanded[0] | expanded[1] == all_tests
+    integration_paths = component_ownership.test_paths_for_lane(
+        manifest,
+        tracked_paths=tracked_paths,
+        lane="integration",
+    )
+    integration_shards = [
+        component_ownership.shard_paths(
+            integration_paths,
+            shard_index=shard["shard_index"],
+            shard_count=len(integration_matrix),
+            strategy="contiguous",
+        )
+        for shard in integration_matrix
+    ]
+    assert set(integration_shards[0]).isdisjoint(integration_shards[1])
+    assert set().union(*map(set, integration_shards)) == set(integration_paths)
+    assert integration_shards[0] + integration_shards[1] == integration_paths
+    auth_path = "tests/integration/test_username_password_auth.py"
+    schema_path = "tests/integration/test_username_password_schema.py"
+    assert any(
+        auth_path in shard and schema_path in shard for shard in integration_shards
+    )
+    assert integration_paths.index(auth_path) < integration_paths.index(schema_path)
+    integration_script = "\n".join(
+        step.get("run", "") for step in jobs["integration"]["steps"]
+    )
+    assert "--shard-strategy contiguous" in integration_script
 
     root_upload = next(
         step
@@ -976,6 +1046,84 @@ def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
     assert "index.html.security-header-smoke" in script
     assert "trap cleanup_security_5xx_probe EXIT" in script
     assert "trap - EXIT" in script
+
+
+def test_staging_build_and_load_share_manifest_owned_image_matrix() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    smoke = workflow["jobs"]["smoke"]
+    steps = {step.get("name"): step for step in smoke["steps"]}
+    resolve_script = steps["Resolve manifest-owned staging image matrix"]["run"]
+    build_script = steps["Build images (parallel)"]["run"]
+    load_script = steps["Load images into kind"]["run"]
+
+    assert "release-images --runtime-policy start" in resolve_script
+    assert smoke["env"]["STAGING_IMAGE_MATRIX"].endswith(".json")
+    assert "STAGING_IMAGE_MATRIX_SHA256" in resolve_script
+    assert "sha256sum --check --status" in build_script
+    assert "sha256sum --check --status" in load_script
+    assert 'row["dockerfile"]' in build_script
+    assert 'row["context"]' in build_script
+    assert 'row["image_name"]' in build_script
+    assert 'row["image_name"]' in load_script
+    assert "builds=(" not in build_script
+    assert "for image_name in loom-" not in load_script
+    assert "< <(python3" not in build_script
+    assert "< <(python3" not in load_script
+    assert 'done < "$build_rows"' in build_script
+    assert 'done < "$image_names"' in load_script
+
+
+def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "loom_cli",
+            "cluster",
+            "render",
+            "--config",
+            "deploy/environments/staging.cluster.toml",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    active_images: set[str] = set()
+    for document in yaml.safe_load_all(result.stdout):
+        if not isinstance(document, dict) or document.get("kind") not in {
+            "DaemonSet",
+            "Deployment",
+            "StatefulSet",
+        }:
+            continue
+        spec = document.get("spec")
+        if not isinstance(spec, dict) or spec.get("replicas", 1) == 0:
+            continue
+        template = spec.get("template")
+        pod_spec = template.get("spec") if isinstance(template, dict) else None
+        containers = pod_spec.get("containers") if isinstance(pod_spec, dict) else None
+        if not isinstance(containers, list):
+            continue
+        for container in containers:
+            image = container.get("image") if isinstance(container, dict) else None
+            if isinstance(image, str) and image.split(":", 1)[0].startswith("loom-"):
+                active_images.add(image.split(":", 1)[0])
+
+    manifest = component_ownership.load_manifest(
+        REPO_ROOT / "config/component-ownership.toml"
+    )
+    matrix_images = {
+        row["image_name"]
+        for row in component_ownership.release_images_for_runtime_policy(
+            manifest,
+            runtime_policy="start",
+        )
+    }
+    assert active_images <= matrix_images
+    assert "loom-family-orchestrator" in active_images
+    assert "loom-worker" not in active_images
 
 
 def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:
@@ -1202,8 +1350,47 @@ def test_real_aws_s3_storage_smoke_is_not_a_pull_request_gate() -> None:
     gate = jobs["staging-smoke-gate"]
 
     assert "smoke-storage-aws-s3" not in jobs
-    assert set(gate["needs"]) == {"plan", "smoke"}
+    assert set(gate["needs"]) == {"plan", "smoke", "system-smoke"}
     assert "ci-aws" not in str(workflow)
+
+
+def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
+    workflow = _workflow(".github/workflows/staging-smoke.yml")
+    jobs = workflow["jobs"]
+    system_smoke = jobs["system-smoke"]
+    scripts = "\n".join(step.get("run", "") for step in system_smoke["steps"])
+    pytest_step = next(
+        step
+        for step in system_smoke["steps"]
+        if step.get("name") == "Pytest — manifest-owned system smoke lane"
+    )
+    diagnostics_step = next(
+        step
+        for step in system_smoke["steps"]
+        if step.get("name") == "Show system-smoke compose diagnostics"
+    )
+    cleanup_step = next(
+        step
+        for step in system_smoke["steps"]
+        if step.get("name") == "Cleanup system-smoke compose stack"
+    )
+
+    assert system_smoke["needs"] == "plan"
+    assert "needs.plan.outputs.required == 'true'" in system_smoke["if"]
+    assert "uv sync --all-packages --extra dev --extra cluster --extra rollout" in scripts
+    assert "uv run python scripts/component_ownership.py test-paths --lane system-smoke" in scripts
+    assert 'uv run pytest --timeout=1200 "${test_paths[@]}"' in scripts
+    assert "--profile worker logs --no-color --tail=300" in scripts
+    assert "--profile worker down -v --remove-orphans" in scripts
+    assert pytest_step["env"]["LOOM_SYSTEM_SMOKE_DIAGNOSTICS"] == (
+        "${{ runner.temp }}/system-smoke-compose.log"
+    )
+    assert diagnostics_step["if"] == "failure()"
+    assert diagnostics_step["env"]["LOOM_SYSTEM_SMOKE_DIAGNOSTICS"] == (
+        "${{ runner.temp }}/system-smoke-compose.log"
+    )
+    assert 'cat "${LOOM_SYSTEM_SMOKE_DIAGNOSTICS}"' in diagnostics_step["run"]
+    assert cleanup_step["if"] == "always()"
 
 
 def test_repository_checks_writes_default_fast_coverage_summary() -> None:

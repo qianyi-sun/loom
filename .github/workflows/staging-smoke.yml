@@ -18,8 +18,8 @@ name: staging-smoke
 #   - workflow_dispatch (manual)
 #   - PRs selected by changed paths or the additive `staging-smoke` label
 #
-# Expected runtime: ~15-20 min (5 image builds + kind boot + apply
-# + wait-for-ready).
+# Expected runtime: ~30-40 min (manifest-owned image builds + kind boot
+# + apply + wait-for-ready).
 
 on:
   workflow_dispatch:
@@ -112,12 +112,13 @@ jobs:
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
     runs-on: ubuntu-latest
-    # 5 image builds (uncached) + kind boot + ingress-nginx + apply +
-    # wait-for-ready easily run 30-40 min on a cold runner. 45 leaves
-    # headroom for the wait step's worst case.
+    # Manifest-owned start-policy image builds (uncached) + kind boot +
+    # ingress-nginx + apply + wait-for-ready can run 30-40 min on a cold
+    # runner. 45 leaves headroom for the wait step's worst case.
     timeout-minutes: 45
     env:
       IMAGE_TAG: smoke-${{ github.run_id }}
+      STAGING_IMAGE_MATRIX: /tmp/loom-staging-image-matrix.json
     steps:
       - name: Validate staging smoke inputs
         shell: bash
@@ -137,6 +138,28 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
+
+      - name: Resolve manifest-owned staging image matrix
+        run: |
+          set -euo pipefail
+          python3 scripts/component_ownership.py \
+            release-images --runtime-policy start \
+            > "$STAGING_IMAGE_MATRIX"
+          python3 - "$STAGING_IMAGE_MATRIX" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          matrix = json.loads(path.read_text(encoding="utf-8"))
+          required = {"image_name", "dockerfile", "context"}
+          if not isinstance(matrix, list) or not matrix:
+              raise SystemExit("FAIL: staging image matrix must be a non-empty array")
+          if any(not isinstance(row, dict) or set(row) != required for row in matrix):
+              raise SystemExit("FAIL: staging image matrix row has invalid schema")
+          PY
+          matrix_sha256=$(sha256sum "$STAGING_IMAGE_MATRIX" | cut -d' ' -f1)
+          echo "STAGING_IMAGE_MATRIX_SHA256=${matrix_sha256}" >> "$GITHUB_ENV"
 
       - name: Install kind + kubectl
         run: |
@@ -163,48 +186,46 @@ jobs:
           uv sync --extra cluster --extra rollout --python 3.11
 
       - name: Build images (parallel)
-        # Build all 5 loom images in parallel. Each gets the smoke
+        # Build every start-policy image in parallel. Each gets the smoke
         # run-id as its tag so concurrent runs on the same daemon
-        # don't collide. The Dockerfile names (control-plane,
-        # gateway, service, worker, web) don't match the image names
-        # (loom-control-plane, loom-llm-gateway, loom-service,
-        # loom-worker, loom-web) one-to-one — `gateway` Dockerfile
-        # produces `loom-llm-gateway`. Image names MUST match what
-        # the k8s templates reference.
+        # don't collide. Image names, Dockerfiles, and build contexts come
+        # from the ownership manifest.
         run: |
           set -euo pipefail
           export DOCKER_BUILDKIT=1
+          echo "${STAGING_IMAGE_MATRIX_SHA256}  ${STAGING_IMAGE_MATRIX}" \
+            | sha256sum --check --status
           checkout_sha=$(git rev-parse HEAD)
           [[ "$checkout_sha" =~ ^[0-9a-f]{40}$ ]] || {
             echo "FAIL: invalid checkout SHA" >&2
             exit 1
           }
-          # (dockerfile-suffix, image-name) pairs.
-          builds=(
-            "control-plane:loom-control-plane"
-            "gateway:loom-llm-gateway"
-            "service:loom-service"
-            "worker:loom-worker"
-            "web:loom-web"
-          )
+          build_rows=$(mktemp /tmp/loom-staging-builds.XXXXXX.tsv)
+          python3 - "$STAGING_IMAGE_MATRIX" > "$build_rows" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          for row in json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")):
+              print(row["image_name"], row["dockerfile"], row["context"], sep="\t")
+          PY
           pids=()
-          for pair in "${builds[@]}"; do
-            suffix="${pair%%:*}"
-            image_name="${pair##*:}"
+          while IFS=$'\t' read -r image_name dockerfile build_context; do
             image="${image_name}:${IMAGE_TAG}"
             (
               echo "::group::Build ${image}"
               build_args=()
-              if [[ "$suffix" == "service" ]]; then
+              if [[ "$image_name" == "loom-service" ]]; then
                 build_args+=(--build-arg "LOOM_BUILD_SHA=${checkout_sha}")
               fi
-              docker build -f "deploy/Dockerfile.${suffix}" \
-                -t "${image}" "${build_args[@]}" . 2>&1 \
-                | sed "s/^/[${suffix}] /"
+              docker build -f "${dockerfile}" \
+                -t "${image}" "${build_args[@]}" "${build_context}" 2>&1 \
+                | sed "s/^/[${image_name}] /"
               echo "::endgroup::"
             ) &
             pids+=($!)
-          done
+          done < "$build_rows"
+          rm -f "$build_rows"
           rc=0
           for pid in "${pids[@]}"; do
             wait "$pid" || rc=$?
@@ -267,10 +288,23 @@ jobs:
         # would fail to pull (kind has no registry config for
         # `loom-*:smoke-*` tags).
         run: |
-          for image_name in loom-control-plane loom-llm-gateway loom-service loom-worker loom-web; do
+          set -euo pipefail
+          echo "${STAGING_IMAGE_MATRIX_SHA256}  ${STAGING_IMAGE_MATRIX}" \
+            | sha256sum --check --status
+          image_names=$(mktemp /tmp/loom-staging-images.XXXXXX.txt)
+          python3 - "$STAGING_IMAGE_MATRIX" > "$image_names" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          for row in json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")):
+              print(row["image_name"])
+          PY
+          while IFS= read -r image_name; do
             kind load docker-image "${image_name}:${IMAGE_TAG}" \
               --name loom-staging
-          done
+          done < "$image_names"
+          rm -f "$image_names"
 
       - name: Bootstrap namespace + Secrets
         # Bootstrap loom-secrets from schema via `loom cluster bootstrap-secrets`.
@@ -1041,6 +1075,70 @@ jobs:
         if: always()
         run: kind delete cluster --name loom-staging || true
 
+  system-smoke:
+    name: manifest-owned system smoke
+    needs: plan
+    if: >-
+      needs.plan.outputs.gate_mode == 'full' &&
+      needs.plan.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false
+
+      - name: Sync system-smoke dependencies
+        run: |
+          uv python install 3.11
+          uv sync --all-packages --extra dev --extra cluster --extra rollout --python 3.11
+
+      - name: Pytest — manifest-owned system smoke lane
+        shell: bash
+        env:
+          LOOM_SYSTEM_SMOKE_DIAGNOSTICS: ${{ runner.temp }}/system-smoke-compose.log
+        run: |
+          set -euo pipefail
+          mapfile -t test_paths < <(
+            uv run python scripts/component_ownership.py test-paths --lane system-smoke
+          )
+          [[ ${#test_paths[@]} -gt 0 ]]
+          uv run pytest --timeout=1200 "${test_paths[@]}"
+
+      - name: Show system-smoke compose diagnostics
+        if: failure()
+        env:
+          LOOM_SYSTEM_SMOKE_DIAGNOSTICS: ${{ runner.temp }}/system-smoke-compose.log
+          LOOM_WORKER_TOKEN: unused-diagnostics-token
+        run: |
+          if [[ ! -s "${LOOM_SYSTEM_SMOKE_DIAGNOSTICS}" ]]; then
+            echo "fixture diagnostics missing; capturing remaining Compose state" >&2
+            # The helper captures the equivalent of
+            # `--profile worker logs --no-color --tail=300` and redacts it
+            # before writing to runner.temp.
+            uv run python -c \
+              'from tests.system.docker_compose import preserve_compose_diagnostics; preserve_compose_diagnostics()' \
+              || true
+          fi
+          if [[ -s "${LOOM_SYSTEM_SMOKE_DIAGNOSTICS}" ]]; then
+            cat "${LOOM_SYSTEM_SMOKE_DIAGNOSTICS}"
+          else
+            echo "system-smoke diagnostics unavailable" >&2
+          fi
+
+      - name: Cleanup system-smoke compose stack
+        if: always()
+        env:
+          LOOM_WORKER_TOKEN: unused-cleanup-token
+        run: |
+          timeout 60s docker compose -f deploy/docker-compose.test.yml \
+            --profile worker down -v --remove-orphans
+
   staging-smoke-gate:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
@@ -1048,7 +1146,7 @@ jobs:
           'staging-smoke-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [plan, smoke]
+    needs: [plan, smoke, system-smoke]
     steps:
       - name: Enforce selected staging smoke results
         env:
@@ -1056,6 +1154,7 @@ jobs:
           GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
+          SYSTEM_SMOKE_RESULT: ${{ needs.system-smoke.result }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
@@ -1073,6 +1172,8 @@ jobs:
           esac
           if [[ "$REQUIRED" == "true" ]]; then
             [[ "$SMOKE_RESULT" == "success" ]] || exit 1
+            [[ "$SYSTEM_SMOKE_RESULT" == "success" ]] || exit 1
           else
             [[ "$SMOKE_RESULT" == "skipped" || "$SMOKE_RESULT" == "success" ]] || exit 1
+            [[ "$SYSTEM_SMOKE_RESULT" == "skipped" || "$SYSTEM_SMOKE_RESULT" == "success" ]] || exit 1
           fi

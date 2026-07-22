@@ -33,6 +33,7 @@ class Component:
     attestation_owner: str
     release_digest: str | None
     runtime_policy: str
+    rollout_role: str
 
 
 @dataclass(frozen=True)
@@ -41,19 +42,58 @@ class TestSuite:
     language: str
     include_paths: tuple[str, ...]
     exclude_paths: tuple[str, ...]
-    lane: str | None
-    runtime_payload: bool
+    lane: str
+    execution_policy: str | None
+
+
+@dataclass(frozen=True)
+class FixtureFile:
+    path: str
+    content: str | None
+    size: int | None
+
+
+@dataclass(frozen=True)
+class ExecutionPolicy:
+    id: str
+    language: str
+    runner: str
+    container_image: str
+    virtual_root: str
+
+
+@dataclass(frozen=True)
+class ExecutionCase:
+    path: str
+    policy: str
+    fixture_files: tuple[FixtureFile, ...]
 
 
 @dataclass(frozen=True)
 class Manifest:
     schema_version: int
     ci_lanes: tuple[str, ...]
+    execution_policies: tuple[ExecutionPolicy, ...]
+    execution_cases: tuple[ExecutionCase, ...]
     smoke_owners: tuple[str, ...]
     scan_owners: tuple[str, ...]
     attestation_owners: tuple[str, ...]
     components: tuple[Component, ...]
     test_suites: tuple[TestSuite, ...]
+
+    def execution_policy(self, policy_id: str) -> ExecutionPolicy:
+        matches = tuple(policy for policy in self.execution_policies if policy.id == policy_id)
+        if len(matches) != 1:
+            raise ManifestError(
+                f"execution policy must have exactly one definition: {policy_id}"
+            )
+        return matches[0]
+
+    def execution_case(self, path: str) -> ExecutionCase:
+        matches = tuple(case for case in self.execution_cases if case.path == path)
+        if len(matches) != 1:
+            raise ManifestError(f"execution case must have exactly one definition: {path}")
+        return matches[0]
 
     def component_owners_for_path(self, path: str) -> tuple[Component, ...]:
         normalized = _safe_path(path, context="query path")
@@ -205,6 +245,7 @@ def _component(raw: dict[str, Any]) -> Component:
             "attestation_owner",
             "release_digest",
             "runtime_policy",
+            "rollout_role",
         },
         context,
     )
@@ -226,6 +267,15 @@ def _component(raw: dict[str, Any]) -> Component:
     release_digest = (
         _required_string(raw, "release_digest", context) if "release_digest" in raw else None
     )
+    rollout_role = raw.get("rollout_role", "none")
+    if not isinstance(rollout_role, str) or rollout_role not in {
+        "none",
+        "primary",
+        "auxiliary",
+    }:
+        raise ManifestError(
+            f"{context}.rollout_role must be one of none, primary, auxiliary"
+        )
     kind_contract_valid = (
         kind == "release-image"
         and runtime_policy in {"start", "conformance"}
@@ -242,6 +292,18 @@ def _component(raw: dict[str, Any]) -> Component:
             "loom-* digest and start/conformance policy; runtime payload images require no "
             "release digest and runtime-payload policy"
         )
+    if rollout_role == "primary" and not (
+        kind == "release-image" and runtime_policy == "start"
+    ):
+        raise ManifestError(
+            f"{context}.rollout_role primary requires a start-policy release image"
+        )
+    if rollout_role == "auxiliary" and not (
+        kind == "release-image" and runtime_policy == "conformance"
+    ):
+        raise ManifestError(
+            f"{context}.rollout_role auxiliary requires a conformance release image"
+        )
     return Component(
         id=_required_slug(raw, "id", context),
         kind=kind,
@@ -253,6 +315,7 @@ def _component(raw: dict[str, Any]) -> Component:
         attestation_owner=_required_slug(raw, "attestation_owner", context),
         release_digest=release_digest,
         runtime_policy=runtime_policy,
+        rollout_role=rollout_role,
     )
 
 
@@ -266,18 +329,17 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
             "lane",
             "include_paths",
             "exclude_paths",
-            "runtime_payload",
+            "execution_policy",
         },
         context,
     )
-    lane = raw.get("lane")
-    runtime_payload = raw.get("runtime_payload", False)
-    if lane is not None and (not isinstance(lane, str) or not lane):
-        raise ManifestError(f"{context}.lane must be a non-empty string")
-    if not isinstance(runtime_payload, bool):
-        raise ManifestError(f"{context}.runtime_payload must be a boolean")
-    if (lane is None) == (not runtime_payload):
-        raise ManifestError(f"{context} must set exactly one of lane or runtime_payload")
+    lane = _required_slug(raw, "lane", context)
+    execution_policy = raw.get("execution_policy")
+    if execution_policy is not None:
+        if not isinstance(execution_policy, str) or re.fullmatch(
+            r"[a-z0-9][a-z0-9-]*", execution_policy
+        ) is None:
+            raise ManifestError(f"{context}.execution_policy must be a lowercase slug")
     include_paths = tuple(
         _safe_path(item, context=f"{context}.include_paths", allow_glob=True)
         for item in _string_list(raw, "include_paths", context)
@@ -300,8 +362,90 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         include_paths=include_paths,
         exclude_paths=exclude_paths,
         lane=lane,
-        runtime_payload=runtime_payload,
+        execution_policy=execution_policy,
     )
+
+
+def _fixture_file(raw: dict[str, Any], *, context: str) -> FixtureFile:
+    _reject_unknown_keys(raw, {"path", "content", "size"}, context)
+    path = _safe_path(_required_string(raw, "path", context), context=f"{context}.path")
+    content = raw.get("content")
+    size = raw.get("size")
+    if (content is None) == (size is None):
+        raise ManifestError(f"{context} must set exactly one of content or size")
+    if content is not None and not isinstance(content, str):
+        raise ManifestError(f"{context}.content must be a string")
+    if size is not None and (type(size) is not int or size <= 0):
+        raise ManifestError(f"{context}.size must be a positive integer")
+    return FixtureFile(path=path, content=content, size=size)
+
+
+def _execution_policy(raw: dict[str, Any]) -> ExecutionPolicy:
+    context = f"execution policy {raw.get('id', '<missing>')!r}"
+    _reject_unknown_keys(
+        raw,
+        {
+            "id",
+            "language",
+            "runner",
+            "container_image",
+            "virtual_root",
+        },
+        context,
+    )
+    policy_id = _required_slug(raw, "id", context)
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*-v[1-9][0-9]*", policy_id) is None:
+        raise ManifestError(f"{context}.id must end in an explicit -vN version")
+    language = _required_string(raw, "language", context)
+    if language != "python":
+        raise ManifestError(f"{context}.language must be python")
+    runner = _required_string(raw, "runner", context)
+    if runner != "python-zero-arg-v1":
+        raise ManifestError(f"{context}.runner is unsupported: {runner}")
+    container_image = _required_string(raw, "container_image", context)
+    if re.fullmatch(r"[a-z0-9][a-z0-9./_-]*@sha256:[0-9a-f]{64}", container_image) is None:
+        raise ManifestError(
+            f"{context}.container_image must be pinned by a full sha256 digest"
+        )
+    virtual_root = _required_string(raw, "virtual_root", context)
+    if virtual_root not in {"/app", "/workspace"}:
+        raise ManifestError(f"{context}.virtual_root must be /app or /workspace")
+    return ExecutionPolicy(
+        id=policy_id,
+        language=language,
+        runner=runner,
+        container_image=container_image,
+        virtual_root=virtual_root,
+    )
+
+
+def _execution_case(raw: dict[str, Any], *, index: int) -> ExecutionCase:
+    context = f"execution case [{index}]"
+    _reject_unknown_keys(raw, {"path", "policy", "fixture_files"}, context)
+    path = _safe_path(
+        _required_string(raw, "path", context),
+        context=f"{context}.path",
+    )
+    policy = _required_slug(raw, "policy", context)
+    raw_files = raw.get("fixture_files")
+    if not isinstance(raw_files, list) or not raw_files or not all(
+        isinstance(item, dict) for item in raw_files
+    ):
+        raise ManifestError(f"{context}.fixture_files must be a non-empty table array")
+    fixture_files = tuple(
+        _fixture_file(item, context=f"{context}.fixture_files[{index}]")
+        for index, item in enumerate(raw_files)
+    )
+    paths = [item.path for item in fixture_files]
+    if len(set(paths)) != len(paths):
+        raise ManifestError(f"{context}.fixture_files must not contain duplicate paths")
+    total_size = sum(
+        item.size if item.size is not None else len((item.content or "").encode("utf-8"))
+        for item in fixture_files
+    )
+    if len(fixture_files) > 32 or total_size > 128 * 1024 * 1024:
+        raise ManifestError(f"{context}.fixture_files exceed conformance resource limits")
+    return ExecutionCase(path=path, policy=policy, fixture_files=fixture_files)
 
 
 def load_manifest(path: Path) -> Manifest:
@@ -317,6 +461,8 @@ def load_manifest(path: Path) -> Manifest:
         {
             "schema_version",
             "ci_lanes",
+            "execution_policies",
+            "execution_cases",
             "smoke_owners",
             "scan_owners",
             "attestation_owners",
@@ -326,8 +472,8 @@ def load_manifest(path: Path) -> Manifest:
         "manifest",
     )
     schema_version = raw.get("schema_version")
-    if type(schema_version) is not int or schema_version != 1:
-        raise ManifestError("manifest.schema_version must be the integer 1")
+    if type(schema_version) is not int or schema_version != 2:
+        raise ManifestError("manifest.schema_version must be the integer 2")
     raw_components = raw.get("components", [])
     raw_test_suites = raw.get("test_suites", [])
     raw_ci_lanes = raw.get("ci_lanes", [])
@@ -349,13 +495,62 @@ def load_manifest(path: Path) -> Manifest:
         isinstance(item, dict) for item in raw_test_suites
     ):
         raise ManifestError("manifest.test_suites must be an array of tables")
+    raw_execution_policies = raw.get("execution_policies", [])
+    if not isinstance(raw_execution_policies, list) or not all(
+        isinstance(item, dict) for item in raw_execution_policies
+    ):
+        raise ManifestError("manifest.execution_policies must be an array of tables")
+    execution_policies = tuple(_execution_policy(item) for item in raw_execution_policies)
+    execution_policy_ids = Counter(policy.id for policy in execution_policies)
+    for policy_id, count in sorted(execution_policy_ids.items()):
+        if count > 1:
+            raise ManifestError(f"execution policy has multiple definitions: {policy_id}")
+    raw_execution_cases = raw.get("execution_cases", [])
+    if not isinstance(raw_execution_cases, list) or not all(
+        isinstance(item, dict) for item in raw_execution_cases
+    ):
+        raise ManifestError("manifest.execution_cases must be an array of tables")
+    execution_cases = tuple(
+        _execution_case(item, index=index)
+        for index, item in enumerate(raw_execution_cases)
+    )
+    execution_case_paths = Counter(case.path for case in execution_cases)
+    for case_path, count in sorted(execution_case_paths.items()):
+        if count > 1:
+            raise ManifestError(f"execution case has multiple definitions: {case_path}")
+    declared_policy_ids = {policy.id for policy in execution_policies}
+    for case in execution_cases:
+        if case.policy not in declared_policy_ids:
+            raise ManifestError(
+                f"execution case {case.path!r} uses undeclared execution policy: "
+                f"{case.policy}"
+            )
     test_suites = tuple(_test_suite(item) for item in raw_test_suites)
     for suite in test_suites:
-        if suite.lane is not None and suite.lane not in ci_lanes:
+        if suite.lane not in ci_lanes:
             raise ManifestError(f"test suite {suite.id!r} uses undeclared CI lane: {suite.lane}")
+        runtime_payload = suite.lane == "runtime-payload"
+        if runtime_payload != (suite.execution_policy is not None):
+            raise ManifestError(
+                f"test suite {suite.id!r} must set execution_policy exactly when "
+                "lane is runtime-payload"
+            )
+        if runtime_payload and suite.language != "python":
+            raise ManifestError(
+                f"test suite {suite.id!r} runtime-payload lane requires Python"
+            )
+        if suite.execution_policy is not None and suite.execution_policy not in {
+            policy.id for policy in execution_policies
+        }:
+            raise ManifestError(
+                f"test suite {suite.id!r} uses undeclared execution policy: "
+                f"{suite.execution_policy}"
+            )
     return Manifest(
-        schema_version=1,
+        schema_version=2,
         ci_lanes=ci_lanes,
+        execution_policies=execution_policies,
+        execution_cases=execution_cases,
         smoke_owners=_slug_registry(raw, "smoke_owners"),
         scan_owners=_slug_registry(raw, "scan_owners"),
         attestation_owners=_slug_registry(raw, "attestation_owners"),
@@ -379,6 +574,16 @@ def _test_language(path: str) -> str | None:
     if re.search(r"\.(?:test|spec)\.(?:js|jsx|ts|tsx)$", path):
         return "web"
     return None
+
+
+def _is_runnable_test_path(path: str) -> bool:
+    """Return whether a tracked test-owned path is an executable test module."""
+
+    language = _test_language(path)
+    if language != "python":
+        return language is not None
+    name = PurePosixPath(path).name
+    return name.startswith("test_") or name.endswith("_test.py")
 
 
 def _uses_pytest_docker_marker(source: str) -> bool:
@@ -414,6 +619,32 @@ def validate_manifest(
     for lane in manifest.ci_lanes:
         if not any(suite.lane == lane for suite in manifest.test_suites):
             errors.append(f"CI lane has no test suite owner: {lane}")
+    for policy in manifest.execution_policies:
+        if not any(suite.execution_policy == policy.id for suite in manifest.test_suites):
+            errors.append(f"execution policy has no test suite owner: {policy.id}")
+    runtime_paths = (
+        set(
+            test_paths_for_lane(
+                manifest,
+                tracked_paths=tracked_paths,
+                lane="runtime-payload",
+            )
+        )
+        if "runtime-payload" in manifest.ci_lanes
+        else set()
+    )
+    case_paths = {case.path for case in manifest.execution_cases}
+    for path in sorted(runtime_paths - case_paths):
+        errors.append(f"runtime payload has no execution case: {path}")
+    for path in sorted(case_paths - runtime_paths):
+        errors.append(f"execution case does not own a tracked runtime payload: {path}")
+    for case in manifest.execution_cases:
+        owners = manifest.test_owners_for_path(case.path)
+        if len(owners) == 1 and owners[0].execution_policy != case.policy:
+            errors.append(
+                f"execution case policy differs from test owner: {case.path}: "
+                f"{case.policy} != {owners[0].execution_policy}"
+            )
     owner_registries = (
         ("smoke", manifest.smoke_owners, "smoke_owner"),
         ("scan", manifest.scan_owners, "scan_owner"),
@@ -544,7 +775,7 @@ def validate_manifest(
             if uses_docker_marker and test_owners[0].lane != "integration-docker":
                 errors.append(
                     "docker-marked pytest module must use integration-docker lane: "
-                    f"{path}: {test_owners[0].lane or 'runtime-payload'}"
+                    f"{path}: {test_owners[0].lane}"
                 )
     return errors
 
@@ -597,6 +828,46 @@ def release_image_matrix(manifest: Manifest) -> tuple[dict[str, str], ...]:
             "context": component.build_context,
         }
         for component in manifest.release_components()
+    )
+
+
+def release_images_for_runtime_policy(
+    manifest: Manifest,
+    *,
+    runtime_policy: str,
+) -> tuple[dict[str, str], ...]:
+    """Render candidate-bound rollout inputs for one runtime policy."""
+
+    if runtime_policy not in {"start", "conformance"}:
+        raise ManifestError(f"unsupported release runtime policy: {runtime_policy}")
+    return tuple(
+        {
+            "image_name": component.release_digest or "",
+            "dockerfile": component.dockerfile,
+            "context": component.build_context,
+        }
+        for component in manifest.release_components()
+        if component.runtime_policy == runtime_policy
+    )
+
+
+def release_images_for_rollout_role(
+    manifest: Manifest,
+    *,
+    rollout_role: str,
+) -> tuple[dict[str, str], ...]:
+    """Render candidate-bound rollout inputs for one explicit rollout role."""
+
+    if rollout_role not in {"primary", "auxiliary"}:
+        raise ManifestError(f"unsupported release rollout role: {rollout_role}")
+    return tuple(
+        {
+            "image_name": component.release_digest or "",
+            "dockerfile": component.dockerfile,
+            "context": component.build_context,
+        }
+        for component in manifest.release_components()
+        if component.rollout_role == rollout_role
     )
 
 
@@ -665,6 +936,90 @@ def validate_release_image_pair(
     return []
 
 
+def test_paths_for_lane(
+    manifest: Manifest,
+    *,
+    tracked_paths: tuple[str, ...],
+    lane: str,
+) -> tuple[str, ...]:
+    """Return every tracked test path assigned to one required CI lane."""
+
+    if lane not in manifest.ci_lanes:
+        raise ManifestError(f"undeclared CI lane: {lane}")
+    return tuple(
+        path
+        for path in sorted(tracked_paths)
+        if _is_runnable_test_path(path)
+        and len(owners := manifest.test_owners_for_path(path)) == 1
+        and owners[0].lane == lane
+    )
+
+
+def test_paths_for_policy(
+    manifest: Manifest,
+    *,
+    tracked_paths: tuple[str, ...],
+    policy: str,
+) -> tuple[str, ...]:
+    """Return runnable payload tests assigned to one declared execution policy."""
+
+    if policy not in {item.id for item in manifest.execution_policies}:
+        raise ManifestError(f"undeclared execution policy: {policy}")
+    return tuple(
+        path
+        for path in sorted(tracked_paths)
+        if _is_runnable_test_path(path)
+        and len(owners := manifest.test_owners_for_path(path)) == 1
+        and owners[0].execution_policy == policy
+    )
+
+
+def lane_execution_plan(
+    manifest: Manifest,
+    *,
+    tracked_paths: tuple[str, ...],
+    lane: str,
+) -> tuple[dict[str, Any], ...]:
+    """Render the exact policy-grouped execution plan for a policy lane."""
+
+    lane_paths = test_paths_for_lane(
+        manifest,
+        tracked_paths=tracked_paths,
+        lane=lane,
+    )
+    if not lane_paths:
+        raise ManifestError(f"CI lane has no tracked test paths: {lane}")
+    if any(
+        manifest.test_owner_for_path(path).execution_policy is None for path in lane_paths
+    ):
+        raise ManifestError(f"CI lane is not fully policy-owned: {lane}")
+    cases_by_path = {case.path: case for case in manifest.execution_cases}
+    if set(cases_by_path) != set(lane_paths):
+        raise ManifestError(f"execution cases do not exactly cover CI lane: {lane}")
+    for path in lane_paths:
+        if cases_by_path[path].policy != manifest.test_owner_for_path(path).execution_policy:
+            raise ManifestError(f"execution case policy differs from CI lane owner: {path}")
+    plan: tuple[dict[str, Any], ...] = tuple(
+        {
+            "policy": asdict(policy),
+            "cases": [
+                asdict(cases_by_path[path])
+                for path in lane_paths
+                if cases_by_path[path].policy == policy.id
+            ],
+        }
+        for policy in manifest.execution_policies
+        if any(
+            manifest.test_owner_for_path(path).execution_policy == policy.id
+            for path in lane_paths
+        )
+    )
+    planned_paths = [case["path"] for entry in plan for case in entry["cases"]]
+    if len(planned_paths) != len(set(planned_paths)) or set(planned_paths) != set(lane_paths):
+        raise ManifestError(f"execution plan does not exactly cover CI lane: {lane}")
+    return plan
+
+
 def _tracked_paths(repo_root: Path) -> tuple[str, ...]:
     try:
         output = subprocess.check_output(
@@ -674,6 +1029,31 @@ def _tracked_paths(repo_root: Path) -> tuple[str, ...]:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ManifestError(f"failed to list tracked repository paths: {exc}") from exc
     return tuple(item.decode("utf-8") for item in output.split(b"\0") if item)
+
+
+def shard_paths(
+    paths: tuple[str, ...],
+    *,
+    shard_index: int,
+    shard_count: int,
+    strategy: str = "round-robin",
+) -> tuple[str, ...]:
+    """Partition an ordered manifest-owned path list without a second path authority."""
+
+    if shard_count < 1:
+        raise ManifestError("shard count must be at least 1")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ManifestError(
+            f"shard index must be between 0 and {shard_count - 1}: {shard_index}"
+        )
+    if strategy == "round-robin":
+        return paths[shard_index::shard_count]
+    if strategy == "contiguous":
+        base_size, larger_shards = divmod(len(paths), shard_count)
+        start = shard_index * base_size + min(shard_index, larger_shards)
+        stop = start + base_size + int(shard_index < larger_shards)
+        return paths[start:stop]
+    raise ManifestError(f"unsupported shard strategy: {strategy}")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -708,6 +1088,36 @@ def _parser() -> argparse.ArgumentParser:
     validate_image.add_argument("--image-name", required=True)
     validate_image.add_argument("--dockerfile", required=True)
     validate_image.add_argument("--build-context", required=True)
+    test_paths = subparsers.add_parser(
+        "test-paths",
+        help="Print every tracked test path assigned to one CI lane.",
+    )
+    test_paths.add_argument("--lane", required=True)
+    test_paths.add_argument("--shard-index", type=int, default=0)
+    test_paths.add_argument("--shard-count", type=int, default=1)
+    test_paths.add_argument(
+        "--shard-strategy",
+        choices=("round-robin", "contiguous"),
+        default="round-robin",
+    )
+    execution_plan = subparsers.add_parser(
+        "execution-plan",
+        help="Print a JSON execution plan for one policy-owned CI lane.",
+    )
+    execution_plan.add_argument("--lane", required=True)
+    release_images = subparsers.add_parser(
+        "release-images",
+        help="Print candidate-bound release images for one policy or rollout role as JSON.",
+    )
+    release_filter = release_images.add_mutually_exclusive_group(required=True)
+    release_filter.add_argument(
+        "--runtime-policy",
+        choices=("start", "conformance"),
+    )
+    release_filter.add_argument(
+        "--rollout-role",
+        choices=("primary", "auxiliary"),
+    )
     return parser
 
 
@@ -739,7 +1149,7 @@ def main(argv: list[str] | None = None) -> int:
             tracked_paths=tracked_paths,
         )
         if errors:
-            print("component ownership validation failed:", file=sys.stderr)
+            print("FAIL: component ownership validation failed:", file=sys.stderr)
             for error in errors:
                 print(f"- {error}", file=sys.stderr)
             return 1
@@ -773,10 +1183,63 @@ def main(argv: list[str] | None = None) -> int:
                 build_context=args.build_context,
             )
             if errors:
-                print("component ownership validation failed:", file=sys.stderr)
+                print("FAIL: component ownership validation failed:", file=sys.stderr)
                 for error in errors:
                     print(f"- {error}", file=sys.stderr)
                 return 1
+            return 0
+        if args.command == "test-paths":
+            paths = test_paths_for_lane(
+                manifest,
+                tracked_paths=tracked_paths,
+                lane=args.lane,
+            )
+            if not paths:
+                raise ManifestError(f"CI lane has no tracked test paths: {args.lane}")
+            paths = shard_paths(
+                paths,
+                shard_index=args.shard_index,
+                shard_count=args.shard_count,
+                strategy=args.shard_strategy,
+            )
+            if not paths:
+                raise ManifestError(
+                    f"CI lane shard has no tracked test paths: {args.lane} "
+                    f"({args.shard_index}/{args.shard_count})"
+                )
+            print("\n".join(paths))
+            return 0
+        if args.command == "execution-plan":
+            print(
+                json.dumps(
+                    lane_execution_plan(
+                        manifest,
+                        tracked_paths=tracked_paths,
+                        lane=args.lane,
+                    ),
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "release-images":
+            images = (
+                release_images_for_rollout_role(
+                    manifest,
+                    rollout_role=args.rollout_role,
+                )
+                if args.rollout_role is not None
+                else release_images_for_runtime_policy(
+                    manifest,
+                    runtime_policy=args.runtime_policy,
+                )
+            )
+            print(
+                json.dumps(
+                    images,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
             return 0
         test_count = sum(_test_language(path) is not None for path in tracked_paths)
         print(

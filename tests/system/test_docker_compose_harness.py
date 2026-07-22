@@ -1,0 +1,468 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+import yaml
+
+from tests.system import docker_compose
+
+
+def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:
+    compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    gateway_key = services["llm-gateway"]["environment"][
+        "LOOM_GW_STEP_JWT_SIGNING_KEY"
+    ]
+    control_plane_key = services["control-plane"]["environment"][
+        "LOOM_CP_STEP_JWT_SIGNING_KEY"
+    ]
+
+    assert gateway_key == control_plane_key
+    assert "do-not-use-in-prod" in gateway_key
+
+
+def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> None:
+    compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
+    worker = compose["services"]["worker"]
+
+    assert worker["environment"]["LOOM_WORKER_FIXTURES_ROOT"] == (
+        "/app/tests/fixtures/tasks"
+    )
+    assert worker["environment"][
+        "LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC"
+    ] == "0.1"
+    assert worker["environment"][
+        "LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED"
+    ] == "false"
+    assert "../tests/fixtures/tasks:/app/tests/fixtures/tasks:ro" in worker["volumes"]
+
+    hello_dockerfile = (
+        docker_compose.REPO_ROOT
+        / "tests/fixtures/tasks/hello-world/environment/Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert "pytest-jsonreport" not in hello_dockerfile
+    assert "pytest-json-report" in hello_dockerfile
+
+    hello_task = tomllib.loads(
+        (
+            docker_compose.REPO_ROOT
+            / "tests/fixtures/tasks/hello-world/task.toml"
+        ).read_text(encoding="utf-8"),
+    )
+    assert hello_task["environment"]["cpu_arch"] == "any"
+
+
+def test_worker_image_installs_direct_benchmark_runtime_dependency() -> None:
+    worker_dockerfile = (
+        docker_compose.REPO_ROOT / "deploy/Dockerfile.worker"
+    ).read_text(encoding="utf-8")
+
+    assert "pip install --no-cache-dir -e ./packages/loom-benchmarks" in (
+        worker_dockerfile
+    )
+
+
+def test_stack_up_migrates_blank_database_before_starting_services(
+    monkeypatch: Any,
+) -> None:
+    events: list[tuple[Any, ...]] = []
+
+    def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        events.append(("compose", *args))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    def fake_wait(services: list[str], timeout_sec: float) -> None:
+        events.append(("wait", tuple(services), timeout_sec))
+
+    def fake_run(
+        command: list[str],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        if command[1:3] == ["-m", "alembic"]:
+            events.append(("migrate", tuple(command), kwargs["env"]["LOOM_DB_URL"]))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        events.append(("seed", tuple(command)))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="team-token\nworker-token\n",
+            stderr="",
+        )
+
+    def fake_canary(team_token: str, *, timeout_sec: float) -> None:
+        events.append(("claim-canary", team_token, timeout_sec))
+
+    monkeypatch.setattr(docker_compose, "_compose", fake_compose)
+    monkeypatch.setattr(docker_compose, "_wait_services_healthy", fake_wait)
+    monkeypatch.setattr(docker_compose, "_verify_worker_claim_canary", fake_canary)
+    monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
+
+    assert docker_compose.stack_up(timeout_sec=17) == ("team-token", "worker-token")
+
+    assert events[0] == ("compose", "up", "-d", "postgres", "minio")
+    assert events[1] == ("wait", ("postgres", "minio"), 17)
+    assert events[2][0] == "migrate"
+    assert events[2][1][0:3] == (sys.executable, "-m", "alembic")
+    assert events[2][2] == docker_compose.DB_URL
+    assert events[3] == ("compose", "up", "-d", "--build")
+    assert events[4] == (
+        "wait",
+        ("postgres", "minio", "llm-gateway", "control-plane"),
+        17,
+    )
+    assert events[5][0] == "seed"
+    assert events[5][1][0] == sys.executable
+    assert events[6] == (
+        "compose",
+        "--profile",
+        "worker",
+        "up",
+        "-d",
+        "--build",
+        "--no-deps",
+        "worker",
+    )
+    assert events[7] == ("wait", ("worker",), 60.0)
+    assert events[8] == (
+        "claim-canary",
+        "team-token",
+        docker_compose._CANARY_MAX_TIMEOUT_SEC,
+    )
+
+
+def test_wait_services_healthy_bounds_compose_inspection(monkeypatch: Any) -> None:
+    timeouts: list[float] = []
+
+    def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        timeouts.append(kwargs["timeout_sec"])
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='{"Service":"postgres","State":"running","Health":"healthy"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(docker_compose, "_compose", fake_compose)
+
+    docker_compose._wait_services_healthy(["postgres"], timeout_sec=30.0)
+
+    assert timeouts
+    assert 0 < timeouts[0] <= docker_compose._COMPOSE_INSPECT_TIMEOUT_SEC
+
+
+def test_stack_up_cleans_partial_compose_state_on_setup_failure(
+    monkeypatch: Any,
+) -> None:
+    compose_calls: list[tuple[str, ...]] = []
+
+    def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        compose_calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    def fail_wait(services: list[str], timeout_sec: float) -> None:
+        raise RuntimeError(f"failed waiting for {services} after {timeout_sec}")
+
+    monkeypatch.setattr(docker_compose, "_compose", fake_compose)
+    monkeypatch.setattr(docker_compose, "_wait_services_healthy", fail_wait)
+
+    with pytest.raises(RuntimeError, match="failed waiting"):
+        docker_compose.stack_up(timeout_sec=17)
+
+    assert compose_calls[-1] == (
+        "--profile",
+        "worker",
+        "down",
+        "-v",
+        "--remove-orphans",
+    )
+    assert compose_calls[-3:-1] == [
+        ("--profile", "worker", "ps", "-a"),
+        ("--profile", "worker", "logs", "--no-color", "--tail=300"),
+    ]
+
+
+def _worker_compose_result(state: str = "running") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        ["docker", "compose"],
+        0,
+        stdout=f'{{"Service":"worker","State":"{state}"}}\n',
+        stderr="",
+    )
+
+
+def test_worker_claim_canary_claims_cancels_and_waits_for_terminal(
+    monkeypatch: Any,
+) -> None:
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+    responses = iter(
+        [
+            httpx.Response(201, json={"trial_id": "trial-canary"}),
+            httpx.Response(
+                200,
+                json={"state": "queued", "attempt_count": 0, "claimed_at": None},
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "state": "claimed",
+                    "attempt_count": 1,
+                    "claimed_at": "2026-07-22T00:00:00Z",
+                },
+            ),
+            httpx.Response(200, json={"state": "cancelled"}),
+            httpx.Response(200, json={"state": "cancelled", "attempt_count": 1}),
+        ],
+    )
+
+    def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        calls.append((method, url, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(docker_compose, "_compose", lambda *a, **k: _worker_compose_result())
+    monkeypatch.setattr(docker_compose.httpx, "request", fake_request)
+    monkeypatch.setattr(docker_compose.time, "sleep", lambda _: None)
+
+    docker_compose._verify_worker_claim_canary(
+        "loom_team_do-not-leak",
+        timeout_sec=2.0,
+    )
+
+    assert [(method, url.rsplit("/", 1)[-1]) for method, url, _ in calls] == [
+        ("POST", "trials"),
+        ("GET", "trial-canary"),
+        ("GET", "trial-canary"),
+        ("POST", "cancel"),
+        ("GET", "trial-canary"),
+    ]
+    assert calls[0][2]["json"]["task_id"] == "hello-world"
+    assert all(
+        call[2]["headers"]["Authorization"] == "Bearer loom_team_do-not-leak"
+        for call in calls
+    )
+
+
+def test_worker_claim_canary_times_out_and_best_effort_cancels(
+    monkeypatch: Any,
+) -> None:
+    now = 0.0
+    calls: list[tuple[str, str]] = []
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        calls.append((method, url))
+        if method == "POST" and url.endswith("/trials"):
+            return httpx.Response(201, json={"trial_id": "trial-timeout"})
+        if method == "POST" and url.endswith("/cancel"):
+            return httpx.Response(200, json={"state": "cancelled"})
+        return httpx.Response(
+            200,
+            json={"state": "queued", "attempt_count": 0, "claimed_at": None},
+        )
+
+    monkeypatch.setattr(docker_compose, "_compose", lambda *a, **k: _worker_compose_result())
+    monkeypatch.setattr(docker_compose.httpx, "request", fake_request)
+    monkeypatch.setattr(docker_compose.time, "monotonic", monotonic)
+    monkeypatch.setattr(docker_compose.time, "sleep", sleep)
+
+    with pytest.raises(RuntimeError, match="did not claim"):
+        docker_compose._verify_worker_claim_canary("loom_team_timeout", timeout_sec=1.0)
+
+    assert calls[-1] == (
+        "POST",
+        f"{docker_compose.CONTROL_PLANE_URL}/trials/trial-timeout/cancel",
+    )
+    assert now <= 1.0
+
+
+def test_worker_claim_canary_fails_fast_when_worker_exits(monkeypatch: Any) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        calls.append((method, url))
+        if url.endswith("/trials"):
+            return httpx.Response(201, json={"trial_id": "trial-exit"})
+        return httpx.Response(200, json={"state": "cancelled"})
+
+    monkeypatch.setattr(
+        docker_compose,
+        "_compose",
+        lambda *a, **k: _worker_compose_result("exited"),
+    )
+    monkeypatch.setattr(docker_compose.httpx, "request", fake_request)
+
+    with pytest.raises(RuntimeError, match="worker container exited"):
+        docker_compose._verify_worker_claim_canary("loom_team_exit", timeout_sec=1.0)
+
+    assert calls[-1] == (
+        "POST",
+        f"{docker_compose.CONTROL_PLANE_URL}/trials/trial-exit/cancel",
+    )
+
+
+def test_worker_claim_canary_tolerates_bounded_inspection_timeout(
+    monkeypatch: Any,
+) -> None:
+    timeout = subprocess.TimeoutExpired(["docker", "compose", "ps"], 0.1)
+    monkeypatch.setattr(
+        docker_compose,
+        "_compose",
+        lambda *args, **kwargs: (_ for _ in ()).throw(timeout),
+    )
+
+    assert docker_compose._worker_container_running(
+        deadline=docker_compose.time.monotonic() + 1.0,
+    ) is None
+    docker_compose._require_worker_running(
+        deadline=docker_compose.time.monotonic() + 1.0,
+    )
+
+
+def test_worker_claim_canary_http_error_does_not_leak_team_token(
+    monkeypatch: Any,
+) -> None:
+    secret = "loom_team_highly-sensitive"
+
+    def fail_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        raise httpx.ReadError(f"Authorization: Bearer {secret}")
+
+    monkeypatch.setattr(docker_compose.httpx, "request", fail_request)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        docker_compose._verify_worker_claim_canary(secret, timeout_sec=1.0)
+
+    assert secret not in str(exc_info.value)
+    assert "Bearer" not in str(exc_info.value)
+
+
+def test_worker_claim_canary_retries_transient_initial_connect_error(
+    monkeypatch: Any,
+) -> None:
+    attempts = 0
+
+    def request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("control plane port is still warming")
+        return httpx.Response(201, json={"trial_id": "trial-canary"})
+
+    monkeypatch.setattr(docker_compose.httpx, "request", request)
+    monkeypatch.setattr(docker_compose.time, "sleep", lambda _: None)
+
+    response = docker_compose._canary_request(
+        "POST",
+        f"{docker_compose.CONTROL_PLANE_URL}/trials",
+        deadline=docker_compose.time.monotonic() + 1.0,
+        headers={"Authorization": "Bearer loom_team_not-logged"},
+        json_body={"task_id": "hello-world"},
+        retry_connect_errors=True,
+    )
+
+    assert response.status_code == 201
+    assert attempts == 2
+
+
+def test_failed_teardown_redacts_diagnostics_before_down(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    timeouts: list[float] = []
+    diagnostics = tmp_path / "system-smoke.log"
+    raw_secrets = (
+        "loom_w_worker-secret",
+        "loom_team_team-secret",
+        "Bearer arbitrary-secret",
+        "https://example.com/object?X-Amz-Signature=signed-secret",
+    )
+
+    def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        timeouts.append(kwargs["timeout_sec"])
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="\n".join(raw_secrets) + "\n",
+            stderr="",
+        )
+
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout="deploy-worker-1\tloom-worker:dev\tUp 10 seconds\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(docker_compose, "_compose", fake_compose)
+    monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
+    monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
+
+    docker_compose.stack_down_with_diagnostics(failed=True)
+
+    assert calls == [
+        ("--profile", "worker", "ps", "-a"),
+        ("--profile", "worker", "logs", "--no-color", "--tail=300"),
+        ("--profile", "worker", "down", "-v", "--remove-orphans"),
+    ]
+    assert timeouts == [
+        docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
+        docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
+        docker_compose._COMPOSE_TEARDOWN_TIMEOUT_SEC,
+    ]
+    payload = diagnostics.read_text(encoding="utf-8")
+    assert "===== compose ps -a =====" in payload
+    assert "===== compose logs --tail=300 =====" in payload
+    assert "===== docker ps for project deploy =====" in payload
+    assert "deploy-worker-1" in payload
+    assert all(secret not in payload for secret in raw_secrets)
+    assert "[REDACTED:loom-token]" in payload
+    assert "[REDACTED:bearer]" in payload
+    assert "[REDACTED:signed-url]" in payload
+
+
+def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fail_diagnostics() -> None:
+        raise OSError("diagnostics destination unavailable")
+
+    def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_compose, "preserve_compose_diagnostics", fail_diagnostics)
+    monkeypatch.setattr(docker_compose, "_compose", fake_compose)
+
+    docker_compose.stack_down_with_diagnostics(failed=True)
+
+    assert calls == [
+        ("--profile", "worker", "down", "-v", "--remove-orphans"),
+    ]
+
+
+def test_workflow_prints_runner_temp_diagnostics_before_cleanup() -> None:
+    workflow = (
+        docker_compose.REPO_ROOT / ".github/workflows/staging-smoke.yml"
+    ).read_text(encoding="utf-8")
+    diagnostics = '${{ runner.temp }}/system-smoke-compose.log'
+
+    assert workflow.count(f"LOOM_SYSTEM_SMOKE_DIAGNOSTICS: {diagnostics}") == 2
+    capture_index = workflow.index("preserve_compose_diagnostics()")
+    cat_index = workflow.index('cat "${LOOM_SYSTEM_SMOKE_DIAGNOSTICS}"')
+    cleanup_index = workflow.index("- name: Cleanup system-smoke compose stack")
+    assert capture_index < cat_index < cleanup_index
+    assert "timeout 60s docker compose" in workflow

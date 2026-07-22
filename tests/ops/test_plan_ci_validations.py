@@ -316,6 +316,26 @@ def test_planner_change_selects_every_heavy_gate() -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "config/component-ownership.toml",
+        "scripts/component_ownership.py",
+        "tests/ops/test_component_ownership_manifest.py",
+    ],
+)
+def test_ownership_authority_change_selects_every_heavy_gate(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    assert all("ownership-authority-change" in plan.reasons[name] for name in HEAVY_CHECKS)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "deploy/environments/staging.cluster.toml",
         "deploy/environment-state/staging.toml",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",

@@ -1,5 +1,4 @@
-"""Full-stack: submit multi-step-3 → all 3 steps complete → aggregate
-reward = mean of step rewards."""
+"""Full-stack: submit multi-step-3 and verify all 3 steps complete."""
 
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ import httpx
 from tests.system.docker_compose import run_seed
 
 
-def test_multi_step_aggregates_mean(compose_stack: dict[str, str]) -> None:
+def test_multi_step_completes_all_steps(compose_stack: dict[str, str]) -> None:
     cp = compose_stack["control_plane"]
     # Seed an additional fixture (the session stack is already running and
     # already seeded hello-world by stack_up). multi-step-3 needs its own
@@ -22,7 +21,7 @@ def test_multi_step_aggregates_mean(compose_stack: dict[str, str]) -> None:
         headers={"Authorization": f"Bearer {raw_token}"},
         json={
             "task_id": "multi-step-3",
-            "config": {"step_aggregation": "mean"},
+            "config": {"agent_name": "oracle", "agent_model": None},
         },
         timeout=10,
     )
@@ -41,5 +40,11 @@ def test_multi_step_aggregates_mean(compose_stack: dict[str, str]) -> None:
             break
         time.sleep(1.0)
     assert body["state"] == "succeeded", body
-    steps = body.get("steps") or []
-    assert len(steps) == 3, f"expected 3 steps, got {len(steps)}"
+    result = body.get("result") or {}
+    steps = result.get("steps") or []
+    assert [step.get("step_name") for step in steps] == [
+        "phase-1",
+        "phase-2",
+        "phase-3",
+    ]
+    assert all(step.get("error") is None for step in steps)

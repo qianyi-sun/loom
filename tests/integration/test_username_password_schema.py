@@ -1,10 +1,44 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
 from sqlalchemy import create_engine, inspect, text
+from testcontainers.postgres import PostgresContainer
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_0044_adds_username_password_account_schema(postgres_url: str) -> None:
-    engine = create_engine(postgres_url)
+@pytest.fixture
+def freshly_migrated_db() -> Iterator[str]:
+    """A pristine Postgres migrated to head, isolated from the shared
+    session database.
+
+    The admin accounts (``Hongjian``/``Qianyi``) and their ``admin`` team are
+    created by the account migrations, but other integration tests sharing the
+    session DB delete teams (and cascade their memberships) wholesale. This
+    seed assertion must therefore run against its own untouched database so it
+    is independent of test order across shards.
+    """
+    with PostgresContainer("postgres:16") as pg:
+        url = pg.get_connection_url().replace(
+            "postgresql+psycopg2://", "postgresql+psycopg://",
+        )
+        subprocess.run(
+            [sys.executable, "-m", "alembic",
+             "-c", "migrations/alembic.ini", "upgrade", "head"],
+            cwd=_REPO_ROOT, check=True,
+            env={**os.environ, "LOOM_DB_URL": url},
+        )
+        yield url
+
+
+def test_0044_adds_username_password_account_schema(freshly_migrated_db: str) -> None:
+    engine = create_engine(freshly_migrated_db)
     with engine.connect() as conn:
         inspector = inspect(conn)
 
