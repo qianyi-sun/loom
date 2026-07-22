@@ -49,7 +49,9 @@ def test_gateway_metric_objects_registered() -> None:
         ), f"metric stem {stem!r} missing"
 
 
-def test_record_call_increments_llm_calls_total() -> None:
+def test_record_call_increments_llm_calls_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """record_call() with a successful call must bump
     loom_gateway_llm_calls_total{provider, dialect, result=\"ok\"}."""
     import asyncio
@@ -65,6 +67,10 @@ def test_record_call_increments_llm_calls_total() -> None:
     )._value.get()  # type: ignore[attr-defined]
 
     fake_session = AsyncMock()
+    monkeypatch.setattr(
+        "loom_llm_gateway.llm_calls.ensure_trial_event_lifecycle_authority",
+        AsyncMock(return_value=uuid4()),
+    )
     asyncio.run(record_call(
         fake_session,
         team_id=uuid4(),
@@ -84,7 +90,7 @@ def test_record_call_increments_llm_calls_total() -> None:
     assert after == before + 1
 
 
-def test_record_call_skips_cost_when_zero() -> None:
+def test_record_call_skips_cost_when_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """COST_USD_TOTAL only increments for positive costs; zero-cost
     calls (rate-card-missing / operator-supplied=0) don't pollute
     the counter."""
@@ -102,6 +108,10 @@ def test_record_call_skips_cost_when_zero() -> None:
     )._value.get()  # type: ignore[attr-defined]
 
     fake_session = AsyncMock()
+    monkeypatch.setattr(
+        "loom_llm_gateway.llm_calls.ensure_trial_event_lifecycle_authority",
+        AsyncMock(return_value=uuid4()),
+    )
     asyncio.run(record_call(
         fake_session,
         team_id=team_id,
@@ -121,7 +131,9 @@ def test_record_call_skips_cost_when_zero() -> None:
     assert after == before
 
 
-def test_record_call_increments_cost_when_positive() -> None:
+def test_record_call_increments_cost_when_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import asyncio
     from unittest.mock import AsyncMock
     from uuid import uuid4
@@ -132,6 +144,10 @@ def test_record_call_increments_cost_when_positive() -> None:
 
     team_id = uuid4()
     fake_session = AsyncMock()
+    monkeypatch.setattr(
+        "loom_llm_gateway.llm_calls.ensure_trial_event_lifecycle_authority",
+        AsyncMock(return_value=uuid4()),
+    )
     asyncio.run(record_call(
         fake_session,
         team_id=team_id,

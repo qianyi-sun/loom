@@ -47,6 +47,20 @@ describe("frontend runtime config", () => {
     ).toThrow(/routePath .* does not match current route/);
   });
 
+  it("rejects a staging config on the development route", () => {
+    expect(() =>
+      resolveFrontendConfig(
+        {
+          environment: "staging",
+          environmentLabel: "Staging",
+          routePath: "/dev",
+          apiBase: "/dev",
+        },
+        new URL("https://yylx.world/dev/monitor"),
+      ),
+    ).toThrow(/staging frontend config does not use its canonical routePath/);
+  });
+
   it("rejects route and API base prefix mismatches", () => {
     expect(() =>
       resolveFrontendConfig(
@@ -90,6 +104,33 @@ describe("frontend runtime config", () => {
     );
     expect(config.environmentLabel).toBe("Development / staging");
     expect(getFrontendConfig().apiRouteBase).toBe("https://yylx.world/dev/api");
+  });
+
+  it("loads the exact isolated rehearsal runtime config", async () => {
+    const rehearsalId = "5".repeat(24);
+    const routePath = `/staging/rehearsal/${rehearsalId}`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          environment: "staging",
+          environmentLabel: "Staging rehearsal",
+          routePath,
+          apiBase: routePath,
+          apiRouteBase: `https://yylx.world${routePath}/api`,
+        }),
+        { status: 200 },
+      ),
+    );
+    window.history.replaceState(null, "", `${routePath}/admin/access`);
+
+    const config = await loadFrontendConfig();
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      `${routePath}/loom-frontend-config.json`,
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    expect(config.routePath).toBe(routePath);
+    expect(config.apiRouteBase).toBe(`https://yylx.world${routePath}/api`);
   });
 
   it("deduplicates a runtime-config request within one startup attempt", async () => {
@@ -172,8 +213,41 @@ describe("frontend runtime config", () => {
     expect(frontendHomePath(new URL("https://loom.test/dev/settings"))).toBe(
       "/dev/",
     );
+    expect(frontendHomePath(new URL("https://loom.test/staging"))).toBe(
+      "/staging/",
+    );
+    expect(
+      frontendHomePath(new URL("https://loom.test/staging/library")),
+    ).toBe("/staging/");
     expect(frontendHomePath(new URL("https://loom.test/prod/monitor"))).toBe(
       "/prod/",
     );
+  });
+
+  it("keeps recovery home links inside an exact rehearsal route prefix", () => {
+    const rehearsalId = "a5".repeat(12);
+    const routePath = `/staging/rehearsal/${rehearsalId}`;
+
+    expect(frontendHomePath(new URL(`https://loom.test${routePath}`))).toBe(
+      `${routePath}/`,
+    );
+    expect(
+      frontendHomePath(new URL(`https://loom.test${routePath}/admin/access`)),
+    ).toBe(`${routePath}/`);
+  });
+
+  it("fails closed for malformed rehearsal route near-misses", () => {
+    const nearMisses = [
+      "/staging/rehearsal",
+      `/staging/rehearsal/${"a".repeat(23)}`,
+      `/staging/rehearsal/${"A".repeat(24)}`,
+      `/staging/rehearsal/${"a".repeat(25)}`,
+    ];
+
+    for (const pathname of nearMisses) {
+      expect(frontendHomePath(new URL(`https://loom.test${pathname}`))).toBe(
+        "/",
+      );
+    }
   });
 });

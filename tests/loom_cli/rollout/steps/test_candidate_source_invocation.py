@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -20,7 +21,7 @@ from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.steps import candidate_source
-from loom_cli.rollout.steps.base import VerifyOutcome
+from loom_cli.rollout.steps.base import RunResult, VerifyOutcome
 from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_argv,
     candidate_loom_env,
@@ -32,6 +33,7 @@ from loom_cli.rollout.steps.s04_gb10_prep import (
     GB10Host,
     GB10PrepStep,
     _node_agent_timer_name,
+    _prep_one_host,
     _ssh,
     gb10_hosts_for,
 )
@@ -49,11 +51,125 @@ from loom_cli.rollout.steps.s11_cluster_up import ClusterUpStep
 from loom_cli.rollout.steps.s12_production_defaults import ProductionDefaultsStep
 from loom_cli.rollout.steps.s12_release_gate import (
     ReleaseGateStep,
+    _current_candidate_worker_binding,
     _is_gb10_convergence_failure,
 )
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
+_RUN_CANDIDATE_BOUND_HF_CANARY = ReleaseGateStep._run_candidate_bound_hf_canary
+
+
+@pytest.fixture(autouse=True)
+def _stub_candidate_bound_hf_canary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ReleaseGateStep,
+        "_run_candidate_bound_hf_canary",
+        lambda _self, _ctx, _step_dir: RunResult(
+            exit_code=0,
+            artifacts={"batch_id": "00000000-0000-4000-8000-000000000001"},
+        ),
+    )
+
+
+def test_sealed_gb10_prep_fetches_exact_shared_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "a" * 40
+    ctx = replace(
+        make_ctx(tmp_path),
+        image_tag="staging-aaaaaaa",
+        resolved_sha=sha,
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+    host = GB10Host(
+        ssh_target="trt-gb10-1",
+        repo_path="/home/qianyi/loom-worker-build-staging",
+        env_file_path="/home/qianyi/loom-worker-staging.env",
+    )
+    commands: list[str] = []
+
+    def successful_ssh(
+        _host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        assert stdin_text is None
+        commands.append(command)
+        return SubprocessResult([], 0, "", "")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", successful_ssh)
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+
+    ok, _summary = _prep_one_host(ctx, host, host_dir)
+
+    assert ok is True
+    fetch = next(command for command in commands if " fetch " in command)
+    assert "git fetch --quiet origin" not in fetch
+    assert "-c protocol.file.allow=always" in fetch
+    assert "-c fetch.fsckObjects=true" in fetch
+    assert "--upload-pack='/usr/bin/git -c safe.directory=" in fetch
+    assert "/loom-remote-worker-staging-aaaaaaa/.git upload-pack'" in fetch
+    assert (
+        "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-staging-aaaaaaa"
+    ) in fetch
+    assert fetch.endswith(sha)
+
+
+def test_merged_dev_gb10_prep_keeps_origin_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    host = GB10Host(
+        ssh_target="trt-gb10-1",
+        repo_path="/home/qianyi/loom-worker-build-staging",
+        env_file_path="/home/qianyi/loom-worker-staging.env",
+    )
+    commands: list[str] = []
+
+    def successful_ssh(
+        _host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        assert stdin_text is None
+        commands.append(command)
+        return SubprocessResult([], 0, "", "")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", successful_ssh)
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+
+    ok, _summary = _prep_one_host(ctx, host, host_dir)
+
+    assert ok is True
+    assert any(command.endswith("git fetch --quiet origin") for command in commands)
+
+
+def test_sealed_context_binds_source_identities_into_inputs(tmp_path: Path) -> None:
+    ctx = replace(
+        make_ctx(tmp_path),
+        request_id="req-1234567890abcdef",
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+        preflight_attestation_sha256="d" * 64,
+        preflight_registry_sha256="e" * 64,
+        preflight_coverage_sha256="f" * 64,
+    )
+
+    inputs = ctx.to_inputs_dict()
+
+    assert inputs["source_mode"] == "sealed-cumulative"
+    assert inputs["resolved_tree"] == "b" * 40
+    assert inputs["approved_base_sha"] == "c" * 40
 
 
 def _is_candidate_invocation(argv: list[str]) -> bool:
@@ -958,6 +1074,9 @@ def test_env_state_runs_catalog_provisioning_between_apply_and_check(
     db_url = "postgresql://loom:catalog-secret@postgres/loom"
     env_file.write_text(
         f"HF_TOKEN={hf_token}\n"
+        "XDG_CACHE_HOME=/data/loom-staging/breakglass/stale/xdg\n"
+        "HF_HOME=/data/loom-staging/breakglass/stale/huggingface\n"
+        "HF_HUB_CACHE=/data/loom-staging/breakglass/stale/huggingface/hub\n"
         f"LOOM_SVC_DB_URL={db_url}\n"
         "LOOM_SVC_MINIO_ENDPOINT=http://minio:9000\n"
         "LOOM_SVC_MINIO_ACCESS_KEY=minio-access-secret\n"
@@ -1022,6 +1141,17 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
             assert kwargs["env"]["HF_TOKEN"] == hf_token
             assert kwargs["env"]["LOOM_SVC_DB_URL"] == db_url
             assert kwargs["env"]["PUBLISHED_SHA"] == ("79087002d62bb22169a704bc941c8d614082d880")
+            cache_root = step_dir.artifact_path("catalog-cache")
+            assert kwargs["env"]["XDG_CACHE_HOME"] == str(cache_root / "xdg")
+            assert kwargs["env"]["HF_HOME"] == str(cache_root / "huggingface")
+            assert kwargs["env"]["HF_HUB_CACHE"] == str(cache_root / "huggingface/hub")
+            for path in (
+                cache_root,
+                cache_root / "xdg",
+                cache_root / "huggingface",
+                cache_root / "huggingface/hub",
+            ):
+                assert stat.S_IMODE(path.stat().st_mode) == 0o700
             return SubprocessResult(
                 argv=list(argv),
                 returncode=0,
@@ -1080,6 +1210,11 @@ PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
     assert "[REDACTED:LOOM_SVC_DB_URL]" in combined
     evidence = json.loads(artifact)
     assert evidence["returncode"] == 0
+    assert evidence["cache"] == {
+        "environment_keys": ["HF_HOME", "HF_HUB_CACHE", "XDG_CACHE_HOME"],
+        "mode": "0o700",
+        "root": str(step_dir.artifact_path("catalog-cache")),
+    }
     assert evidence["env_file"]["source_identity"].startswith("sha256:")
     assert str(env_file) not in artifact
     assert evidence["required_env"] == [
@@ -2610,6 +2745,126 @@ def test_gb10_prep_verify_accepts_successful_oneshot_node_agent(
     assert any("systemctl --user show" in call for call in calls)
 
 
+def test_gb10_prep_verify_waits_for_transient_timer_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123", resolved_sha="e" * 40)
+    _write_single_node_agent_gb10_config(ctx, tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    timer_calls = 0
+    service_calls = 0
+    sleeps: list[float] = []
+
+    def fake_ssh(host, remote_cmd):
+        nonlocal timer_calls, service_calls
+        if "systemctl --user show loom-gb10-node-agent.timer" in remote_cmd:
+            timer_calls += 1
+            substate = "running" if timer_calls == 1 else "waiting"
+            stdout = (
+                "LoadState=loaded\n"
+                "ActiveState=active\n"
+                f"SubState={substate}\n"
+                "Unit=loom-gb10-node-agent.service\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user show loom-gb10-node-agent.service" in remote_cmd:
+            service_calls += 1
+            stdout = (
+                "LoadState=loaded\n"
+                "Type=oneshot\n"
+                "Result=success\n"
+                "ExecMainStatus=0\n"
+                f"ActiveState={'active' if service_calls == 1 else 'inactive'}\n"
+                f"SubState={'running' if service_calls == 1 else 'dead'}\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user is-enabled loom-gb10-node-agent.timer" in remote_cmd:
+            stdout = "enabled\n"
+        else:
+            stdout = ""
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep.time.sleep",
+        sleeps.append,
+    )
+
+    outcome = GB10PrepStep().verify(ctx, ev.step_dir(12, "gb10-prep"))
+
+    assert outcome is VerifyOutcome.MATCH
+    assert timer_calls == 2
+    assert service_calls == 2
+    assert sleeps == [2.0]
+
+
+def test_gb10_prep_verify_fails_closed_when_timer_never_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _runner_backed_gb10_config: None,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123", resolved_sha="e" * 40)
+    _write_single_node_agent_gb10_config(ctx, tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    timer_calls = 0
+    sleeps: list[float] = []
+
+    def fake_ssh(host, remote_cmd):
+        nonlocal timer_calls
+        if "systemctl --user show loom-gb10-node-agent.timer" in remote_cmd:
+            timer_calls += 1
+            stdout = (
+                "LoadState=loaded\n"
+                "ActiveState=active\n"
+                "SubState=running\n"
+                "Unit=loom-gb10-node-agent.service\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user show loom-gb10-node-agent.service" in remote_cmd:
+            stdout = (
+                "LoadState=loaded\n"
+                "Type=oneshot\n"
+                "Result=success\n"
+                "ExecMainStatus=0\n"
+                "ActiveState=active\n"
+                "SubState=running\n"
+                "NeedDaemonReload=no\n"
+            )
+        elif "systemctl --user is-enabled loom-gb10-node-agent.timer" in remote_cmd:
+            stdout = "enabled\n"
+        else:
+            stdout = ""
+        return SubprocessResult(
+            argv=["ssh", host.ssh_target, remote_cmd],
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep.time.sleep",
+        sleeps.append,
+    )
+    step_dir = ev.step_dir(12, "gb10-prep")
+
+    outcome = GB10PrepStep().verify(ctx, step_dir)
+
+    assert outcome is VerifyOutcome.MISMATCH
+    assert timer_calls == 16
+    assert sleeps == [2.0] * 15
+    assert "SubState=running" in step_dir.stderr_path().read_text()
+
+
 @pytest.mark.parametrize(
     "service",
     (
@@ -3136,6 +3391,7 @@ def test_release_gate_run_generates_manifest_then_gates(
                 "argv": list(argv),
                 "cwd": kwargs.get("cwd"),
                 "env": kwargs.get("env"),
+                "timeout_sec": kwargs.get("timeout_sec"),
             }
         )
         if list(argv[:3]) == ["docker", "image", "inspect"]:
@@ -3214,6 +3470,8 @@ def test_release_gate_run_generates_manifest_then_gates(
         "environment-state",
         "check",
     ]
+    assert calls[3]["timeout_sec"] == 180.0
+    assert calls[4]["timeout_sec"] == 180.0
     assert _candidate_args(calls[5]["argv"])[:2] == [
         "datasets",
         "hf-boundary-evidence",
@@ -3231,6 +3489,9 @@ def test_release_gate_run_generates_manifest_then_gates(
     assert calls[5]["argv"][calls[5]["argv"].index("--namespace") + 1] == ctx.namespace
     assert calls[5]["argv"][calls[5]["argv"].index("--gb10-workers-status") + 1] == (
         str(step_dir.artifact_path("gb10-workers-status-staging-abc123.json"))
+    )
+    assert calls[5]["argv"][calls[5]["argv"].index("--canary-batch-id") + 1] == (
+        "00000000-0000-4000-8000-000000000001"
     )
     assert calls[5]["argv"][calls[5]["argv"].index("--output") + 1] == str(hf_boundary)
     assert calls[6]["argv"][calls[6]["argv"].index("--manifest") + 1] == str(manifest)
@@ -3482,6 +3743,170 @@ def test_release_gate_retry_classifier_accepts_failing_gb10_check() -> None:
     )
 
     assert _is_gb10_convergence_failure(result)
+
+
+def test_current_candidate_worker_binding_is_stable_across_heartbeat_timestamps(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        resolved_sha="a" * 40,
+    )
+    status_path = tmp_path / "status.json"
+
+    def write_status(timestamp: str) -> None:
+        status_path.write_text(
+            json.dumps(
+                {
+                    "desired_states": [
+                        {
+                            "environment": "staging",
+                            "pool_name": "gb10",
+                            "image_tag": "staging-abc123",
+                            "source_git_commit": "a" * 40,
+                            "updated_at": timestamp,
+                            "host_intents": {
+                                "trt-gb10-1": "active",
+                                "trt-gb10-7": "stopped",
+                            },
+                        }
+                    ],
+                    "nodes": [
+                        {
+                            "environment": "staging",
+                            "pool_name": "gb10",
+                            "hostname": "trt-gb10-1",
+                            "worker_id": "worker-current",
+                            "worker_status": "active",
+                            "worker_fresh": True,
+                            "worker_last_seen_at": timestamp,
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    write_status("2026-07-18T00:00:00Z")
+    first = _current_candidate_worker_binding(ctx=ctx, status_path=status_path)
+    write_status("2026-07-18T00:01:00Z")
+    second = _current_candidate_worker_binding(ctx=ctx, status_path=status_path)
+
+    assert first == second
+
+
+def test_current_candidate_worker_binding_rejects_stale_registration(
+    tmp_path: Path,
+) -> None:
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-abc123",
+        resolved_sha="a" * 40,
+    )
+    status_path = tmp_path / "status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "desired_states": [
+                    {
+                        "environment": "staging",
+                        "pool_name": "gb10",
+                        "image_tag": "staging-abc123",
+                        "source_git_commit": "a" * 40,
+                        "host_intents": {"trt-gb10-1": "active"},
+                    }
+                ],
+                "nodes": [
+                    {
+                        "environment": "staging",
+                        "pool_name": "gb10",
+                        "hostname": "trt-gb10-1",
+                        "worker_id": "worker-stale",
+                        "worker_status": "active",
+                        "worker_fresh": False,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="no active fresh worker registration"):
+        _current_candidate_worker_binding(ctx=ctx, status_path=status_path)
+
+
+def test_release_gate_runs_exact_candidate_bound_canary_before_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = replace(
+        make_ctx(
+            tmp_path,
+            image_tag="staging-abc123",
+            resolved_sha="a" * 40,
+        ),
+        smoke_task_id="loom-smoke/gb10-oracle-hello-world",
+        smoke_required_worker_pool="gb10",
+        smoke_agent="oracle",
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="11111111-1111-4111-8111-111111111111",
+        smoke_admin_actor="qianyi",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(14, "release-gate")
+    status_path = ReleaseGateStep().gb10_status_path(ctx, step_dir)
+    status_path.write_text(
+        json.dumps(
+            {
+                "desired_states": [
+                    {
+                        "environment": "staging",
+                        "pool_name": "gb10",
+                        "image_tag": "staging-abc123",
+                        "source_git_commit": "a" * 40,
+                        "host_intents": {"trt-gb10-1": "active"},
+                    }
+                ],
+                "nodes": [
+                    {
+                        "environment": "staging",
+                        "pool_name": "gb10",
+                        "hostname": "trt-gb10-1",
+                        "worker_id": "worker-current",
+                        "worker_status": "active",
+                        "worker_fresh": True,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_canary(canary_ctx, _step_dir, **kwargs):
+        captured["ctx"] = canary_ctx
+        captured.update(kwargs)
+        return RunResult(exit_code=0, artifacts={"batch_id": "batch-current"})
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate.run_admin_on_behalf_smoke",
+        fake_canary,
+    )
+
+    result = _RUN_CANDIDATE_BOUND_HF_CANARY(ReleaseGateStep(), ctx, step_dir)
+
+    assert result.artifacts == {"batch_id": "batch-current"}
+    canary_ctx = captured["ctx"]
+    assert isinstance(canary_ctx, RolloutContext)
+    assert canary_ctx.smoke_task_id == ("skilllearnbench/fix-security-bug/fix-security-bug-1")
+    assert captured["n_per_task"] == 1
+    assert captured["artifact_prefix"] == "hf-canary-"
+    assert str(captured["batch_name"]).startswith("rollout-hf-boundary-staging-abc123-")
 
 
 def test_release_gate_retries_transient_gb10_status_cp_unreachable(

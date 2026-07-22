@@ -422,7 +422,7 @@ async def test_actor_cancels_jobs_when_grace_is_cancel_retryable(
         ]
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, now=now, slurm_runner=runner,
+                s, environment="staging", now=now, slurm_runner=runner,
             )
             await s.commit()
 
@@ -472,7 +472,7 @@ async def test_actor_holds_without_cancel_when_grace_is_wait(
         ]
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, now=now, slurm_runner=runner,
+                s, environment="staging", now=now, slurm_runner=runner,
             )
             await s.commit()
 
@@ -520,7 +520,7 @@ async def test_actor_scales_normally_when_no_drain_intent(
         runner = FakeSlurmRunner()
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, now=now, slurm_runner=runner,
+                s, environment="staging", now=now, slurm_runner=runner,
             )
             await s.commit()
 

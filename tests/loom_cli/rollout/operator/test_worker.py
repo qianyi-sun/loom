@@ -1,19 +1,43 @@
 from __future__ import annotations
 
 import io
+import json
+import os
 import signal
 import subprocess
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.failure_authority import classify_rollout_failure
+from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.operator import worker as worker_module
+from loom_cli.rollout.operator.backup import BackupCreator, BackupError
+from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope, transition_backup_job
+from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.model import ActivePointer, DriverEnvelope, RequestEvent
 from loom_cli.rollout.operator.policy import sanitized_child_environment
-from loom_cli.rollout.operator.worker import WorkerDependencies, run_attempt
+from loom_cli.rollout.operator.readonly_database_client import ReadonlyDatabaseTunnelError
+from loom_cli.rollout.operator.store import RequestStore
+from loom_cli.rollout.operator.worker import (
+    VerifiedBackupJob,
+    WorkerDependencies,
+    run_attempt,
+    run_backup_job,
+)
 from loom_cli.rollout.operator.worker import main as worker_main
+from tests.loom_cli.rollout.operator.test_backup import RecordingRunner
+from tests.loom_cli.rollout.operator.test_backup import make_config as make_backup_config
+from tests.loom_cli.rollout.operator.test_broker import fakes as broker_fakes
+from tests.loom_cli.rollout.operator.test_broker import make_config
+from tests.loom_cli.rollout.operator.test_store import (
+    make_assessment,
+    make_preflight_backup_job,
+    make_preflight_request,
+)
 
 REQUEST_ID = "req-alpha"
 
@@ -36,6 +60,9 @@ def valid_envelope() -> DriverEnvelope:
         backup_manifest_path="/data/loom-staging/backups/fixed/backup-manifest.json",
         backup_manifest_sha256="2" * 64,
         runner_config_sha256="1" * 64,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
         cluster_name="loom-staging",
         namespace="loom-staging",
         environment="staging",
@@ -178,11 +205,87 @@ def test_worker_holds_lifecycle_lock_and_runs_only_finalized_envelope() -> None:
     ]
 
 
+def test_worker_refuses_driver_when_final_attestation_admission_fails() -> None:
+    bundle = worker_fakes()
+
+    def reject(_envelope: DriverEnvelope) -> object:
+        bundle.order.append("final-admission")
+        raise ValueError("drifted")
+
+    bundle.deps.final_admission = reject
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    assert bundle.order == [
+        "driver-lock-acquire",
+        "final-admission",
+        "attempt_failed",
+        "active-clear-pending",
+        "driver-lock-release",
+    ]
+    assert bundle.store.events[-1].reason == "preflight.attestation.final-admission@static"
+    assert bundle.store.events[-1].current_step == "00-final-admission"
+    assert bundle.store.active is None
+
+
+def test_worker_uses_attested_final_gates_instead_of_legacy_driver() -> None:
+    bundle = worker_fakes()
+
+    def run_final(_envelope: DriverEnvelope, _admission: object) -> int:
+        bundle.order.append("final-gates-run")
+        return 0
+
+    bundle.deps.final_admission = lambda _envelope: object()
+    bundle.deps.run_final_gates = run_final
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 0
+    assert "final-gates-run" in bundle.order
+    assert "driver-run" not in bundle.order
+
+
+def test_attested_worker_never_falls_back_to_legacy_driver() -> None:
+    bundle = worker_fakes()
+    bundle.deps.final_admission = lambda _envelope: object()
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    assert "driver-run" not in bundle.order
+    assert bundle.store.events[-1].reason == ("final.protected-apply.runner-unavailable@final-only")
+    assert bundle.store.events[-1].current_step == "00-final-gate-runner"
+    assert bundle.store.active is None
+
+
+def test_final_gate_runner_without_admission_never_reaches_driver() -> None:
+    bundle = worker_fakes()
+    bundle.deps.run_final_gates = lambda _envelope, _admission: 0
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    assert "driver-run" not in bundle.order
+    assert bundle.store.events[-1].reason == (
+        "preflight.attestation.final-admission-missing@static"
+    )
+    assert bundle.store.events[-1].current_step == "00-final-admission"
+    assert bundle.store.active is None
+
+
 def test_worker_records_failed_driver_and_clears_active() -> None:
     bundle = worker_fakes(driver_rc=2)
     assert run_attempt(valid_envelope(), bundle.deps) == 1
     assert "attempt_failed" in bundle.order
     assert bundle.store.active is None
+
+
+def test_worker_publishes_normalized_driver_failure_stage() -> None:
+    bundle = worker_fakes(driver_rc=2)
+    bundle.deps.read_driver_failure = lambda envelope: classify_rollout_failure(
+        step_number=15,
+        step_name="smoke",
+        reason="protected route failed",
+    )
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    terminal = bundle.store.events[-1]
+    assert terminal.event == "attempt_failed"
+    assert terminal.reason == "final.smoke.failed@final-only"
+    assert terminal.current_step == "15-smoke"
 
 
 def test_worker_observes_cancel_marker_without_editing_rollout_state() -> None:
@@ -252,6 +355,286 @@ def test_worker_parser_exposes_only_internal_run_attempt_surface() -> None:
         )
         == 2
     )
+
+
+def _backup_worker_store(tmp_path: Path) -> tuple[RequestStore, PreflightBackupJobEnvelope]:
+    store = RequestStore(tmp_path / "state")
+    assessment = make_assessment(tmp_path)
+    request = replace(
+        make_preflight_request(),
+        request_id=REQUEST_ID,
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    job = replace(
+        make_preflight_backup_job(),
+        request_id=REQUEST_ID,
+        job_id="job-alpha000",
+        payload_id="payload-alpha000",
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    store.create_preflight_request(request)
+    store.publish_preflight_assessment(REQUEST_ID, assessment)
+    store.publish_preflight_backup_job(job)
+    return store, job
+
+
+def test_backup_worker_publishes_only_verified_cas_state(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=lambda _request, _job, _cancelled: VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
+        ),
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 0
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_VERIFIED
+    assert state.manifest_sha256 == "d" * 64
+    assert state.lease_digest == "e" * 64
+    assert state.preflight_attestation_sha256 == "f" * 64
+
+
+def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
+    tmp_path: Path,
+) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    config = make_config(tmp_path)
+
+    class LaunchLifecycle:
+        def __init__(self) -> None:
+            self.launched: list[DriverEnvelope] = []
+
+        def launch(self, envelope: DriverEnvelope) -> ActivePointer:
+            self.launched.append(envelope)
+            return ActivePointer(
+                request_id=envelope.request_id,
+                attempt_number=envelope.attempt_number,
+                unit_name=f"loom-staging-rollout-{envelope.request_id}-1.service",
+                status="pending",
+            )
+
+    lifecycle = LaunchLifecycle()
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=lifecycle,
+        run_driver=lambda _path, _resume: 0,
+        run_backup=lambda _request, _job, _cancelled: VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
+        ),
+        finalize_backup=lambda request, verified: worker_module._finalize_verified_backup(  # type: ignore[attr-defined]
+            config,
+            store,
+            request,
+            verified,
+        ),
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 0
+
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.LAUNCH_RUNNING
+    request = store.read_request(REQUEST_ID)
+    envelope = store.read_attempt_envelope(REQUEST_ID, 1)
+    assert request.preflight_attestation_sha256 == "f" * 64
+    assert envelope.backup_manifest_sha256 == "d" * 64
+    assert envelope.preflight_attestation_sha256 == "f" * 64
+    assert lifecycle.launched == [envelope]
+
+
+def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def cancel_during_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        state = store.read_preflight_backup_job_state(REQUEST_ID)
+        requested = transition_backup_job(
+            state,
+            LifecycleAction.REQUEST_CANCEL,
+            updated_at=datetime(2026, 7, 19, 22, tzinfo=UTC),
+        )
+        store.replace_preflight_backup_job_state(
+            requested,
+            expected_sequence=state.sequence,
+        )
+        return VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
+        )
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=cancel_during_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 130
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "backup_cancelled"
+
+
+def test_backup_worker_persists_secret_safe_backup_stage_code(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        raise BackupError("postgres_dump_failed")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=fail_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 1
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "postgres_dump_failed"
+
+
+def test_inventory_tunnel_failure_reaches_private_diagnostic_and_public_status(
+    tmp_path: Path,
+) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir()
+    creator = BackupCreator(
+        make_backup_config(backup_root),
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        now=lambda: job.created_at,
+        object_inventory_provider=lambda _created_at: (_ for _ in ()).throw(
+            ReadonlyDatabaseTunnelError(
+                "credential",
+                "Unauthorized token=private-value",
+            )
+        ),
+        publish_latest=False,
+    )
+    stderr = io.StringIO()
+
+    def run_backup(request, envelope, _cancelled):  # type: ignore[no-untyped-def]
+        creator.create(request, created_at=envelope.created_at)
+        raise AssertionError("unreachable")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=run_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=stderr,
+    )
+
+    assert run_backup_job(job, deps) == 1
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "object_inventory_credentials_failed"
+    event = store.read_events(REQUEST_ID)[-1]
+    assert event.event == "backup_failed"
+    assert event.reason == "backup_object_inventory_failed"
+    assert event.operator == "hongjian"
+    assert event.operator_uid == 2002
+    assert event.unit_name == f"loom-staging-backup-{REQUEST_ID}.service"
+    assert "private-value" not in stderr.getvalue()
+    assert "[REDACTED:token]" in stderr.getvalue()
+
+    broker = broker_fakes(tmp_path / "broker")
+    status_dependencies = replace(
+        broker.dependencies,
+        config=replace(broker.config, state_root=store.root),
+        store=store,
+    )
+    assert (
+        broker_main(
+            ["status"],
+            dependencies=status_dependencies,
+        )
+        == 0
+    )
+    status = json.loads(broker.stdout.getvalue().splitlines()[-1])
+    assert status["stage"] == "backup_failed"
+    assert status["reason"] == "backup_object_inventory_failed"
+    assert status["unit"] == f"loom-staging-backup-{REQUEST_ID}.service"
+    assert "diagnostic" not in status
+    assert "object_inventory_credentials_failed" not in json.dumps(status)
+
+
+def test_private_diagnostic_write_failure_does_not_drop_durable_event(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        raise BackupError(
+            "object_inventory_transport_failed",
+            diagnostic="private transport diagnostic",
+        )
+
+    class FailingStderr(io.StringIO):
+        def write(self, value: str) -> int:
+            del value
+            raise OSError("stderr unavailable")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=fail_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=FailingStderr(),
+    )
+
+    assert run_backup_job(job, deps) == 1
+    event = store.read_events(REQUEST_ID)[-1]
+    assert event.event == "backup_failed"
+    assert event.reason == "backup_object_inventory_failed"
+
+
+def test_backup_worker_redacts_unclassified_failure_text(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        raise ValueError("secret-bearing diagnostic")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=fail_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 1
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "backup_failed"
+    persisted = (
+        store.root / "requests" / REQUEST_ID / "preflight-backup" / "state.json"
+    ).read_text()
+    assert "secret-bearing" not in persisted
 
 
 def _install_fake_signal_handlers(
@@ -342,12 +725,15 @@ def test_default_worker_run_uses_exact_sanitized_environment(
     config = make_config(tmp_path)
     expected = sanitized_child_environment(config, service_uid=1234)
     environments: list[dict[str, str] | None] = []
+    timeouts: list[object] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         environments.append(kwargs.get("env"))  # type: ignore[arg-type]
+        timeouts.append(kwargs.get("timeout"))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     worker_module._run(["systemctl", "--user", "show"], environment=expected)
 
     assert environments == [expected]
+    assert timeouts == [120]

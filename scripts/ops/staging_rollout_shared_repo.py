@@ -10,8 +10,6 @@ that trusted operator.
 from __future__ import annotations
 
 import argparse
-import ctypes
-import errno
 import grp
 import json
 import os
@@ -20,14 +18,20 @@ import re
 import secrets
 import stat
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    from scripts.ops.staging_rollout_shared_work2 import MountError, mount_identity
+except ModuleNotFoundError:  # installed helper executes directly from scripts/ops
+    from staging_rollout_shared_work2 import MountError, mount_identity
 
 SERVICE_USER = "loom-rollout"
 SERVICE_GROUP = "loom-rollout"
 CONSUMER_USER = "qianyi"
 SHARED_GROUP = "sharedwork"
-CONSUMER_PARENT = Path("/shared_work/qianyi")
+CONSUMER_PARENT = Path("/shared_work2/qianyi")
 AUTHORITY_ROOT = CONSUMER_PARENT / ".loom-staging-rollout"
 REPOSITORY_ROOT = AUTHORITY_ROOT / "worker-repos"
 
@@ -157,73 +161,44 @@ def _ensure_child(
     try:
         child = _open_child(parent, name)
     except FileNotFoundError:
-        temp_name = f".{name}.tmp-{secrets.token_hex(16)}"
-        temp: BoundDirectory | None = None
         try:
-            os.mkdir(temp_name, 0o700, dir_fd=parent.fd)
-            temp = _open_child(parent, temp_name)
-            os.fchown(temp.fd, uid, gid)
-            os.fchmod(temp.fd, mode)
-            _validate_directory(temp, uid=uid, gid=gid, mode=mode)
+            os.mkdir(name, 0o700, dir_fd=parent.fd)
+        except FileExistsError:
+            child = _open_child(parent, name)
             try:
-                _rename_noreplace(parent.fd, temp_name, parent.fd, name)
-            except FileExistsError:
-                os.close(temp.fd)
-                temp = None
-                os.rmdir(temp_name, dir_fd=parent.fd)
-                child = _open_child(parent, name)
                 _validate_directory(child, uid=uid, gid=gid, mode=mode)
+                parent.assert_stable()
                 return child, False
-            child = BoundDirectory(parent.path / name, temp.fd, temp.device, temp.inode)
-            temp = None
+            except Exception:
+                os.close(child.fd)
+                raise
+        created = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+        child: BoundDirectory | None = None
+        try:
+            child = _open_child(parent, name)
+            if (child.device, child.inode) != (created.st_dev, created.st_ino):
+                raise AuthorityError("shared repository authority changed")
+            os.fchown(child.fd, uid, gid)
+            os.fchmod(child.fd, mode)
             _validate_directory(child, uid=uid, gid=gid, mode=mode)
             parent.assert_stable()
             return child, True
         except Exception:
-            if temp is not None:
-                os.close(temp.fd)
             try:
-                os.rmdir(temp_name, dir_fd=parent.fd)
-            except FileNotFoundError:
-                pass
+                lexical = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+                if (lexical.st_dev, lexical.st_ino) == (created.st_dev, created.st_ino):
+                    os.rmdir(name, dir_fd=parent.fd)
+            finally:
+                if child is not None:
+                    os.close(child.fd)
             raise
-    _validate_directory(child, uid=uid, gid=gid, mode=mode)
-    parent.assert_stable()
-    return child, False
-
-
-def _rename_noreplace(
-    source_fd: int,
-    source_name: str,
-    destination_fd: int,
-    destination_name: str,
-) -> None:
-    libc = ctypes.CDLL(None, use_errno=True)
     try:
-        rename = libc.renameat2
-    except AttributeError as exc:
-        raise AuthorityError("atomic shared repository publication is unavailable") from exc
-    rename.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    rename.restype = ctypes.c_int
-    result = rename(
-        source_fd,
-        os.fsencode(source_name),
-        destination_fd,
-        os.fsencode(destination_name),
-        1,
-    )
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-        raise FileExistsError(error_number, "destination exists")
-    raise AuthorityError("atomic shared repository publication failed safely")
+        _validate_directory(child, uid=uid, gid=gid, mode=mode)
+        parent.assert_stable()
+        return child, False
+    except Exception:
+        os.close(child.fd)
+        raise
 
 
 def _probe_identity(identity: Identity, checks: tuple[tuple[int, int, bool], ...]) -> bool:
@@ -262,6 +237,133 @@ def _probe_identity(identity: Identity, checks: tuple[tuple[int, int, bool], ...
     return status == 0 and payload == b"1"
 
 
+def _run_as_identity(identity: Identity, operation: Callable[[], bool]) -> bool:
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:  # pragma: no cover - result is asserted by the parent
+        try:
+            os.close(read_fd)
+            os.setgroups(list(identity.groups))
+            os.setgid(identity.gid)
+            os.setuid(identity.uid)
+            os.write(write_fd, b"1" if operation() else b"0")
+        except BaseException:
+            try:
+                os.write(write_fd, b"0")
+            except OSError:
+                pass
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    try:
+        payload = os.read(read_fd, 2)
+    finally:
+        os.close(read_fd)
+    _, status = os.waitpid(child, 0)
+    return status == 0 and payload == b"1"
+
+
+def _probe_private_publication(
+    service: Identity,
+    consumer: Identity,
+    repository: BoundDirectory,
+    shared_gid: int,
+) -> bool:
+    name = f".publication-probe-{secrets.token_hex(16)}"
+    child: BoundDirectory | None = None
+    try:
+        if not _run_as_identity(
+            service,
+            lambda: _create_private_directory(repository.fd, name),
+        ):
+            return False
+        child = _open_child(repository, name)
+        private = _validate_directory(child, uid=service.uid, gid=shared_gid, mode=0o2700)
+        if not _probe_identity(
+            service,
+            ((child.fd, os.W_OK | os.X_OK, True),),
+        ) or not _probe_identity(
+            consumer,
+            ((child.fd, os.R_OK | os.X_OK, False),),
+        ):
+            return False
+        if not _run_as_identity(
+            service,
+            lambda: _publish_private_directory(repository.fd, name),
+        ):
+            return False
+        published = _validate_directory(child, uid=service.uid, gid=shared_gid, mode=0o750)
+        if (published.st_dev, published.st_ino) != (private.st_dev, private.st_ino):
+            return False
+        if not _probe_identity(
+            consumer,
+            (
+                (child.fd, os.R_OK | os.X_OK, True),
+                (child.fd, os.W_OK, False),
+            ),
+        ):
+            return False
+        if not _run_as_identity(
+            service,
+            lambda: _collision_is_rejected(repository.fd, name),
+        ):
+            return False
+        after_collision = child.assert_stable()
+        return (after_collision.st_dev, after_collision.st_ino) == (
+            published.st_dev,
+            published.st_ino,
+        )
+    finally:
+        if child is not None:
+            try:
+                lexical = os.stat(name, dir_fd=repository.fd, follow_symlinks=False)
+                current = os.fstat(child.fd)
+                if (lexical.st_dev, lexical.st_ino) == (current.st_dev, current.st_ino):
+                    os.rmdir(name, dir_fd=repository.fd)
+            finally:
+                os.close(child.fd)
+
+
+def _create_private_directory(parent_fd: int, name: str) -> bool:
+    os.mkdir(name, 0o700, dir_fd=parent_fd)
+    fd: int | None = None
+    try:
+        fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        if stat.S_IMODE(os.fstat(fd).st_mode) == 0o2700:
+            return True
+        os.rmdir(name, dir_fd=parent_fd)
+        return False
+    except Exception:
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _publish_private_directory(parent_fd: int, name: str) -> bool:
+    fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    try:
+        metadata = os.fstat(fd)
+        if stat.S_IMODE(metadata.st_mode) != 0o2700:
+            return False
+        os.fchmod(fd, 0o750)
+        return stat.S_IMODE(os.fstat(fd).st_mode) == 0o750
+    finally:
+        os.close(fd)
+
+
+def _collision_is_rejected(parent_fd: int, name: str) -> bool:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        return True
+    return False
+
+
 def converge(*, ensure: bool) -> dict[str, object]:
     if os.geteuid() != 0:
         raise AuthorityError("shared repository helper requires root")
@@ -274,11 +376,30 @@ def converge(*, ensure: bool) -> dict[str, object]:
     if shared_gid not in consumer.groups or shared_gid in service.groups:
         raise AuthorityError("shared repository group membership is invalid")
 
-    parent = _open_absolute(CONSUMER_PARENT)
+    try:
+        mount_report = mount_identity()
+    except MountError as exc:
+        raise AuthorityError("shared repository mount identity is invalid") from exc
+    mount = _open_absolute(CONSUMER_PARENT.parent)
+    parent: BoundDirectory | None = None
     authority: BoundDirectory | None = None
     repository: BoundDirectory | None = None
     created: list[str] = []
     try:
+        if ensure:
+            parent, parent_created = _ensure_child(
+                mount,
+                CONSUMER_PARENT.name,
+                uid=consumer.uid,
+                gid=shared_gid,
+                mode=0o2775,
+            )
+            if parent_created:
+                created.append("consumer-parent")
+        else:
+            parent = _open_child(mount, CONSUMER_PARENT.name)
+        if parent is None:  # pragma: no cover - invariant
+            raise AuthorityError("shared repository consumer parent is unavailable")
         parent_metadata = _validate_directory(
             parent,
             uid=consumer.uid,
@@ -340,6 +461,8 @@ def converge(*, ensure: bool) -> dict[str, object]:
         )
         if not service_ok or not consumer_ok:
             raise AuthorityError("shared repository capability contract is invalid")
+        if not _probe_private_publication(service, consumer, repository, shared_gid):
+            raise AuthorityError("shared repository atomic publication contract is invalid")
         return {
             "schema_version": 1,
             "root": str(REPOSITORY_ROOT),
@@ -362,6 +485,8 @@ def converge(*, ensure: bool) -> dict[str, object]:
             "repository_inode": repository_metadata.st_ino,
             "service_capability": "parent-not-writable;repository-writable-searchable",
             "consumer_capability": "repository-readable-searchable-not-writable",
+            "publication_capability": "private-mkdir-publish-verified",
+            "mount": mount_report,
             "created": created,
         }
     finally:
@@ -369,7 +494,9 @@ def converge(*, ensure: bool) -> dict[str, object]:
             os.close(repository.fd)
         if authority is not None:
             os.close(authority.fd)
-        os.close(parent.fd)
+        if parent is not None:
+            os.close(parent.fd)
+        os.close(mount.fd)
 
 
 def _converge_service_owned(
@@ -415,7 +542,11 @@ def _converge_service_owned(
         for name in relative_chain:
             if ensure:
                 child, was_created = _ensure_child(
-                    current, name, uid=service.uid, gid=shared_gid, mode=SERVICE_DIR_MODE,
+                    current,
+                    name,
+                    uid=service.uid,
+                    gid=shared_gid,
+                    mode=SERVICE_DIR_MODE,
                 )
                 if was_created:
                     created.append(name)

@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,7 @@ import pytest
 from loom.models.trajectory import StepStartEvent, TrialEndEvent, TrialStartEvent
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
-from loom.trial.finalize import finalize_trajectory
+from loom.trial.finalize import finalize_trajectory, finalize_trajectory_with_metadata
 
 
 @pytest.fixture
@@ -78,3 +79,33 @@ async def test_finalize_uses_custom_bucket(tmp_path: Path, store: FakeObjectStor
         bucket="custom-bucket",
     )
     assert uri == "s3://custom-bucket/team/trial-9/atif.json"
+
+
+async def test_finalize_returns_exact_object_metadata(
+    tmp_path: Path,
+    store: FakeObjectStore,
+) -> None:
+    local = tmp_path / "events.jsonl"
+    writer = TrajectoryWriter(
+        local_path=local, store=store,
+        bucket="x", key="x", min_part_bytes=0,
+    )
+    trial_uuid = uuid4()
+    async with writer:
+        await writer.append(TrialStartEvent(
+            **_ev(0, trial_uuid), task_id="t",
+            agent_name="oracle", agent_mode="out-of-box",
+        ))
+        await writer.append(TrialEndEvent(
+            **_ev(1, trial_uuid), final_state="succeeded",
+        ))
+
+    finalized = await finalize_trajectory_with_metadata(
+        local_path=local, store=store,
+        team_id="team", trial_id="trial-10",
+        task_id="t", agent_name="oracle", agent_version="1.0",
+    )
+    body = store.objects[("trajectories", "team/trial-10/atif.json")]
+    assert finalized.uri == "s3://trajectories/team/trial-10/atif.json"
+    assert finalized.size_bytes == len(body)
+    assert finalized.sha256 == hashlib.sha256(body).hexdigest()

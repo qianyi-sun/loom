@@ -24,7 +24,8 @@ def _cfg(url: str) -> Config:
 
 @pytest.fixture
 def at_revision_0006(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch,
+    isolated_migration_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
     """Roll back to pre-Plan-19, yield, then bring back to head.
 
@@ -32,8 +33,8 @@ def at_revision_0006(
     environment. Keep this pin here so any legacy env-only path still points at
     the live session container while Alembic now prefers the explicit Config URL.
     """
-    monkeypatch.setenv("LOOM_DB_URL", postgres_url)
-    cfg = _cfg(postgres_url)
+    monkeypatch.setenv("LOOM_DB_URL", isolated_migration_postgres_url)
+    cfg = _cfg(isolated_migration_postgres_url)
     command.downgrade(cfg, "0006")
     try:
         yield
@@ -42,14 +43,15 @@ def at_revision_0006(
 
 
 def test_0007_creates_campaigns_table(
-    postgres_url: str, at_revision_0006: None,
+    isolated_migration_postgres_url: str,
+    at_revision_0006: None,
 ) -> None:
     """Migration 0007 historically created the `campaigns` table
     (pre-rename). It's a historical fact pinned here so we can
     detect anyone who edits 0007 to short-circuit the rename."""
-    cfg = _cfg(postgres_url)
+    cfg = _cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0007")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     insp = inspect(engine)
     assert "campaigns" in insp.get_table_names()
     trial_cols = {c["name"] for c in insp.get_columns("trials")}
@@ -58,21 +60,19 @@ def test_0007_creates_campaigns_table(
     indexes = {i["name"] for i in insp.get_indexes("trials")}
     assert "trials_campaign_idx" in indexes
     assert "trials_idempotency_key_uidx" in indexes
-    uniq = [
-        i for i in insp.get_indexes("trials")
-        if i["name"] == "trials_idempotency_key_uidx"
-    ]
+    uniq = [i for i in insp.get_indexes("trials") if i["name"] == "trials_idempotency_key_uidx"]
     assert uniq and uniq[0]["unique"] is True
     engine.dispose()
 
 
 def test_0007_downgrade_drops_campaigns_table(
-    postgres_url: str, at_revision_0006: None,
+    isolated_migration_postgres_url: str,
+    at_revision_0006: None,
 ) -> None:
-    cfg = _cfg(postgres_url)
+    cfg = _cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0007")
     command.downgrade(cfg, "0006")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     insp = inspect(engine)
     assert "campaigns" not in insp.get_table_names()
     trial_cols = {c["name"] for c in insp.get_columns("trials")}
@@ -82,14 +82,15 @@ def test_0007_downgrade_drops_campaigns_table(
 
 
 def test_0011_renames_campaigns_to_batches(
-    postgres_url: str, at_revision_0006: None,
+    isolated_migration_postgres_url: str,
+    at_revision_0006: None,
 ) -> None:
     """Migration 0011 is the rename. After it runs, the schema
     speaks Batch (table + trials.batch_id + indexes named with
     `batches_` / `trials_batch_`)."""
-    cfg = _cfg(postgres_url)
+    cfg = _cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0011")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     insp = inspect(engine)
     tables = insp.get_table_names()
     assert "batches" in tables
@@ -104,12 +105,13 @@ def test_0011_renames_campaigns_to_batches(
 
 
 def test_0011_downgrade_reverts_to_campaigns(
-    postgres_url: str, at_revision_0006: None,
+    isolated_migration_postgres_url: str,
+    at_revision_0006: None,
 ) -> None:
-    cfg = _cfg(postgres_url)
+    cfg = _cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0011")
     command.downgrade(cfg, "0010")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     insp = inspect(engine)
     tables = insp.get_table_names()
     assert "campaigns" in tables

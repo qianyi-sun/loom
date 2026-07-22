@@ -1303,6 +1303,7 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # rendering as postgres-cnpg above.
     "minio-distributed.yaml.j2",
     "control-plane.yaml.j2",
+    "staging-data-lifecycle.yaml.j2",
     # #672 family-runs: orchestrator sibling. Ships with the CP env
     # block (same LOOM_CP_* prefix) so the deployment is trivially
     # co-configured.
@@ -1376,6 +1377,7 @@ _NAMESPACED_RENDER_KINDS = frozenset(
     {
         "Cluster",  # CloudNativePG custom resource
         "ConfigMap",
+        "CronJob",
         "DaemonSet",
         "Deployment",
         "HorizontalPodAutoscaler",

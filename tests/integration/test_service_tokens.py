@@ -17,7 +17,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
-from loom.db.schema import Team, Token
+from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom.data_lifecycle_capacity import CAPACITY_SOURCE
+from loom.db.schema import StagingLifecycleCapacity, StagingMutationEpoch, Team, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.test_service_auth_sessions import (
@@ -267,6 +269,98 @@ async def test_legacy_team_token_whoami_reports_compatibility_credential(
     assert body["username"] is None
     assert body["team_id"] == str(team_id)
     assert body["token_prefix"] == token_hash_prefix
+
+
+async def test_readonly_probe_is_get_only_and_does_not_update_usage(
+    svc_setup: tuple[FastAPI, str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _raw, team_id = svc_setup
+    monkeypatch.setenv("LOOM_ENV", "staging")
+    monkeypatch.setenv("LOOM_NAMESPACE", "loom-staging")
+    raw = f"loom_readonly_{uuid4().hex}"
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    async with app.state.session_factory() as session:
+        await session.execute(insert(Token).values(
+            token_hash=token_hash,
+            name="staging baseline",
+            type="readonly_probe",
+            scopes=["read:own"],
+            team_id=team_id,
+            issued_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ))
+        await session.execute(insert(StagingMutationEpoch).values(
+            environment="staging",
+            namespace="loom-staging",
+            epoch=9,
+            reason="bootstrap",
+        ))
+        capacity = StagingCapacity(1, 2, 80, 90)
+        await session.execute(insert(StagingLifecycleCapacity).values(
+            environment="staging",
+            namespace="loom-staging",
+            object_count=capacity.object_count,
+            bytes_used=capacity.bytes_used,
+            disk_free_percent=capacity.disk_free_percent,
+            inode_free_percent=capacity.inode_free_percent,
+            policy_sha256=staging_capacity_policy_digest(),
+            evidence_sha256=capacity.evidence_digest,
+            source=CAPACITY_SOURCE,
+            observed_at=datetime.now(UTC),
+        ))
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    head_buckets: list[str] = []
+
+    def _head_bucket(*, Bucket: str) -> None:  # noqa: N803 - boto3 API
+        head_buckets.append(Bucket)
+
+    monkeypatch.setattr(
+        app.state.minio_client,
+        "head_bucket",
+        _head_bucket,
+    )
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        whoami = await ac.get(
+            "/api/v1/auth/whoami",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        rejected = await ac.post(
+            "/api/v1/tokens",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "forbidden",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 1,
+            },
+        )
+        readiness = await ac.get(
+            "/api/v1/health/ready",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert whoami.status_code == 200, whoami.text
+    assert whoami.json()["credential_type"] == "staging_readonly_probe"
+    assert whoami.json()["scopes"] == ["read:own"]
+    assert whoami.json()["allowed_http_methods"] == ["GET", "HEAD"]
+    assert whoami.json()["readonly_authority_version"] == "v1"
+    assert rejected.status_code == 401
+    assert readiness.status_code == 200, readiness.text
+    assert readiness.json()["status"] == "ready"
+    assert readiness.json()["blockers"] == []
+    assert head_buckets == ["artifacts", "trajectories"]
+    async with app.state.session_factory() as session:
+        usage = (await session.execute(
+            select(Token.last_seen_at, Token.last_used_at).where(
+                Token.token_hash == token_hash,
+            ),
+        )).one()
+    assert usage == (None, None)
 
 
 async def test_owner_rotates_token_revoking_old_secret(

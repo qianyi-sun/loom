@@ -59,6 +59,8 @@ PROTECTED_STAGING_ROLLOUT_EXACT = {
     "deploy/environments/staging.cluster.toml",
     "deploy/environment-state/staging.toml",
     "deploy/worker-pools/gb10/known_hosts",
+    "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports",
+    "deploy/worker-pools/gb10/loom-staging-rollout-shared-work2-export-authority.sudoers",
     "deploy/worker-pools/gb10/ssh_config",
     "scripts/ops/verify_staging_rollout_secret_boundary.py",
     "src/loom_cli/rollout/steps/s04_gb10_prep.py",

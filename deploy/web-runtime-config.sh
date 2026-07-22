@@ -10,6 +10,7 @@ label="${LOOM_FRONTEND_ENVIRONMENT_LABEL:-Local development}"
 route_path="${LOOM_FRONTEND_ROUTE_PATH:-}"
 api_base="${LOOM_FRONTEND_API_BASE:-${route_path}}"
 public_origin="${LOOM_FRONTEND_PUBLIC_ORIGIN:-}"
+rehearsal_id="${LOOM_FRONTEND_REHEARSAL_ID:-}"
 
 case "${environment}" in
   local|development|staging|production) ;;
@@ -19,21 +20,32 @@ case "${environment}" in
     ;;
 esac
 
-case "${route_path}" in
-  ""|"/"|"/prod"|"/dev") ;;
-  *)
-    echo "LOOM_FRONTEND_ROUTE_PATH must be empty, /, /prod, or /dev" >&2
+if [ -n "${rehearsal_id}" ]; then
+  if [ "${environment}" != "staging" ] || ! printf '%s' "${rehearsal_id}" | grep -Eq '^[0-9a-f]{24}$'; then
+    echo "LOOM_FRONTEND_REHEARSAL_ID requires staging and 24 lowercase hex characters" >&2
     exit 1
-    ;;
-esac
+  fi
+  if [ "${route_path}" != "/dev/rehearsal/${rehearsal_id}" ] || [ "${api_base}" != "${route_path}" ]; then
+    echo "rehearsal frontend route must match its exact isolated identity" >&2
+    exit 1
+  fi
+else
+  case "${route_path}" in
+    ""|"/"|"/prod"|"/dev") ;;
+    *)
+      echo "LOOM_FRONTEND_ROUTE_PATH must be empty, /, /prod, or /dev" >&2
+      exit 1
+      ;;
+  esac
 
-case "${api_base}" in
-  ""|"/"|"/prod"|"/dev") ;;
-  *)
-    echo "LOOM_FRONTEND_API_BASE must be empty, /, /prod, or /dev" >&2
-    exit 1
-    ;;
-esac
+  case "${api_base}" in
+    ""|"/"|"/prod"|"/dev") ;;
+    *)
+      echo "LOOM_FRONTEND_API_BASE must be empty, /, /prod, or /dev" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 if [ "${route_path}" = "/" ]; then
   route_path=""

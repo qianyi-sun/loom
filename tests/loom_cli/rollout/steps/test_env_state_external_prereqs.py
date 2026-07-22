@@ -7,7 +7,6 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +18,7 @@ from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
 from loom_cli.rollout.operator.preflight import ACTIVE_GB10_HOSTS
 from loom_cli.rollout.steps import s10_env_state as env_state_module
+from loom_cli.rollout.steps.candidate_source import MaterializedCandidateBlob
 from loom_cli.rollout.steps.s04_gb10_prep import GB10Host
 from loom_cli.rollout.steps.s10_env_state import (
     ControlPlaneReadinessError,
@@ -31,39 +31,6 @@ from loom_cli.rollout.steps.s10_env_state import (
     _wait_for_control_plane,
 )
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
-
-
-@pytest.fixture(autouse=True)
-def _exclusive_rename_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    if sys.platform.startswith("linux"):
-        return
-
-    def rename_noreplace(
-        source_fd: int,
-        source_name: str,
-        destination_fd: int,
-        destination_name: str,
-    ) -> None:
-        try:
-            os.stat(destination_name, dir_fd=destination_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            raise ExternalSlurmPrereqMaterializationError(
-                "external runner repository destination appeared during materialization",
-            )
-        os.rename(
-            source_name,
-            destination_name,
-            src_dir_fd=source_fd,
-            dst_dir_fd=destination_fd,
-        )
-
-    monkeypatch.setattr(
-        env_state_module,
-        "_TEST_RENAME_NOREPLACE_BACKEND",
-        rename_noreplace,
-    )
 
 
 def _write_external_prereq_profile(
@@ -131,8 +98,25 @@ def _consumer_verification_fixture(
     marker.write_text("# candidate marker\n", encoding="utf-8")
     verifier = candidate / "scripts" / "ops" / "staging_rollout_shared_repo_consumer.py"
     verifier.parent.mkdir(parents=True)
-    verifier.write_text("# trusted verifier bytes\n", encoding="utf-8")
-    verifier.chmod(0o640)
+    verifier.write_text("# mutable worktree verifier must not be read\n", encoding="utf-8")
+    verifier.chmod(0o660)
+    trusted_verifier = b"# trusted verifier bytes\n"
+
+    def materialize_verifier(
+        _ctx: RolloutContext,
+        repo_path: Path,
+        target: Path,
+    ) -> MaterializedCandidateBlob:
+        assert repo_path == Path("scripts/ops/staging_rollout_shared_repo_consumer.py")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(trusted_verifier)
+        return MaterializedCandidateBlob(data=trusted_verifier, evidence_path=target)
+
+    monkeypatch.setattr(
+        env_state_module,
+        "materialize_candidate_blob",
+        materialize_verifier,
+    )
     shared_root = tmp_path / "worker-repos"
     target = shared_root / "loom-remote-worker-test"
     malicious = target / "scripts" / "ops" / "staging_rollout_shared_repo_consumer.py"
@@ -226,6 +210,7 @@ def test_post_publish_consumer_verification_streams_trusted_verifier_to_exact_14
     assert [host for host, _, _ in calls] == list(ACTIVE_GB10_HOSTS)
     assert all(command.startswith("/usr/bin/python3 - --root ") for _, command, _ in calls)
     assert all(stdin_text == "# trusted verifier bytes\n" for _, _, stdin_text in calls)
+    assert all("mutable worktree verifier" not in stdin_text for _, _, stdin_text in calls)
     assert all("forged" not in stdin_text for _, _, stdin_text in calls)
     persisted = json.loads(
         step_dir.artifact_path("external-slurm-runner-consumer-verification.json").read_text(
@@ -273,6 +258,169 @@ def test_post_publish_consumer_verification_rejects_divergent_host_content_ident
     )
     assert persisted["passed"] is False
     assert persisted["host_count"] == 13
+    assert persisted["failed_attempts"] == 1
+    assert persisted["failed_host"] == "trt-gb10-15"
+    assert persisted["failure_class"] == "content_identity"
+
+
+def test_post_publish_consumer_verification_retries_transient_verifier_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+    from loom_cli.rollout.steps import s04_gb10_prep
+
+    original_ssh = s04_gb10_prep._ssh
+    first = True
+
+    def transient(
+        host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        nonlocal first
+        if host.ssh_target == "trt-gb10-1" and first:
+            first = False
+            calls.append((host.ssh_target, command, stdin_text or ""))
+            return SubprocessResult([], 1, "", "transient verifier failure")
+        return original_ssh(host, command, stdin_text=stdin_text)
+
+    monkeypatch.setattr(s04_gb10_prep, "_ssh", transient)
+    monkeypatch.setattr(env_state_module.time, "sleep", lambda _seconds: None)
+
+    evidence = _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+    assert evidence is not None
+    assert evidence["passed"] is True
+    assert evidence["host_count"] == 14
+    assert len(calls) == 15
+    assert [node["attempts"] for node in evidence["nodes"]] == [2] + [1] * 13
+
+
+def test_post_publish_consumer_verification_covers_shared_visibility_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+    from loom_cli.rollout.steps import s04_gb10_prep
+
+    original_ssh = s04_gb10_prep._ssh
+    failures_remaining = 7
+    sleeps: list[float] = []
+
+    def transient(
+        host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        nonlocal failures_remaining
+        if host.ssh_target == "trt-gb10-1" and failures_remaining:
+            failures_remaining -= 1
+            calls.append((host.ssh_target, command, stdin_text or ""))
+            return SubprocessResult([], 1, "", "transient verifier failure")
+        return original_ssh(host, command, stdin_text=stdin_text)
+
+    monkeypatch.setattr(s04_gb10_prep, "_ssh", transient)
+    monkeypatch.setattr(env_state_module.time, "sleep", sleeps.append)
+
+    evidence = _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+    assert evidence is not None
+    assert evidence["passed"] is True
+    assert evidence["host_count"] == 14
+    assert len(calls) == 21
+    assert [node["attempts"] for node in evidence["nodes"]] == [8] + [1] * 13
+    assert sleeps == [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "failure_class"),
+    [(1, "verifier"), (255, "ssh")],
+)
+def test_post_publish_consumer_verification_exhausts_transient_failure_safely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    failure_class: str,
+) -> None:
+    ctx, step_dir, records, calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+    from loom_cli.rollout.steps import s04_gb10_prep
+
+    def unavailable(
+        host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        calls.append((host.ssh_target, command, stdin_text or ""))
+        return SubprocessResult([], returncode, "", "secret-bearing transport detail")
+
+    monkeypatch.setattr(s04_gb10_prep, "_ssh", unavailable)
+    sleeps: list[float] = []
+    monkeypatch.setattr(env_state_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="failed safely",
+    ):
+        _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+    persisted_path = step_dir.artifact_path("external-slurm-runner-consumer-verification.json")
+    persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
+    assert len(calls) == 13
+    assert persisted["failed_attempts"] == 13
+    assert persisted["failed_host"] == "trt-gb10-1"
+    assert persisted["failure_class"] == failure_class
+    assert persisted["host_count"] == 0
+    assert sleeps == [5.0 * attempt for attempt in range(1, 13)]
+    assert sum(sleeps) == 390.0
+    assert "secret-bearing" not in persisted_path.read_text(encoding="utf-8")
+
+
+def test_post_publish_consumer_verification_rejects_oversized_commit_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, _calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        env_state_module,
+        "materialize_candidate_blob",
+        lambda _ctx, _path, target: MaterializedCandidateBlob(
+            data=b"x" * (1024 * 1024 + 1),
+            evidence_path=target,
+        ),
+    )
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="verifier is unsafe",
+    ):
+        _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+
+def test_post_publish_consumer_verification_rejects_non_utf8_commit_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, _calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        env_state_module,
+        "materialize_candidate_blob",
+        lambda _ctx, _path, target: MaterializedCandidateBlob(
+            data=b"\xff",
+            evidence_path=target,
+        ),
+    )
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="verifier is unavailable",
+    ):
+        _verify_external_slurm_runner_consumers(ctx, step_dir, records)
 
 
 def test_materializes_external_slurm_env_file_without_secret_evidence(
@@ -930,11 +1078,14 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clone_commands: list[list[str]] = []
+    shared_git_environments: list[dict[str, str]] = []
     original_run_captured = env_state_module.run_captured
 
     def record_git_commands(argv: list[str], **kwargs: Any) -> SubprocessResult:
         if argv[:3] == ["git", "--no-replace-objects", "clone"]:
             clone_commands.append(argv)
+        if argv[:1] == ["/usr/bin/git"]:
+            shared_git_environments.append(dict(kwargs["env"]))
         return original_run_captured(argv, **kwargs)
 
     monkeypatch.setattr(env_state_module, "run_captured", record_git_commands)
@@ -992,66 +1143,256 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     )
     assert clone_commands
     assert all("--no-hardlinks" in command for command in clone_commands)
+    assert shared_git_environments
+    assert all(
+        environment["GIT_INDEX_FILE"] == "/dev/null" for environment in shared_git_environments
+    )
 
 
-def test_atomic_repo_publish_succeeds_once_and_rejects_existing_targets(
+def test_published_repo_verification_never_asks_git_to_refresh_the_index(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = tmp_path / "source"
-    destination = tmp_path / "destination"
-    source.mkdir()
-    destination.mkdir()
-    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
-    destination_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        (source / "checkout").mkdir()
-        env_state_module._rename_directory_noreplace(
-            source_fd,
-            "checkout",
-            destination_fd,
-            "published",
-        )
-        assert (destination / "published").is_dir()
-        assert not (source / "checkout").exists()
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+    index = repo_dir / ".git" / "index"
+    before = index.stat()
+    calls: list[tuple[str, ...]] = []
+    original_git = env_state_module._shared_repo_git
 
-        (source / "empty-race").mkdir()
-        (destination / "empty-target").mkdir()
-        with pytest.raises(
-            ExternalSlurmPrereqMaterializationError,
-            match="destination appeared",
-        ):
-            env_state_module._rename_directory_noreplace(
-                source_fd,
-                "empty-race",
-                destination_fd,
-                "empty-target",
-            )
-        assert (source / "empty-race").is_dir()
-        assert (destination / "empty-target").is_dir()
+    def reject_index_git(_repo: Path, *arguments: str) -> str:
+        calls.append(arguments)
+        if arguments[:1] == ("ls-files",):
+            raise AssertionError("published index must be parsed without Git")
+        return original_git(_repo, *arguments)
 
-        (source / "nonempty-race").mkdir()
-        (destination / "nonempty-target").mkdir()
-        (destination / "nonempty-target" / "marker").write_text(
-            "preserve\n",
-            encoding="utf-8",
+    monkeypatch.setattr(env_state_module, "_shared_repo_git", reject_index_git)
+
+    verified = env_state_module.verify_external_runner_repo(
+        repo_dir=repo_dir,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+    after = index.stat()
+
+    assert verified["repo_action"] == "matched"
+    assert all(arguments[:1] != ("ls-files",) for arguments in calls)
+    assert (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_size,
+        stat.S_IMODE(after.st_mode),
+    ) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+        0o640,
+    )
+
+
+def test_published_repo_rejects_noncanonical_index_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "update-index", "--index-version", "4"],
+        check=True,
+    )
+    (repo_dir / ".git" / "index").chmod(0o640)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="index is unsupported",
+    ):
+        env_state_module.verify_external_runner_repo(
+            repo_dir=repo_dir,
+            resolved_sha=head,
+            expected_ref="staging-abc123",
         )
-        with pytest.raises(
-            ExternalSlurmPrereqMaterializationError,
-            match="destination appeared",
-        ):
-            env_state_module._rename_directory_noreplace(
-                source_fd,
-                "nonempty-race",
-                destination_fd,
-                "nonempty-target",
-            )
-        assert (source / "nonempty-race").is_dir()
-        assert (destination / "nonempty-target" / "marker").read_text(
-            encoding="utf-8"
-        ) == "preserve\n"
-    finally:
-        os.close(source_fd)
-        os.close(destination_fd)
+
+
+def test_materialize_repo_dir_keeps_final_claim_private_until_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    original_clone = env_state_module._clone_repo_checkout
+
+    def assert_private_then_clone(**kwargs: Any) -> None:
+        assert kwargs["tmp_dir"] == repo_dir
+        assert stat.S_IMODE(repo_dir.stat().st_mode) == 0o2700
+        original_clone(**kwargs)
+
+    monkeypatch.setattr(env_state_module, "_clone_repo_checkout", assert_private_then_clone)
+
+    result = _materialize_repo_dir(
+        repo_dir=repo_dir,
+        source_repo=source_repo,
+        resolved_sha=head,
+        expected_ref="staging-abc123",
+    )
+
+    assert result["repo_action"] == "created"
+    assert stat.S_IMODE(repo_dir.stat().st_mode) == 0o750
+
+
+def test_materialize_repo_dir_preserves_published_inode_on_late_validation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (source_repo / "README.md").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-qm", "init"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "worker-repos"
+    repo_root.mkdir(mode=0o2750)
+    repo_root.chmod(0o2750)
+    repo_dir = repo_root / "loom-remote-worker-staging-abc123"
+    monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        env_state_module.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+    original_validate = env_state_module._validate_repo_tree
+
+    def fail_only_after_publish(*args: Any, **kwargs: Any) -> None:
+        original_validate(*args, **kwargs)
+        if kwargs.get("top_mode", 0o750) == 0o750:
+            raise ExternalSlurmPrereqMaterializationError("injected late validation failure")
+
+    monkeypatch.setattr(env_state_module, "_validate_repo_tree", fail_only_after_publish)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="injected late validation failure",
+    ):
+        _materialize_repo_dir(
+            repo_dir=repo_dir,
+            source_repo=source_repo,
+            resolved_sha=head,
+            expected_ref="staging-abc123",
+        )
+
+    assert repo_dir.is_dir()
+    assert stat.S_IMODE(repo_dir.stat().st_mode) == 0o750
 
 
 def test_materialize_repo_dir_rejects_non_direct_or_symlinked_authority(
@@ -1116,7 +1457,7 @@ def test_materialize_repo_dir_rejects_non_direct_or_symlinked_authority(
         )
 
 
-def test_materialize_repo_dir_does_not_clean_replaced_temp_inode(
+def test_materialize_repo_dir_does_not_clean_replaced_claim_inode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1133,17 +1474,16 @@ def test_materialize_repo_dir_does_not_clean_replaced_temp_inode(
     )
     repo_dir = repo_root / "loom-remote-worker-staging-abc123"
 
-    def replace_temp_authority(*, tmp_dir: Path, **_: Any) -> None:
-        temp_root = tmp_dir.parent
-        original = temp_root.with_name(f"{temp_root.name}.original")
-        temp_root.rename(original)
-        temp_root.mkdir()
-        (temp_root / "foreign-marker").write_text("preserve\n", encoding="utf-8")
+    def replace_claim_authority(*, tmp_dir: Path, **_: Any) -> None:
+        original = tmp_dir.with_name(f".{tmp_dir.name}.original")
+        tmp_dir.rename(original)
+        tmp_dir.mkdir()
+        (tmp_dir / "foreign-marker").write_text("preserve\n", encoding="utf-8")
         raise ExternalSlurmPrereqMaterializationError("injected clone failure")
 
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s10_env_state._clone_repo_checkout",
-        replace_temp_authority,
+        replace_claim_authority,
     )
 
     with pytest.raises(
@@ -1157,15 +1497,11 @@ def test_materialize_repo_dir_does_not_clean_replaced_temp_inode(
             expected_ref="staging-abc123",
         )
 
-    replacement = next(
-        path
-        for path in repo_root.glob(f".{repo_dir.name}.tmp-*")
-        if not path.name.endswith(".original")
-    )
-    assert (replacement / "foreign-marker").read_text(encoding="utf-8") == "preserve\n"
+    assert (repo_dir / "foreign-marker").read_text(encoding="utf-8") == "preserve\n"
+    assert (repo_root / f".{repo_dir.name}.original").is_dir()
 
 
-def test_temp_root_requires_linux_setgid_inheritance_for_nonmember_shared_group(
+def test_private_claim_requires_linux_setgid_inheritance_for_nonmember_shared_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     inherited = SimpleNamespace(
@@ -1191,7 +1527,7 @@ def test_temp_root_requires_linux_setgid_inheritance_for_nonmember_shared_group(
             return self.metadata
 
     assert (
-        env_state_module._prepare_temp_root(  # type: ignore[arg-type]
+        env_state_module._prepare_private_claim(  # type: ignore[arg-type]
             FakeTempRoot(inherited),
             root=root,  # type: ignore[arg-type]
         )
@@ -1201,7 +1537,7 @@ def test_temp_root_requires_linux_setgid_inheritance_for_nonmember_shared_group(
         ExternalSlurmPrereqMaterializationError,
         match="did not inherit setgid",
     ):
-        env_state_module._prepare_temp_root(  # type: ignore[arg-type]
+        env_state_module._prepare_private_claim(  # type: ignore[arg-type]
             FakeTempRoot(missing_setgid),
             root=root,  # type: ignore[arg-type]
         )
@@ -1743,6 +2079,7 @@ def test_shared_repo_git_uses_exact_safe_directory_argv_and_environment(
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_CONFIG_SYSTEM": "/dev/null",
         "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_INDEX_FILE": "/dev/null",
         "GIT_ATTR_NOSYSTEM": "1",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0",
@@ -1784,7 +2121,7 @@ def test_materialize_repo_dir_cleans_clone_failure_and_refuses_existing_drift(
             resolved_sha="a" * 40,
             expected_ref="staging-abc123",
         )
-    assert not list(repo_root.glob(f".{repo_dir.name}.tmp-*"))
+    assert not repo_dir.exists()
 
     repo_dir.mkdir(mode=0o750)
     (repo_dir / ".git").mkdir(mode=0o750)

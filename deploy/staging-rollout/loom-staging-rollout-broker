@@ -22,9 +22,10 @@ exec /usr/bin/env -i \
   HOME=/var/lib/loom-staging-rollout \
   USER=loom-rollout \
   LOGNAME=loom-rollout \
-  PATH=/opt/loom-staging-runner/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  PATH=__CANDIDATE_VENV__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
+  PYTHONDONTWRITEBYTECODE=1 \
   GIT_CONFIG_NOSYSTEM=1 \
   GIT_CONFIG_GLOBAL=/dev/null \
   GIT_TERMINAL_PROMPT=0 \
@@ -35,4 +36,4 @@ exec /usr/bin/env -i \
   SUDO_USER="${SUDO_USER}" \
   SUDO_UID="${SUDO_UID}" \
   SUDO_GID="${SUDO_GID}" \
-  /opt/loom-staging-runner/venv/bin/python -I -B -m loom_cli.rollout.operator.broker "$@"
+  __CANDIDATE_VENV__/bin/python -I -B -m loom_cli.rollout.operator.broker "$@"

@@ -37,7 +37,7 @@ def require_human_or_admin(ctx: AuthContext | None) -> AuthContext:
             status_code=403,
             detail="step session tokens cannot use the service layer",
         )
-    if ctx.type not in {"team", "admin", "user"}:
+    if ctx.type not in {"team", "admin", "user", "readonly_probe"}:
         raise HTTPException(
             status_code=403,
             detail=f"unsupported token type: {ctx.type}",

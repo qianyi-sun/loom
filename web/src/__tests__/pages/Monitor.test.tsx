@@ -490,7 +490,7 @@ describe("Monitor human-readable labels", () => {
     });
 
     expect(await screen.findByText("Monitor health")).toBeInTheDocument();
-    expect(screen.getByText("3 / 12")).toBeInTheDocument();
+    expect(await screen.findByText("3 / 12")).toBeInTheDocument();
     expect(screen.getByText("Concurrent tasks")).toBeInTheDocument();
     expect(screen.getByText("2 active workers")).toBeInTheDocument();
     expect(screen.getByText("1 queued")).toBeInTheDocument();

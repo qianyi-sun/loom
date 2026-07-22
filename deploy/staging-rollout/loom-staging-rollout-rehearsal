@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+umask 077
+
+exec /usr/bin/env -i \
+  HOME=/var/lib/loom-staging-rollout \
+  USER=loom-rollout \
+  LOGNAME=loom-rollout \
+  PATH=__CANDIDATE_VENV__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C.UTF-8 \
+  LC_ALL=C.UTF-8 \
+  PYTHONDONTWRITEBYTECODE=1 \
+  XDG_RUNTIME_DIR="/run/user/$(/usr/bin/id -u)" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(/usr/bin/id -u)/bus" \
+  KUBECONFIG=/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig \
+  LOOM_STAGING_ROLLOUT_CONFIG=/etc/loom/staging-rollout.toml \
+  __CANDIDATE_VENV__/bin/python -I -B -m loom_cli.rollout.rehearsal_helper "$@"

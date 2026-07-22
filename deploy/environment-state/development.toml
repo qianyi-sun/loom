@@ -152,7 +152,7 @@ timer_name = "loom-autoscaler-oldlab-dev.timer"
 working_directory = "/opt/loom-development-runner/repo"
 python_path = "/opt/loom-development-runner/venv/bin/python"
 script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "oldlab", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15447", "--freshness-sec", "120"]
+args = ["--environment", "development", "--pool-name", "oldlab", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15447", "--freshness-sec", "120"]
 enabled = false
 active = false
 
@@ -164,6 +164,6 @@ timer_name = "loom-autoscaler-gb10-dev.timer"
 working_directory = "/opt/loom-development-runner/repo"
 python_path = "/opt/loom-development-runner/venv/bin/python"
 script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "gb10", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15450", "--freshness-sec", "120"]
+args = ["--environment", "development", "--pool-name", "gb10", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15450", "--freshness-sec", "120"]
 enabled = false
 active = false

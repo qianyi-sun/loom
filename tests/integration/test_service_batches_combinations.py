@@ -22,7 +22,6 @@ from loom.db.schema import (
     Batch,
     ProviderConnection,
     ProviderModelCache,
-    RateCard,
     Task,
     Team,
     TeamQuota,
@@ -34,6 +33,7 @@ from loom.db.schema import (
 from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.integration.gateway_db import delete_lifecycle_authorities
 
 
 def _valid_task_config(task_id: str) -> dict[str, object]:
@@ -104,17 +104,23 @@ async def setup(
     team_id = uuid4()
     user_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
+    worker_id = uuid4()
+    owned_task_ids = tuple(
+        [f"humaneval/HumanEval/{index}" for index in range(10)] + ["local/script-only-combo"]
+    )
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(User).values(
-            id=user_id,
-            username=f"BatchComboUser-{user_id.hex[:8]}",
-            username_normalized=f"batch-combo-user-{user_id.hex[:8]}",
-            status="active",
-            is_platform_admin=False,
-        ))
+        s.execute(
+            insert(User).values(
+                id=user_id,
+                username=f"BatchComboUser-{user_id.hex[:8]}",
+                username_normalized=f"batch-combo-user-{user_id.hex[:8]}",
+                status="active",
+                is_platform_admin=False,
+            )
+        )
         s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(
             insert(Token).values(
@@ -127,8 +133,7 @@ async def setup(
             )
         )
         # Seed 10 deterministic tasks under benchmark "humaneval".
-        for i in range(10):
-            task_id = f"humaneval/HumanEval/{i}"
+        for task_id in owned_task_ids[:10]:
             s.execute(
                 insert(Task).values(
                     id=task_id,
@@ -143,7 +148,7 @@ async def setup(
         # required by the POST /batches reject-when-no-worker check.
         s.execute(
             insert(Worker).values(
-                id=uuid4(),
+                id=worker_id,
                 hostname="fixture-worker",
                 version="test",
                 capabilities=[
@@ -166,16 +171,25 @@ async def setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
-            s.execute(delete(Trial))
-            s.execute(delete(Batch))
-            s.execute(delete(ProviderConnection))
-            s.execute(delete(Task))
-            s.execute(delete(Token))
-            s.execute(delete(Worker))
-            s.execute(delete(TeamQuota))
+            trial_ids = tuple(s.scalars(select(Trial.id).where(Trial.team_id == team_id)).all())
+            batch_ids = tuple(s.scalars(select(Batch.id).where(Batch.team_id == team_id)).all())
+            s.execute(delete(Trial).where(Trial.team_id == team_id))
+            s.execute(delete(Batch).where(Batch.team_id == team_id))
+            s.execute(delete(ProviderConnection).where(ProviderConnection.team_id == team_id))
+            s.execute(delete(Task).where(Task.id.in_(owned_task_ids)))
+            s.execute(delete(Token).where(Token.team_id == team_id))
+            s.execute(delete(Worker).where(Worker.id == worker_id))
+            delete_lifecycle_authorities(
+                s,
+                bindings=(
+                    *(("trial", "trial", str(trial_id), team_id) for trial_id in trial_ids),
+                    *(("event", "trial", str(trial_id), team_id) for trial_id in trial_ids),
+                    *(("run", "batch", str(batch_id), team_id) for batch_id in batch_ids),
+                ),
+            )
+            s.execute(delete(TeamQuota).where(TeamQuota.team_id == team_id))
             s.execute(delete(User).where(User.id == user_id))
-            s.execute(delete(Team))
-            s.execute(delete(RateCard))
+            s.execute(delete(Team).where(Team.id == team_id))
             s.commit()
         sync_engine.dispose()
 
@@ -372,24 +386,28 @@ async def test_combinations_preserve_per_combo_provider_routing(
             (conn_a, "Combo provider A", "glm-5.1-thinking"),
             (conn_b, "Combo provider B", "qwen3.6-35b-a3b"),
         ):
-            s.execute(insert(ProviderConnection).values(
-                id=conn_id,
-                team_id=team_id,
-                provider_type="openai-compatible",
-                display_name=display_name,
-                base_url="https://api.example.test/v1",
-                upstream_host="api.example.test",
-                resolved_egress_ips=["203.0.113.10"],
-                encrypted_api_key_ref=f"test://{conn_id}",
-                status="valid",
-                pricing_source="tokens-only",
-                created_by="test:combo",
-            ))
-            s.execute(insert(ProviderModelCache).values(
-                provider_connection_id=conn_id,
-                model_id=model_id,
-                last_preflight_status="valid",
-            ))
+            s.execute(
+                insert(ProviderConnection).values(
+                    id=conn_id,
+                    team_id=team_id,
+                    provider_type="openai-compatible",
+                    display_name=display_name,
+                    base_url="https://api.example.test/v1",
+                    upstream_host="api.example.test",
+                    resolved_egress_ips=["203.0.113.10"],
+                    encrypted_api_key_ref=f"test://{conn_id}",
+                    status="valid",
+                    pricing_source="tokens-only",
+                    created_by="test:combo",
+                )
+            )
+            s.execute(
+                insert(ProviderModelCache).values(
+                    provider_connection_id=conn_id,
+                    model_id=model_id,
+                    last_preflight_status="valid",
+                )
+            )
         s.commit()
     sync_engine.dispose()
 
@@ -450,25 +468,29 @@ async def test_combinations_reject_provider_model_cache_per_combo(
     conn_id = uuid4()
     with sl() as s:
         team_id = s.execute(select(Token.team_id).where(Token.type == "team")).scalar_one()
-        s.execute(insert(ProviderConnection).values(
-            id=conn_id,
-            team_id=team_id,
-            provider_type="openai-compatible",
-            display_name="Combo provider",
-            base_url="https://api.example.test/v1",
-            upstream_host="api.example.test",
-            resolved_egress_ips=["203.0.113.10"],
-            encrypted_api_key_ref=f"test://{conn_id}",
-            status="valid",
-            pricing_source="tokens-only",
-            created_by="test:combo",
-        ))
-        s.execute(insert(ProviderModelCache).values(
-            provider_connection_id=conn_id,
-            model_id="bad-model",
-            last_preflight_status="failed",
-            last_preflight_error_code="upstream_404",
-        ))
+        s.execute(
+            insert(ProviderConnection).values(
+                id=conn_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name="Combo provider",
+                base_url="https://api.example.test/v1",
+                upstream_host="api.example.test",
+                resolved_egress_ips=["203.0.113.10"],
+                encrypted_api_key_ref=f"test://{conn_id}",
+                status="valid",
+                pricing_source="tokens-only",
+                created_by="test:combo",
+            )
+        )
+        s.execute(
+            insert(ProviderModelCache).values(
+                provider_connection_id=conn_id,
+                model_id="bad-model",
+                last_preflight_status="failed",
+                last_preflight_error_code="upstream_404",
+            )
+        )
         s.commit()
     sync_engine.dispose()
 
@@ -620,7 +642,8 @@ async def test_combinations_reject_agent_without_service_runtime(
 
 
 async def test_combinations_reject_oracle_when_any_task_is_incompat(
-    setup: tuple[FastAPI, str], postgres_url: str,
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
 ) -> None:
     """#320: a multi-agent combinations batch where oracle is one of
     the agents must be rejected if any task is non-pytest. The
@@ -644,7 +667,8 @@ async def test_combinations_reject_oracle_when_any_task_is_incompat(
     sync_engine.dispose()
 
     r = await _post(
-        app, raw,
+        app,
+        raw,
         {
             "name": "oracle+litellm-on-script-task",
             "task_filter": {
@@ -653,11 +677,13 @@ async def test_combinations_reject_oracle_when_any_task_is_incompat(
             },
             "trial_config": {},
             "combinations": [
-                {"agent_name": "oracle", "agent_model": None,
-                 "n_per_task": 1, "label": "oracle"},
-                {"agent_name": "litellm",
-                 "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
-                 "n_per_task": 1, "label": "litellm"},
+                {"agent_name": "oracle", "agent_model": None, "n_per_task": 1, "label": "oracle"},
+                {
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                    "n_per_task": 1,
+                    "label": "litellm",
+                },
             ],
         },
     )

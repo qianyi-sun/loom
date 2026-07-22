@@ -150,6 +150,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         worker_pool_autoscaler_task = asyncio.create_task(
             run_worker_pool_autoscaler_loop(
                 session_factory=session_factory,
+                environment=settings.slurm_worker_controller_environment,
                 interval_sec=settings.worker_reclaim_sweep_interval_sec,
                 freshness_sec=settings.worker_heartbeat_expiry_sec,
             ),

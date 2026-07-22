@@ -13,16 +13,12 @@ class TestDefaultStepSequence:
     def test_all_steps_have_unique_numbers(self) -> None:
         seq = default_step_sequence()
         numbers = [s.number for s in seq]
-        assert len(numbers) == len(set(numbers)), (
-            f"duplicate step numbers: {numbers}"
-        )
+        assert len(numbers) == len(set(numbers)), f"duplicate step numbers: {numbers}"
 
     def test_all_steps_have_unique_names(self) -> None:
         seq = default_step_sequence()
         names = [s.name for s in seq]
-        assert len(names) == len(set(names)), (
-            f"duplicate step names: {names}"
-        )
+        assert len(names) == len(set(names)), f"duplicate step names: {names}"
 
     def test_numbers_are_monotonic(self) -> None:
         seq = default_step_sequence()
@@ -33,9 +29,7 @@ class TestDefaultStepSequence:
 
     def test_all_steps_conform_to_protocol(self) -> None:
         for step in default_step_sequence():
-            assert isinstance(step, Step), (
-                f"step {step!r} does not conform to the Step protocol"
-            )
+            assert isinstance(step, Step), f"step {step!r} does not conform to the Step protocol"
 
     def test_summary_is_last(self) -> None:
         seq = default_step_sequence()
@@ -62,6 +56,7 @@ class TestDefaultStepSequence:
             "production-defaults",
             "release-gate",
             "smoke",
+            "staging-admin-browser-acceptance",
             "summary",
         }
         got = {s.name for s in default_step_sequence()}
@@ -104,9 +99,7 @@ class TestDefaultStepSequence:
         render_dir.artifact_path("rendered.yaml").write_text("yaml")
         gb10_dir = ev.step_dir(14, "release-gate")
         gb10_dir.path.mkdir(parents=True, exist_ok=True)
-        release_gate_env_state_check = gb10_dir.artifact_path(
-            "environment-state-check.json"
-        )
+        release_gate_env_state_check = gb10_dir.artifact_path("environment-state-check.json")
         release_gate_env_state_check.write_text("{}")
 
         argv = list(ReleaseGateStep().argv(ctx, gb10_dir))

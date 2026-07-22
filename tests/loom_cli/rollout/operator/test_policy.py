@@ -185,6 +185,7 @@ def test_child_environment_is_an_exact_fixed_allowlist() -> None:
         "USER": "loom-rollout",
         "LOGNAME": "loom-rollout",
         "PATH": "/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "XDG_RUNTIME_DIR": f"/run/user/{SERVICE_UID}",
         "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{SERVICE_UID}/bus",
         "KUBECONFIG": "/var/lib/loom-staging-rollout/kubeconfig",

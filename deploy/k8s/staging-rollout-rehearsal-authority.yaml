@@ -1,0 +1,214 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loom-rollout-system
+  labels:
+    loom.openai.dev/authority: staging-preflight-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loom-rollout-rehearsal
+  namespace: loom-rollout-system
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loom-rollout-rehearsal
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "delete", "get", "patch", "update"]
+  - apiGroups: [""]
+    resources:
+      - "configmaps"
+      - "endpoints"
+      - "persistentvolumeclaims"
+      - "pods"
+      - "pods/exec"
+      - "pods/log"
+      - "secrets"
+      - "serviceaccounts"
+      - "services"
+    verbs: ["create", "delete", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["create", "delete", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "patch", "update"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["create", "delete", "patch", "update"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create", "delete", "patch", "update"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["loom-rollout-rehearsal-observer"]
+    verbs: ["bind"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["selfsubjectreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["selfsubjectaccessreviews", "selfsubjectrulesreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loom-rollout-rehearsal-observer
+rules:
+  - apiGroups: [""]
+    resources:
+      - "configmaps"
+      - "endpoints"
+      - "persistentvolumeclaims"
+      - "pods"
+      - "pods/log"
+      - "secrets"
+      - "serviceaccounts"
+      - "services"
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: loom-rollout-rehearsal-namespaces
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: exact-rehearsal-principal
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:loom-rollout-system:loom-rollout-rehearsal'
+  validations:
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject : object).metadata.name.startsWith('loom-rehearsal-')
+      message: rehearsal principal may only manage loom-rehearsal-* namespaces
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['loom.openai.dev/authority']
+        == 'staging-preflight'
+      message: rehearsal namespace must carry the exact staging-preflight authority label
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['pod-security.kubernetes.io/enforce']
+        == 'restricted' &&
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['pod-security.kubernetes.io/enforce-version']
+        == 'latest' &&
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['pod-security.kubernetes.io/audit']
+        == 'restricted' &&
+        (request.operation == 'DELETE' ? oldObject : object).metadata.labels['pod-security.kubernetes.io/warn']
+        == 'restricted'
+      message: rehearsal namespaces must enforce the restricted pod security standard
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: loom-rollout-rehearsal-namespaces
+spec:
+  policyName: loom-rollout-rehearsal-namespaces
+  validationActions: ["Deny"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: loom-rollout-rehearsal-resources
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
+        resources: ["*"]
+  matchConditions:
+    - name: exact-rehearsal-principal
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:loom-rollout-system:loom-rollout-rehearsal'
+    - name: exclude-namespace-admission
+      expression: >-
+        !(request.resource.group == '' && request.resource.resource == 'namespaces')
+  validations:
+    - expression: request.namespace.startsWith('loom-rehearsal-')
+      message: rehearsal principal may only mutate resources in loom-rehearsal-* namespaces
+    - expression: >-
+        request.resource.group != 'rbac.authorization.k8s.io' ||
+        request.resource.resource != 'rolebindings' ||
+        ((request.operation == 'DELETE' ? oldObject : object).roleRef.apiGroup ==
+        'rbac.authorization.k8s.io' &&
+        (request.operation == 'DELETE' ? oldObject : object).roleRef.kind == 'ClusterRole' &&
+        (request.operation == 'DELETE' ? oldObject : object).roleRef.name ==
+        'loom-rollout-rehearsal-observer' &&
+        (request.operation == 'DELETE' ? oldObject : object).subjects.size() == 1 &&
+        (request.operation == 'DELETE' ? oldObject : object).subjects[0].kind == 'ServiceAccount' &&
+        (request.operation == 'DELETE' ? oldObject : object).subjects[0].name ==
+        'loom-rollout-rehearsal' &&
+        (request.operation == 'DELETE' ? oldObject : object).subjects[0].namespace ==
+        'loom-rollout-system')
+      message: rehearsal role bindings may only bind the exact observer authority
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: loom-rollout-rehearsal-resources
+spec:
+  policyName: loom-rollout-rehearsal-resources
+  validationActions: ["Deny"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loom-rollout-rehearsal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: loom-rollout-rehearsal
+subjects:
+  - kind: ServiceAccount
+    name: loom-rollout-rehearsal
+    namespace: loom-rollout-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loom-rollout-rehearsal-ingress-observer
+  namespace: ingress-nginx
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["ingress-nginx-controller"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loom-rollout-rehearsal-ingress-observer
+  namespace: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loom-rollout-rehearsal-ingress-observer
+subjects:
+  - kind: ServiceAccount
+    name: loom-rollout-rehearsal
+    namespace: loom-rollout-system

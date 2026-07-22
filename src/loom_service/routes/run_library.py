@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch, LlmCall, Team, Trial
 from loom.security.redaction import redact_mapping, redact_text
 from loom_service.auth_guards import (
@@ -1973,7 +1974,16 @@ async def clone_run_library_batch_config(
         },
         *benchmark_provenance,
     ]
+    clone_id = uuid4()
+    clone_created_at = datetime.now(UTC)
+    clone_lifecycle_authority_id = await ensure_batch_lifecycle_authority(
+        session,
+        batch_id=clone_id,
+        team_id=ctx.team_id,
+        created_at=clone_created_at,
+    )
     clone = Batch(
+        id=clone_id,
         team_id=ctx.team_id,
         name=payload.name,
         description=payload.description or (f"Cloned config from shared batch {source.id}."),
@@ -1993,6 +2003,8 @@ async def clone_run_library_batch_config(
         provider_connection_id=payload.provider_connection_id,
         provider_model_id=payload.provider_model_id or source.provider_model_id,
         source_provenance=provenance,
+        created_at=clone_created_at,
+        lifecycle_authority_id=clone_lifecycle_authority_id,
     )
     session.add(clone)
     await session.commit()
@@ -2156,7 +2168,16 @@ async def reuse_run_library_artifact(
         combinations=combinations,
     ) + len(required_worker_pools)
     provenance.extend(benchmark_provenance)
+    derived_id = uuid4()
+    derived_created_at = datetime.now(UTC)
+    derived_lifecycle_authority_id = await ensure_batch_lifecycle_authority(
+        session,
+        batch_id=derived_id,
+        team_id=ctx.team_id,
+        created_at=derived_created_at,
+    )
     derived = Batch(
+        id=derived_id,
         team_id=ctx.team_id,
         name=payload.name,
         description=payload.description
@@ -2181,6 +2202,8 @@ async def reuse_run_library_artifact(
             or (batch.provider_model_id if batch else None)
         ),
         source_provenance=provenance,
+        created_at=derived_created_at,
+        lifecycle_authority_id=derived_lifecycle_authority_id,
     )
     session.add(derived)
     await session.commit()

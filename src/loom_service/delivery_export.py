@@ -20,6 +20,11 @@ from botocore.exceptions import ClientError
 from sqlalchemy import select
 
 from loom.auth import AuthContext
+from loom.data_lifecycle_registry import (
+    bind_existing_batch_lifecycle_authority,
+    ensure_artifact_lifecycle_authority,
+    register_lifecycle_object,
+)
 from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial
 from loom_service.delivery_export_tb2_v2 import (
     build_per_trial_v2_bundle,
@@ -1790,6 +1795,11 @@ async def create_delivery_export(
     public_base_url: str | None = None,
 ) -> dict[str, Any]:
     main, supplements = await _load_batch_family(session, main_batch_id, supplemental_batch_ids)
+    await bind_existing_batch_lifecycle_authority(
+        session,
+        batch_id=main.id,
+        expected_team_id=main.team_id,
+    )
     batch_ids = [main.id, *[batch.id for batch in supplements]]
     trials_by_batch = await _trials_for_batches(session, batch_ids)
     selected = _select_trials(
@@ -1842,9 +1852,16 @@ async def create_delivery_export(
     summary["archive_sha256"] = sha256
 
     artifact_id = uuid4()
+    artifact_created_at = datetime.now(UTC)
+    lifecycle_authority_id = await ensure_artifact_lifecycle_authority(
+        session,
+        artifact_id=artifact_id,
+        team_id=main.team_id,
+        created_at=artifact_created_at,
+    )
     filename = _archive_filename(main, mode=mode)
     storage_key = f"delivery-exports/{main.team_id}/{main.id}/{artifact_id}/{filename}"
-    minio_client.put_object(
+    archive_result = minio_client.put_object(
         Bucket=settings.artifacts_bucket,
         Key=storage_key,
         Body=archive.body,
@@ -1852,10 +1869,38 @@ async def create_delivery_export(
     close = getattr(archive.body, "close", None)
     if callable(close):
         close()
-    minio_client.put_object(
+    checksum_key = f"{storage_key}.sha256"
+    checksum_body = f"{sha256}  {filename}\n".encode()
+    checksum_result = minio_client.put_object(
         Bucket=settings.artifacts_bucket,
-        Key=f"{storage_key}.sha256",
-        Body=f"{sha256}  {filename}\n".encode(),
+        Key=checksum_key,
+        Body=checksum_body,
+    )
+    archive_version = archive_result.get("VersionId")
+    if not isinstance(archive_version, str) or not archive_version:
+        archive_version = None
+    checksum_version = checksum_result.get("VersionId")
+    if not isinstance(checksum_version, str) or not checksum_version:
+        checksum_version = None
+    await register_lifecycle_object(
+        session,
+        authority_id=lifecycle_authority_id,
+        bucket=settings.artifacts_bucket,
+        object_key=storage_key,
+        version_id=archive_version,
+        content_sha256=sha256,
+        size_bytes=archive.size_bytes,
+        created_at=artifact_created_at,
+    )
+    await register_lifecycle_object(
+        session,
+        authority_id=lifecycle_authority_id,
+        bucket=settings.artifacts_bucket,
+        object_key=checksum_key,
+        version_id=checksum_version,
+        content_sha256=hashlib.sha256(checksum_body).hexdigest(),
+        size_bytes=len(checksum_body),
+        created_at=artifact_created_at,
     )
     source_batch_ids = [str(batch_id) for batch_id in batch_ids]
     artifact = Artifact(
@@ -1906,6 +1951,8 @@ async def create_delivery_export(
                 "ledger_rows": len(rows),
             }
         },
+        created_at=artifact_created_at,
+        lifecycle_authority_id=lifecycle_authority_id,
     )
     session.add(artifact)
     await session.commit()

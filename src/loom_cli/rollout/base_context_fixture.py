@@ -42,6 +42,9 @@ def make_ctx(
     backup_manifest_max_total_bytes: int | None = None,
     backup_manifest_sha256: str | None = None,
     runner_config_sha256: str | None = None,
+    preflight_attestation_sha256: str | None = None,
+    preflight_registry_sha256: str | None = None,
+    preflight_coverage_sha256: str | None = None,
     request_id: str | None = None,
     initiating_operator: str | None = None,
     initiating_uid: int | None = None,
@@ -88,6 +91,15 @@ def make_ctx(
         backup_manifest_max_total_bytes=backup_manifest_max_total_bytes,
         backup_manifest_sha256=backup_manifest_sha256,
         runner_config_sha256=runner_config_sha256,
+        preflight_attestation_sha256=(
+            preflight_attestation_sha256 or ("c" * 64 if request_id is not None else None)
+        ),
+        preflight_registry_sha256=(
+            preflight_registry_sha256 or ("d" * 64 if request_id is not None else None)
+        ),
+        preflight_coverage_sha256=(
+            preflight_coverage_sha256 or ("e" * 64 if request_id is not None else None)
+        ),
         request_id=request_id,
         initiating_operator=initiating_operator,
         initiating_uid=initiating_uid,

@@ -10,8 +10,6 @@ active=false) actually stop and disable supervisors.
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import glob
 import grp
 import hashlib
@@ -20,17 +18,16 @@ import json
 import os
 import pwd
 import re
-import secrets
 import shlex
 import socket
 import stat
+import struct
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -57,7 +54,7 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_env,
     candidate_relative_path,
     candidate_worktree,
-    validate_candidate_loom_source,
+    materialize_candidate_blob,
 )
 from loom_cli.rollout.steps.subprocess_util import run_captured
 from loom_cli.secret_source import SecretSourceError, resolve_secret_source
@@ -79,9 +76,10 @@ _CONTROL_PLANE_READY_TIMEOUT_SECONDS = 60.0
 _CONTROL_PLANE_READY_INTERVAL_SECONDS = 0.5
 _MAX_CATALOG_SOURCE_BYTES = 1024 * 1024
 _MAX_PORT_FORWARD_LOG_CHARS = 64 * 1024
-_SHARED_WORKER_REPO_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_WORKER_REPO_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
 _SHARED_WORKER_REPO_CONSUMER = PurePosixPath("scripts/ops/staging_rollout_shared_repo_consumer.py")
 _GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
+_MAX_SHARED_REPO_INDEX_BYTES = 64 * 1024 * 1024
 _CANONICAL_SHARED_REPO_GIT_CONFIG = (
     b"[core]\n"
     b"\trepositoryformatversion = 0\n"
@@ -89,8 +87,14 @@ _CANONICAL_SHARED_REPO_GIT_CONFIG = (
     b"\tbare = false\n"
     b"\tlogallrefupdates = true\n"
 )
-_TEST_RENAME_NOREPLACE_BACKEND: Callable[[int, str, int, str], None] | None = None
 _OVERSIZED_PORT_FORWARD_OUTPUT = "[REDACTED:oversized-port-forward-output]\n"
+_CATALOG_CACHE_ENV_PATHS = {
+    "XDG_CACHE_HOME": Path("xdg"),
+    "HF_HOME": Path("huggingface"),
+    "HF_HUB_CACHE": Path("huggingface/hub"),
+}
+_EXTERNAL_CONSUMER_VERIFY_ATTEMPTS = 13
+_EXTERNAL_CONSUMER_VERIFY_BACKOFF_SECONDS = 5.0
 _PORT_FORWARD_ENV_KEYS = frozenset(
     {
         "DBUS_SESSION_BUS_ADDRESS",
@@ -1047,6 +1051,51 @@ def _catalog_port_forward_evidence(
     }
 
 
+def _catalog_cache_environment(step_dir: StepDir) -> dict[str, str]:
+    """Create one private, rollout-owned cache namespace for catalog tooling."""
+    cache_root = step_dir.artifact_path("catalog-cache")
+    directories = (
+        cache_root,
+        cache_root / "xdg",
+        cache_root / "huggingface",
+        cache_root / "huggingface" / "hub",
+    )
+    for path in directories:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise CatalogProvisioningError(
+                "catalog provisioning cache could not be created safely",
+            ) from exc
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise CatalogProvisioningError(
+                "catalog provisioning cache could not be inspected safely",
+            ) from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != os.getegid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise CatalogProvisioningError(
+                "catalog provisioning cache authority is unsafe",
+            )
+    return {name: str(cache_root / relative) for name, relative in _CATALOG_CACHE_ENV_PATHS.items()}
+
+
+def _catalog_cache_evidence(step_dir: StepDir) -> dict[str, object]:
+    return {
+        "environment_keys": sorted(_CATALOG_CACHE_ENV_PATHS),
+        "mode": "0o700",
+        "root": str(step_dir.artifact_path("catalog-cache")),
+    }
+
+
 @contextmanager
 def _catalog_effective_env(
     plan: CatalogProvisioningPlan,
@@ -1054,6 +1103,7 @@ def _catalog_effective_env(
     step_dir: StepDir,
 ) -> Iterator[tuple[dict[str, str], dict[str, Any]]]:
     env = dict(plan.env)
+    env.update(_catalog_cache_environment(step_dir))
     config = plan.kubernetes_port_forward
     if config is None:
         yield env, {"enabled": False}
@@ -1182,6 +1232,7 @@ def _run_catalog_provisioning(
                 "required_env": plan.required_env,
                 "env_file": plan.env_file,
                 "env_sources": plan.env_sources,
+                "cache": _catalog_cache_evidence(step_dir),
                 "kubernetes_port_forward": {"enabled": True, "error": message},
                 "stdout_log": str(stdout_log),
                 "stderr_log": str(stderr_log),
@@ -1215,6 +1266,7 @@ def _run_catalog_provisioning(
         "required_env": plan.required_env,
         "env_file": plan.env_file,
         "env_sources": plan.env_sources,
+        "cache": _catalog_cache_evidence(step_dir),
         "kubernetes_port_forward": port_forward_evidence,
         "environment_keys": sorted(effective_env),
         "stdout_log": str(stdout_log),
@@ -1493,6 +1545,7 @@ def _shared_repo_git(repo_dir: Path, *arguments: str) -> str:
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_CONFIG_SYSTEM": "/dev/null",
             "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_INDEX_FILE": "/dev/null",
             "GIT_ATTR_NOSYSTEM": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_TERMINAL_PROMPT": "0",
@@ -1612,19 +1665,115 @@ def _open_child_directory(parent_fd: int, name: str) -> int:
     )
 
 
-def _index_entries(repo_dir: Path) -> dict[str, tuple[str, str]]:
-    raw = _shared_repo_git(repo_dir, "ls-files", "--stage", "-z")
-    entries: dict[str, tuple[str, str]] = {}
-    for raw_entry in raw.split("\0"):
-        if not raw_entry:
-            continue
-        metadata, separator, relative = raw_entry.partition("\t")
-        fields = metadata.split()
-        if separator != "\t" or len(fields) != 3 or fields[2] != "0":
+def _read_shared_repo_index(git_fd: int) -> bytes:
+    """Read the exact index without letting Git refresh the published file."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open("index", flags, dir_fd=git_fd)
+    except OSError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is unavailable",
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or not 32 <= before.st_size <= _MAX_SHARED_REPO_INDEX_BYTES
+        ):
             raise ExternalSlurmPrereqMaterializationError(
                 "external runner repository index is invalid",
             )
-        mode, object_id = fields[:2]
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository index is truncated",
+                )
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_size,
+        ) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_mtime_ns,
+            before.st_size,
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index changed while read",
+            )
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _index_entries(git_fd: int) -> dict[str, tuple[str, str]]:
+    raw = _read_shared_repo_index(git_fd)
+    if raw[:4] != b"DIRC" or hashlib.sha1(raw[:-20], usedforsecurity=False).digest() != raw[-20:]:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is invalid",
+        )
+    try:
+        version, entry_count = struct.unpack(">II", raw[4:12])
+    except struct.error as exc:  # pragma: no cover - guarded by the size bound
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is invalid",
+        ) from exc
+    if version not in {2, 3} or not 1 <= entry_count <= 1_000_000:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is unsupported",
+        )
+
+    entries: dict[str, tuple[str, str]] = {}
+    offset = 12
+    payload_end = len(raw) - 20
+    for _entry_number in range(entry_count):
+        entry_start = offset
+        if offset + 62 > payload_end:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index is invalid",
+            )
+        mode_value = struct.unpack(">I", raw[offset + 24 : offset + 28])[0]
+        object_id = raw[offset + 40 : offset + 60].hex()
+        flags_value = struct.unpack(">H", raw[offset + 60 : offset + 62])[0]
+        if (flags_value >> 12) & 0x3:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index contains an unmerged entry",
+            )
+        offset += 62
+        if flags_value & 0x4000:
+            if version != 3 or offset + 2 > payload_end:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner repository index is invalid",
+                )
+            offset += 2
+        try:
+            terminator = raw.index(b"\0", offset, payload_end)
+            relative = raw[offset:terminator].decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index path is invalid",
+            ) from exc
+        encoded_length = terminator - offset
+        if (flags_value & 0x0FFF) != min(encoded_length, 0x0FFF):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index path length is invalid",
+            )
+        entry_length = terminator + 1 - entry_start
+        offset = entry_start + ((entry_length + 7) // 8) * 8
+        if offset > payload_end or any(raw[terminator + 1 : offset]):
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index padding is invalid",
+            )
+
+        mode = f"{mode_value:o}"
         relative_path = PurePosixPath(relative)
         if (
             mode not in {"100644", "100755", "120000"}
@@ -1639,6 +1788,26 @@ def _index_entries(repo_dir: Path) -> dict[str, tuple[str, str]]:
                 "external runner repository index contains an unsupported entry",
             )
         entries[relative] = (mode, object_id)
+
+    extensions: set[bytes] = set()
+    while offset < payload_end:
+        if offset + 8 > payload_end:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index extension is invalid",
+            )
+        signature = raw[offset : offset + 4]
+        extension_size = struct.unpack(">I", raw[offset + 4 : offset + 8])[0]
+        offset += 8
+        if signature != b"TREE" or signature in extensions or offset + extension_size > payload_end:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository index extension is unsupported",
+            )
+        extensions.add(signature)
+        offset += extension_size
+    if offset != payload_end:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository index is invalid",
+        )
     if not entries:
         raise ExternalSlurmPrereqMaterializationError(
             "external runner repository index is empty",
@@ -2090,6 +2259,7 @@ def _validate_repo_tree(
     *,
     root: _BoundDirectory,
     resolved_sha: str,
+    top_mode: int = 0o750,
 ) -> None:
     root.assert_stable()
     try:
@@ -2101,7 +2271,7 @@ def _validate_repo_tree(
         if (
             top.st_uid != os.geteuid()
             or top.st_gid != root.identity.st_gid
-            or stat.S_IMODE(top.st_mode) != 0o750
+            or stat.S_IMODE(top.st_mode) != top_mode
         ):
             raise ExternalSlurmPrereqMaterializationError(
                 "existing external runner repository has unsafe authority",
@@ -2151,7 +2321,7 @@ def _validate_repo_tree(
                 raise ExternalSlurmPrereqMaterializationError(
                     "external runner repository does not exactly match the resolved candidate",
                 )
-            index_entries = _index_entries(repo_dir)
+            index_entries = _index_entries(git_fd)
             tree_entries = _commit_tree_entries(repo_dir, resolved_sha)
             if index_entries != tree_entries:
                 raise ExternalSlurmPrereqMaterializationError(
@@ -2208,6 +2378,7 @@ def _normalize_repo_tree(
     *,
     root: _BoundDirectory,
     resolved_sha: str,
+    publish: bool = True,
 ) -> None:
     root.assert_stable()
     repo_fd = _open_child_directory(root.fd, repo_dir.name)
@@ -2235,22 +2406,22 @@ def _normalize_repo_tree(
                 uid=os.geteuid(),
                 gid=root.identity.st_gid,
             )
+            if _shared_repo_git(repo_dir, "rev-parse", "--show-object-format").strip() != "sha1":
+                raise ExternalSlurmPrereqMaterializationError(
+                    "fresh external runner checkout object format is unsupported",
+                )
+            head = _shared_repo_git(repo_dir, "rev-parse", "HEAD^{commit}").strip()
+            if head != resolved_sha:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "fresh external runner checkout does not match the resolved candidate",
+                )
+            index_entries = _index_entries(git_fd)
+            if index_entries != _commit_tree_entries(repo_dir, resolved_sha):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "fresh external runner checkout index does not match its commit tree",
+                )
         finally:
             os.close(git_fd)
-        if _shared_repo_git(repo_dir, "rev-parse", "--show-object-format").strip() != "sha1":
-            raise ExternalSlurmPrereqMaterializationError(
-                "fresh external runner checkout object format is unsupported",
-            )
-        head = _shared_repo_git(repo_dir, "rev-parse", "HEAD^{commit}").strip()
-        if head != resolved_sha:
-            raise ExternalSlurmPrereqMaterializationError(
-                "fresh external runner checkout does not match the resolved candidate",
-            )
-        index_entries = _index_entries(repo_dir)
-        if index_entries != _commit_tree_entries(repo_dir, resolved_sha):
-            raise ExternalSlurmPrereqMaterializationError(
-                "fresh external runner checkout index does not match its commit tree",
-            )
         index_modes = {relative: entry[0] for relative, entry in index_entries.items()}
         expected_directories = _expected_worktree_directories(index_entries)
         materialized, directories = _normalize_worktree(
@@ -2260,14 +2431,24 @@ def _normalize_repo_tree(
             uid=os.geteuid(),
             gid=root.identity.st_gid,
         )
-        os.fchmod(repo_fd, 0o750)
+        if publish:
+            os.fchmod(repo_fd, 0o750)
+        elif stat.S_IMODE(os.fstat(repo_fd).st_mode) != 0o2700:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner private checkout lost its setgid access gate",
+            )
         if materialized != set(index_modes) or directories != expected_directories:
             raise ExternalSlurmPrereqMaterializationError(
                 "fresh external runner checkout does not match its exact index",
             )
     finally:
         os.close(repo_fd)
-    _validate_repo_tree(repo_dir, root=root, resolved_sha=resolved_sha)
+    _validate_repo_tree(
+        repo_dir,
+        root=root,
+        resolved_sha=resolved_sha,
+        top_mode=0o750 if publish else 0o2700,
+    )
 
 
 def _repo_matches(
@@ -2324,34 +2505,34 @@ def _clone_repo_checkout(
     )
 
 
-def _prepare_temp_root(
-    temp_root: Path,
+def _prepare_private_claim(
+    claim_root: Path,
     *,
     root: _BoundDirectory,
 ) -> os.stat_result:
-    temp_identity = temp_root.lstat()
+    claim_identity = claim_root.lstat()
     if (
-        temp_identity.st_gid != root.identity.st_gid
-        or temp_identity.st_uid != os.geteuid()
-        or not stat.S_ISDIR(temp_identity.st_mode)
-        or stat.S_ISLNK(temp_identity.st_mode)
+        claim_identity.st_gid != root.identity.st_gid
+        or claim_identity.st_uid != os.geteuid()
+        or not stat.S_ISDIR(claim_identity.st_mode)
+        or stat.S_ISLNK(claim_identity.st_mode)
     ):
         raise ExternalSlurmPrereqMaterializationError(
-            "external runner temporary checkout did not inherit root authority",
+            "external runner private checkout did not inherit root authority",
         )
-    if not temp_identity.st_mode & stat.S_ISGID:
+    if not claim_identity.st_mode & stat.S_ISGID:
         process_groups = {*os.getgroups(), os.getgid()}
         if root.identity.st_gid not in process_groups:
             raise ExternalSlurmPrereqMaterializationError(
-                "external runner temporary checkout did not inherit setgid authority",
+                "external runner private checkout did not inherit setgid authority",
             )
-        os.chmod(temp_root, 0o2700)
-        temp_identity = temp_root.lstat()
-    if stat.S_IMODE(temp_identity.st_mode) != 0o2700:
+        os.chmod(claim_root, 0o2700)
+        claim_identity = claim_root.lstat()
+    if stat.S_IMODE(claim_identity.st_mode) != 0o2700:
         raise ExternalSlurmPrereqMaterializationError(
-            "external runner temporary checkout mode is unsafe",
+            "external runner private checkout mode is unsafe",
         )
-    return temp_identity
+    return claim_identity
 
 
 def _remove_directory_at(parent_fd: int, name: str, *, expected: os.stat_result) -> None:
@@ -2360,7 +2541,7 @@ def _remove_directory_at(parent_fd: int, name: str, *, expected: os.stat_result)
         current = os.fstat(directory_fd)
         if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
             raise ExternalSlurmPrereqMaterializationError(
-                "external runner temporary checkout authority changed during materialization",
+                "external runner private checkout authority changed during materialization",
             )
         for child in os.listdir(directory_fd):
             metadata = os.stat(child, dir_fd=directory_fd, follow_symlinks=False)
@@ -2373,70 +2554,7 @@ def _remove_directory_at(parent_fd: int, name: str, *, expected: os.stat_result)
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _entry_exists(directory_fd: int, name: str) -> bool:
-    try:
-        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    return True
-
-
-def _rename_directory_noreplace(
-    source_fd: int,
-    source_name: str,
-    destination_fd: int,
-    destination_name: str,
-) -> None:
-    """Publish exactly once without a check-then-replace race."""
-    if _TEST_RENAME_NOREPLACE_BACKEND is not None:
-        _TEST_RENAME_NOREPLACE_BACKEND(
-            source_fd,
-            source_name,
-            destination_fd,
-            destination_name,
-        )
-        return
-    if not sys.platform.startswith("linux"):
-        raise ExternalSlurmPrereqMaterializationError(
-            "atomic external runner repository publication is unavailable",
-        )
-    libc = ctypes.CDLL(None, use_errno=True)
-    encoded_source = os.fsencode(source_name)
-    encoded_destination = os.fsencode(destination_name)
-    try:
-        rename = libc.renameat2
-    except AttributeError as exc:
-        raise ExternalSlurmPrereqMaterializationError(
-            "atomic external runner repository publication is unavailable",
-        ) from exc
-    rename.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    rename.restype = ctypes.c_int
-    result = rename(
-        source_fd,
-        encoded_source,
-        destination_fd,
-        encoded_destination,
-        1,  # RENAME_NOREPLACE
-    )
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-        raise ExternalSlurmPrereqMaterializationError(
-            "external runner repository destination appeared during materialization",
-        )
-    raise ExternalSlurmPrereqMaterializationError(
-        "atomic external runner repository publication failed safely",
-    )
-
-
-def _materialize_repo_dir(
+def materialize_external_runner_repo(
     *,
     repo_dir: Path,
     source_repo: Path,
@@ -2444,8 +2562,8 @@ def _materialize_repo_dir(
     expected_ref: str,
 ) -> dict[str, Any]:
     root = _validate_repo_root(repo_dir, expected_ref)
-    temp_name: str | None = None
-    temp_identity: os.stat_result | None = None
+    claim_identity: os.stat_result | None = None
+    published = False
     try:
         try:
             matched = _repo_matches(repo_dir, resolved_sha, root=root)
@@ -2453,42 +2571,61 @@ def _materialize_repo_dir(
             matched = None
         if matched is not None:
             return matched
-        if _entry_exists(root.fd, repo_dir.name):
+        try:
+            os.mkdir(repo_dir.name, 0o700, dir_fd=root.fd)
+        except FileExistsError:
             raise ExternalSlurmPrereqMaterializationError(
                 "existing external runner repository does not exactly match the candidate",
-            )
-
-        temp_name = f".{repo_dir.name}.tmp-{secrets.token_hex(16)}"
-        os.mkdir(temp_name, 0o700, dir_fd=root.fd)
-        temp_root = repo_dir.parent / temp_name
-        temp_identity = os.stat(temp_name, dir_fd=root.fd, follow_symlinks=False)
-        checkout = temp_root / "checkout"
-        temp_fd = _open_child_directory(root.fd, temp_name)
+            ) from None
+        claim_identity = os.stat(repo_dir.name, dir_fd=root.fd, follow_symlinks=False)
+        repo_fd = _open_child_directory(root.fd, repo_dir.name)
         try:
-            temp_identity = _prepare_temp_root(temp_root, root=root)
+            claim_identity = _prepare_private_claim(repo_dir, root=root)
+            opened_claim = os.fstat(repo_fd)
+            if (opened_claim.st_dev, opened_claim.st_ino) != (
+                claim_identity.st_dev,
+                claim_identity.st_ino,
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner private checkout authority changed before materialization",
+                )
             root.assert_stable()
             _clone_repo_checkout(
                 source_repo=source_repo,
-                tmp_dir=checkout,
+                tmp_dir=repo_dir,
                 resolved_sha=resolved_sha,
             )
             root.assert_stable()
-            temp_current = os.fstat(temp_fd)
-            if (temp_current.st_dev, temp_current.st_ino) != (
-                temp_identity.st_dev,
-                temp_identity.st_ino,
+            claim_current = os.fstat(repo_fd)
+            if (claim_current.st_dev, claim_current.st_ino) != (
+                claim_identity.st_dev,
+                claim_identity.st_ino,
             ):
                 raise ExternalSlurmPrereqMaterializationError(
-                    "external runner temporary checkout authority changed during materialization",
+                    "external runner private checkout authority changed during materialization",
                 )
             _normalize_repo_tree(
-                checkout,
-                root=_BoundDirectory(temp_root, temp_fd, temp_identity),
+                repo_dir,
+                root=root,
                 resolved_sha=resolved_sha,
+                publish=False,
             )
-            _rename_directory_noreplace(temp_fd, "checkout", root.fd, repo_dir.name)
+            root.assert_stable()
+            lexical = os.stat(repo_dir.name, dir_fd=root.fd, follow_symlinks=False)
+            current = os.fstat(repo_fd)
+            if (
+                (lexical.st_dev, lexical.st_ino) != (claim_identity.st_dev, claim_identity.st_ino)
+                or (current.st_dev, current.st_ino)
+                != (claim_identity.st_dev, claim_identity.st_ino)
+                or stat.S_IMODE(current.st_mode) != 0o2700
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner private checkout authority changed before publication",
+                )
+            os.fchmod(repo_fd, 0o750)
+            published = True
         finally:
-            os.close(temp_fd)
+            os.close(repo_fd)
 
         _validate_repo_tree(repo_dir, root=root, resolved_sha=resolved_sha)
         return {
@@ -2501,15 +2638,43 @@ def _materialize_repo_dir(
         }
     finally:
         try:
-            if temp_name is not None and temp_identity is not None:
+            if not published and claim_identity is not None:
+                cleanup_current: os.stat_result | None
                 try:
-                    current = os.stat(temp_name, dir_fd=root.fd, follow_symlinks=False)
+                    cleanup_current = os.stat(
+                        repo_dir.name,
+                        dir_fd=root.fd,
+                        follow_symlinks=False,
+                    )
                 except FileNotFoundError:
-                    current = None
-                if current is not None:
-                    _remove_directory_at(root.fd, temp_name, expected=temp_identity)
+                    cleanup_current = None
+                if cleanup_current is not None:
+                    _remove_directory_at(root.fd, repo_dir.name, expected=claim_identity)
         finally:
             os.close(root.fd)
+
+
+def verify_external_runner_repo(
+    *,
+    repo_dir: Path,
+    resolved_sha: str,
+    expected_ref: str,
+) -> dict[str, Any]:
+    """Verify one already-published immutable external-runner checkout."""
+    root = _validate_repo_root(repo_dir, expected_ref)
+    try:
+        matched = _repo_matches(repo_dir, resolved_sha, root=root)
+        if matched is None:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner repository is unavailable",
+            )
+        return matched
+    finally:
+        os.close(root.fd)
+
+
+# Compatibility alias retained for the focused materializer regression suite.
+_materialize_repo_dir = materialize_external_runner_repo
 
 
 def _materialize_external_slurm_runner_prerequisites(
@@ -2668,43 +2833,18 @@ def _verify_external_slurm_runner_consumers(
         )
 
     try:
-        candidate_root = validate_candidate_loom_source(step_dir).resolve(strict=True)
-        consumer_script = candidate_root / _SHARED_WORKER_REPO_CONSUMER
-        consumer_script.relative_to(candidate_root)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        verifier_fd = os.open(consumer_script, flags)
-        try:
-            verifier_before = os.fstat(verifier_fd)
-            if (
-                not stat.S_ISREG(verifier_before.st_mode)
-                or verifier_before.st_uid != owner_uid
-                or stat.S_IMODE(verifier_before.st_mode) & 0o022
-                or verifier_before.st_nlink != 1
-                or not 0 < verifier_before.st_size <= 1024 * 1024
-            ):
-                raise ExternalSlurmPrereqMaterializationError(
-                    "external runner consumer verifier is unsafe",
-                )
-            verifier_bytes = os.read(verifier_fd, verifier_before.st_size + 1)
-            verifier_after = os.fstat(verifier_fd)
-            if len(verifier_bytes) != verifier_before.st_size or (
-                verifier_after.st_dev,
-                verifier_after.st_ino,
-                verifier_after.st_mtime_ns,
-                verifier_after.st_size,
-            ) != (
-                verifier_before.st_dev,
-                verifier_before.st_ino,
-                verifier_before.st_mtime_ns,
-                verifier_before.st_size,
-            ):
-                raise ExternalSlurmPrereqMaterializationError(
-                    "external runner consumer verifier changed while read",
-                )
-        finally:
-            os.close(verifier_fd)
+        verifier_blob = materialize_candidate_blob(
+            ctx,
+            Path(_SHARED_WORKER_REPO_CONSUMER),
+            step_dir.artifact_path("external-slurm-runner-consumer.py"),
+        )
+        verifier_bytes = verifier_blob.data
+        if not 0 < len(verifier_bytes) <= 1024 * 1024:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner consumer verifier is unsafe",
+            )
         verifier_text = verifier_bytes.decode("utf-8")
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (CandidateToolingError, OSError, UnicodeError, ValueError) as exc:
         raise ExternalSlurmPrereqMaterializationError(
             "external runner consumer verifier is unavailable",
         ) from exc
@@ -2744,63 +2884,85 @@ def _verify_external_slurm_runner_consumers(
     }
     content_identity: tuple[str, str, str, int] | None = None
     for host in hosts:
-        result = _ssh(host, command, stdin_text=verifier_text)
         safe = False
         parsed: dict[str, object] | None = None
-        if (
-            result.returncode == 0
-            and not result.stderr
-            and 0 < len(result.stdout) <= 1024
-            and result.stdout.count("\n") <= 1
-        ):
-            try:
-                candidate = json.loads(result.stdout)
-            except (TypeError, ValueError):
-                candidate = None
-            if isinstance(candidate, dict) and set(candidate) == expected_keys:
-                parsed = candidate
-                numeric_keys = {
-                    "root_device",
-                    "root_inode",
-                    "target_device",
-                    "target_inode",
-                    "tracked_entries",
-                }
-                safe = bool(
-                    candidate.get("head") == ctx.resolved_sha
-                    and all(
-                        isinstance(candidate.get(key), str)
-                        and re.fullmatch(r"[0-9a-f]{64}", str(candidate[key]))
-                        for key in {
-                            "index_sha256",
-                            "probe_file_sha256",
-                            "tree_content_sha256",
-                        }
+        attempts = 0
+        failure_class = "verifier"
+        for attempt in range(1, _EXTERNAL_CONSUMER_VERIFY_ATTEMPTS + 1):
+            attempts = attempt
+            result = _ssh(host, command, stdin_text=verifier_text)
+            retryable = result.returncode != 0
+            if result.returncode == 255:
+                failure_class = "ssh"
+            elif result.returncode != 0:
+                failure_class = "verifier"
+            elif result.stderr:
+                failure_class = "unexpected_stderr"
+            elif not (0 < len(result.stdout) <= 1024 and result.stdout.count("\n") <= 1):
+                failure_class = "evidence_shape"
+            else:
+                try:
+                    candidate = json.loads(result.stdout)
+                except (TypeError, ValueError):
+                    candidate = None
+                if isinstance(candidate, dict) and set(candidate) == expected_keys:
+                    parsed = candidate
+                    numeric_keys = {
+                        "root_device",
+                        "root_inode",
+                        "target_device",
+                        "target_inode",
+                        "tracked_entries",
+                    }
+                    safe = bool(
+                        candidate.get("head") == ctx.resolved_sha
+                        and all(
+                            isinstance(candidate.get(key), str)
+                            and re.fullmatch(r"[0-9a-f]{64}", str(candidate[key]))
+                            for key in {
+                                "index_sha256",
+                                "probe_file_sha256",
+                                "tree_content_sha256",
+                            }
+                        )
+                        and all(
+                            type(candidate.get(key)) is int and int(candidate[key]) > 0
+                            for key in numeric_keys
+                        )
                     )
-                    and all(
-                        type(candidate.get(key)) is int and int(candidate[key]) > 0
-                        for key in numeric_keys
-                    )
-                )
-                if safe:
-                    candidate_identity = (
-                        str(candidate["index_sha256"]),
-                        str(candidate["probe_file_sha256"]),
-                        str(candidate["tree_content_sha256"]),
-                        int(candidate["tracked_entries"]),
-                    )
-                    if content_identity is None:
-                        content_identity = candidate_identity
-                    elif candidate_identity != content_identity:
-                        safe = False
+                    if safe:
+                        candidate_identity = (
+                            str(candidate["index_sha256"]),
+                            str(candidate["probe_file_sha256"]),
+                            str(candidate["tree_content_sha256"]),
+                            int(candidate["tracked_entries"]),
+                        )
+                        if content_identity is None:
+                            content_identity = candidate_identity
+                        elif candidate_identity != content_identity:
+                            safe = False
+                            failure_class = "content_identity"
+                    else:
+                        failure_class = "evidence_values"
+                else:
+                    failure_class = "evidence_shape"
+            if safe:
+                break
+            if retryable and attempt < _EXTERNAL_CONSUMER_VERIFY_ATTEMPTS:
+                time.sleep(_EXTERNAL_CONSUMER_VERIFY_BACKOFF_SECONDS * attempt)
+                continue
+            break
         if not safe or parsed is None:
             evidence_hash.update(host.ssh_target.encode("ascii"))
-            evidence_hash.update(b"\0failed\0")
+            evidence_hash.update(f"\0failed\0{failure_class}\0{attempts}\0".encode("ascii"))
             _write_safe_json(
                 artifact,
                 {
                     "evidence_sha256": evidence_hash.hexdigest(),
                     "expected_host_count": len(ACTIVE_GB10_HOSTS),
+                    "failed_attempts": attempts,
+                    "failed_host": host.ssh_target,
+                    "failure_class": failure_class,
                     "host_count": len(node_evidence),
                     "nodes": node_evidence,
                     "passed": False,
@@ -2817,6 +2979,7 @@ def _verify_external_slurm_runner_consumers(
         evidence_hash.update(b"\0")
         node_evidence.append(
             {
+                "attempts": attempts,
                 "host": host.ssh_target,
                 "root_device": parsed["root_device"],
                 "root_inode": parsed["root_inode"],

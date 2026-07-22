@@ -692,6 +692,24 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
     assert projection["result"]["aggregate_reward"] == 1.0
     assert projection["trajectory_index"]["trajectory_uri"] == result.trajectory_uri
     assert projection["trajectory_index"]["atif_uri"] == result.atif_uri
+    assert projection["trajectory_index"]["trajectory_sha256"] == (
+        result.trajectory_sha256
+    )
+    assert projection["trajectory_index"]["trajectory_size_bytes"] == (
+        result.trajectory_size_bytes
+    )
+    assert projection["trajectory_index"]["atif_sha256"] == result.atif_sha256
+    assert projection["trajectory_index"]["atif_size_bytes"] == (
+        result.atif_size_bytes
+    )
+    assert isinstance(result.trajectory_sha256, str)
+    assert len(result.trajectory_sha256) == 64
+    assert result.trajectory_size_bytes is not None
+    assert result.trajectory_size_bytes > 0
+    assert isinstance(result.atif_sha256, str)
+    assert len(result.atif_sha256) == 64
+    assert result.atif_size_bytes is not None
+    assert result.atif_size_bytes > 0
     assert projection["trajectory_index"]["artifacts"] == [
         {
             "step_name": "main",
@@ -699,7 +717,8 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
             "key": f"{team_id}/{trial_id}/main/result.txt",
             "size": 5,
             "content_hash": (
-                "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e"
+                "1b161e5c1fa7425e73043362938b9824"
             ),
             "share_status": "shared",
             "blocked_reason": None,

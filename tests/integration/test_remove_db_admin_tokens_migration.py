@@ -27,39 +27,45 @@ def _token_revoked_at(session: object) -> dict[bytes, object]:
 
 
 @pytest.fixture
-def seeded_admin_tokens(postgres_url: str) -> Iterator[None]:
-    cfg = _alembic_cfg(postgres_url)
+def seeded_admin_tokens(isolated_migration_postgres_url: str) -> Iterator[None]:
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.downgrade(cfg, "0023")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     sl = sessionmaker(engine)
     with sl() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(b"legacy-admin").digest(),
-            type="admin",
-            scopes=["admin:tokens", "admin:rate_cards"],
-            team_id=None,
-            issued_at=datetime.now(UTC),
-            expires_at=None,
-            revoked_at=None,
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(b"team-token").digest(),
-            type="team",
-            scopes=["read:own"],
-            team_id=None,
-            issued_at=datetime.now(UTC),
-            expires_at=None,
-            revoked_at=None,
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(b"team-admin-scope").digest(),
-            type="team",
-            scopes=["read:own", "admin:tokens"],
-            team_id=None,
-            issued_at=datetime.now(UTC),
-            expires_at=None,
-            revoked_at=None,
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(b"legacy-admin").digest(),
+                type="admin",
+                scopes=["admin:tokens", "admin:rate_cards"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+                revoked_at=None,
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(b"team-token").digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+                revoked_at=None,
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(b"team-admin-scope").digest(),
+                type="team",
+                scopes=["read:own", "admin:tokens"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+                revoked_at=None,
+            )
+        )
         s.commit()
     try:
         yield
@@ -72,13 +78,13 @@ def seeded_admin_tokens(postgres_url: str) -> Iterator[None]:
 
 
 def test_migration_revokes_legacy_db_admin_tokens(
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
     seeded_admin_tokens: None,
 ) -> None:
-    cfg = _alembic_cfg(postgres_url)
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0024")
 
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     sl = sessionmaker(engine)
     with sl() as s:
         by_hash = _token_revoked_at(s)

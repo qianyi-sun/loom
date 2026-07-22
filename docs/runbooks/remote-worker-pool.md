@@ -1353,7 +1353,7 @@ available only on the OLDLAB submit host, mark the policy as externally run:
       "trt-eai-oldlab-5"
     ],
     "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
-    "repo_dir": "/shared_work/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}",
+    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 2,
     "requested_memory_mib": 8192,
     "requested_concurrency": 1,
@@ -1375,11 +1375,13 @@ The in-pod Control Plane autoscaler loop skips `external_runner` policies, so
 it does not repeatedly fail on missing `sbatch`. Run the reconciler on the
 Slurm submit host with the same deployed code and a local Control Plane DB
 port-forward. The supported one-shot entrypoint is
-`scripts/ops/worker_pool_autoscaler_external_once.py --pool-name <pool>`, which
-passes `include_external_policies=True`, `external_only=True`, and a pool filter
-to `reconcile_worker_pool_autoscaler_once`. This keeps policy, status, and API
-visibility in the Control Plane while executing Slurm commands only where the
-cluster credentials exist and only for the intended pool.
+`scripts/ops/worker_pool_autoscaler_external_once.py --environment
+<environment> --pool-name <pool>`, which passes the exact environment and pool
+filters together with `include_external_policies=True` and
+`external_only=True` to `reconcile_worker_pool_autoscaler_once`. This keeps
+policy, status, and API visibility in the Control Plane while executing Slurm
+commands only where the cluster credentials exist and only for the intended
+environment/pool authority.
 
 For GB10, use the same Slurm actuator rather than the legacy `gb10` actuator
 for normal capacity. The backend remains `docker` because each worker runs
@@ -1413,8 +1415,8 @@ node 7, the active 14-node, 10-slot policy has a ceiling of 140 slots:
       "trt-gb10-14",
       "trt-gb10-15"
     ],
-    "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-${IMAGE_TAG}.env",
-    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
+    "env_file": "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-${IMAGE_TAG}.env",
+    "repo_dir": "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 20,
     "requested_memory_mib": 115000,
     "requested_concurrency": 10,
@@ -1435,34 +1437,58 @@ from the replayable `--worker-token` source, forces mode `0600`, and prepares
 a clean shared checkout at the target `repo_dir` before the environment-state
 check validates existence, git HEAD, clean status, and token parity.
 
-The platform-dev installer owns the dedicated staging checkout root at
-`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+The platform-dev installer owns the dedicated GB10 staging checkout root at
+`/shared_work2/qianyi/.loom-staging-rollout/worker-repos` as
 `loom-rollout:sharedwork` mode `2750`. It creates or verifies that root only
 while rollout admission is closed and no request is active. The service can
 write the root, while the `qianyi` Slurm submitter can read and traverse it but
-cannot write it; the service receives no write access to `/shared_work/qianyi`
-itself. The install record binds both account names to their resolved UID/GID,
+cannot write it. The checked-in exporter helper adds only
+`192.168.50.103/32` to the existing `/shared_work2` export. The platform-dev
+installer owns the exact `192.168.20.12:/shared_work2` NFSv4.2 systemd mount
+and creates the absent `qianyi` parent with fixed owner/group/mode. Mountinfo,
+filesystem type, options, and device identity are checked so a local empty
+directory cannot pass. The install record binds both account names to their resolved UID/GID,
 and readiness rechecks metadata plus effective service/consumer access.
+Token and worker-env files remain private mode-`0600` local files; only the
+immutable candidate checkout uses `/shared_work2`.
 
 Step 11 accepts only the candidate-named direct child of that exact root. It
-clones with `--no-hardlinks` into a private, unpredictable setgid-root temp
-container, normalizes the completed tree to shared-group read/execute without
-group or other write, and then publishes with same-root
-`renameat2(RENAME_NOREPLACE)`. Tracked repository symlinks remain valid;
+claims that final child with an atomic no-replace `mkdir` at private mode
+`2700`, clones into it with `--no-hardlinks`, and normalizes the completed tree
+without exposing it to the shared group. It then publishes with an inode-bound
+publication mode transition to consumer-readable `0750` only after complete
+validation. Tracked repository symlinks remain valid;
 authority symlinks, foreign ownership, hard-linked or special files, extra
 directories, wrong modes, and SHA drift fail closed. Existing targets are
 immutable: only an exact fully validated target is reused, and rollout never
 replaces, cleans, or takes over drifted or ambient directories.
+Install/check runs a bounded, self-cleaning private-claim/access-gate/publish/
+collision probe as the service identity before accepting the NFS publication
+contract.
 
 Broker preflight checks the fixed 14 active GB10 nodes against the root as the
-`qianyi` consumer. After publication and before environment-state apply, step
-11 streams a trusted candidate verifier to `/usr/bin/python3 -` over the same
-protected SSH config, identity, and known-hosts boundary. The target checkout
-is data only, never verifier authority. Every node must report the exact HEAD,
+`qianyi` consumer. The 13 NFS clients must report the exact source and NFSv4
+identity, while `trt-gb10-2` must report its ext4 export backend. After
+publication and before environment-state apply, step 11 reads the verifier
+from the exact resolved commit's Git blob, not the mutable rollout worktree,
+then streams the captured bytes to `/usr/bin/python3 -` over the same protected
+SSH config, identity, and known-hosts boundary. The target checkout is data
+only, never verifier authority. Every node must report the exact HEAD,
 zero modified/untracked/ignored status, exact physical index and modes,
 readability of the deterministic tracked probe file, and no qianyi write
 capability. Content identities must agree 14/14; NFS device/inode evidence is
-recorded per node without requiring equality across nodes.
+recorded per node without requiring equality across nodes. A non-zero remote
+verifier or SSH exit is retried at most thirteen times over a bounded
+390-second incremental-backoff window so a just-published shared checkout or
+transient transport reset cannot fail the release on its first observation.
+Valid but divergent structured evidence is never retried, and exhausted
+evidence records only the host, attempt count, and a non-sensitive failure
+class before failing closed.
+
+For sealed-cumulative rollouts, step 12 then fetches the exact commit from that
+verified shared checkout through the fixed system upload-pack with object fsck
+enabled. It does not resolve or fetch `origin/dev`; merged-dev keeps the
+existing GitHub-origin fetch path.
 
 Keep the GB10 node-agent path only for Docker Compose rollout validation,
 legacy compatibility, or break-glass operation when Slurm is unavailable. The

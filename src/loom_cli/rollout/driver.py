@@ -45,6 +45,7 @@ from typing import TextIO
 
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
+from loom_cli.rollout.failure_authority import classify_rollout_failure
 from loom_cli.rollout.operator.redaction import (
     known_secrets_from_sources,
     redact_rollout_text,
@@ -566,6 +567,27 @@ def _safe_exception_text(exc: Exception) -> str:
     return redact_rollout_text(rendered, limit=2000)
 
 
+def _record_rollout_failure(
+    *,
+    evidence: EvidenceDirectory,
+    step: Step,
+    reason: str,
+) -> None:
+    """Persist one normalized stage classification before returning non-zero."""
+    safe_reason = redact_rollout_text(reason, limit=512).strip() or "rollout step failed"
+    try:
+        failure = classify_rollout_failure(
+            step_number=step.number,
+            step_name=step.name,
+            reason=safe_reason,
+        )
+    except ValueError:
+        # Test/plugin step inventories are permitted by ``run_rollout``.  The
+        # production inventory is separately proven exact against coverage.
+        return
+    evidence.write_failure(failure.to_dict())
+
+
 def _record_step_callback_failure(
     *,
     state: RolloutState,
@@ -603,6 +625,11 @@ def _record_step_callback_failure(
         started_at=started_at,
         inputs_hash=_INPUTS_HASH_UNAVAILABLE_AFTER_CALLBACK,
     )
+    _record_rollout_failure(
+        evidence=evidence,
+        step=step,
+        reason=f"{callback} exception: {safe_error}",
+    )
     return 1
 
 
@@ -634,6 +661,11 @@ def _record_strict_callback_stop(
         "attempted; investigate before an explicit reset.\n",
     )
     _clear_driver_and_save(state, evidence)
+    _record_rollout_failure(
+        evidence=evidence,
+        step=step,
+        reason=f"{callback} strict verification exception: {safe_error}",
+    )
     return 2
 
 
@@ -779,6 +811,11 @@ def _run_rollout_scoped(
                     "and explicitly reset the step before any new run.\n",
                 )
                 _clear_driver_and_save(state, evidence)
+                _record_rollout_failure(
+                    evidence=evidence,
+                    step=step,
+                    reason="persisted DONE evidence failed the strict contract",
+                )
                 return 2
             if done_evidence_matches:
                 try:
@@ -828,6 +865,11 @@ def _run_rollout_scoped(
                         f"attempted. {diagnostic}\n",
                     )
                     _clear_driver_and_save(state, evidence)
+                    _record_rollout_failure(
+                        evidence=evidence,
+                        step=step,
+                        reason=f"completed-step revalidation returned {outcome_label}",
+                    )
                     return 2
 
         # Recovery path — persisted state says something was running.
@@ -851,6 +893,11 @@ def _run_rollout_scoped(
                         "reset.\n",
                     )
                     _clear_driver_and_save(state, evidence)
+                    _record_rollout_failure(
+                        evidence=evidence,
+                        step=step,
+                        reason=f"strict pending evidence is invalid: {exc}",
+                    )
                     return 2
             _emit(
                 evidence,
@@ -924,6 +971,11 @@ def _run_rollout_scoped(
                     "and explicitly reset it if another run is required.\n",
                 )
                 _clear_driver_and_save(state, evidence)
+                _record_rollout_failure(
+                    evidence=evidence,
+                    step=step,
+                    reason=f"strict recovery verification returned {outcome.value}",
+                )
                 return 2
             if outcome is VerifyOutcome.UNKNOWN:
                 _emit(
@@ -934,6 +986,11 @@ def _run_rollout_scoped(
                     "confirmed. Investigate before re-running.\n",
                 )
                 _clear_driver_and_save(state, evidence)
+                _record_rollout_failure(
+                    evidence=evidence,
+                    step=step,
+                    reason="recovery verification returned unknown",
+                )
                 return 2
             # MISMATCH → drop back to RUNNING and re-run below.
 
@@ -969,6 +1026,11 @@ def _run_rollout_scoped(
                 started_at=record.started_at or _utc_now_iso(),
                 inputs_hash=_INPUTS_HASH_UNAVAILABLE_AFTER_STEP_FAILURE,
             )
+            _record_rollout_failure(
+                evidence=evidence,
+                step=step,
+                reason=f"run exception: {safe_error}",
+            )
             return 1
 
         _scrub_step_diagnostics(step_dir)
@@ -996,6 +1058,11 @@ def _run_rollout_scoped(
                 summary=result.summary,
                 started_at=record.started_at or _utc_now_iso(),
                 inputs_hash=_INPUTS_HASH_UNAVAILABLE_AFTER_STEP_FAILURE,
+            )
+            _record_rollout_failure(
+                evidence=evidence,
+                step=step,
+                reason=result.error or f"exit code {result.exit_code}",
             )
             return result.exit_code
 
@@ -1069,6 +1136,11 @@ def _run_rollout_scoped(
                 "reset it if another run is required.\n",
             )
             _clear_driver_and_save(state, evidence)
+            _record_rollout_failure(
+                evidence=evidence,
+                step=step,
+                reason=f"strict post-run verification returned {outcome.value}",
+            )
             return 2
         if outcome is VerifyOutcome.MISMATCH:
             # Rare — the run reported success but verify says the
@@ -1086,6 +1158,11 @@ def _run_rollout_scoped(
                 error="run reported success but verify said MISMATCH",
             )
             _clear_driver_and_save(state, evidence)
+            _record_rollout_failure(
+                evidence=evidence,
+                step=step,
+                reason="run succeeded but verification mismatched",
+            )
             return 2
         # Non-strict steps retain the historical UNKNOWN-accept behavior.
         # Strict steps reach here only on MATCH.

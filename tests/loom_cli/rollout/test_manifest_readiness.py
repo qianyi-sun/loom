@@ -1,0 +1,333 @@
+from __future__ import annotations
+
+import hashlib
+import subprocess
+
+import pytest
+
+from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ROLLOUT_IMAGES
+from loom_cli.rollout.manifest_readiness import (
+    ManifestRenderSession,
+    inspect_rendered_manifests,
+)
+
+
+def _digests() -> dict[str, str]:
+    return {
+        name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+
+
+def _rendered(*, image_tag: str = "staging-1111111") -> str:
+    containers = "\n".join(
+        f"        - name: {name}\n          image: {name}:{image_tag}"
+        for name, _path in ROLLOUT_IMAGES
+    )
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exact-candidate
+  namespace: loom-staging
+spec:
+  template:
+    spec:
+      containers:
+{containers}
+"""
+
+
+def test_manifest_render_binds_every_local_image_to_exact_id() -> None:
+    artifact = inspect_rendered_manifests(
+        _rendered(),
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    assert artifact.resource_count == 1
+    assert artifact.image_identities == {name: _digests()[name] for name, _path in ROLLOUT_IMAGES}
+    assert len(artifact.artifact_digest) == 64
+
+
+def test_manifest_render_ignores_only_empty_yaml_documents() -> None:
+    artifact = inspect_rendered_manifests(
+        "---\n---\n" + _rendered() + "---\n",
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    assert artifact.resource_count == 1
+    with pytest.raises(ValueError, match="resource set is invalid"):
+        inspect_rendered_manifests(
+            _rendered() + "---\nscalar\n",
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+        )
+
+
+def test_manifest_render_rejects_missing_or_stale_local_image() -> None:
+    missing = _rendered().replace(
+        "        - name: loom-worker\n          image: loom-worker:staging-1111111\n",
+        "",
+    )
+    with pytest.raises(ValueError, match="image set is incomplete"):
+        inspect_rendered_manifests(
+            missing,
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+        )
+    with pytest.raises(ValueError, match="image tag drifted"):
+        inspect_rendered_manifests(
+            _rendered(image_tag="staging-2222222"),
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+        )
+
+
+def test_manifest_render_binds_profile_enabled_image_subset() -> None:
+    expected = frozenset(name for name, _path in ROLLOUT_IMAGES if name != "loom-worker")
+    rendered = _rendered().replace(
+        "        - name: loom-worker\n          image: loom-worker:staging-1111111\n",
+        "",
+    )
+
+    artifact = inspect_rendered_manifests(
+        rendered,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+        expected_image_names=expected,
+    )
+
+    assert set(artifact.image_identities) == expected
+
+
+def test_manifest_render_rejects_unexpected_profile_image() -> None:
+    expected = frozenset(name for name, _path in ROLLOUT_IMAGES if name != "loom-worker")
+
+    with pytest.raises(ValueError, match="disabled rollout image"):
+        inspect_rendered_manifests(
+            _rendered(),
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+            expected_image_names=expected,
+        )
+
+
+def test_manifest_render_rejects_ambiguous_nonroot_cronjob_identity() -> None:
+    rendered = (
+        _rendered()
+        + """---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lifecycle
+  namespace: loom-staging
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsNonRoot: true
+          containers:
+            - name: lifecycle
+              image: external.example/maintenance:exact
+"""
+    )
+
+    with pytest.raises(ValueError, match="non-root identity is ambiguous"):
+        inspect_rendered_manifests(
+            rendered,
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+        )
+
+
+def test_manifest_render_accepts_explicit_container_nonroot_identity() -> None:
+    rendered = (
+        _rendered()
+        + """---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lifecycle
+  namespace: loom-staging
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsNonRoot: true
+          containers:
+            - name: lifecycle
+              image: external.example/maintenance:exact
+              securityContext:
+                runAsUser: 65532
+"""
+    )
+
+    artifact = inspect_rendered_manifests(
+        rendered,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    assert artifact.resource_count == 2
+
+
+def test_manifest_render_rejects_declared_egress_denied_by_target_ingress() -> None:
+    rendered = _rendered() + _network_policy_graph(allow_source=False)
+
+    with pytest.raises(ValueError, match="network policy graph denies declared egress"):
+        inspect_rendered_manifests(
+            rendered,
+            image_tag="staging-1111111",
+            namespace="loom-staging",
+            image_digests=_digests(),
+        )
+
+
+def test_manifest_render_accepts_symmetric_network_policy_graph() -> None:
+    artifact = inspect_rendered_manifests(
+        _rendered() + _network_policy_graph(allow_source=True),
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    assert artifact.resource_count == 5
+
+
+def _network_policy_graph(*, allow_source: bool) -> str:
+    allowed_app = "lifecycle" if allow_source else "other"
+    return f"""---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lifecycle-pod
+  namespace: loom-staging
+  labels: {{app: lifecycle}}
+spec:
+  containers: [{{name: lifecycle, image: external.example/lifecycle:exact}}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: object-store-pod
+  namespace: loom-staging
+  labels: {{app: object-store}}
+spec:
+  containers: [{{name: object-store, image: external.example/object-store:exact}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lifecycle
+  namespace: loom-staging
+spec:
+  podSelector: {{matchLabels: {{app: lifecycle}}}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {{matchLabels: {{app: object-store}}}}
+      ports: [{{port: 9000, protocol: TCP}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: object-store
+  namespace: loom-staging
+spec:
+  podSelector: {{matchLabels: {{app: object-store}}}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {{matchLabels: {{app: {allowed_app}}}}}
+      ports: [{{port: 9000, protocol: TCP}}]
+"""
+
+
+def test_manifest_session_renders_once_and_server_validates_same_bytes() -> None:
+    render_calls: list[object] = []
+    server_inputs: list[str] = []
+
+    def render() -> str:
+        render_calls.append(object())
+        return _rendered()
+
+    def server_dry_run(payload: str):
+        server_inputs.append(payload)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    session = ManifestRenderSession(
+        render,
+        server_dry_run,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    first = session.render()
+    second = session.render()
+    checked = session.server_validate()
+
+    assert first is second is checked
+    assert len(render_calls) == 1
+    assert server_inputs == [_rendered()]
+
+
+def test_manifest_server_validation_fails_closed_without_rerender() -> None:
+    session = ManifestRenderSession(
+        _rendered,
+        lambda _payload: subprocess.CompletedProcess([], 1, "", "rejected"),
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+    session.render()
+
+    with pytest.raises(ValueError, match="server-side dry-run"):
+        session.server_validate()
+
+
+def test_seeded_manifest_session_never_rerenders_exact_artifact() -> None:
+    artifact = inspect_rendered_manifests(
+        _rendered(),
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+    render_calls: list[object] = []
+    server_inputs: list[str] = []
+
+    def render() -> str:
+        render_calls.append(object())
+        return "must-not-render"
+
+    def server_dry_run(payload: str):
+        server_inputs.append(payload)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    session = ManifestRenderSession(
+        render,
+        server_dry_run,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+        artifact=artifact,
+    )
+
+    assert session.render() is artifact
+    assert session.server_validate() is artifact
+    assert not render_calls
+    assert server_inputs == [_rendered()]

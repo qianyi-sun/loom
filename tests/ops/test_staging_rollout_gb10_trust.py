@@ -135,6 +135,17 @@ def _initialize_ledger(tmp_path: Path, config: Path, public_path: Path) -> None:
     )
 
 
+def test_cli_requires_exact_candidate_ssh_config(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert trust.main(["check"]) == 2
+    assert "exact-candidate GB10 SSH config is required" in capsys.readouterr().err
+
+    legacy = "/opt/loom-staging-runner/repo/deploy/worker-pools/gb10/ssh_config"
+    assert trust.main(["--ssh-config", legacy, "check"]) == 2
+    assert "not bound to an exact candidate" in capsys.readouterr().err
+
+
 def _register_ledger_hosts(
     tmp_path: Path,
     config: Path,

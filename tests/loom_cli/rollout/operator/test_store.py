@@ -7,22 +7,41 @@ import stat
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from loom_cli.rollout.lifecycle_protocol import LifecycleAction
+from loom_cli.rollout.operator.backup_job import (
+    BackupJobEnvelope,
+    BackupJobState,
+    PreflightBackupJobEnvelope,
+    transition_backup_job,
+)
+from loom_cli.rollout.operator.backup_lease import BackupLease
+from loom_cli.rollout.operator.backup_rotation import (
+    BackupRotationState,
+    begin_candidate,
+    record_manifest_verified,
+    record_restore_verified,
+)
 from loom_cli.rollout.operator.config import APPROVED_REMOTE_URL
 from loom_cli.rollout.operator.model import (
     ActivePointer,
     CallerIdentity,
     CandidateBinding,
     DriverEnvelope,
+    PreflightRequest,
     RequestEvent,
     RolloutRequest,
 )
 from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
+from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
+from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipeline
+from tests.loom_cli.rollout.test_preflight_pipeline import _context, _registry
 
 REQUEST_ID = "stg-20260713-abcdef12"
 RESOLVED_SHA = "abcdef1234567890abcdef1234567890abcdef12"
@@ -90,6 +109,9 @@ def make_request(
         ),
         requested_at="2026-07-13T20:00:01Z",
         runner_config_sha256="2" * 64,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
         command="start",
         status=status,  # type: ignore[arg-type]
     )
@@ -122,6 +144,9 @@ def make_envelope(
         ),
         backup_manifest_sha256="1" * 64,
         runner_config_sha256="2" * 64,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
         cluster_name="loom-staging",
         namespace="loom-staging",
         environment="staging",
@@ -160,6 +185,92 @@ def make_event(
     )
 
 
+def make_backup_job_request() -> RolloutRequest:
+    return replace(
+        make_request(),
+        candidate=CandidateBinding(
+            remote_url=APPROVED_REMOTE_URL,
+            target_ref="origin/dev",
+            resolved_sha=RESOLVED_SHA,
+            image_tag="staging-abcdef1",
+            fetched_at="2026-07-13T20:00:00Z",
+            source_mode="sealed-cumulative",
+            resolved_tree="b" * 40,
+            approved_base_sha="c" * 40,
+        ),
+    )
+
+
+def make_backup_job() -> BackupJobEnvelope:
+    return BackupJobEnvelope(
+        job_id="job-20260713-abcdef12",
+        request_id=REQUEST_ID,
+        payload_id="payload-20260713-abcdef12",
+        candidate_sha=RESOLVED_SHA,
+        candidate_tree="b" * 40,
+        preflight_attestation_sha256="3" * 64,
+        mutation_epoch=4,
+        environment="staging",
+        namespace="loom-staging",
+        bundle_name="20260713T200000Z-stg-20260713-abcdef12",
+        created_at=datetime(2026, 7, 13, 20, tzinfo=UTC),
+    )
+
+
+def make_preflight_request() -> PreflightRequest:
+    return PreflightRequest(
+        request_id=REQUEST_ID,
+        rollout_id="staging-abcdef1",
+        caller=CallerIdentity("hongjian", 2002),
+        candidate=CandidateBinding(
+            remote_url=APPROVED_REMOTE_URL,
+            target_ref="origin/dev",
+            resolved_sha=RESOLVED_SHA,
+            image_tag="staging-abcdef1",
+            fetched_at="2026-07-13T20:00:00Z",
+            source_mode="sealed-cumulative",
+            resolved_tree="b" * 40,
+            approved_base_sha="c" * 40,
+        ),
+        candidate_tree="b" * 40,
+        requested_at="2026-07-13T20:00:01Z",
+        runner_config_sha256="2" * 64,
+        preflight_assessment_sha256="6" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
+        mutation_epoch=4,
+        environment="staging",
+        namespace="loom-staging",
+    )
+
+
+def make_preflight_backup_job() -> PreflightBackupJobEnvelope:
+    return PreflightBackupJobEnvelope(
+        job_id="job-20260713-abcdef12",
+        request_id=REQUEST_ID,
+        payload_id="payload-20260713-abcdef12",
+        candidate_sha=RESOLVED_SHA,
+        candidate_tree="b" * 40,
+        preflight_assessment_sha256="6" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
+        mutation_epoch=4,
+        environment="staging",
+        namespace="loom-staging",
+        bundle_name="20260713T200000Z-stg-20260713-abcdef12",
+        created_at=datetime(2026, 7, 13, 20, tzinfo=UTC),
+    )
+
+
+def make_assessment(tmp_path: Path) -> PreflightAssessment:
+    registry = _registry()
+    return PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "attestations"),
+        now=lambda: datetime(2026, 7, 13, 20, tzinfo=UTC),
+    ).assess(context=_context(registry))
+
+
 def test_create_request_is_private_and_no_replace(tmp_path: Path) -> None:
     store = RequestStore(tmp_path)
     request = make_request()
@@ -174,6 +285,226 @@ def test_create_request_is_private_and_no_replace(tmp_path: Path) -> None:
     with pytest.raises(RequestStoreError, match="already exists"):
         store.create_request(request)
     assert store.read_request(REQUEST_ID) == request
+
+
+def test_backup_lease_and_rotation_are_digest_bound_and_compare_and_swap(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    lease = BackupLease(
+        lease_id="lease-alpha000",
+        source_request_id="req-alpha0000",
+        manifest_sha256="a" * 64,
+        component_sha256={"postgres": "b" * 64, "authority": "c" * 64},
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=7,
+        db_snapshot_identity="lsn:0/16B6C50",
+        schema_revision="0067",
+        object_inventory_root="d" * 64,
+        created_at=datetime(2026, 7, 19, 20, tzinfo=UTC),
+        restore_verified_at=datetime(2026, 7, 19, 20, 5, tzinfo=UTC),
+        expires_at=datetime(2026, 7, 19, 20, tzinfo=UTC) + timedelta(hours=2),
+    )
+    lease_path = store.publish_backup_lease(lease)
+    state = begin_candidate(
+        BackupRotationState(),
+        payload_id="payload-alpha000",
+        request_id="req-alpha0000",
+        bundle_name="20260719T200000Z-req-alpha0000",
+        created_at=datetime(2026, 7, 19, 20, tzinfo=UTC),
+    ).state
+    store.replace_backup_rotation(state, expected_generation=0)
+    next_state = record_manifest_verified(
+        state,
+        payload_id="payload-alpha000",
+        manifest_sha256=lease.manifest_sha256,
+    ).state
+    store.replace_backup_rotation(next_state, expected_generation=1)
+    restored_state = record_restore_verified(
+        next_state,
+        payload_id="payload-alpha000",
+        lease=lease,
+    ).state
+    store.replace_backup_rotation(restored_state, expected_generation=2)
+
+    assert stat.S_IMODE(lease_path.stat().st_mode) == 0o600
+    assert store.publish_backup_lease(lease) == lease_path
+    assert store.read_backup_lease(lease.evidence_digest) == lease
+    assert store.read_backup_rotation() == restored_state
+    with pytest.raises(RequestStoreError, match="changed concurrently"):
+        store.replace_backup_rotation(restored_state, expected_generation=2)
+
+
+def test_preflight_request_backup_and_promotion_are_separate_immutable_authorities(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    assessment = make_assessment(tmp_path)
+    preliminary = replace(
+        make_preflight_request(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    path = store.create_preflight_request(preliminary)
+    store.publish_preflight_assessment(REQUEST_ID, assessment)
+    job = replace(
+        make_preflight_backup_job(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+
+    job_path = store.publish_preflight_backup_job(job)
+    rehearsal = PreflightPipeline(
+        registry=_registry(),
+        store=PreflightAttestationStore(tmp_path / "attestations"),
+        now=lambda: datetime(2026, 7, 13, 20, tzinfo=UTC),
+    ).rehearse(context=_context(_registry()), assessment=assessment)
+    rehearsal_path = store.publish_preflight_rehearsal(REQUEST_ID, rehearsal)
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    running = transition_backup_job(
+        state,
+        LifecycleAction.START_BACKUP,
+        updated_at=datetime(2026, 7, 13, 20, 1, tzinfo=UTC),
+    )
+    store.replace_preflight_backup_job_state(running, expected_sequence=0)
+
+    assert path.name == "preflight.json"
+    assert store.read_preflight_request(REQUEST_ID) == preliminary
+    assert job_path.parent.name == "preflight-backup"
+    assert store.read_preflight_backup_job(REQUEST_ID) == job
+    assert rehearsal_path.name == "rehearsal.json"
+    assert store.read_preflight_rehearsal(REQUEST_ID) == rehearsal
+    assert store.read_preflight_backup_job_state(REQUEST_ID) == running
+    store.append_event(make_event(event="backup_started"))
+    assert store.read_events(REQUEST_ID)[-1].event == "backup_started"
+    with pytest.raises(RequestStoreError, match="not promoted"):
+        store.read_request(REQUEST_ID)
+
+    promoted = replace(
+        make_backup_job_request(),
+        preflight_attestation_sha256="7" * 64,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    request_path = store.promote_preflight_request(promoted)
+
+    assert request_path.name == "request.json"
+    assert store.read_request(REQUEST_ID) == promoted
+    assert store.read_preflight_request(REQUEST_ID) == preliminary
+    with pytest.raises(RequestStoreError, match="already exists"):
+        store.promote_preflight_request(promoted)
+
+
+def test_active_attempt_resolves_exact_backup_payload_reference(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    assessment = make_assessment(tmp_path)
+    request = replace(
+        make_preflight_request(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    job = replace(
+        make_preflight_backup_job(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    store.create_preflight_request(request)
+    store.publish_preflight_assessment(REQUEST_ID, assessment)
+    store.publish_preflight_backup_job(job)
+
+    assert store.referenced_backup_payload_ids() == frozenset()
+    store.set_active(
+        ActivePointer(
+            request_id=REQUEST_ID,
+            attempt_number=1,
+            unit_name="loom-staging-rollout-test.service",
+            status="running",
+        )
+    )
+
+    assert store.referenced_backup_payload_ids() == frozenset({job.payload_id})
+
+
+def test_preflight_promotion_and_backup_reject_identity_drift(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    assessment = make_assessment(tmp_path)
+    preliminary = replace(
+        make_preflight_request(),
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    store.create_preflight_request(preliminary)
+    store.publish_preflight_assessment(REQUEST_ID, assessment)
+
+    with pytest.raises(RequestStoreError, match="preflight request binding"):
+        store.publish_preflight_backup_job(
+            replace(
+                make_preflight_backup_job(),
+                preflight_assessment_sha256=assessment.assessment_digest,
+                preflight_registry_sha256=assessment.registry_digest,
+                preflight_coverage_sha256=assessment.coverage_digest,
+                mutation_epoch=5,
+            )
+        )
+    with pytest.raises(RequestStoreError, match="preflight authority"):
+        store.promote_preflight_request(
+            replace(
+                make_backup_job_request(),
+                runner_config_sha256="8" * 64,
+                preflight_registry_sha256=assessment.registry_digest,
+                preflight_coverage_sha256=assessment.coverage_digest,
+            )
+        )
+
+
+def test_backup_job_is_immutable_private_and_state_uses_compare_and_swap(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    store.create_request(make_backup_job_request())
+    job = make_backup_job()
+
+    path = store.publish_backup_job(job)
+    state = store.read_backup_job_state(REQUEST_ID)
+    running = transition_backup_job(
+        state,
+        LifecycleAction.START_BACKUP,
+        updated_at=datetime(2026, 7, 13, 20, 1, tzinfo=UTC),
+    )
+    store.replace_backup_job_state(running, expected_sequence=0)
+
+    assert path == tmp_path / "requests" / REQUEST_ID / "backup" / "job.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert store.read_backup_job(REQUEST_ID) == job
+    assert store.read_backup_job_state(REQUEST_ID) == running
+    with pytest.raises(RequestStoreError, match="already exists"):
+        store.publish_backup_job(job)
+    with pytest.raises(RequestStoreError, match="changed concurrently"):
+        store.replace_backup_job_state(running, expected_sequence=0)
+
+
+def test_backup_job_rejects_request_binding_and_cross_job_state(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    store.create_request(make_backup_job_request())
+
+    with pytest.raises(RequestStoreError, match="immutable request"):
+        store.publish_backup_job(replace(make_backup_job(), candidate_tree="d" * 40))
+
+    store.publish_backup_job(make_backup_job())
+    wrong = BackupJobState(
+        job_id="job-other0000",
+        request_id=REQUEST_ID,
+        sequence=1,
+        updated_at=datetime(2026, 7, 13, 20, 1, tzinfo=UTC),
+    )
+    with pytest.raises(RequestStoreError, match="immutable envelope"):
+        store.replace_backup_job_state(wrong, expected_sequence=0)
 
 
 @pytest.mark.parametrize("request_id", ["../escape", "short", "UPPERCASE-ID"])
@@ -234,6 +565,9 @@ def test_publish_attempt_envelope_is_private_and_no_replace(tmp_path: Path) -> N
         },
         {"fetched_at": "2026-07-13T20:00:02Z"},
         {"runner_config_sha256": "3" * 64},
+        {"preflight_attestation_sha256": "6" * 64},
+        {"preflight_registry_sha256": "7" * 64},
+        {"preflight_coverage_sha256": "8" * 64},
     ],
 )
 def test_attempt_envelope_must_match_immutable_request_binding(
@@ -367,6 +701,49 @@ def test_set_active_only_replaces_status_for_the_same_attempt(tmp_path: Path) ->
         store.set_active(different)
     assert store.read_active() == running
     assert list(tmp_path.glob(".active.json.*.tmp")) == []
+
+
+def test_backup_retention_claim_is_exact_idempotent_and_blocks_active_publication(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    digest = "a" * 64
+    payload_ids = ("payload-retire02", "payload-retire01")
+
+    path = store.claim_backup_retention(digest, payload_ids)
+    repeated = store.claim_backup_retention(
+        digest,
+        ("payload-retire01", "payload-retire02"),
+    )
+
+    assert path == repeated == tmp_path / "backup-retention-claim.json"
+    assert store.read_backup_retention_claim() == (
+        digest,
+        ("payload-retire01", "payload-retire02"),
+    )
+    with pytest.raises(RequestStoreError, match="another backup retention claim"):
+        store.claim_backup_retention("b" * 64, payload_ids)
+    with pytest.raises(RequestStoreError, match="retention maintenance"):
+        store.set_active(ActivePointer("req-blocked", 1, "unit-blocked", "pending"))
+    with pytest.raises(RequestStoreError, match="identity does not match"):
+        store.clear_backup_retention_claim("b" * 64)
+
+    assert store.clear_backup_retention_claim(digest) is True
+    assert store.clear_backup_retention_claim(digest) is False
+    assert store.read_backup_retention_claim() is None
+    store.set_active(ActivePointer("req-allowed", 1, "unit-allowed", "pending"))
+
+
+def test_backup_retention_claim_rejects_existing_active_pointer(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    pointer = ActivePointer("req-active", 1, "unit-active", "pending")
+    store.set_active(pointer)
+
+    with pytest.raises(RequestStoreError, match="active rollout blocks"):
+        store.claim_backup_retention("a" * 64, ())
+
+    assert store.read_active() == pointer
+    assert store.read_backup_retention_claim() is None
 
 
 def test_concurrent_active_reservation_has_exactly_one_winner(tmp_path: Path) -> None:

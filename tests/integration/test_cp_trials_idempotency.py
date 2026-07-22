@@ -15,7 +15,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial, User
+from loom.db.schema import (
+    Batch,
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
+    Task,
+    Team,
+    TeamQuota,
+    Token,
+    Trial,
+    User,
+)
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -63,6 +75,10 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
             s.execute(delete(User).where(User.username_normalized.like("cp-submit-user-%")))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team))
             s.execute(delete(Task))
             s.commit()
@@ -89,8 +105,9 @@ def app(
 def test_same_idempotency_key_returns_same_trial(
     app,  # type: ignore[no-untyped-def]
     seed_team: tuple[UUID, str],
+    postgres_url: str,
 ) -> None:
-    _, raw = seed_team
+    team_id, raw = seed_team
     with TestClient(app) as client:
         r1 = client.post(
             "/trials",
@@ -111,6 +128,34 @@ def test_same_idempotency_key_returns_same_trial(
     assert r1.status_code == 201, r1.text
     assert r2.status_code == 201, r2.text
     assert r1.json()["trial_id"] == r2.json()["trial_id"]
+    trial_id = UUID(r1.json()["trial_id"])
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial, authority = session.execute(
+                select(Trial, DataLifecycleAuthority)
+                .join(
+                    DataLifecycleAuthority,
+                    DataLifecycleAuthority.id == Trial.lifecycle_authority_id,
+                )
+                .where(Trial.id == trial_id)
+            ).one()
+            team_authorities = session.scalars(
+                select(DataLifecycleAuthority).where(
+                    DataLifecycleAuthority.team_id == team_id
+                )
+            ).all()
+    finally:
+        engine.dispose()
+    assert authority.environment == "development"
+    assert authority.namespace == "loom"
+    assert authority.data_class == "trial"
+    assert authority.owner_kind == "trial"
+    assert authority.owner_id == str(trial.id)
+    assert authority.created_at == trial.submitted_at
+    assert authority.pinned is True
+    assert authority.expires_at is None
+    assert [row.id for row in team_authorities] == [authority.id]
 
 
 def test_different_idempotency_keys_different_trials(

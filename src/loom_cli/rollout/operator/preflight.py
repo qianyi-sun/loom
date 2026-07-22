@@ -6,6 +6,7 @@ import grp
 import hashlib
 import importlib
 import io
+import json
 import os
 import pwd
 import re
@@ -15,12 +16,29 @@ import stat
 import subprocess
 import tomllib
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
 from dotenv import dotenv_values
 
+from loom_cli.rollout import gb10_readiness as gb10_readiness_module
+from loom_cli.rollout.credential_authority import (
+    read_trusted_file,
+    safe_content_fingerprint,
+)
+from loom_cli.rollout.docker_readiness import probe_docker_runtime
+from loom_cli.rollout.gb10_readiness import (
+    GB10ProbeTarget,
+    GB10SharedMountReadiness,
+)
+from loom_cli.rollout.install_attestation import verify_runner_install
+from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
+from loom_cli.rollout.runtime_readiness import ModuleImporter, probe_runtime_readiness
+
+from .candidate import CandidateBindingError, bind_configured_candidate
 from .config import OperatorConfig
 from .policy import sanitized_child_environment
 from .redaction import redact_rollout_text
@@ -28,24 +46,6 @@ from .redaction import redact_rollout_text
 _CHECK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 _MAX_REMEDIATION_LENGTH = 240
 _MAX_EVIDENCE_LENGTH = 120
-_REQUIRED_EXECUTABLES = (
-    "git",
-    "docker",
-    "kind",
-    "kubectl",
-    "ssh",
-    "systemd-run",
-    "systemctl",
-    "journalctl",
-)
-_REQUIRED_IMPORTS = (
-    "boto3",
-    "yaml",
-    "loom_benchmark_tool.register_cmd",
-    "loom_benchmarks.registry",
-    "loom_benchmarks.adapters.skilllearnbench",
-    "loom_benchmark_terminal_bench_2.adapter",
-)
 _REQUIRED_ROLLOUT_SUBDIRECTORIES = (
     "rollouts",
     "postgres",
@@ -53,26 +53,73 @@ _REQUIRED_ROLLOUT_SUBDIRECTORIES = (
     "backups",
     "environment-state",
 )
-FULL_GB10_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
-TEMPORARILY_EXCLUDED_GB10_HOSTS = frozenset({"trt-gb10-7"})
-ACTIVE_GB10_HOSTS = tuple(
-    host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_GB10_HOSTS
-)
+FULL_GB10_HOSTS = gb10_readiness_module.FULL_GB10_HOSTS
+TEMPORARILY_EXCLUDED_GB10_HOSTS = gb10_readiness_module.TEMPORARILY_EXCLUDED_GB10_HOSTS
+ACTIVE_GB10_HOSTS = gb10_readiness_module.ACTIVE_GB10_HOSTS
 EXPECTED_GB10_SSH_CONFIG_SHA256 = "7ac3cbe20670762590b9efe4daea46126caa823f192e060be109b96350e82b4e"
-_SHARED_REPOSITORY_ROOT = Path("/shared_work/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2"
+_MOUNTINFO = Path("/proc/self/mountinfo")
 _GB10_KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
-_REMOTE_SHARED_REPOSITORY_PROBE = """
+
+
+def _render_remote_shared_repository_probe(
+    *,
+    shared_root: Path = Path("/shared_work2"),
+    mountinfo: Path = Path("/proc/self/mountinfo"),
+) -> str:
+    parent = shared_root / "qianyi"
+    authority = parent / ".loom-staging-rollout"
+    repository = authority / "worker-repos"
+    return f"""
 import os
 import stat
 
 paths = (
-    "/shared_work/qianyi",
-    "/shared_work/qianyi/.loom-staging-rollout",
-    "/shared_work/qianyi/.loom-staging-rollout/worker-repos",
+    {str(parent)!r},
+    {str(authority)!r},
+    {str(repository)!r},
 )
 entries = [os.lstat(path) for path in paths]
 safe = all(stat.S_ISDIR(item.st_mode) and not stat.S_ISLNK(item.st_mode) for item in entries)
 safe = safe and os.access(paths[-1], os.R_OK | os.X_OK) and not os.access(paths[-1], os.W_OK)
+mounts = []
+target = {str(shared_root)!r}
+with open({str(mountinfo)!r}, encoding="utf-8") as stream:
+    for line in stream:
+        left, separator, right = line.partition(" - ")
+        if not separator:
+            continue
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) >= 6 and len(right_fields) == 3:
+            mount_point = left_fields[4]
+            if not mount_point.startswith("/") or "\\\\" in mount_point:
+                continue
+            contains_target = mount_point == "/" or target == mount_point or target.startswith(
+                mount_point.rstrip("/") + "/"
+            )
+            if not contains_target:
+                continue
+            device = left_fields[2].split(":", 1)
+            if len(device) == 2:
+                mounts.append(
+                    (
+                        len(mount_point),
+                        right_fields[0],
+                        right_fields[1],
+                        int(device[0]),
+                        int(device[1]),
+                    )
+                )
+mount = None
+if mounts:
+    specificity = max(item[0] for item in mounts)
+    selected = [item for item in mounts if item[0] == specificity]
+    if len(selected) == 1:
+        mount = selected[0][1:]
+mount_stat = os.lstat(target)
+safe = safe and mount is not None and (os.major(mount_stat.st_dev), os.minor(mount_stat.st_dev)) == mount[2:]
 groups = set(os.getgroups())
 groups.add(os.getegid())
 fields = [str(os.getuid()), ",".join(str(value) for value in sorted(groups))]
@@ -86,9 +133,14 @@ for item in entries:
             str(item.st_ino),
         )
     )
+if mount is not None:
+    fields.extend((mount[0], mount[1], str(mount[2]), str(mount[3])))
 print(";".join(fields))
 raise SystemExit(0 if safe else 1)
 """.strip()
+
+
+_REMOTE_SHARED_REPOSITORY_PROBE = _render_remote_shared_repository_probe()
 
 
 class CommandResult(Protocol):
@@ -172,7 +224,7 @@ class PreflightReport:
 
 def safe_fingerprint(payload: bytes) -> str:
     """Render the only credential detail permitted in preflight output."""
-    return f"sha256:{hashlib.sha256(payload).hexdigest()[:12]} len={len(payload)}"
+    return safe_content_fingerprint(payload)
 
 
 def _default_run(
@@ -215,62 +267,15 @@ def _trusted_file_bytes(
     private: bool,
     allow_qianyi_owner: bool = False,
 ) -> bytes | None:
-    normalized = Path(os.path.normpath(path))
-    if not normalized.is_absolute():
-        return None
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    # Linux O_PATH preserves the installer contract of traverse-only parent
-    # ACLs; O_RDONLY would also require directory listing permission.
-    directory_flags = (
-        getattr(os, "O_PATH", os.O_RDONLY)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    directory_fd: int | None = None
     try:
-        directory_fd = os.open("/", directory_flags)
-        for component in normalized.parts[1:-1]:
-            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
-        fd = os.open(normalized.name, flags, dir_fd=directory_fd)
-    except OSError:
-        if directory_fd is not None:
-            os.close(directory_fd)
+        return read_trusted_file(
+            path,
+            service_uid=service_uid,
+            private=private,
+            allow_qianyi_owner=allow_qianyi_owner,
+        ).payload
+    except ValueError:
         return None
-    os.close(directory_fd)
-    try:
-        metadata = os.fstat(fd)
-        allowed_owners = {0, service_uid}
-        if allow_qianyi_owner:
-            try:
-                allowed_owners.add(pwd.getpwnam("qianyi").pw_uid)
-            except (KeyError, OSError):
-                pass
-        unsafe_mode = 0o137 if private else 0o022
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid not in allowed_owners
-            or stat.S_IMODE(metadata.st_mode) & unsafe_mode
-            or metadata.st_nlink != 1
-            or metadata.st_size > 1024 * 1024
-        ):
-            return None
-        payload = os.read(fd, metadata.st_size + 1)
-        if len(payload) != metadata.st_size:
-            return None
-        after = os.fstat(fd)
-        if (metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_size) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_mtime_ns,
-            after.st_size,
-        ):
-            return None
-        return payload
-    finally:
-        os.close(fd)
 
 
 def _private_file_bytes(
@@ -310,57 +315,43 @@ def _directory_has_access(path: Path, modes: tuple[int, ...]) -> bool:
     )
 
 
-def _checkout_tree_is_trusted(root: Path, *, service_uid: int) -> bool:
-    allowed_owners = {0, service_uid}
-    try:
-        root_metadata = root.lstat()
-        root_resolved = root.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return False
-    if (
-        not stat.S_ISDIR(root_metadata.st_mode)
-        or stat.S_ISLNK(root_metadata.st_mode)
-        or root_metadata.st_uid not in allowed_owners
-        or stat.S_IMODE(root_metadata.st_mode) & 0o022
-    ):
-        return False
-    for directory, directories, filenames in os.walk(root, followlinks=False):
-        for name in [".", *directories, *filenames]:
-            path = Path(directory) if name == "." else Path(directory) / name
-            try:
-                metadata = path.lstat()
-            except OSError:
-                return False
-            if metadata.st_uid not in allowed_owners:
-                return False
-            if stat.S_ISLNK(metadata.st_mode):
-                try:
-                    target = (path.parent / os.readlink(path)).resolve(strict=False)
-                except (OSError, RuntimeError):
-                    return False
-                if not target.is_relative_to(root_resolved):
-                    return False
-                continue
-            if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
-                return False
-            if stat.S_IMODE(metadata.st_mode) & 0o022:
-                return False
-    try:
-        git_dir = (root / ".git").lstat()
-    except OSError:
-        return False
-    return stat.S_ISDIR(git_dir.st_mode) and not stat.S_ISLNK(git_dir.st_mode)
+def _checkout_is_trusted(
+    config: OperatorConfig,
+    *,
+    service_uid: int,
+    run: CommandRunner,
+) -> bool:
+    """Reuse fixed-size install metadata and the shared exact candidate proof.
 
-
-def _checkout_is_trusted(config: OperatorConfig, *, service_uid: int) -> bool:
-    if not _checkout_tree_is_trusted(config.runner_repo, service_uid=service_uid):
+    The root installer recursively validates and hardens the candidate once.
+    Runtime Tier 0 therefore re-hashes the fixed install-asset allowlist and
+    delegates checkout identity to ``bind_configured_candidate``.  That shared
+    predicate checks fixed root metadata plus detached SHA/tree/remote and, for
+    a sealed cumulative source, the configured base and bounded linear history.
+    It intentionally performs neither a checkout walk nor a Git status scan.
+    """
+    if service_uid < 0:
         return False
-    return (
-        _readable_config_bytes(
-            config.runner_repo / ".git" / "config",
-            service_uid=service_uid,
+    try:
+        installed = verify_runner_install(service_uid=service_uid)
+        if not installed.ready:
+            return False
+        binding = bind_configured_candidate(
+            config,
+            run=lambda argv: run(argv),
+            now=lambda: datetime.now(UTC),
         )
-        is not None
+    except (CandidateBindingError, OSError, RuntimeError, ValueError):
+        return False
+
+    statement = installed.attestation
+    expected_tree = binding.resolved_tree or "none"
+    expected_base = binding.approved_base_sha or "none"
+    return bool(
+        statement.source_mode == config.source_mode == binding.source_mode
+        and statement.source_sha == binding.resolved_sha
+        and statement.source_tree_sha == expected_tree
+        and statement.source_base_sha == expected_base
     )
 
 
@@ -437,10 +428,65 @@ def _gb10_inputs(
     return Path(os.path.normpath(ssh_config)), identity, ACTIVE_GB10_HOSTS
 
 
+@dataclass(frozen=True, slots=True)
+class GB10PreflightInputs:
+    """Exact checked-in GB10 topology consumed by legacy and DAG preflight."""
+
+    ssh_config: Path
+    identity: Path
+    targets: tuple[GB10ProbeTarget, ...]
+
+
+def load_catalog_environment_path(
+    config: OperatorConfig,
+    *,
+    service_uid: int,
+) -> Path | None:
+    """Return the protected catalog environment path through the canonical parser."""
+    return _catalog_environment_path(config, service_uid=service_uid)
+
+
+def load_gb10_preflight_inputs(
+    config: OperatorConfig,
+    *,
+    service_uid: int,
+) -> GB10PreflightInputs | None:
+    """Return one typed GB10 authority without duplicating cluster parsing rules."""
+    legacy = _gb10_inputs(config, service_uid=service_uid)
+    cluster = _load_toml(config.cluster_config_path, service_uid=service_uid)
+    if legacy is None or cluster is None:
+        return None
+    pool = cluster.get("gb10_pool")
+    hosts = pool.get("hosts") if isinstance(pool, dict) else None
+    if not isinstance(hosts, list):
+        return None
+    targets: list[GB10ProbeTarget] = []
+    try:
+        for item in hosts:
+            if not isinstance(item, dict):
+                return None
+            target = item.get("ssh_target")
+            service = item.get("node_agent_service", "loom-gb10-node-agent.service")
+            if not isinstance(target, str) or not isinstance(service, str):
+                return None
+            targets.append(GB10ProbeTarget(target, service))
+    except ValueError:
+        return None
+    ssh_config, identity, expected_hosts = legacy
+    if tuple(target.ssh_target for target in targets) != expected_hosts:
+        return None
+    return GB10PreflightInputs(
+        ssh_config=ssh_config,
+        identity=identity,
+        targets=tuple(targets),
+    )
+
+
 def _shared_repository_binding(
     *,
     service_uid: int,
     root: Path = _SHARED_REPOSITORY_ROOT,
+    mountinfo: Path = _MOUNTINFO,
 ) -> dict[str, int] | None:
     try:
         service = pwd.getpwnam("loom-rollout")
@@ -460,6 +506,52 @@ def _shared_repository_binding(
         or consumer.pw_uid <= 0
         or shared_group.gr_gid <= 0
         or not root.is_absolute()
+    ):
+        return None
+
+    mount_point = root.parents[2]
+    try:
+        mount_payload = mountinfo.read_text(encoding="utf-8")
+        mount_metadata = os.lstat(mount_point)
+    except OSError:
+        return None
+    mount_matches: list[tuple[int, int]] = []
+    for raw_line in mount_payload.splitlines():
+        left, separator, right = raw_line.partition(" - ")
+        left_fields = left.split()
+        right_fields = right.split()
+        if not separator or len(left_fields) < 6 or len(right_fields) != 3:
+            continue
+        if left_fields[4] != str(mount_point):
+            continue
+        device = left_fields[2].split(":", 1)
+        try:
+            major, minor = int(device[0]), int(device[1])
+        except (IndexError, ValueError):
+            return None
+        mount_options = set(left_fields[5].split(","))
+        super_options = set(right_fields[2].split(","))
+        if (
+            right_fields[0] != "nfs4"
+            or right_fields[1] != _SHARED_REPOSITORY_SOURCE
+            or not {"rw", "nosuid", "nodev", "noexec"}.issubset(mount_options)
+            or not {
+                "rw",
+                "hard",
+                "vers=4.2",
+                "proto=tcp",
+                "sec=sys",
+                "timeo=600",
+                "retrans=2",
+            }.issubset(super_options)
+        ):
+            return None
+        mount_matches.append((major, minor))
+    if (
+        len(mount_matches) != 1
+        or not stat.S_ISDIR(mount_metadata.st_mode)
+        or stat.S_ISLNK(mount_metadata.st_mode)
+        or mount_matches[0] != (os.major(mount_metadata.st_dev), os.minor(mount_metadata.st_dev))
     ):
         return None
 
@@ -544,19 +636,103 @@ def _shared_repository_binding(
     }
 
 
-def _gb10_shared_repository_probe(
+def load_shared_repository_binding(*, service_uid: int) -> dict[str, int] | None:
+    """Return the held-descriptor mount authority used by every GB10 predicate."""
+    return _shared_repository_binding(service_uid=service_uid)
+
+
+def shared_repository_binding_digest(binding: dict[str, int]) -> str:
+    """Hash the complete non-secret local mount/UID/GID binding."""
+    expected = {
+        "authority_device",
+        "authority_inode",
+        "consumer_primary_gid",
+        "consumer_uid",
+        "parent_device",
+        "parent_inode",
+        "repository_device",
+        "repository_inode",
+        "service_primary_gid",
+        "service_uid",
+        "shared_gid",
+    }
+    if set(binding) != expected or any(
+        type(value) is not int or value < 0 for value in binding.values()
+    ):
+        raise ValueError("shared repository binding is invalid")
+    return hashlib.sha256(
+        json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _validate_gb10_shared_mount_output(
+    output: str,
+    *,
+    host: str,
+    binding: dict[str, int],
+) -> str | None:
+    fields = output.strip().split(";")
+    if len(fields) != 21 or any(not field for field in fields):
+        return None
+    try:
+        remote_uid = int(fields[0])
+        remote_groups = {int(value) for value in fields[1].split(",")}
+        values: list[int] = []
+        for offset in range(2, 17, 5):
+            values.extend(
+                (
+                    int(fields[offset]),
+                    int(fields[offset + 1]),
+                    int(fields[offset + 2], 8),
+                    int(fields[offset + 3]),
+                    int(fields[offset + 4]),
+                )
+            )
+        mount_type = fields[17]
+        mount_source = fields[18]
+        mount_device = (int(fields[19]), int(fields[20]))
+        parent = values[0:5]
+        authority = values[5:10]
+        repository = values[10:15]
+        repository_device = (os.major(repository[3]), os.minor(repository[3]))
+    except (OverflowError, ValueError):
+        return None
+    if (
+        remote_uid != binding["consumer_uid"]
+        or binding["shared_gid"] not in remote_groups
+        or parent[:3] != [binding["consumer_uid"], binding["shared_gid"], int("2775", 8)]
+        or authority[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
+        or repository[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
+        or any(value <= 0 for value in (*parent[3:], *authority[3:], *repository[3:]))
+        or mount_device != repository_device
+        or (
+            host == "trt-gb10-2"
+            and (mount_type != "ext4" or mount_source == _SHARED_REPOSITORY_SOURCE)
+        )
+        or (
+            host != "trt-gb10-2"
+            and (mount_type != "nfs4" or mount_source != _SHARED_REPOSITORY_SOURCE)
+        )
+    ):
+        return None
+    return hashlib.sha256(output.strip().encode("ascii")).hexdigest()
+
+
+def probe_gb10_shared_mount_readonly(
     run: CommandRunner,
     *,
     ssh_config: Path,
     identity: Path,
     hosts: tuple[str, ...],
     binding: dict[str, int],
-) -> str | None:
-    if hosts != ACTIVE_GB10_HOSTS:
-        return None
-    evidence = hashlib.sha256()
+    max_concurrency: int = 8,
+) -> GB10SharedMountReadiness:
+    """Collect exact mount, directory, UID/GID, and checkout-root evidence."""
+    if hosts != ACTIVE_GB10_HOSTS or not 1 <= max_concurrency <= 16:
+        raise ValueError("GB10 shared mount inventory is invalid")
     remote_command = f"python3 -c {shlex.quote(_REMOTE_SHARED_REPOSITORY_PROBE)}"
-    for host in hosts:
+
+    def probe(host: str) -> str | None:
         output = _command_stdout(
             run,
             [
@@ -583,44 +759,53 @@ def _gb10_shared_repository_probe(
                 remote_command,
             ],
         )
-        if output is None:
-            return None
-        fields = output.strip().split(";")
-        if len(fields) != 17 or any(not field for field in fields):
-            return None
-        try:
-            remote_uid = int(fields[0])
-            remote_groups = {int(value) for value in fields[1].split(",")}
-            values: list[int] = []
-            for offset in range(2, 17, 5):
-                values.extend(
-                    (
-                        int(fields[offset]),
-                        int(fields[offset + 1]),
-                        int(fields[offset + 2], 8),
-                        int(fields[offset + 3]),
-                        int(fields[offset + 4]),
-                    )
-                )
-        except ValueError:
-            return None
-        parent = values[0:5]
-        authority = values[5:10]
-        repository = values[10:15]
-        if (
-            remote_uid != binding["consumer_uid"]
-            or binding["shared_gid"] not in remote_groups
-            or parent[:3] != [binding["consumer_uid"], binding["shared_gid"], int("2775", 8)]
-            or authority[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
-            or repository[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
-            or any(value <= 0 for value in (*parent[3:], *authority[3:], *repository[3:]))
-        ):
-            return None
-        evidence.update(host.encode("ascii"))
-        evidence.update(b"\0")
-        evidence.update(output.strip().encode("ascii"))
-        evidence.update(b"\0")
-    return f"sha256:{evidence.hexdigest()[:12]} hosts={len(hosts)}"
+        return (
+            None
+            if output is None
+            else _validate_gb10_shared_mount_output(output, host=host, binding=binding)
+        )
+
+    outcomes: dict[str, str | None] = {}
+    with ThreadPoolExecutor(
+        max_workers=min(max_concurrency, len(hosts)),
+        thread_name_prefix="loom-gb10-shared-mount",
+    ) as executor:
+        futures = {executor.submit(probe, host): host for host in hosts}
+        for future in as_completed(futures):
+            host = futures[future]
+            try:
+                outcomes[host] = future.result()
+            except Exception:
+                outcomes[host] = None
+    return GB10SharedMountReadiness(
+        host_digests={host: digest for host, digest in outcomes.items() if digest is not None},
+        failed_hosts=tuple(sorted(host for host, digest in outcomes.items() if digest is None)),
+    )
+
+
+def _gb10_shared_repository_probe(
+    run: CommandRunner,
+    *,
+    ssh_config: Path,
+    identity: Path,
+    hosts: tuple[str, ...],
+    binding: dict[str, int],
+) -> str | None:
+    try:
+        evidence = probe_gb10_shared_mount_readonly(
+            run,
+            ssh_config=ssh_config,
+            identity=identity,
+            hosts=hosts,
+            binding=binding,
+        )
+    except ValueError:
+        return None
+    return (
+        f"sha256:{evidence.evidence_digest[:12]} hosts={len(evidence.host_digests)}"
+        if evidence.ready
+        else None
+    )
 
 
 def catalog_secret_values(
@@ -655,7 +840,7 @@ def collect_preflight(
     service_uid: int | None = None,
     run: CommandRunner | None = None,
     which: Callable[[str], str | None] | None = None,
-    importer: Callable[[str], object] = importlib.import_module,
+    importer: ModuleImporter = importlib.import_module,
 ) -> PreflightReport:
     """Collect every fixed preflight without exposing subprocess diagnostics."""
     if service_uid is None:
@@ -678,121 +863,68 @@ def collect_preflight(
     def add(name: str, passed: bool, remediation: str) -> None:
         checks.append(PreflightCheck(name, bool(passed), None if passed else remediation))
 
-    trusted_checkout = service_uid >= 0 and _checkout_is_trusted(config, service_uid=service_uid)
-    remotes: str | None = None
-    origin_url: str | None = None
-    status: str | None = None
-    pushurl_absent = False
-    if trusted_checkout:
-        remotes = _command_stdout(
-            child_run,
-            ["git", "-C", str(config.runner_repo), "remote"],
-        )
-        origin_url = _command_stdout(
-            child_run,
-            [
-                "git",
-                "-C",
-                str(config.runner_repo),
-                "remote",
-                "get-url",
-                "--all",
-                "origin",
-            ],
-        )
-        try:
-            pushurl = child_run(
-                [
-                    "git",
-                    "-C",
-                    str(config.runner_repo),
-                    "config",
-                    "--get-all",
-                    "remote.origin.pushurl",
-                ]
-            )
-            pushurl_absent = (
-                pushurl.returncode == 1 and pushurl.stdout == "" and pushurl.stderr == ""
-            )
-        except Exception:
-            pushurl_absent = False
-        status = _command_stdout(
-            child_run,
-            [
-                "git",
-                "-C",
-                str(config.runner_repo),
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-            ],
-        )
-    clean_checkout = (
-        trusted_checkout
-        and remotes is not None
-        and remotes.splitlines() == ["origin"]
-        and origin_url is not None
-        and origin_url.splitlines() == [config.remote_url]
-        and pushurl_absent
-        and status == ""
+    trusted_checkout = _checkout_is_trusted(
+        config,
+        service_uid=service_uid,
+        run=child_run,
     )
-    add("checkout", clean_checkout, "restore the protected clean runner checkout")
+    add(
+        "checkout",
+        trusted_checkout,
+        "restore the exact protected runner candidate and install attestation",
+    )
 
     executable_lookup = which or (lambda name: shutil.which(name, path=environment["PATH"]))
-    executables_ok = all(executable_lookup(name) is not None for name in _REQUIRED_EXECUTABLES)
-    add("executables", executables_ok, "install the fixed rollout executable set")
+    runtime = probe_runtime_readiness(
+        executable_lookup=executable_lookup,
+        importer=importer,
+    )
+    add(
+        "executables",
+        runtime.executables_ready,
+        "install the fixed rollout executable set",
+    )
+    add(
+        "python-imports",
+        runtime.imports_ready,
+        "synchronize the locked rollout Python environment",
+    )
 
-    imports_ok = True
-    for module in _REQUIRED_IMPORTS:
-        try:
-            importer(module)
-        except Exception:
-            imports_ok = False
-    add("python-imports", imports_ok, "synchronize the locked rollout Python environment")
-
+    docker = probe_docker_runtime(child_run) if trusted_checkout else None
     add(
         "docker",
-        trusted_checkout and _command_passes(child_run, ["docker", "info"]),
+        docker is not None and docker.daemon_ready,
         "restore service Docker access",
     )
     add(
         "docker-buildx",
-        trusted_checkout and _command_passes(child_run, ["docker", "buildx", "version"]),
+        docker is not None and docker.buildx_ready,
         "install and verify the Docker buildx plugin",
     )
+    add(
+        "docker-inotify",
+        docker is not None and docker.inotify_capacity_ready,
+        "restore the managed host inotify instance headroom",
+    )
 
-    current_context = None
-    if trusted_checkout:
-        current_context = _command_stdout(
+    kubernetes = (
+        probe_kubernetes_client(
             child_run,
-            [
-                "kubectl",
-                "--kubeconfig",
-                str(config.kubeconfig_path),
-                "config",
-                "current-context",
-            ],
+            kubeconfig=config.kubeconfig_path,
+            cluster_name=config.cluster_name,
+            namespace=config.namespace,
         )
-    kube_context_ok = current_context is not None and current_context.strip() in {
-        config.cluster_name,
-        f"kind-{config.cluster_name}",
-    }
-    add("kube-context", kube_context_ok, "restore the fixed staging kube context")
-    namespace_ok = trusted_checkout and _command_passes(
-        child_run,
-        [
-            "kubectl",
-            "--kubeconfig",
-            str(config.kubeconfig_path),
-            "get",
-            "namespace",
-            config.namespace,
-            "--request-timeout=10s",
-        ],
+        if trusted_checkout
+        else None
+    )
+    add(
+        "kube-context",
+        kubernetes is not None and kubernetes.context_ready,
+        "restore the fixed staging kube context",
     )
     add(
         "kube-namespace",
-        trusted_checkout and namespace_ok,
+        kubernetes is not None and kubernetes.namespace_ready,
         "restore access to the staging namespace",
     )
 
@@ -955,9 +1087,15 @@ def collect_preflight(
 __all__ = [
     "CommandResult",
     "CommandRunner",
+    "GB10PreflightInputs",
     "PreflightCheck",
     "PreflightReport",
     "catalog_secret_values",
     "collect_preflight",
+    "load_catalog_environment_path",
+    "load_gb10_preflight_inputs",
+    "load_shared_repository_binding",
+    "probe_gb10_shared_mount_readonly",
     "safe_fingerprint",
+    "shared_repository_binding_digest",
 ]

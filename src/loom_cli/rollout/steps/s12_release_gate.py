@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +30,27 @@ from loom_cli.rollout.steps.s10_env_state import (
     _profile_path_for,
     environment_state_check_argv,
 )
+from loom_cli.rollout.steps.s13_smoke import run_admin_on_behalf_smoke
 from loom_cli.rollout.steps.subcommand_step import SubcommandStep
-from loom_cli.rollout.steps.subprocess_util import SubprocessResult, run_captured
+from loom_cli.rollout.steps.subprocess_util import (
+    SubprocessExecutionError,
+    SubprocessResult,
+    run_captured,
+)
 
 _GB10_STATUS_MAX_ATTEMPTS = 180
 _GB10_STATUS_RETRY_DELAY_SEC = 5.0
+_GB10_STATUS_COMMAND_TIMEOUT_SEC = 180.0
+_HF_BOUNDARY_CANARY_TASK_ID = "skilllearnbench/fix-security-bug/fix-security-bug-1"
+_HF_BOUNDARY_CANARY_TIMEOUT_SEC = 3600.0
+_STAGING_ROLLOUT_ROOT = Path("/data/loom-staging")
+_DOCKER_CACHE_RETENTION_HOURS = 24
+# A first convergence on platform-dev can retire roughly two thousand stale
+# images and spend well over 30 minutes in Docker's metadata deletion path.
+# Keep the operation bounded, but allow enough time for Docker to finish
+# atomically instead of killing a healthy prune after it has already restored
+# the required storage headroom.
+_DOCKER_CACHE_PRUNE_TIMEOUT_SEC = 2 * 60 * 60.0
 
 
 def _append_redacted_diagnostic(path: Path, text: str) -> None:
@@ -64,6 +83,89 @@ def _is_gb10_convergence_failure(result: SubprocessResult) -> bool:
         ):
             return True
     return False
+
+
+def _current_candidate_worker_binding(
+    *,
+    ctx: RolloutContext,
+    status_path: Path,
+) -> str:
+    """Return a stable digest for the current candidate worker registrations.
+
+    The full status artifact remains the release-gate authority. This smaller
+    digest only makes the pre-gate SkillLearnBench canary idempotent while
+    worker heartbeat timestamps change.
+    """
+
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"GB10 status artifact is unreadable: {exc}") from exc
+    if not isinstance(status, dict):
+        raise ValueError("GB10 status artifact root must be an object")
+    desired_states = status.get("desired_states")
+    if not isinstance(desired_states, list) or len(desired_states) != 1:
+        raise ValueError("GB10 status must contain exactly one desired state")
+    desired = desired_states[0]
+    if not isinstance(desired, dict):
+        raise ValueError("GB10 desired state must be an object")
+    if (
+        desired.get("environment") != ctx.environment
+        or desired.get("image_tag") != ctx.image_tag
+        or desired.get("source_git_commit") != ctx.resolved_sha
+    ):
+        raise ValueError("GB10 desired state does not bind the exact rollout candidate")
+    pool_name = desired.get("pool_name")
+    if not isinstance(pool_name, str) or not pool_name:
+        raise ValueError("GB10 desired state pool_name is required")
+    host_intents = desired.get("host_intents")
+    if not isinstance(host_intents, dict):
+        raise ValueError("GB10 desired state host_intents must be an object")
+    active_hosts = sorted(
+        host
+        for host, intent in host_intents.items()
+        if isinstance(host, str) and host and intent == "active"
+    )
+    if not active_hosts:
+        raise ValueError("GB10 desired state has no active hosts")
+    raw_nodes = status.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raise ValueError("GB10 status nodes must be a list")
+    nodes = [node for node in raw_nodes if isinstance(node, dict)]
+    registrations: list[dict[str, str]] = []
+    seen_worker_ids: set[str] = set()
+    for hostname in active_hosts:
+        matches = [
+            node
+            for node in nodes
+            if node.get("hostname") == hostname
+            and node.get("environment") == ctx.environment
+            and node.get("pool_name") == pool_name
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"active GB10 host {hostname} must have exactly one current node status"
+            )
+        node = matches[0]
+        worker_id = node.get("worker_id")
+        if not isinstance(worker_id, str) or not worker_id:
+            raise ValueError(f"active GB10 host {hostname} has no worker_id")
+        if node.get("worker_status") != "active" or node.get("worker_fresh") is not True:
+            raise ValueError(f"active GB10 host {hostname} has no active fresh worker registration")
+        if worker_id in seen_worker_ids:
+            raise ValueError(f"worker_id {worker_id} is linked to multiple active hosts")
+        seen_worker_ids.add(worker_id)
+        registrations.append({"hostname": hostname, "worker_id": worker_id})
+    binding = {
+        "environment": ctx.environment,
+        "image_tag": ctx.image_tag,
+        "source_git_commit": ctx.resolved_sha,
+        "pool_name": pool_name,
+        "registrations": registrations,
+    }
+    return hashlib.sha256(
+        json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _string_list(value: Any) -> list[str]:
@@ -142,6 +244,14 @@ class ReleaseGateStep(SubcommandStep):
             "image_tag": ctx.image_tag,
             "namespace": ctx.namespace,
             "resolved_sha": ctx.resolved_sha,
+            "smoke_admin_actor": ctx.smoke_admin_actor,
+            "smoke_on_behalf_team_id": ctx.smoke_on_behalf_team_id,
+            "smoke_on_behalf_username": ctx.smoke_on_behalf_username,
+            "staging_host_cache_retention_hours": (
+                _DOCKER_CACHE_RETENTION_HOURS
+                if ctx.environment == "staging" and ctx.rollout_root == _STAGING_ROLLOUT_ROOT
+                else None
+            ),
         }
 
     def release_manifest_path(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
@@ -175,6 +285,37 @@ class ReleaseGateStep(SubcommandStep):
 
     def environment_state_check_path(self, step_dir: StepDir) -> Path:
         return step_dir.artifact_path("environment-state-check.json")
+
+    def _run_candidate_bound_hf_canary(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> RunResult:
+        try:
+            worker_binding = _current_candidate_worker_binding(
+                ctx=ctx,
+                status_path=self.gb10_status_path(ctx, step_dir),
+            )
+        except ValueError as exc:
+            return RunResult(
+                exit_code=2,
+                summary="GB10 canary binding validation failed",
+                error=str(exc),
+            )
+        canary_ctx = replace(
+            ctx,
+            smoke_task_id=_HF_BOUNDARY_CANARY_TASK_ID,
+            smoke_required_worker_pool="gb10",
+            smoke_agent="oracle",
+        )
+        return run_admin_on_behalf_smoke(
+            canary_ctx,
+            step_dir,
+            batch_name=f"rollout-hf-boundary-{ctx.image_tag}-{worker_binding[:16]}",
+            n_per_task=1,
+            artifact_prefix="hf-canary-",
+            terminal_timeout_sec=_HF_BOUNDARY_CANARY_TIMEOUT_SEC,
+        )
 
     def release_manifest_argv(
         self,
@@ -297,6 +438,8 @@ class ReleaseGateStep(SubcommandStep):
         self,
         ctx: RolloutContext,
         step_dir: StepDir,
+        *,
+        canary_batch_id: str,
     ) -> Sequence[str]:
         return candidate_loom_argv(
             "datasets",
@@ -310,6 +453,8 @@ class ReleaseGateStep(SubcommandStep):
             str(rollout_cluster_config(ctx, step_dir)),
             "--gb10-workers-status",
             str(self.gb10_status_path(ctx, step_dir)),
+            "--canary-batch-id",
+            canary_batch_id,
             "--output",
             str(self.hf_mirror_boundary_evidence_path(ctx, step_dir)),
         )
@@ -400,6 +545,189 @@ class ReleaseGateStep(SubcommandStep):
         )
         return output_path
 
+    def _reclaim_staging_host_cache(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> RunResult:
+        """Bound stale Docker cache before measuring protected storage headroom.
+
+        The staging MinIO hostPath shares the platform-dev root filesystem with
+        Docker.  Historical rollout images therefore consume the same free
+        space governed by the MinIO release gate even though they are not
+        staging object data.  Docker's own prune operation is the authority for
+        deciding whether an image or build-cache record is unused.  A 24-hour
+        floor preserves the current candidate and recent rollback/build cache;
+        exact candidate identities are revalidated after cleanup.
+
+        The fixed rollout-root guard keeps this mutation staging-only and
+        prevents the helper from becoming a generic host cleanup surface.
+        """
+
+        artifact = step_dir.artifact_path("staging-host-cache-retention.json")
+        if ctx.environment != "staging" or ctx.rollout_root != _STAGING_ROLLOUT_ROOT:
+            artifact.write_text(
+                json.dumps(
+                    {
+                        "environment": ctx.environment,
+                        "outcome": "skipped",
+                        "reason": "fixed staging rollout root not selected",
+                        "rollout_root": str(ctx.rollout_root),
+                        "schema_version": 1,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return RunResult(
+                exit_code=0,
+                artifacts={"staging_host_cache_retention": str(artifact)},
+            )
+
+        identities_path = self.expected_image_identities_path(ctx, step_dir)
+        try:
+            identities_before = identities_path.read_bytes()
+            free_before = shutil.disk_usage(ctx.rollout_root).free
+        except OSError as exc:
+            return RunResult(
+                exit_code=2,
+                summary="staging host-cache retention precheck failed",
+                error=str(exc),
+                artifacts={"staging_host_cache_retention": str(artifact)},
+            )
+
+        commands = (
+            (
+                "docker",
+                "image",
+                "prune",
+                "--all",
+                "--force",
+                "--filter",
+                f"until={_DOCKER_CACHE_RETENTION_HOURS}h",
+            ),
+            (
+                "docker",
+                "builder",
+                "prune",
+                "--all",
+                "--force",
+                "--filter",
+                f"until={_DOCKER_CACHE_RETENTION_HOURS}h",
+            ),
+        )
+        record: dict[str, object] = {
+            "candidate_sha": ctx.resolved_sha,
+            "candidate_image_tag": ctx.image_tag,
+            "environment": ctx.environment,
+            "free_bytes_before": free_before,
+            "policy": "docker-unused-older-than",
+            "retention_hours": _DOCKER_CACHE_RETENTION_HOURS,
+            "rollout_root": str(ctx.rollout_root),
+            "schema_version": 1,
+            "steps": [],
+        }
+        step_records: list[dict[str, object]] = []
+        record["steps"] = step_records
+        for index, command in enumerate(commands, start=1):
+            try:
+                result = run_captured(
+                    command,
+                    stdout_log=step_dir.artifact_path(f"host-cache-prune-{index}.stdout"),
+                    stderr_log=step_dir.artifact_path(f"host-cache-prune-{index}.stderr"),
+                    timeout_sec=_DOCKER_CACHE_PRUNE_TIMEOUT_SEC,
+                    sanitize_return=True,
+                )
+            except SubprocessExecutionError as exc:
+                record["outcome"] = "failed"
+                record["failed_command"] = list(command[:3])
+                artifact.write_text(
+                    json.dumps(record, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                return RunResult(
+                    exit_code=2,
+                    summary="staging host-cache retention failed",
+                    error=str(exc),
+                    artifacts={"staging_host_cache_retention": str(artifact)},
+                )
+            step_records.append(
+                {
+                    "command": list(command[:3]),
+                    "exit_code": result.returncode,
+                }
+            )
+            if result.returncode != 0:
+                record["outcome"] = "failed"
+                record["failed_command"] = list(command[:3])
+                artifact.write_text(
+                    json.dumps(record, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                return RunResult(
+                    exit_code=result.returncode,
+                    summary="staging host-cache retention failed",
+                    error=(
+                        result.stderr.strip().splitlines()[-1]
+                        if result.stderr.strip()
+                        else f"{' '.join(command[:3])} exited {result.returncode}"
+                    ),
+                    artifacts={"staging_host_cache_retention": str(artifact)},
+                )
+
+        try:
+            free_after = shutil.disk_usage(ctx.rollout_root).free
+            self._write_expected_image_identities(ctx, step_dir)
+            identities_after = identities_path.read_bytes()
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            record["outcome"] = "failed"
+            record["error"] = "candidate image identity revalidation failed"
+            artifact.write_text(
+                json.dumps(record, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return RunResult(
+                exit_code=2,
+                summary="staging host-cache retention identity check failed",
+                error=str(exc),
+                artifacts={"staging_host_cache_retention": str(artifact)},
+            )
+        if identities_after != identities_before:
+            record["outcome"] = "failed"
+            record["error"] = "candidate image identities changed during retention"
+            artifact.write_text(
+                json.dumps(record, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return RunResult(
+                exit_code=2,
+                summary="staging host-cache retention identity drift",
+                error="candidate image identities changed during retention",
+                artifacts={"staging_host_cache_retention": str(artifact)},
+            )
+
+        record.update(
+            {
+                "candidate_identities_sha256": hashlib.sha256(
+                    identities_after,
+                ).hexdigest(),
+                "free_bytes_after": free_after,
+                "free_bytes_reclaimed": max(0, free_after - free_before),
+                "outcome": "passed",
+            }
+        )
+        artifact.write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return RunResult(
+            exit_code=0,
+            summary="staging host-cache retention passed",
+            artifacts={"staging_host_cache_retention": str(artifact)},
+        )
+
     def cwd(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
         return candidate_loom_cwd(step_dir)
 
@@ -432,6 +760,9 @@ class ReleaseGateStep(SubcommandStep):
             "gb10_workers_status": str(self.gb10_status_path(ctx, step_dir)),
             "hf_mirror_boundary_evidence": str(
                 self.hf_mirror_boundary_evidence_path(ctx, step_dir),
+            ),
+            "staging_host_cache_retention": str(
+                step_dir.artifact_path("staging-host-cache-retention.json"),
             ),
         }
         try:
@@ -475,6 +806,10 @@ class ReleaseGateStep(SubcommandStep):
                 artifacts=artifacts,
             )
 
+        cache_retention = self._reclaim_staging_host_cache(ctx, step_dir)
+        if not cache_retention.is_success():
+            return replace(cache_retention, artifacts=artifacts)
+
         minio_cmd = list(self.minio_storage_preflight_argv(ctx, step_dir))
         minio_storage = run_captured(
             minio_cmd,
@@ -507,7 +842,7 @@ class ReleaseGateStep(SubcommandStep):
                 stderr_log=step_dir.artifact_path("gb10-workers-status.stderr"),
                 cwd=cwd,
                 env=env,
-                timeout_sec=60,
+                timeout_sec=_GB10_STATUS_COMMAND_TIMEOUT_SEC,
             )
             if gb10.returncode != 0:
                 if _is_transient_cp_unreachable(
@@ -538,7 +873,7 @@ class ReleaseGateStep(SubcommandStep):
                     stderr_log=step_dir.artifact_path("environment-state-check.stderr"),
                     cwd=cwd,
                     env=env,
-                    timeout_sec=60,
+                    timeout_sec=_GB10_STATUS_COMMAND_TIMEOUT_SEC,
                 )
                 last_env_state_check = env_state_check
                 if env_state_check.returncode != 0:
@@ -564,8 +899,30 @@ class ReleaseGateStep(SubcommandStep):
                     )
 
             if ctx.environment in {"staging", "production"}:
+                canary = self._run_candidate_bound_hf_canary(ctx, step_dir)
+                if canary.exit_code != 0:
+                    return RunResult(
+                        exit_code=canary.exit_code,
+                        summary="candidate-bound SkillLearnBench canary failed",
+                        error=canary.error,
+                        artifacts={**artifacts, **canary.artifacts},
+                    )
+                canary_batch_id = canary.artifacts.get("batch_id")
+                if not isinstance(canary_batch_id, str) or not canary_batch_id:
+                    return RunResult(
+                        exit_code=2,
+                        summary="candidate-bound SkillLearnBench canary is invalid",
+                        error="successful canary result did not include batch_id",
+                        artifacts={**artifacts, **canary.artifacts},
+                    )
                 hf_boundary = run_captured(
-                    list(self.hf_mirror_boundary_generation_argv(ctx, step_dir)),
+                    list(
+                        self.hf_mirror_boundary_generation_argv(
+                            ctx,
+                            step_dir,
+                            canary_batch_id=canary_batch_id,
+                        )
+                    ),
                     stdout_log=step_dir.artifact_path(
                         "hf-mirror-boundary-evidence.stdout",
                     ),

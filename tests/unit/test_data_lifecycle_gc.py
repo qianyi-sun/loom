@@ -1,0 +1,570 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
+
+import pytest
+
+from loom.data_lifecycle_gc import (
+    AuthorityInventory,
+    GcPlan,
+    GcScope,
+    LifecycleGcExecutionError,
+    LifecycleGcPlanError,
+    ObservedObject,
+    RegisteredObject,
+    build_gc_plan,
+    deserialize_gc_plan,
+    execute_gc,
+    reconcile_object_inventory,
+    resume_gc,
+    serialize_gc_plan,
+)
+from loom.staging_mutation_epoch import MutationEpochAdvance, MutationEpochState
+
+NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
+SCOPE = GcScope(environment="staging", namespace="loom-staging")
+
+
+def _authority(**overrides: object) -> AuthorityInventory:
+    values: dict[str, object] = {
+        "id": uuid4(),
+        "environment": "staging",
+        "namespace": "loom-staging",
+        "owner_kind": "trial",
+        "owner_id": "trial-1",
+        "expires_at": NOW - timedelta(seconds=1),
+        "pinned": False,
+        "state": "active",
+    }
+    values.update(overrides)
+    return AuthorityInventory(**values)  # type: ignore[arg-type]
+
+
+def _object(authority_id: UUID, **overrides: object) -> RegisteredObject:
+    values: dict[str, object] = {
+        "id": uuid4(),
+        "authority_id": authority_id,
+        "environment": "staging",
+        "namespace": "loom-staging",
+        "bucket": "loom-staging-artifacts",
+        "object_key": "teams/t/trials/1/trajectory.jsonl",
+        "version_id": None,
+        "content_sha256": "a" * 64,
+        "size_bytes": 42,
+        "state": "active",
+    }
+    values.update(overrides)
+    return RegisteredObject(**values)  # type: ignore[arg-type]
+
+
+def _plan() -> GcPlan:
+    authority = _authority()
+    return build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        now=NOW,
+        authorities=[authority],
+        objects=[_object(authority.id)],
+    )
+
+
+def _batch_plan() -> GcPlan:
+    authority = _authority()
+    return build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=7,
+        now=NOW,
+        authorities=[authority],
+        objects=[_object(authority.id, object_key=f"batch/{index}.json") for index in range(3)],
+    )
+
+
+def test_gc_scope_is_staging_only() -> None:
+    with pytest.raises(ValueError, match="staging-only"):
+        GcScope(environment="production", namespace="loom-prod")
+
+
+def test_plan_is_deterministic_and_selects_only_expired_authority() -> None:
+    expired = _authority(owner_id="expired")
+    live = _authority(owner_id="live", expires_at=NOW + timedelta(days=1))
+    pinned = _authority(owner_id="pinned", expires_at=None, pinned=True)
+    deleted = _object(expired.id)
+    plan = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=3,
+        now=NOW,
+        authorities=[live, expired, pinned],
+        objects=[deleted, _object(live.id), _object(pinned.id)],
+    )
+    reversed_plan = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=3,
+        now=NOW,
+        authorities=[pinned, expired, live],
+        objects=[_object(pinned.id), _object(live.id), deleted],
+    )
+    assert plan.authority_ids == (expired.id,)
+    assert plan.objects == (deleted,)
+    assert plan.inventory_digest == reversed_plan.inventory_digest
+
+
+def test_inventory_digest_excludes_report_time_but_binds_epoch() -> None:
+    authority = _authority()
+    item = _object(authority.id)
+    first = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=3,
+        now=NOW,
+        authorities=[authority],
+        objects=[item],
+    )
+    later = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=3,
+        now=NOW + timedelta(minutes=5),
+        authorities=[authority],
+        objects=[item],
+    )
+    changed_epoch = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=4,
+        now=NOW + timedelta(minutes=5),
+        authorities=[authority],
+        objects=[item],
+    )
+
+    assert first.planned_at != later.planned_at
+    assert first.inventory_digest == later.inventory_digest
+    assert changed_epoch.inventory_digest != later.inventory_digest
+
+
+def test_gc_plan_round_trip_is_exact_and_tampering_fails_closed() -> None:
+    plan = _plan()
+    document = serialize_gc_plan(plan)
+
+    assert deserialize_gc_plan(document) == plan
+    document["mutation_epoch"] = 8
+    with pytest.raises(LifecycleGcPlanError, match="digest"):
+        deserialize_gc_plan(document)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("environment", "production", "crosses GC scope"),
+        ("namespace", "other", "crosses GC scope"),
+        ("content_sha256", None, "lacks an exact SHA-256"),
+        ("content_sha256", "not-a-sha", "invalid SHA-256"),
+        ("state", "delete_pending", "is not active"),
+        ("size_bytes", -1, "negative size"),
+    ],
+)
+def test_plan_blocks_ambiguous_or_cross_scope_objects(
+    field: str,
+    value: object,
+    match: str,
+) -> None:
+    authority = _authority()
+    plan = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=0,
+        now=NOW,
+        authorities=[authority],
+        objects=[replace(_object(authority.id), **{field: value})],
+    )
+    with pytest.raises(LifecycleGcPlanError, match=match):
+        plan.require_applicable()
+
+
+def test_versioned_object_does_not_require_content_hash() -> None:
+    authority = _authority()
+    item = _object(authority.id, version_id="v1", content_sha256=None)
+    plan = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=0,
+        now=NOW,
+        authorities=[authority],
+        objects=[item],
+    )
+    plan.require_applicable()
+    assert plan.objects == (item,)
+
+
+def test_external_inventory_blockers_are_bound_into_plan_digest() -> None:
+    authority = _authority()
+    plan = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=0,
+        now=NOW,
+        authorities=[authority],
+        objects=[_object(authority.id)],
+        additional_blockers=["trials contains 2 unclassified execution rows"],
+    )
+
+    with pytest.raises(LifecycleGcPlanError, match="unclassified execution rows"):
+        plan.require_applicable()
+    without_blocker = build_gc_plan(
+        scope=SCOPE,
+        mutation_epoch=0,
+        now=NOW,
+        authorities=[authority],
+        objects=[_object(authority.id, id=plan.objects[0].id)],
+    )
+    assert serialize_gc_plan(plan)["inventory_digest"] == plan.inventory_digest
+    assert plan.inventory_digest != without_blocker.inventory_digest
+
+
+def test_reconciliation_reports_both_orphan_directions() -> None:
+    authority = _authority()
+    registered = _object(authority.id)
+    missing = _object(authority.id, object_key="missing")
+    report = reconcile_object_inventory(
+        registered=[registered, missing],
+        observed=[
+            ObservedObject(
+                bucket=registered.bucket,
+                object_key=registered.object_key,
+                version_id=None,
+                size_bytes=registered.size_bytes,
+            ),
+            ObservedObject(
+                bucket=registered.bucket,
+                object_key="unknown",
+                version_id=None,
+                size_bytes=1,
+            ),
+        ],
+    )
+    assert report.registered_missing == ((registered.bucket, "missing", ""),)
+    assert report.observed_unregistered == ((registered.bucket, "unknown", ""),)
+    assert not report.clean
+
+
+class _Journal:
+    def __init__(self, *, epoch_after: int = 8) -> None:
+        self.run_id = uuid4()
+        self.epoch_after = epoch_after
+        self.events: list[tuple[str, object]] = []
+
+    def record_dry_run(self, *, plan: GcPlan, requested_by: str) -> UUID:
+        self.events.append(("dry_run", (plan.inventory_digest, requested_by)))
+        return self.run_id
+
+    def begin_apply(
+        self,
+        *,
+        plan: GcPlan,
+        requested_by: str,
+        deletion_token: UUID,
+    ) -> UUID:
+        self.events.append(("begin", (plan.mutation_epoch, requested_by, deletion_token)))
+        return self.run_id
+
+    def record_object_deleted(
+        self,
+        *,
+        run_id: UUID,
+        object_id: UUID,
+        deletion_token: UUID,
+    ) -> None:
+        self.events.append(("deleted", (run_id, object_id, deletion_token)))
+
+    def record_object_verified(
+        self,
+        *,
+        run_id: UUID,
+        object_id: UUID,
+        deletion_token: UUID,
+    ) -> None:
+        self.events.append(("verified", (run_id, object_id, deletion_token)))
+
+    def delete_business_metadata(
+        self,
+        *,
+        run_id: UUID,
+        authority_ids: tuple[UUID, ...],
+        deletion_token: UUID,
+    ) -> None:
+        self.events.append(("metadata", (run_id, authority_ids, deletion_token)))
+
+    def complete_apply(
+        self,
+        *,
+        run_id: UUID,
+        mutation: MutationEpochAdvance,
+        deletion_token: UUID,
+    ) -> MutationEpochState:
+        self.events.append(("complete", (run_id, mutation, deletion_token)))
+        return MutationEpochState(
+            environment=mutation.environment,
+            namespace=mutation.namespace,
+            epoch=self.epoch_after,
+            mutation_class=mutation.mutation_class,
+            request_id=mutation.request_id,
+            evidence_sha256=mutation.evidence_sha256,
+            updated_at=mutation.occurred_at,
+        )
+
+    def fail_apply(self, *, run_id: UUID, reason: str) -> None:
+        self.events.append(("failed", (run_id, reason)))
+
+    def load_resume(self, run_id: UUID):
+        from loom.data_lifecycle_gc import GcResumeSnapshot
+
+        plan = _plan()
+        return GcResumeSnapshot(
+            run_id=run_id,
+            deletion_token=UUID(int=42),
+            plan=plan,
+            item_states=((plan.objects[0].id, "object_deleted"),),
+        )
+
+    def begin_resume(self, *, run_id: UUID, deletion_token: UUID) -> None:
+        self.events.append(("resume", (run_id, deletion_token)))
+
+
+class _Deleter:
+    def __init__(self, *, verify: bool = True) -> None:
+        self.verify = verify
+        self.deleted: list[UUID] = []
+
+    def delete_exact(self, item: RegisteredObject) -> None:
+        self.deleted.append(item.id)
+
+    def exact_absent(self, item: RegisteredObject) -> bool:
+        return self.verify and item.id in self.deleted
+
+
+class _BatchJournal(_Journal):
+    def record_objects_deleted(
+        self,
+        *,
+        run_id: UUID,
+        object_ids: tuple[UUID, ...],
+        deletion_token: UUID,
+    ) -> None:
+        self.events.append(("deleted-many", (run_id, object_ids, deletion_token)))
+
+    def record_objects_verified(
+        self,
+        *,
+        run_id: UUID,
+        object_ids: tuple[UUID, ...],
+        deletion_token: UUID,
+    ) -> None:
+        self.events.append(("verified-many", (run_id, object_ids, deletion_token)))
+
+
+class _BatchDeleter(_Deleter):
+    def delete_exact_many(
+        self, items: tuple[RegisteredObject, ...] | list[RegisteredObject]
+    ) -> None:
+        self.deleted.extend(item.id for item in items)
+
+    def exact_absent_many(
+        self,
+        items: tuple[RegisteredObject, ...] | list[RegisteredObject],
+    ) -> dict[UUID, bool]:
+        return {item.id: self.exact_absent(item) for item in items}
+
+
+class _BatchResumeJournal(_BatchJournal):
+    def __init__(self, plan: GcPlan) -> None:
+        super().__init__()
+        self.plan = plan
+
+    def load_resume(self, run_id: UUID):
+        from loom.data_lifecycle_gc import GcResumeSnapshot
+
+        return GcResumeSnapshot(
+            run_id=run_id,
+            deletion_token=UUID(int=42),
+            plan=self.plan,
+            item_states=tuple((item.id, "marked") for item in self.plan.objects),
+        )
+
+
+def test_dry_run_never_calls_object_store_or_mutates_epoch() -> None:
+    journal = _Journal()
+    deleter = _Deleter()
+    result = execute_gc(
+        plan=_plan(),
+        requested_by="qianyi",
+        journal=journal,
+        object_deleter=deleter,
+        dry_run=True,
+    )
+    assert result.dry_run
+    assert result.mutation_epoch_after is None
+    assert deleter.deleted == []
+    assert [event[0] for event in journal.events] == ["dry_run"]
+
+
+def test_apply_orders_delete_verify_metadata_and_epoch() -> None:
+    plan = _plan()
+    journal = _Journal()
+    result = execute_gc(
+        plan=plan,
+        requested_by="qianyi",
+        journal=journal,
+        object_deleter=_Deleter(),
+        dry_run=False,
+        request_id="req-gc0000000",
+        completed_at=NOW,
+    )
+    assert result.mutation_epoch_after == 8
+    assert result.deleted_objects == 1
+    assert result.deleted_bytes == 42
+    assert [event[0] for event in journal.events] == [
+        "begin",
+        "deleted",
+        "verified",
+        "metadata",
+        "complete",
+    ]
+
+
+def test_batched_apply_journals_bounded_exact_object_phases() -> None:
+    plan = _batch_plan()
+    journal = _BatchJournal()
+    result = execute_gc(
+        plan=plan,
+        requested_by="qianyi",
+        journal=journal,
+        object_deleter=_BatchDeleter(),
+        dry_run=False,
+        request_id="req-gcbatched00",
+        completed_at=NOW,
+        batch_size=2,
+    )
+
+    assert result.deleted_objects == 3
+    assert [event[0] for event in journal.events] == [
+        "begin",
+        "deleted-many",
+        "deleted-many",
+        "verified-many",
+        "verified-many",
+        "metadata",
+        "complete",
+    ]
+
+
+def test_batched_apply_requires_batch_capability_before_journal_mutation() -> None:
+    journal = _Journal()
+    with pytest.raises(TypeError, match="batch-capable"):
+        execute_gc(
+            plan=_plan(),
+            requested_by="qianyi",
+            journal=journal,
+            object_deleter=_Deleter(),
+            dry_run=False,
+            request_id="req-gcbatched01",
+            completed_at=NOW,
+            batch_size=2,
+        )
+    assert journal.events == []
+
+
+def test_batched_resume_accepts_only_journaled_partial_delete_absence() -> None:
+    plan = _batch_plan()
+    journal = _BatchResumeJournal(plan)
+    deleter = _BatchDeleter()
+    already_absent = plan.objects[0].id
+    deleter.deleted.append(already_absent)
+
+    result = resume_gc(
+        run_id=journal.run_id,
+        request_id="req-gcbatchresume",
+        completed_at=NOW,
+        journal=journal,
+        object_deleter=deleter,
+        batch_size=2,
+    )
+
+    assert result.deleted_objects == 3
+    assert deleter.deleted.count(already_absent) == 1
+    assert set(deleter.deleted) == {item.id for item in plan.objects}
+    assert [event[0] for event in journal.events] == [
+        "resume",
+        "deleted-many",
+        "deleted-many",
+        "verified-many",
+        "verified-many",
+        "metadata",
+        "complete",
+    ]
+
+
+def test_apply_seals_failure_before_business_metadata_removal() -> None:
+    journal = _Journal()
+    with pytest.raises(LifecycleGcExecutionError, match="still present"):
+        execute_gc(
+            plan=_plan(),
+            requested_by="qianyi",
+            journal=journal,
+            object_deleter=_Deleter(verify=False),
+            dry_run=False,
+            request_id="req-gc0000000",
+            completed_at=NOW,
+        )
+    assert [event[0] for event in journal.events] == ["begin", "deleted", "failed"]
+
+
+def test_apply_rejects_non_monotonic_epoch_completion() -> None:
+    with pytest.raises(LifecycleGcExecutionError, match="non-monotonic"):
+        execute_gc(
+            plan=_plan(),
+            requested_by="qianyi",
+            journal=_Journal(epoch_after=9),
+            object_deleter=_Deleter(),
+            dry_run=False,
+            request_id="req-gc0000000",
+            completed_at=NOW,
+        )
+
+
+def test_apply_requires_exact_mutation_authority_before_deletion() -> None:
+    journal = _Journal()
+    deleter = _Deleter()
+
+    with pytest.raises(ValueError, match="completion authority"):
+        execute_gc(
+            plan=_plan(),
+            requested_by="qianyi",
+            journal=journal,
+            object_deleter=deleter,
+            dry_run=False,
+        )
+
+    assert journal.events == []
+    assert deleter.deleted == []
+
+
+def test_resume_continues_from_exact_object_phase_without_redeleting() -> None:
+    journal = _Journal()
+
+    class ResumeDeleter:
+        def delete_exact(self, item: RegisteredObject) -> None:
+            raise AssertionError("already-deleted object must not be deleted again")
+
+        def exact_absent(self, item: RegisteredObject) -> bool:
+            return True
+
+    result = resume_gc(
+        run_id=journal.run_id,
+        request_id="req-gcresume0",
+        completed_at=NOW,
+        journal=journal,
+        object_deleter=ResumeDeleter(),
+    )
+
+    assert result.mutation_epoch_after == 8
+    assert [event[0] for event in journal.events] == [
+        "resume",
+        "verified",
+        "metadata",
+        "complete",
+    ]

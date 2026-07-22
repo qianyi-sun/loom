@@ -4,18 +4,37 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import stat
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+if TYPE_CHECKING:
+    from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightRehearsal
+
+from .backup_job import (
+    BackupJobEnvelope,
+    BackupJobState,
+    PreflightBackupJobEnvelope,
+    validate_job_binding,
+)
+from .backup_lease import BackupLease
+from .backup_rotation import (
+    BackupPayloadPhase,
+    BackupPayloadRecord,
+    BackupRetirementRecord,
+    BackupRotationState,
+)
 from .model import (
     ActivePointer,
     DriverEnvelope,
+    PreflightRequest,
     RequestEvent,
     RolloutRequest,
     validate_safe_identifier,
@@ -290,6 +309,11 @@ class RequestStore:
         self.requests_root = self.root / "requests"
         self.active_path = self.root / "active.json"
         self._active_lock_path = self.root / ".active.lock"
+        self.backup_rotation_path = self.root / "backup-rotation.json"
+        self._backup_rotation_lock_path = self.root / ".backup-rotation.lock"
+        self.backup_retention_claim_path = self.root / "backup-retention-claim.json"
+        self.backup_leases_root = self.root / "backup-leases"
+        self.backup_retirements_root = self.root / "backup-retirements"
 
     def _ensure_store(self) -> None:
         if not self.root.exists():
@@ -301,6 +325,396 @@ class RequestStore:
                 raise RequestStoreError("could not create request store root") from exc
         _validate_private_directory(self.root, "request store root")
         _ensure_private_directory(self.requests_root, "requests directory")
+
+    def publish_backup_lease(self, lease: BackupLease) -> Path:
+        """Publish one complete restore-verified lease by its evidence digest."""
+        self._ensure_store()
+        _ensure_private_directory(self.backup_leases_root, "backup leases directory")
+        path = self.backup_leases_root / f"{lease.evidence_digest}.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return _publish_immutable(path, lease.to_dict())
+        except OSError as exc:
+            raise RequestStoreError("could not inspect backup lease") from exc
+        if self.read_backup_lease(lease.evidence_digest) != lease:
+            raise RequestStoreError("backup lease digest collision")
+        return path
+
+    def read_backup_lease(self, digest: str) -> BackupLease:
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise RequestStoreError("backup lease digest is invalid")
+        _validate_private_directory(self.root, "request store root")
+        _validate_private_directory(self.backup_leases_root, "backup leases directory")
+        try:
+            lease = BackupLease.from_dict(
+                _read_json(self.backup_leases_root / f"{digest}.json", "backup lease")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if lease.evidence_digest != digest:
+            raise RequestStoreError("backup lease digest does not match its payload")
+        return lease
+
+    def read_backup_rotation(self) -> BackupRotationState:
+        try:
+            self.root.lstat()
+        except FileNotFoundError:
+            return BackupRotationState()
+        _validate_private_directory(self.root, "request store root")
+        try:
+            payload = _read_json(self.backup_rotation_path, "backup rotation state")
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                return BackupRotationState()
+            raise
+        try:
+            state = BackupRotationState.from_dict(payload)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        for record in (state.active, state.candidate):
+            if record is not None and record.lease is not None:
+                if self.read_backup_lease(record.lease.evidence_digest) != record.lease:
+                    raise RequestStoreError("backup rotation lease authority drifted")
+        return state
+
+    def replace_backup_rotation(
+        self,
+        state: BackupRotationState,
+        *,
+        expected_generation: int,
+    ) -> Path:
+        """CAS-publish rotation before any returned payload deletion is applied."""
+        if expected_generation < 0 or state.generation != expected_generation + 1:
+            raise RequestStoreError("backup rotation generation is not the next value")
+        self._ensure_store()
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self._backup_rotation_lock_path, flags, _PRIVATE_FILE_MODE)
+        except OSError as exc:
+            raise RequestStoreError("could not open backup rotation lock") from exc
+        locked = False
+        try:
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise RequestStoreError("backup rotation lock is unsafe")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            current = self.read_backup_rotation()
+            if current.generation != expected_generation:
+                raise RequestStoreError("backup rotation changed concurrently")
+            for record in (state.active, state.candidate):
+                if record is not None and record.lease is not None:
+                    if self.read_backup_lease(record.lease.evidence_digest) != record.lease:
+                        raise RequestStoreError("backup rotation lease authority is unpublished")
+            return _replace_mutable(self.backup_rotation_path, state.to_dict())
+        except OSError as exc:
+            raise RequestStoreError("backup rotation lock failed") from exc
+        finally:
+            if locked:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def referenced_backup_payload_ids(self) -> frozenset[str]:
+        """Return payloads referenced by the sole active rollout attempt."""
+        active = self.read_active()
+        if active is None:
+            return frozenset()
+        readers = (self.read_preflight_backup_job, self.read_backup_job)
+        for reader in readers:
+            try:
+                envelope = reader(active.request_id)
+            except RequestStoreError as exc:
+                if "does not exist" in str(exc) or "not promoted" in str(exc):
+                    continue
+                raise
+            return frozenset({envelope.payload_id})
+        raise RequestStoreError("active rollout payload reference is missing")
+
+    def read_backup_retention_claim(self) -> tuple[str, tuple[str, ...]] | None:
+        """Return the exact durable maintenance claim blocking new references."""
+        try:
+            self.root.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RequestStoreError("could not inspect request store root") from exc
+        _validate_private_directory(self.root, "request store root")
+        try:
+            payload = _read_json(
+                self.backup_retention_claim_path,
+                "backup retention claim",
+            )
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                return None
+            raise
+        if (
+            set(payload) != {"plan_sha256", "retirement_payload_ids", "schema_version"}
+            or payload["schema_version"] != 1
+            or not isinstance(payload["plan_sha256"], str)
+            or len(payload["plan_sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in payload["plan_sha256"])
+            or not isinstance(payload["retirement_payload_ids"], list)
+            or not all(isinstance(item, str) for item in payload["retirement_payload_ids"])
+        ):
+            raise RequestStoreError("backup retention claim schema is invalid")
+        payload_ids = tuple(
+            validate_safe_identifier(item, "retirement_payload_id")
+            for item in payload["retirement_payload_ids"]
+        )
+        if tuple(sorted(set(payload_ids))) != payload_ids:
+            raise RequestStoreError("backup retention claim payload identities are invalid")
+        return payload["plan_sha256"], payload_ids
+
+    def claim_backup_retention(
+        self,
+        plan_sha256: str,
+        retirement_payload_ids: tuple[str, ...],
+    ) -> Path:
+        """Atomically block active-pointer publication for one approved plan."""
+        if len(plan_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in plan_sha256
+        ):
+            raise RequestStoreError("backup retention plan digest is invalid")
+        payload_ids = tuple(
+            sorted(
+                validate_safe_identifier(item, "retirement_payload_id")
+                for item in retirement_payload_ids
+            )
+        )
+        if len(set(payload_ids)) != len(payload_ids):
+            raise RequestStoreError("backup retention claim payload identities are invalid")
+        expected = (plan_sha256, payload_ids)
+        self._ensure_store()
+        with self._active_lock():
+            try:
+                self.active_path.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise RequestStoreError("could not inspect active.json") from exc
+            else:
+                raise RequestStoreError("active rollout blocks backup retention claim")
+            existing = self.read_backup_retention_claim()
+            if existing is not None:
+                if existing != expected:
+                    raise RequestStoreError("another backup retention claim is already active")
+                return self.backup_retention_claim_path
+            return _replace_mutable(
+                self.backup_retention_claim_path,
+                {
+                    "plan_sha256": plan_sha256,
+                    "retirement_payload_ids": list(payload_ids),
+                    "schema_version": 1,
+                },
+            )
+
+    def clear_backup_retention_claim(self, plan_sha256: str) -> bool:
+        """Clear only the exact completed claim while still excluding launches."""
+        with self._active_lock():
+            existing = self.read_backup_retention_claim()
+            if existing is None:
+                return False
+            if existing[0] != plan_sha256:
+                raise RequestStoreError("backup retention claim identity does not match")
+            try:
+                self.backup_retention_claim_path.unlink()
+                _fsync_directory(self.root)
+            except OSError as exc:
+                raise RequestStoreError("could not clear backup retention claim") from exc
+            return True
+
+    def resolve_backup_retirement(
+        self,
+        record: BackupRetirementRecord,
+    ) -> BackupRetirementRecord:
+        """Upgrade a legacy retirement from its immutable job authority."""
+        if record.bundle_name is not None:
+            return record
+        readers = (
+            (self.read_preflight_backup_job, self.read_preflight_backup_job_state),
+            (self.read_backup_job, self.read_backup_job_state),
+        )
+        for read_job, read_state in readers:
+            try:
+                envelope = read_job(record.request_id)
+                state = read_state(record.request_id)
+            except RequestStoreError as exc:
+                if "does not exist" in str(exc) or "not promoted" in str(exc):
+                    continue
+                raise
+            if envelope.payload_id != record.payload_id:
+                raise RequestStoreError("legacy retirement payload identity drifted")
+            manifest_sha256 = record.manifest_sha256 or state.manifest_sha256
+            if record.reason == "superseded" and manifest_sha256 is None:
+                raise RequestStoreError("legacy retirement manifest authority is missing")
+            return replace(
+                record,
+                bundle_name=envelope.bundle_name,
+                manifest_sha256=manifest_sha256,
+            )
+        raise RequestStoreError("legacy retirement job authority is missing")
+
+    def resolve_failed_retirement_active(
+        self,
+        record: BackupRetirementRecord,
+    ) -> BackupPayloadRecord:
+        """Recover exact active authority from one uniquely matching immutable lease."""
+        record = self.resolve_backup_retirement(record)
+        if (
+            record.reason != "failed"
+            or record.bundle_name is None
+            or record.manifest_sha256 is None
+        ):
+            raise RequestStoreError("failed retirement is not recoverable")
+        try:
+            _validate_private_directory(self.root, "request store root")
+            _validate_private_directory(self.backup_leases_root, "backup leases directory")
+            with os.scandir(self.backup_leases_root) as entries:
+                names = tuple(sorted(entry.name for entry in entries))
+        except (FileNotFoundError, OSError) as exc:
+            raise RequestStoreError("failed retirement lease authority is missing") from exc
+        leases: list[BackupLease] = []
+        for name in names:
+            if (
+                len(name) != 69
+                or not name.endswith(".json")
+                or any(character not in "0123456789abcdef" for character in name[:64])
+            ):
+                raise RequestStoreError("backup lease directory contains unsafe authority")
+            lease = self.read_backup_lease(name[:64])
+            if (
+                lease.source_request_id == record.request_id
+                and lease.manifest_sha256 == record.manifest_sha256
+            ):
+                leases.append(lease)
+        if len(leases) != 1:
+            raise RequestStoreError("failed retirement requires one exact backup lease")
+        lease = leases[0]
+        if lease.environment != "staging" or lease.namespace != "loom-staging":
+            raise RequestStoreError("failed retirement lease authority is outside staging")
+        return BackupPayloadRecord(
+            payload_id=record.payload_id,
+            request_id=record.request_id,
+            bundle_name=record.bundle_name,
+            phase=BackupPayloadPhase.ACTIVE,
+            created_at=lease.created_at,
+            manifest_sha256=record.manifest_sha256,
+            lease=lease,
+        )
+
+    def publish_backup_retirement_evidence(
+        self,
+        record: BackupRetirementRecord,
+        *,
+        manifest_path: Path | None,
+    ) -> Path:
+        """Persist compact exact evidence before deleting a large payload."""
+        self._ensure_store()
+        _ensure_private_directory(
+            self.backup_retirements_root,
+            "backup retirements directory",
+        )
+        path = self.backup_retirements_root / f"{record.payload_id}.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            existing = _read_json(path, "backup retirement evidence")
+            if existing.get("record") != record.to_dict():
+                raise RequestStoreError("backup retirement evidence identity drifted")
+            return path
+        manifest_size: int | None = None
+        if record.manifest_sha256 is None:
+            if manifest_path is not None:
+                raise RequestStoreError("incomplete retirement cannot bind a manifest")
+        else:
+            if manifest_path is None or not manifest_path.is_absolute():
+                raise RequestStoreError("manifest retirement evidence path is invalid")
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(manifest_path, flags)
+            except OSError as exc:
+                raise RequestStoreError("could not open retirement manifest evidence") from exc
+            try:
+                metadata = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+                ):
+                    raise RequestStoreError("retirement manifest evidence is unsafe")
+                digest = hashlib.sha256()
+                while chunk := os.read(fd, 1024 * 1024):
+                    digest.update(chunk)
+                manifest_size = metadata.st_size
+            finally:
+                os.close(fd)
+            if digest.hexdigest() != record.manifest_sha256:
+                raise RequestStoreError("retirement manifest evidence digest drifted")
+        payload: dict[str, object] = {
+            "manifest_size": manifest_size,
+            "record": record.to_dict(),
+            "schema_version": 1,
+        }
+        return _publish_immutable(path, payload)
+
+    def publish_backup_retirement_receipt(self, payload_id: str) -> Path:
+        """Record exact payload absence after idempotent retirement."""
+        validate_safe_identifier(payload_id, "payload_id")
+        _validate_private_directory(
+            self.backup_retirements_root,
+            "backup retirements directory",
+        )
+        evidence_path = self.backup_retirements_root / f"{payload_id}.json"
+        evidence = _read_json(evidence_path, "backup retirement evidence")
+        payload = {
+            "evidence_sha256": hashlib.sha256(_json_bytes(evidence)).hexdigest(),
+            "payload_id": payload_id,
+            "schema_version": 1,
+        }
+        path = self.backup_retirements_root / f"{payload_id}.deleted.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return _publish_immutable(path, payload)
+        if _read_json(path, "backup retirement receipt") != payload:
+            raise RequestStoreError("backup retirement receipt identity drifted")
+        return path
+
+    def has_backup_retirement_receipt(self, payload_id: str) -> bool:
+        """Return true only for a complete digest-bound retirement receipt."""
+        validate_safe_identifier(payload_id, "payload_id")
+        try:
+            _validate_private_directory(
+                self.backup_retirements_root,
+                "backup retirements directory",
+            )
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                return False
+            raise
+        evidence_path = self.backup_retirements_root / f"{payload_id}.json"
+        receipt_path = self.backup_retirements_root / f"{payload_id}.deleted.json"
+        try:
+            evidence = _read_json(evidence_path, "backup retirement evidence")
+            receipt = _read_json(receipt_path, "backup retirement receipt")
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                return False
+            raise
+        expected = {
+            "evidence_sha256": hashlib.sha256(_json_bytes(evidence)).hexdigest(),
+            "payload_id": payload_id,
+            "schema_version": 1,
+        }
+        if receipt != expected:
+            raise RequestStoreError("backup retirement receipt identity drifted")
+        return True
 
     def _request_directory(self, request_id: object) -> Path:
         return self.requests_root / _request_id(request_id)
@@ -318,17 +732,167 @@ class RequestStore:
             raise
 
     def _require_request_directory(self, request_id: object) -> Path:
+        request_directory = self._require_record_directory(request_id)
+        try:
+            _read_private_bytes(request_directory / "request.json", "request.json")
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                raise RequestStoreError("rollout request is not promoted") from exc
+            raise
+        return request_directory
+
+    def _require_record_directory(self, request_id: object) -> Path:
         validated_request_id = _request_id(request_id)
         self._validate_request_roots()
         request_directory = self.requests_root / validated_request_id
         try:
             _validate_private_directory(request_directory, "request directory")
-            _read_private_bytes(request_directory / "request.json", "request.json")
         except RequestStoreError as exc:
             if "does not exist" in str(exc):
                 raise RequestStoreError("request does not exist") from exc
             raise
+        for name in ("request.json", "preflight.json"):
+            try:
+                _read_private_bytes(request_directory / name, name)
+            except RequestStoreError as exc:
+                if "does not exist" not in str(exc):
+                    raise
+            else:
+                break
+        else:
+            raise RequestStoreError("request identity document does not exist")
         return request_directory
+
+    def _require_preflight_request_directory(self, request_id: object) -> Path:
+        request_directory = self._require_record_directory(request_id)
+        try:
+            _read_private_bytes(request_directory / "preflight.json", "preflight.json")
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                raise RequestStoreError("preflight request does not exist") from exc
+            raise
+        return request_directory
+
+    def create_preflight_request(self, request: PreflightRequest) -> Path:
+        """Reserve one immutable Tier 0-2 request before detached backup I/O."""
+        try:
+            payload = request.to_dict()
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        self._ensure_store()
+        request_directory = self._request_directory(request.request_id)
+        try:
+            request_directory.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
+        except FileExistsError as exc:
+            raise RequestStoreError(f"request {request.request_id} already exists") from exc
+        except OSError as exc:
+            raise RequestStoreError("could not create request directory") from exc
+        request_directory.chmod(_PRIVATE_DIRECTORY_MODE)
+        _validate_private_directory(request_directory, "request directory")
+        _fsync_directory(self.requests_root)
+        return _publish_immutable(request_directory / "preflight.json", payload)
+
+    def read_preflight_request(self, request_id: str) -> PreflightRequest:
+        request_directory = self._require_preflight_request_directory(request_id)
+        payload = _read_json(request_directory / "preflight.json", "preflight.json")
+        try:
+            request = PreflightRequest.from_dict(payload)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if request.request_id != request_id:
+            raise RequestStoreError("preflight.json request_id does not match its directory")
+        return request
+
+    def publish_preflight_assessment(
+        self,
+        request_id: str,
+        assessment: PreflightAssessment,
+    ) -> Path:
+        """Publish complete Tier 0-2 evidence after its identity is reserved."""
+        preliminary = self.read_preflight_request(request_id)
+        if (
+            not assessment.passed
+            or assessment.assessment_digest != preliminary.preflight_assessment_sha256
+            or assessment.registry_digest != preliminary.preflight_registry_sha256
+            or assessment.coverage_digest != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("preflight assessment does not match request authority")
+        return _publish_immutable(
+            self._require_preflight_request_directory(request_id) / "assessment.json",
+            assessment.to_record(),
+        )
+
+    def read_preflight_assessment(self, request_id: str) -> PreflightAssessment:
+        from loom_cli.rollout.preflight_pipeline import PreflightAssessment
+
+        directory = self._require_preflight_request_directory(request_id)
+        try:
+            assessment = PreflightAssessment.from_record(
+                _read_json(directory / "assessment.json", "preflight assessment")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        preliminary = self.read_preflight_request(request_id)
+        if (
+            assessment.assessment_digest != preliminary.preflight_assessment_sha256
+            or assessment.registry_digest != preliminary.preflight_registry_sha256
+            or assessment.coverage_digest != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("preflight assessment does not match request authority")
+        return assessment
+
+    def publish_preflight_rehearsal(
+        self,
+        request_id: str,
+        rehearsal: PreflightRehearsal,
+    ) -> Path:
+        """Publish exact Tier 0-3 rehearsal evidence before lease attestation."""
+        preliminary = self.read_preflight_request(request_id)
+        if (
+            not rehearsal.passed
+            or rehearsal.registry_digest != preliminary.preflight_registry_sha256
+            or rehearsal.coverage_digest != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("preflight rehearsal does not match request authority")
+        directory = self._require_preflight_backup_job_directory(request_id)
+        return _publish_immutable(directory / "rehearsal.json", rehearsal.to_record())
+
+    def read_preflight_rehearsal(self, request_id: str) -> PreflightRehearsal:
+        from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
+
+        directory = self._require_preflight_backup_job_directory(request_id)
+        try:
+            rehearsal = PreflightRehearsal.from_record(
+                _read_json(directory / "rehearsal.json", "preflight rehearsal")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        preliminary = self.read_preflight_request(request_id)
+        if (
+            rehearsal.registry_digest != preliminary.preflight_registry_sha256
+            or rehearsal.coverage_digest != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("preflight rehearsal does not match request authority")
+        return rehearsal
+
+    def promote_preflight_request(self, request: RolloutRequest) -> Path:
+        """Publish final Tier 0-3 authority without replacing preliminary evidence."""
+        preliminary = self.read_preflight_request(request.request_id)
+        if preliminary.status != "pending" or request.status != "pending":
+            raise RequestStoreError("only pending preflight requests may be promoted")
+        if (
+            request.request_id != preliminary.request_id
+            or request.rollout_id != preliminary.rollout_id
+            or request.caller != preliminary.caller
+            or request.candidate != preliminary.candidate
+            or request.requested_at != preliminary.requested_at
+            or request.runner_config_sha256 != preliminary.runner_config_sha256
+            or request.preflight_registry_sha256 != preliminary.preflight_registry_sha256
+            or request.preflight_coverage_sha256 != preliminary.preflight_coverage_sha256
+        ):
+            raise RequestStoreError("promoted request does not match preflight authority")
+        request_directory = self._require_preflight_request_directory(request.request_id)
+        return _publish_immutable(request_directory / "request.json", request.to_dict())
 
     def create_request(self, request: RolloutRequest) -> Path:
         """Persist the immutable pre-backup request without replacement."""
@@ -364,6 +928,195 @@ class RequestStore:
             raise RequestStoreError("request.json request_id does not match its directory")
         return request
 
+    def publish_backup_job(self, envelope: BackupJobEnvelope) -> Path:
+        """Publish one immutable detached-backup job under its request."""
+        request = self.read_request(envelope.request_id)
+        if request.status != "pending":
+            raise RequestStoreError("preview request cannot publish a backup job")
+        if (
+            request.candidate.resolved_sha != envelope.candidate_sha
+            or request.candidate.resolved_tree != envelope.candidate_tree
+            or request.preflight_attestation_sha256 != envelope.preflight_attestation_sha256
+        ):
+            raise RequestStoreError("backup job does not match immutable request binding")
+        request_directory = self._require_request_directory(envelope.request_id)
+        backup_directory = request_directory / "backup"
+        _ensure_private_directory(backup_directory, "backup job directory")
+        path = _publish_immutable(backup_directory / "job.json", envelope.to_dict())
+        initial = BackupJobState(
+            job_id=envelope.job_id,
+            request_id=envelope.request_id,
+            updated_at=envelope.created_at,
+        )
+        try:
+            _publish_immutable(backup_directory / "state.json", initial.to_dict())
+        except Exception:
+            # Keep the immutable job. Reconciliation may safely initialize a
+            # missing state file, but the job identity is never reused.
+            raise
+        return path
+
+    def publish_preflight_backup_job(self, envelope: PreflightBackupJobEnvelope) -> Path:
+        """Publish one detached job bound to immutable Tier 0-2 authority."""
+        request = self.read_preflight_request(envelope.request_id)
+        assessment = self.read_preflight_assessment(envelope.request_id)
+        if request.status != "pending":
+            raise RequestStoreError("preview request cannot publish a backup job")
+        if (
+            request.candidate.resolved_sha != envelope.candidate_sha
+            or request.candidate_tree != envelope.candidate_tree
+            or request.preflight_assessment_sha256 != envelope.preflight_assessment_sha256
+            or assessment.assessment_digest != envelope.preflight_assessment_sha256
+            or request.preflight_registry_sha256 != envelope.preflight_registry_sha256
+            or request.preflight_coverage_sha256 != envelope.preflight_coverage_sha256
+            or request.mutation_epoch != envelope.mutation_epoch
+            or request.environment != envelope.environment
+            or request.namespace != envelope.namespace
+        ):
+            raise RequestStoreError("backup job does not match preflight request binding")
+        request_directory = self._require_preflight_request_directory(envelope.request_id)
+        backup_directory = request_directory / "preflight-backup"
+        _ensure_private_directory(backup_directory, "preflight backup job directory")
+        path = _publish_immutable(backup_directory / "job.json", envelope.to_dict())
+        initial = BackupJobState(
+            job_id=envelope.job_id,
+            request_id=envelope.request_id,
+            updated_at=envelope.created_at,
+        )
+        _publish_immutable(backup_directory / "state.json", initial.to_dict())
+        return path
+
+    def read_preflight_backup_job(self, request_id: str) -> PreflightBackupJobEnvelope:
+        directory = self._require_preflight_backup_job_directory(request_id)
+        try:
+            envelope = PreflightBackupJobEnvelope.from_dict(
+                _read_json(directory / "job.json", "preflight backup job envelope")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if envelope.request_id != request_id:
+            raise RequestStoreError("preflight backup job identity does not match directory")
+        return envelope
+
+    def read_preflight_backup_job_state(self, request_id: str) -> BackupJobState:
+        directory = self._require_preflight_backup_job_directory(request_id)
+        try:
+            state = BackupJobState.from_dict(
+                _read_json(directory / "state.json", "preflight backup job state")
+            )
+            validate_job_binding(self.read_preflight_backup_job(request_id), state)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        return state
+
+    def replace_preflight_backup_job_state(
+        self,
+        state: BackupJobState,
+        *,
+        expected_sequence: int,
+    ) -> Path:
+        """CAS-update preflight backup state without holding the launch lock."""
+        directory = self._require_preflight_backup_job_directory(state.request_id)
+        return self._replace_job_state(
+            directory,
+            state,
+            expected_sequence=expected_sequence,
+            current=lambda: self.read_preflight_backup_job_state(state.request_id),
+            envelope=lambda: self.read_preflight_backup_job(state.request_id),
+        )
+
+    def read_backup_job(self, request_id: str) -> BackupJobEnvelope:
+        directory = self._require_backup_job_directory(request_id)
+        try:
+            envelope = BackupJobEnvelope.from_dict(
+                _read_json(directory / "job.json", "backup job envelope")
+            )
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if envelope.request_id != request_id:
+            raise RequestStoreError("backup job request identity does not match directory")
+        return envelope
+
+    def read_backup_job_state(self, request_id: str) -> BackupJobState:
+        directory = self._require_backup_job_directory(request_id)
+        try:
+            state = BackupJobState.from_dict(
+                _read_json(directory / "state.json", "backup job state")
+            )
+            validate_job_binding(self.read_backup_job(request_id), state)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        return state
+
+    def replace_backup_job_state(
+        self,
+        state: BackupJobState,
+        *,
+        expected_sequence: int,
+    ) -> Path:
+        """Atomically publish a single-writer state transition with CAS."""
+        directory = self._require_backup_job_directory(state.request_id)
+        return self._replace_job_state(
+            directory,
+            state,
+            expected_sequence=expected_sequence,
+            current=lambda: self.read_backup_job_state(state.request_id),
+            envelope=lambda: self.read_backup_job(state.request_id),
+        )
+
+    def _replace_job_state(
+        self,
+        directory: Path,
+        state: BackupJobState,
+        *,
+        expected_sequence: int,
+        current: Callable[[], BackupJobState],
+        envelope: Callable[[], BackupJobEnvelope | PreflightBackupJobEnvelope],
+    ) -> Path:
+        if expected_sequence < 0 or state.sequence != expected_sequence + 1:
+            raise RequestStoreError("backup job state sequence is not the next generation")
+        lock_path = directory / ".state.lock"
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(lock_path, flags, _PRIVATE_FILE_MODE)
+        except OSError as exc:
+            raise RequestStoreError("could not open backup job state lock") from exc
+        locked = False
+        try:
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise RequestStoreError("backup job state lock is unsafe")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            current_state = current()
+            if current_state.sequence != expected_sequence:
+                raise RequestStoreError("backup job state changed concurrently")
+            try:
+                validate_job_binding(envelope(), state)
+            except ValueError as exc:
+                raise RequestStoreError(str(exc)) from exc
+            return _replace_mutable(directory / "state.json", state.to_dict())
+        except OSError as exc:
+            raise RequestStoreError("backup job state lock failed") from exc
+        finally:
+            if locked:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _require_backup_job_directory(self, request_id: str) -> Path:
+        request_directory = self._require_request_directory(request_id)
+        directory = request_directory / "backup"
+        _validate_private_directory(directory, "backup job directory")
+        return directory
+
+    def _require_preflight_backup_job_directory(self, request_id: str) -> Path:
+        request_directory = self._require_preflight_request_directory(request_id)
+        directory = request_directory / "preflight-backup"
+        _validate_private_directory(directory, "preflight backup job directory")
+        return directory
+
     def publish_attempt_envelope(self, envelope: DriverEnvelope) -> Path:
         """Publish the immutable post-backup driver envelope without replacement."""
         try:
@@ -383,7 +1136,13 @@ class RequestStore:
             "resolved_sha": request.candidate.resolved_sha,
             "image_tag": request.candidate.image_tag,
             "fetched_at": request.candidate.fetched_at,
+            "source_mode": request.candidate.source_mode,
+            "resolved_tree": request.candidate.resolved_tree,
+            "approved_base_sha": request.candidate.approved_base_sha,
             "runner_config_sha256": request.runner_config_sha256,
+            "preflight_attestation_sha256": request.preflight_attestation_sha256,
+            "preflight_registry_sha256": request.preflight_registry_sha256,
+            "preflight_coverage_sha256": request.preflight_coverage_sha256,
         }
         envelope_binding = {
             "request_id": envelope.request_id,
@@ -395,7 +1154,13 @@ class RequestStore:
             "resolved_sha": envelope.resolved_sha,
             "image_tag": envelope.image_tag,
             "fetched_at": envelope.fetched_at,
+            "source_mode": envelope.source_mode,
+            "resolved_tree": envelope.resolved_tree,
+            "approved_base_sha": envelope.approved_base_sha,
             "runner_config_sha256": envelope.runner_config_sha256,
+            "preflight_attestation_sha256": envelope.preflight_attestation_sha256,
+            "preflight_registry_sha256": envelope.preflight_registry_sha256,
+            "preflight_coverage_sha256": envelope.preflight_coverage_sha256,
         }
         if envelope_binding != request_binding:
             raise RequestStoreError("driver envelope does not match immutable request binding")
@@ -505,6 +1270,8 @@ class RequestStore:
         except ValueError as exc:
             raise RequestStoreError(str(exc)) from exc
         with self._active_lock():
+            if self.read_backup_retention_claim() is not None:
+                raise RequestStoreError("backup retention maintenance blocks active publication")
             try:
                 self.active_path.lstat()
             except FileNotFoundError:
@@ -576,7 +1343,7 @@ class RequestStore:
             payload = _json_bytes(event.to_dict())
         except ValueError as exc:
             raise RequestStoreError(str(exc)) from exc
-        request_directory = self._require_request_directory(event.request_id)
+        request_directory = self._require_record_directory(event.request_id)
         path = request_directory / "events.jsonl"
         flags = (
             os.O_WRONLY
@@ -614,7 +1381,7 @@ class RequestStore:
         return path
 
     def read_events(self, request_id: str) -> list[RequestEvent]:
-        request_directory = self._require_request_directory(request_id)
+        request_directory = self._require_record_directory(request_id)
         path = request_directory / "events.jsonl"
         try:
             path.lstat()

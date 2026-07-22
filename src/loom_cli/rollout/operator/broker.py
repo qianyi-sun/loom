@@ -17,23 +17,43 @@ from pathlib import Path
 from typing import Any, Never, TextIO, cast
 from uuid import uuid4
 
+from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.evidence import new_rollout_id
+from loom_cli.rollout.lifecycle_protocol import LifecycleAction
+from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
+from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
 from .backup import (
     BackupCreator,
     BackupError,
+    SubprocessBackupCommandRunner,
     VerifiedBackup,
+    backup_public_reason_for_code,
     normalize_backup_public_reason,
 )
-from .candidate import CandidateBindingError, bind_fresh_origin_dev
+from .backup_job import PreflightBackupJobEnvelope, transition_backup_job
+from .backup_retirement import BackupPayloadActivator, BackupPayloadRetirer
+from .backup_rotation import (
+    backup_rotation_admission_blockers,
+    begin_candidate,
+    fail_candidate,
+)
+from .candidate import CandidateBindingError, bind_configured_candidate
+from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
+from .installed_backup_retention import InstalledBackupRetentionService
+from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
+from .installed_lifecycle_capacity import InstalledLifecycleCapacityService
+from .installed_manifest_ownership import InstalledManifestOwnershipService
+from .installed_preflight_commands import InstalledPreflightCommands
 from .lifecycle import LifecycleBusyError, LifecycleCoordinator, LifecycleError
 from .model import (
     CallerIdentity,
     CandidateBinding,
     DriverEnvelope,
     EventStatus,
+    PreflightRequest,
     RequestEvent,
     RequestEventType,
     RolloutRequest,
@@ -41,6 +61,11 @@ from .model import (
 )
 from .policy import PolicyError, caller_from_sudo, sanitized_child_environment
 from .preflight import PreflightReport, catalog_secret_values, collect_preflight
+from .readonly_capacity_client import verify_installed_immutable_objects
+from .readonly_database_client import (
+    InstalledReadonlyDatabaseEvidenceSource,
+    probe_installed_readonly_database_baseline,
+)
 from .redaction import known_secrets_from_sources, redact_rollout_text
 from .store import RequestStore, RequestStoreError
 from .systemd import (
@@ -52,10 +77,16 @@ from .systemd import (
 
 _MAX_CANCEL_REASON = 500
 _MAX_LOG_BYTES = 8 * 1024 * 1024
+_SEALED_CUMULATIVE_COORDINATORS = frozenset({"qianyi", "hongjian"})
 
 
 class _ArgumentError(ValueError):
     pass
+
+
+def _has_coordinator_authority(caller: CallerIdentity) -> bool:
+    """Return whether the authenticated operator may drive the sealed hotfix lane."""
+    return caller.username in _SEALED_CUMULATIVE_COORDINATORS
 
 
 class _Parser(argparse.ArgumentParser):
@@ -86,6 +117,8 @@ def _parser() -> argparse.ArgumentParser:
     start = commands.add_parser("start")
     start.add_argument("--dry-run", action="store_true")
 
+    commands.add_parser("preflight")
+
     status = commands.add_parser("status")
     status.add_argument("request_id", nargs="?")
 
@@ -102,6 +135,24 @@ def _parser() -> argparse.ArgumentParser:
 
     cleanup_backup = commands.add_parser("cleanup-incomplete-backup")
     cleanup_backup.add_argument("request_id")
+
+    ownership = commands.add_parser("manifest-ownership")
+    ownership_commands = ownership.add_subparsers(dest="ownership_action", required=True)
+    ownership_commands.add_parser("inventory")
+    ownership_apply = ownership_commands.add_parser("apply")
+    ownership_apply.add_argument("--request-id", required=True)
+    ownership_apply.add_argument("--approved-inventory-sha256", required=True)
+
+    capacity = commands.add_parser("lifecycle-capacity")
+    capacity_commands = capacity.add_subparsers(dest="capacity_action", required=True)
+    capacity_commands.add_parser("inventory")
+    capacity_apply = capacity_commands.add_parser("apply")
+    capacity_apply.add_argument("--approved-plan-sha256", required=True)
+    retention = commands.add_parser("backup-retention")
+    retention_commands = retention.add_subparsers(dest="retention_action", required=True)
+    retention_commands.add_parser("inventory")
+    retention_apply = retention_commands.add_parser("apply")
+    retention_apply.add_argument("--approved-plan-sha256", required=True)
     return parser
 
 
@@ -123,6 +174,14 @@ class BrokerDependencies:
     stdout: TextIO
     stderr: TextIO
     known_secrets: Callable[[], Iterable[str]]
+    authorize_preflight: Callable[[CandidateBinding], PreflightPipelineResult] | None = None
+    assess_preflight: Callable[[CandidateBinding, int], PreflightAssessment] | None = None
+    read_mutation_epoch: Callable[[], int] | None = None
+    new_backup_job_id: Callable[[], str] | None = None
+    new_payload_id: Callable[[], str] | None = None
+    manifest_ownership: Any | None = None
+    lifecycle_capacity: Any | None = None
+    backup_retention: Any | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -189,9 +248,12 @@ def _request(
     dependencies: BrokerDependencies,
     caller: CallerIdentity,
     candidate: CandidateBinding,
+    preflight: PreflightPipelineResult,
     *,
     preview: bool,
 ) -> RolloutRequest:
+    if not preflight.passed or preflight.attestation is None:
+        raise ValueError("rollout request requires a complete preflight attestation")
     request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
     rollout_id = validate_safe_identifier(
         dependencies.new_rollout_id(candidate),
@@ -204,6 +266,9 @@ def _request(
         candidate=candidate,
         requested_at=_timestamp(dependencies.now),
         runner_config_sha256=dependencies.config.config_sha256,
+        preflight_attestation_sha256=preflight.attestation.attestation_digest,
+        preflight_registry_sha256=preflight.registry_digest,
+        preflight_coverage_sha256=preflight.coverage_digest,
         status="preview" if preview else "pending",
     )
 
@@ -234,6 +299,9 @@ def _envelope(
         backup_manifest_path=str(backup.manifest_path),
         backup_manifest_sha256=backup.manifest_sha256,
         runner_config_sha256=request.runner_config_sha256,
+        preflight_attestation_sha256=request.preflight_attestation_sha256,
+        preflight_registry_sha256=request.preflight_registry_sha256,
+        preflight_coverage_sha256=request.preflight_coverage_sha256,
         cluster_name=config.cluster_name,
         namespace=config.namespace,
         environment=config.environment,
@@ -249,7 +317,386 @@ def _envelope(
         scope=config.scope,
         gb10_prep_concurrency=config.gb10_prep_concurrency,
         resume=resume,
+        source_mode=request.candidate.source_mode,
+        resolved_tree=request.candidate.resolved_tree,
+        approved_base_sha=request.candidate.approved_base_sha,
     )
+
+
+def _staged_preflight_request(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    candidate: CandidateBinding,
+    assessment: PreflightAssessment,
+    *,
+    request_id: str,
+    rollout_id: str,
+    requested_at: str,
+    mutation_epoch: int,
+    preview: bool,
+) -> PreflightRequest:
+    if not assessment.passed or candidate.resolved_tree is None or mutation_epoch < 0:
+        raise ValueError("pre-backup authority is incomplete")
+    return PreflightRequest(
+        request_id=request_id,
+        rollout_id=rollout_id,
+        caller=caller,
+        candidate=candidate,
+        candidate_tree=candidate.resolved_tree,
+        requested_at=requested_at,
+        runner_config_sha256=dependencies.config.config_sha256,
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+        mutation_epoch=mutation_epoch,
+        environment=dependencies.config.environment,
+        namespace=dependencies.config.namespace,
+        status="preview" if preview else "pending",
+    )
+
+
+def _preflight_only(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+) -> int:
+    """Assess the exact Tier 0-2 graph without publishing request authority."""
+    if dependencies.config.source_mode == "sealed-cumulative" and not _has_coordinator_authority(
+        caller
+    ):
+        return _safe_error(
+            dependencies,
+            "sealed cumulative preflight requires coordinator authority",
+        )
+    if dependencies.assess_preflight is None or dependencies.read_mutation_epoch is None:
+        return _safe_error(dependencies, "deep rollout preflight is not configured")
+    report = dependencies.preflight()
+    if not report.passed:
+        _write_json(dependencies.stderr, report.to_dict())
+        return 1
+    candidate = dependencies.bind_candidate()
+    mutation_epoch = dependencies.read_mutation_epoch()
+    if type(mutation_epoch) is not int or mutation_epoch < 0:
+        raise ValueError("staging mutation epoch is invalid")
+    assessment = dependencies.assess_preflight(candidate, mutation_epoch)
+    if not assessment.passed:
+        _write_json(dependencies.stderr, assessment.to_dict())
+        return 1
+    _write_json(
+        dependencies.stdout,
+        {
+            "candidate_sha": candidate.resolved_sha,
+            "candidate_tree": candidate.resolved_tree,
+            "coverage_sha256": assessment.coverage_digest,
+            "mutation_epoch": mutation_epoch,
+            "preflight_assessment_sha256": assessment.assessment_digest,
+            "registry_sha256": assessment.registry_digest,
+            "status": "passed",
+        },
+    )
+    return 0
+
+
+def _manifest_ownership(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    action: str,
+    request_id: str | None,
+    approved_inventory_sha256: str | None,
+) -> int:
+    if not _has_coordinator_authority(caller):
+        return _safe_error(
+            dependencies,
+            "manifest ownership maintenance requires coordinator authority",
+        )
+    if (
+        dependencies.config.source_mode != "sealed-cumulative"
+        or dependencies.manifest_ownership is None
+    ):
+        return _safe_error(
+            dependencies,
+            "manifest ownership maintenance is not configured",
+        )
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_maintenance_idle()
+        candidate = dependencies.bind_candidate()
+        if action == "inventory":
+            result = dependencies.manifest_ownership.inventory(candidate)
+        elif action == "apply" and request_id is not None and approved_inventory_sha256 is not None:
+            result = dependencies.manifest_ownership.apply(
+                candidate,
+                request_id=request_id,
+                approved_inventory_sha256=approved_inventory_sha256,
+            )
+        else:
+            return 2
+    _write_json(dependencies.stdout, result)
+    return 0
+
+
+def _lifecycle_capacity(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    action: str,
+    approved_plan_sha256: str | None,
+) -> int:
+    if not _has_coordinator_authority(caller):
+        return _safe_error(
+            dependencies,
+            "lifecycle capacity maintenance requires coordinator authority",
+        )
+    if (
+        dependencies.config.source_mode != "sealed-cumulative"
+        or dependencies.lifecycle_capacity is None
+    ):
+        return _safe_error(
+            dependencies,
+            "lifecycle capacity maintenance is not configured",
+        )
+    if action == "inventory" and approved_plan_sha256 is None:
+        plan = dependencies.lifecycle_capacity.inventory()
+        _write_json(dependencies.stdout, plan.to_dict())
+        return 0
+    if action != "apply" or approved_plan_sha256 is None:
+        return 2
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_maintenance_idle()
+        plan = dependencies.lifecycle_capacity.prepare_apply(
+            approved_plan_digest=approved_plan_sha256,
+        )
+    result = dependencies.lifecycle_capacity.execute_claimed(plan)
+    _write_json(dependencies.stdout, result)
+    return 0
+
+
+def _backup_retention(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    action: str,
+    approved_plan_sha256: str | None,
+) -> int:
+    if not _has_coordinator_authority(caller):
+        return _safe_error(
+            dependencies,
+            "backup retention maintenance requires coordinator authority",
+        )
+    if (
+        dependencies.config.source_mode != "sealed-cumulative"
+        or dependencies.backup_retention is None
+    ):
+        return _safe_error(dependencies, "backup retention maintenance is not configured")
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_maintenance_idle()
+        if action == "inventory" and approved_plan_sha256 is None:
+            plan = dependencies.backup_retention.inventory()
+        elif action == "apply" and approved_plan_sha256 is not None:
+            plan = dependencies.backup_retention.load_claim(approved_plan_sha256)
+            dependencies.backup_retention.claim(plan)
+        else:
+            return 2
+    if action == "inventory":
+        _write_json(
+            dependencies.stdout,
+            {"plan": plan.to_dict(), "plan_sha256": plan.plan_digest},
+        )
+        return 0
+    result = dependencies.backup_retention.apply(plan)
+    _write_json(dependencies.stdout, result)
+    return 0
+
+
+def _start_staged(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    dry_run: bool,
+) -> int:
+    """Publish one short-lock detached checkpoint job after Tier 0-2."""
+    assert dependencies.assess_preflight is not None
+    assert dependencies.read_mutation_epoch is not None
+    report = dependencies.preflight()
+    if not report.passed:
+        _write_json(dependencies.stderr, report.to_dict())
+        return 1
+    candidate = dependencies.bind_candidate()
+    mutation_epoch = dependencies.read_mutation_epoch()
+    if type(mutation_epoch) is not int or mutation_epoch < 0:
+        raise ValueError("staging mutation epoch is invalid")
+    assessment = dependencies.assess_preflight(candidate, mutation_epoch)
+    if not assessment.passed:
+        _write_json(dependencies.stderr, assessment.to_dict())
+        return 1
+    request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
+    rollout_id = validate_safe_identifier(
+        dependencies.new_rollout_id(candidate),
+        "rollout_id",
+    )
+    created_at = dependencies.now()
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
+        raise ValueError("broker clock must return a timezone-aware datetime")
+    created_at = created_at.astimezone(UTC)
+    request = _staged_preflight_request(
+        dependencies,
+        caller,
+        candidate,
+        assessment,
+        request_id=request_id,
+        rollout_id=rollout_id,
+        requested_at=created_at.isoformat().replace("+00:00", "Z"),
+        mutation_epoch=mutation_epoch,
+        preview=dry_run,
+    )
+
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_admission_open()
+        _assert_available(dependencies)
+        if dependencies.read_mutation_epoch() != mutation_epoch:
+            raise LifecycleBusyError(
+                "staging mutation epoch changed during preflight",
+                {"reason": "mutation_epoch_drift"},
+            )
+        rotation = dependencies.store.read_backup_rotation()
+        if backup_rotation_admission_blockers(rotation):
+            raise LifecycleBusyError(
+                "detached backup storage is already at the transient limit",
+                {"reason": "backup_lifecycle_busy"},
+            )
+        dependencies.store.create_preflight_request(request)
+        dependencies.store.publish_preflight_assessment(request.request_id, assessment)
+        dependencies.store.append_event(
+            _event(
+                request.request_id,
+                caller,
+                now=lambda: created_at,
+                event="requested",
+                status="preview" if dry_run else "pending",
+            )
+        )
+        if dry_run:
+            dependencies.store.append_event(
+                _event(
+                    request.request_id,
+                    caller,
+                    now=lambda: created_at,
+                    event="preview",
+                    status="preview",
+                )
+            )
+            _write_json(
+                dependencies.stdout,
+                {
+                    "preflight_assessment_sha256": assessment.assessment_digest,
+                    "request_id": request.request_id,
+                    "resolved_sha": candidate.resolved_sha,
+                    "status": "preview",
+                },
+            )
+            return 0
+
+        job_id = validate_safe_identifier(
+            (
+                dependencies.new_backup_job_id()
+                if dependencies.new_backup_job_id is not None
+                else f"job-{uuid4().hex[:16]}"
+            ),
+            "job_id",
+        )
+        payload_id = validate_safe_identifier(
+            (
+                dependencies.new_payload_id()
+                if dependencies.new_payload_id is not None
+                else f"payload-{uuid4().hex[:16]}"
+            ),
+            "payload_id",
+        )
+        bundle_name = BackupCreator.bundle_name(request.request_id, created_at)
+        job = PreflightBackupJobEnvelope(
+            job_id=job_id,
+            request_id=request.request_id,
+            payload_id=payload_id,
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=request.candidate_tree,
+            preflight_assessment_sha256=assessment.assessment_digest,
+            preflight_registry_sha256=assessment.registry_digest,
+            preflight_coverage_sha256=assessment.coverage_digest,
+            mutation_epoch=mutation_epoch,
+            environment=request.environment,
+            namespace=request.namespace,
+            bundle_name=bundle_name,
+            created_at=created_at,
+        )
+        job_path = dependencies.store.publish_preflight_backup_job(job)
+        reservation = begin_candidate(
+            rotation,
+            payload_id=payload_id,
+            request_id=request.request_id,
+            bundle_name=bundle_name,
+            created_at=created_at,
+        )
+        dependencies.store.replace_backup_rotation(
+            reservation.state,
+            expected_generation=rotation.generation,
+        )
+        dependencies.store.append_event(
+            _event(
+                request.request_id,
+                caller,
+                now=lambda: created_at,
+                event="backup_started",
+                status="pending",
+                current_step=bundle_name,
+            )
+        )
+        unit_name = f"loom-staging-backup-{request.request_id}.service"
+        try:
+            dependencies.systemd.start_backup(job_path, unit_name)
+        except Exception:
+            public_reason = backup_public_reason_for_code("backup_launch_failed")
+            current_job = dependencies.store.read_preflight_backup_job_state(request.request_id)
+            failed_job = transition_backup_job(
+                current_job,
+                LifecycleAction.FAIL_BACKUP,
+                updated_at=created_at,
+                failure_code="backup_launch_failed",
+            )
+            dependencies.store.replace_preflight_backup_job_state(
+                failed_job,
+                expected_sequence=current_job.sequence,
+            )
+            current_rotation = dependencies.store.read_backup_rotation()
+            failed_rotation = fail_candidate(
+                current_rotation,
+                payload_id=payload_id,
+                failure_code="backup_launch_failed",
+            )
+            dependencies.store.replace_backup_rotation(
+                failed_rotation.state,
+                expected_generation=current_rotation.generation,
+            )
+            dependencies.store.append_event(
+                _event(
+                    request.request_id,
+                    caller,
+                    now=lambda: created_at,
+                    event="backup_failed",
+                    status="failed",
+                    reason=public_reason,
+                )
+            )
+            raise
+    _write_json(
+        dependencies.stdout,
+        {
+            "backup_unit": unit_name,
+            "preflight_assessment_sha256": assessment.assessment_digest,
+            "request_id": request.request_id,
+            "resolved_sha": candidate.resolved_sha,
+            "status": "backup_pending",
+        },
+    )
+    return 0
 
 
 def _start(
@@ -258,6 +705,14 @@ def _start(
     *,
     dry_run: bool,
 ) -> int:
+    if dependencies.config.source_mode == "sealed-cumulative" and not _has_coordinator_authority(
+        caller
+    ):
+        return _safe_error(dependencies, "sealed cumulative rollout requires coordinator authority")
+    if dependencies.assess_preflight is not None or dependencies.read_mutation_epoch is not None:
+        if dependencies.assess_preflight is None or dependencies.read_mutation_epoch is None:
+            return _safe_error(dependencies, "detached preflight dependencies are incomplete")
+        return _start_staged(dependencies, caller, dry_run=dry_run)
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
         _assert_available(dependencies)
@@ -266,7 +721,19 @@ def _start(
             _write_json(dependencies.stderr, report.to_dict())
             return 1
         candidate = dependencies.bind_candidate()
-        request = _request(dependencies, caller, candidate, preview=dry_run)
+        if dependencies.authorize_preflight is None:
+            return _safe_error(dependencies, "deep rollout preflight is not configured")
+        deep_preflight = dependencies.authorize_preflight(candidate)
+        if not deep_preflight.passed:
+            _write_json(dependencies.stderr, deep_preflight.to_dict())
+            return 1
+        request = _request(
+            dependencies,
+            caller,
+            candidate,
+            deep_preflight,
+            preview=dry_run,
+        )
         dependencies.store.create_request(request)
         dependencies.store.append_event(
             _event(
@@ -404,6 +871,9 @@ def _resume_binding_matches(
     return (
         request.runner_config_sha256 == config.config_sha256
         and envelope.runner_config_sha256 == config.config_sha256
+        and request.preflight_attestation_sha256 == envelope.preflight_attestation_sha256
+        and request.preflight_registry_sha256 == envelope.preflight_registry_sha256
+        and request.preflight_coverage_sha256 == envelope.preflight_coverage_sha256
         and envelope.request_id == request.request_id
         and envelope.rollout_id == request.rollout_id
         and envelope.initiating_operator == request.caller.username
@@ -414,6 +884,17 @@ def _resume_binding_matches(
         and envelope.resolved_sha == request.candidate.resolved_sha
         and envelope.image_tag == request.candidate.image_tag
         and envelope.fetched_at == request.candidate.fetched_at
+        and envelope.source_mode == request.candidate.source_mode == config.source_mode
+        and envelope.resolved_tree == request.candidate.resolved_tree
+        and envelope.approved_base_sha == request.candidate.approved_base_sha
+        and (
+            config.source_mode == "merged-dev"
+            or (
+                envelope.resolved_sha == config.source_commit_sha
+                and envelope.resolved_tree == config.source_tree_sha
+                and envelope.approved_base_sha == config.source_base_sha
+            )
+        )
         and envelope.cluster_name == config.cluster_name
         and envelope.namespace == config.namespace
         and envelope.environment == config.environment
@@ -457,6 +938,10 @@ def _resume(
     caller: CallerIdentity,
     request_id: str,
 ) -> int:
+    if dependencies.config.source_mode == "sealed-cumulative" and not _has_coordinator_authority(
+        caller
+    ):
+        return _safe_error(dependencies, "sealed cumulative rollout requires coordinator authority")
     validate_safe_identifier(request_id, "request_id")
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
@@ -555,10 +1040,12 @@ def _resume(
         return 0
 
 
-def _latest_request(dependencies: BrokerDependencies) -> RolloutRequest | None:
+def _latest_request(
+    dependencies: BrokerDependencies,
+) -> PreflightRequest | RolloutRequest | None:
     custom = getattr(dependencies.store, "latest_request", None)
     if callable(custom):
-        return cast(RolloutRequest | None, custom())
+        return cast(PreflightRequest | RolloutRequest | None, custom())
     requests_root = dependencies.config.state_root / "requests"
     try:
         entries = list(os.scandir(requests_root))
@@ -566,18 +1053,28 @@ def _latest_request(dependencies: BrokerDependencies) -> RolloutRequest | None:
         return None
     except OSError as exc:
         raise RequestStoreError("request ledger is unavailable") from exc
-    requests: list[RolloutRequest] = []
+    requests: list[PreflightRequest | RolloutRequest] = []
     for entry in entries:
         if not entry.is_dir(follow_symlinks=False):
             continue
         try:
             requests.append(dependencies.store.read_request(entry.name))
+        except RequestStoreError as exc:
+            if str(exc) != "rollout request is not promoted":
+                continue
+            try:
+                requests.append(dependencies.store.read_preflight_request(entry.name))
+            except Exception:
+                continue
         except Exception:
             continue
     return max(requests, key=lambda item: (item.requested_at, item.request_id), default=None)
 
 
-def _request_status(dependencies: BrokerDependencies, request: RolloutRequest) -> dict[str, object]:
+def _request_status(
+    dependencies: BrokerDependencies,
+    request: PreflightRequest | RolloutRequest,
+) -> dict[str, object]:
     events = dependencies.store.read_events(request.request_id)
     latest = _latest_attempt_event(events)
     if latest is None and events:
@@ -616,7 +1113,7 @@ def _status(
     dependencies: BrokerDependencies,
     request_id: str | None,
 ) -> int:
-    request: RolloutRequest | None = None
+    request: PreflightRequest | RolloutRequest | None = None
     reconciled = dependencies.lifecycle.reconcile_active()
     if request_id is None:
         if reconciled.pointer is not None:
@@ -632,6 +1129,13 @@ def _status(
     if request is None:
         try:
             request = dependencies.store.read_request(cast(str, request_id))
+        except RequestStoreError as exc:
+            if str(exc) != "rollout request is not promoted":
+                return _safe_error(dependencies, "request does not exist")
+            try:
+                request = dependencies.store.read_preflight_request(cast(str, request_id))
+            except Exception:
+                return _safe_error(dependencies, "request does not exist")
         except Exception:
             return _safe_error(dependencies, "request does not exist")
     payload = _request_status(dependencies, request)
@@ -913,12 +1417,13 @@ def _run(
     *,
     environment: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
+    timeout = 120 if argv and argv[0] in {"systemctl", "systemd-run"} else 30
     return subprocess.run(
         argv,
         check=False,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
         env=environment,
     )
 
@@ -967,7 +1472,8 @@ def _operator_known_secrets(
 
 def _default_dependencies() -> BrokerDependencies:
     config = OperatorConfig.load(fixed_operator_config_path())
-    service_uid = pwd.getpwnam(config.service_user).pw_uid
+    service_account = pwd.getpwnam(config.service_user)
+    service_uid = service_account.pw_uid
     child_environment = sanitized_child_environment(config, service_uid=service_uid)
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -984,6 +1490,100 @@ def _default_dependencies() -> BrokerDependencies:
         stream=stream,
     )
     lifecycle = LifecycleCoordinator(config, store=store, systemd=systemd)
+    backup_runner = SubprocessBackupCommandRunner()
+    inventory_provider = ReadonlyLifecycleInventoryProvider(
+        config,
+        evidence_source=InstalledReadonlyDatabaseEvidenceSource(service_uid=service_uid),
+        object_verifier=lambda objects: verify_installed_immutable_objects(
+            objects,
+            service_uid=service_uid,
+        ),
+    )
+
+    def clock() -> datetime:
+        return datetime.now(UTC)
+
+    deep_preflight = build_installed_deep_preflight_composition(
+        config,
+        service_uid=service_uid,
+        service_gid=service_account.pw_gid,
+        store=store,
+        now=clock,
+    ).authority()
+    manifest_ownership = InstalledManifestOwnershipService(
+        config=config,
+        service_uid=service_uid,
+        read_mutation_epoch=deep_preflight.current_mutation_epoch,
+    )
+    preflight_commands = InstalledPreflightCommands(config, child_environment)
+
+    def bind_exact_candidate() -> CandidateBinding:
+        return bind_configured_candidate(config, run=run, now=clock)
+
+    def load_capacity_artifacts(
+        candidate: CandidateBinding,
+        mutation_epoch: int,
+    ) -> Any:
+        if candidate.resolved_tree is None:
+            raise ValueError("sealed capacity candidate tree is unavailable")
+        return PreflightArtifactStore(config.state_root, service_uid=service_uid).load_exact(
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=candidate.resolved_tree,
+            mutation_epoch=mutation_epoch,
+            image_tag=candidate.image_tag,
+            namespace=config.namespace,
+            image_run=preflight_commands.image,
+        )
+
+    lifecycle_capacity = (
+        InstalledLifecycleCapacityService(
+            config=config,
+            service_uid=service_uid,
+            store=store,
+            bind_candidate=bind_exact_candidate,
+            read_mutation_epoch=deep_preflight.current_mutation_epoch,
+            load_artifacts=load_capacity_artifacts,
+            commands=preflight_commands,
+            read_database=lambda: probe_installed_readonly_database_baseline(
+                service_uid=service_uid,
+            ),
+            now=clock,
+            expected_buckets=(
+                (
+                    cluster_config := load_cluster_config(config.cluster_config_path)
+                ).trajectories_bucket,
+                cluster_config.artifacts_bucket,
+            ),
+            expected_filesystem_paths=tuple(
+                f"/var/lib/loom-minio-capacity/{index}"
+                for index in range(
+                    int(cluster_config.to_render_context()["topology"]["minio_replicas"])
+                )
+            ),
+        )
+        if config.source_mode == "sealed-cumulative"
+        else None
+    )
+    backup = BackupCreator(
+        config,
+        service_uid=service_uid,
+        runner=backup_runner,
+        object_inventory_provider=inventory_provider,
+    )
+    backup_retention = (
+        InstalledBackupRetentionService(
+            config=config,
+            service_uid=service_uid,
+            store=store,
+            retirer=BackupPayloadRetirer(creator=backup, store=store),
+            activate_payload=BackupPayloadActivator(
+                creator=backup,
+                enforce_freshness=False,
+            ),
+        )
+        if config.source_mode == "sealed-cumulative"
+        else None
+    )
     return BrokerDependencies(
         config=config,
         authenticate=lambda: caller_from_sudo(
@@ -993,16 +1593,12 @@ def _default_dependencies() -> BrokerDependencies:
             groups=_groups,
         ),
         preflight=lambda: collect_preflight(config, service_uid=service_uid),
-        bind_candidate=lambda: bind_fresh_origin_dev(
-            config,
-            run=run,
-            now=lambda: datetime.now(UTC),
-        ),
-        backup=BackupCreator(config, service_uid=service_uid),
+        bind_candidate=bind_exact_candidate,
+        backup=backup,
         store=store,
         lifecycle=lifecycle,
         systemd=systemd,
-        now=lambda: datetime.now(UTC),
+        now=clock,
         new_request_id=lambda: f"req-{uuid4().hex[:16]}",
         new_rollout_id=lambda candidate: new_rollout_id(image_tag=candidate.image_tag),
         stdout=sys.stdout,
@@ -1011,6 +1607,11 @@ def _default_dependencies() -> BrokerDependencies:
             config,
             service_uid=service_uid,
         ),
+        assess_preflight=deep_preflight.assess,
+        read_mutation_epoch=deep_preflight.current_mutation_epoch,
+        manifest_ownership=manifest_ownership,
+        lifecycle_capacity=lifecycle_capacity,
+        backup_retention=backup_retention,
     )
 
 
@@ -1040,6 +1641,8 @@ def _main(
     try:
         deps = dependencies or _default_dependencies()
         caller = deps.authenticate()
+        if args.command == "preflight":
+            return _preflight_only(deps, caller)
         if args.command == "start":
             return _start(deps, caller, dry_run=bool(args.dry_run))
         if args.command == "status":
@@ -1052,6 +1655,32 @@ def _main(
             return _cancel(deps, caller, args.request_id, args.reason)
         if args.command == "cleanup-incomplete-backup":
             return _cleanup_backup(deps, caller, args.request_id)
+        if args.command == "manifest-ownership":
+            return _manifest_ownership(
+                deps,
+                caller,
+                action=args.ownership_action,
+                request_id=getattr(args, "request_id", None),
+                approved_inventory_sha256=getattr(
+                    args,
+                    "approved_inventory_sha256",
+                    None,
+                ),
+            )
+        if args.command == "lifecycle-capacity":
+            return _lifecycle_capacity(
+                deps,
+                caller,
+                action=args.capacity_action,
+                approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
+            )
+        if args.command == "backup-retention":
+            return _backup_retention(
+                deps,
+                caller,
+                action=args.retention_action,
+                approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
+            )
         return 2
     except (ValueError, PolicyError):
         if deps is None:

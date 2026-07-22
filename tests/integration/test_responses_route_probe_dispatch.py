@@ -43,6 +43,7 @@ from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
+from tests.integration.gateway_db import delete_gateway_trial, insert_gateway_trial
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
@@ -70,7 +71,8 @@ async def route_setup(
     async_engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     app.state.rate_card_cache = RateCardCache(
         session_factory=app.state.session_factory,
@@ -96,7 +98,8 @@ async def route_setup(
         s.commit()
 
     async_session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     async with async_session_factory() as ses:
         store = LocalEncryptedSecretStore(ses)
@@ -183,6 +186,9 @@ async def route_setup(
     )
 
     trial_id = uuid4()
+    with session_local() as s:
+        task_id = insert_gateway_trial(s, team_id=team_id, trial_id=trial_id)
+        s.commit()
     step_jwt = mint_step_jwt(
         team_id=team_id,
         trial_id=trial_id,
@@ -200,6 +206,7 @@ async def route_setup(
         await async_engine.dispose()
         with session_local() as s:
             s.execute(delete(LlmCall))
+            delete_gateway_trial(s, trial_id=trial_id, task_id=task_id)
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(Token))
@@ -221,7 +228,8 @@ async def _post_responses(
         "instructions": "be helpful",
     }
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         return await client.post(
             "/openai/v1/responses",
@@ -252,16 +260,19 @@ async def _set_probe_state(
 
 
 async def _read_probe_state(
-    postgres_url: str, connection_id: UUID,
+    postgres_url: str,
+    connection_id: UUID,
 ) -> tuple[bool | None, datetime | None]:
     engine = create_async_engine(postgres_url)
     async with async_sessionmaker(engine, expire_on_commit=False)() as ses:
-        row = (await ses.execute(
-            select(
-                ProviderConnection.responses_api_supported,
-                ProviderConnection.responses_api_probed_at,
-            ).where(ProviderConnection.id == connection_id)
-        )).one()
+        row = (
+            await ses.execute(
+                select(
+                    ProviderConnection.responses_api_supported,
+                    ProviderConnection.responses_api_probed_at,
+                ).where(ProviderConnection.id == connection_id)
+            )
+        ).one()
     await engine.dispose()
     return row  # type: ignore[return-value]
 
@@ -272,12 +283,15 @@ async def _read_probe_state(
 
 
 async def test_cached_false_skips_native_and_translates(
-    route_setup, postgres_url: str,
+    route_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, conn_id, captures = route_setup
     await _set_probe_state(
-        postgres_url, conn_id,
-        supported=False, probed_at=datetime.now(UTC),
+        postgres_url,
+        conn_id,
+        supported=False,
+        probed_at=datetime.now(UTC),
     )
 
     r = await _post_responses(app, jwt)
@@ -303,7 +317,8 @@ async def test_cached_false_skips_native_and_translates(
 
 
 async def test_null_probes_then_dispatches_and_caches(
-    route_setup, postgres_url: str,
+    route_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, conn_id, _captures = route_setup
     # Leave responses_api_supported as NULL (fixture default).
@@ -326,7 +341,8 @@ async def test_null_probes_then_dispatches_and_caches(
 
 
 async def test_cached_true_uses_native_path_unchanged(
-    route_setup, postgres_url: str,
+    route_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, conn_id, captures = route_setup
     # Replace the canned /responses response with a real Responses body.
@@ -351,8 +367,10 @@ async def test_cached_true_uses_native_path_unchanged(
     captures["route_response"]["/responses"] = canned_responses_ok  # type: ignore[index]
 
     await _set_probe_state(
-        postgres_url, conn_id,
-        supported=True, probed_at=datetime.now(UTC),
+        postgres_url,
+        conn_id,
+        supported=True,
+        probed_at=datetime.now(UTC),
     )
 
     r = await _post_responses(app, jwt)
@@ -374,7 +392,8 @@ async def test_cached_true_uses_native_path_unchanged(
 
 
 async def test_stale_true_is_reprobed(
-    route_setup, postgres_url: str,
+    route_setup,
+    postgres_url: str,
 ) -> None:
     """Even a cached TRUE gets re-checked once it ages past the TTL —
     upstream config drift should not silently reintroduce the 40-min
@@ -382,7 +401,8 @@ async def test_stale_true_is_reprobed(
     app, jwt, conn_id, _captures = route_setup
     # Set cached TRUE with a 48h-old probed_at (assumed TTL is 24h).
     await _set_probe_state(
-        postgres_url, conn_id,
+        postgres_url,
+        conn_id,
         supported=True,
         probed_at=datetime.now(UTC) - timedelta(hours=48),
     )

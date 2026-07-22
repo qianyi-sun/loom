@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
+import inspect
 import io
 import json
 import logging
 import os
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,7 +17,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
@@ -35,6 +38,11 @@ from loom_cli.rollout.operator.model import (
     CallerIdentity,
     CandidateBinding,
     RolloutRequest,
+)
+from loom_cli.rollout.operator.readonly_database_client import ReadonlyDatabaseTunnelError
+from loom_cli.rollout.operator.rollout_checkpoint import (
+    ImmutableObjectInventory,
+    build_immutable_inventory,
 )
 
 FIXED_NOW = datetime(2026, 7, 13, 20, 0, tzinfo=UTC)
@@ -106,6 +114,9 @@ def make_request() -> RolloutRequest:
         candidate=candidate,
         requested_at="2026-07-13T20:00:00Z",
         runner_config_sha256="2" * 64,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
     )
 
 
@@ -324,6 +335,204 @@ def test_binary_dump_and_exact_secret_allowlist_never_expose_credentials(tmp_pat
     for value in (MINIO_ACCESS_KEY, MINIO_SECRET_KEY):
         assert value not in rendered_boundary
     assert runner.timeouts == [600.0, 30.0, 30.0, 30.0, 30.0]
+
+
+def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    runner = RecordingRunner()
+
+    def inventory(created_at: datetime):
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-staging",
+            mutation_epoch=6,
+            schema_revision="0066",
+            created_at=created_at,
+            objects=[],
+        )
+
+    backup = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=FailingMinioMirror(),
+        now=lambda: FIXED_NOW,
+        object_inventory_provider=inventory,
+    ).create(make_request())
+
+    manifest = json.loads(backup.manifest_path.read_text(encoding="utf-8"))
+    bundle = backup.manifest_path.parent
+    assert manifest["schema_version"] == 2
+    assert set(manifest["components"]) == {
+        "postgres",
+        "object_inventory",
+        "k8s_secrets",
+    }
+    assert not (bundle / "minio").exists()
+    inventory_document = json.loads((bundle / "object-inventory.json").read_text(encoding="utf-8"))
+    assert inventory_document["mutation_epoch"] == 6
+    assert len(inventory_document["inventory_root"]) == 64
+    assert all("port-forward" not in argv for argv in runner.argvs)
+    assert not any(argv[-2:] == ["-o", "json"] for argv in runner.argvs)
+    assert runner.timeouts == [600.0, 30.0, 30.0, 30.0]
+
+
+def test_critical_checkpoint_surfaces_inventory_provider_failure_without_detail(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+
+    def inventory(_created_at: datetime) -> ImmutableObjectInventory:
+        raise RuntimeError("secret-bearing inventory provider detail")
+
+    with pytest.raises(BackupError) as exc_info:
+        BackupCreator(
+            config,
+            service_uid=os.getuid(),
+            runner=RecordingRunner(),
+            minio=FailingMinioMirror(),
+            now=lambda: FIXED_NOW,
+            object_inventory_provider=inventory,
+        ).create(make_request())
+
+    assert exc_info.value.code == "object_inventory_failed"
+    assert exc_info.value.public_reason == "backup_object_inventory_failed"
+    assert "secret-bearing" not in str(exc_info.value)
+
+
+def test_critical_checkpoint_surfaces_inventory_binding_failure(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    def inventory(created_at: datetime):
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-other-staging",
+            mutation_epoch=6,
+            schema_revision="0066",
+            created_at=created_at,
+            objects=[],
+        )
+
+    with pytest.raises(BackupError) as exc_info:
+        BackupCreator(
+            config,
+            service_uid=os.getuid(),
+            runner=RecordingRunner(),
+            minio=FailingMinioMirror(),
+            now=lambda: FIXED_NOW,
+            object_inventory_provider=inventory,
+        ).create(make_request())
+
+    assert exc_info.value.code == "object_inventory_binding_failed"
+    assert exc_info.value.public_reason == "backup_object_inventory_failed"
+
+
+def test_creator_surfaces_missing_service_account_as_precondition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_service_account(_username: str) -> None:
+        raise KeyError("missing")
+
+    monkeypatch.setattr(backup_module.pwd, "getpwnam", missing_service_account)
+
+    with pytest.raises(BackupError) as exc_info:
+        BackupCreator(make_config(tmp_path))
+
+    assert exc_info.value.code == "service_account_unavailable"
+    assert exc_info.value.public_reason == "backup_precondition_failed"
+
+
+def test_creator_rejects_preview_request_as_precondition_without_commands(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingRunner()
+    creator = BackupCreator(
+        make_config(tmp_path),
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=FailingMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    with pytest.raises(BackupError) as exc_info:
+        creator.create(replace(make_request(), status="preview"))
+
+    assert exc_info.value.code == "backup_request_not_pending"
+    assert exc_info.value.public_reason == "backup_precondition_failed"
+    assert runner.argvs == []
+
+
+def test_critical_checkpoint_defers_latest_until_explicit_activation(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runner = RecordingRunner()
+
+    def inventory(created_at: datetime):
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-staging",
+            mutation_epoch=6,
+            schema_revision="0066",
+            created_at=created_at,
+            objects=[],
+        )
+
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=runner,
+        minio=FailingMinioMirror(),
+        now=lambda: FIXED_NOW,
+        object_inventory_provider=inventory,
+        publish_latest=False,
+    )
+    backup = creator.create(make_request())
+    latest = config.rollout_root / "backups" / "latest"
+
+    assert not latest.exists()
+    creator.activate(backup)
+    assert latest.readlink() == Path(backup.manifest_path.parent.name)
+
+
+def test_recovery_activation_revalidates_aged_payload_without_freshness_authority(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+
+    def inventory(created_at: datetime):
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-staging",
+            mutation_epoch=6,
+            schema_revision="0066",
+            created_at=created_at,
+            objects=[],
+        )
+
+    backup = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=FailingMinioMirror(),
+        now=lambda: FIXED_NOW,
+        object_inventory_provider=inventory,
+        publish_latest=False,
+    ).create(make_request())
+    latest = config.rollout_root / "backups" / "latest"
+    recovery = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        now=lambda: FIXED_NOW + timedelta(days=2),
+    )
+
+    with pytest.raises(BackupError, match="backup_revalidation_failed"):
+        recovery.activate(backup)
+
+    assert not latest.exists()
+    recovery.activate(backup, enforce_freshness=False)
+    assert latest.readlink() == Path(backup.manifest_path.parent.name)
 
 
 def test_oversized_postgres_dump_stops_before_crossing_component_cap(
@@ -1213,7 +1422,7 @@ def test_revalidate_detects_component_mutation_without_running_commands(
     object_path.chmod(0o600)
     runner = RecordingRunner()
 
-    with pytest.raises(BackupError, match="backup_revalidation_failed"):
+    with pytest.raises(BackupError, match="backup_revalidation_failed") as exc_info:
         BackupCreator(
             config,
             service_uid=os.getuid(),
@@ -1222,6 +1431,7 @@ def test_revalidate_detects_component_mutation_without_running_commands(
             now=lambda: FIXED_NOW,
         ).revalidate(backup, enforce_freshness=False)
 
+    assert exc_info.value.public_reason == "backup_manifest_failed"
     assert runner.argvs == []
 
 
@@ -1242,7 +1452,7 @@ def test_revalidate_rejects_supplied_manifest_digest_mismatch_without_commands(
     )
     runner = RecordingRunner()
 
-    with pytest.raises(BackupError, match="backup_manifest_digest_mismatch"):
+    with pytest.raises(BackupError, match="backup_manifest_digest_mismatch") as exc_info:
         BackupCreator(
             config,
             service_uid=os.getuid(),
@@ -1251,6 +1461,7 @@ def test_revalidate_rejects_supplied_manifest_digest_mismatch_without_commands(
             now=lambda: FIXED_NOW,
         ).revalidate(mismatched, enforce_freshness=False)
 
+    assert exc_info.value.public_reason == "backup_manifest_failed"
     assert runner.argvs == []
 
 
@@ -3446,6 +3657,47 @@ def test_stage_unknown_code_defaults_to_backup_failed() -> None:
     assert exc_info.value.public_reason == "backup_failed"
 
 
+@pytest.mark.parametrize(
+    ("kind", "expected_code"),
+    [
+        ("credential", "object_inventory_credentials_failed"),
+        ("transport", "object_inventory_transport_failed"),
+        ("timeout", "object_inventory_timeout"),
+    ],
+)
+def test_inventory_stage_preserves_typed_private_tunnel_diagnostic(
+    kind: str,
+    expected_code: str,
+) -> None:
+    diagnostic = "Unauthorized token=[REDACTED:token]"
+
+    def fail() -> None:
+        raise ReadonlyDatabaseTunnelError(kind, diagnostic)  # type: ignore[arg-type]
+
+    with pytest.raises(backup_module.BackupError) as caught:
+        backup_module._stage("object_inventory_failed", fail)
+
+    assert caught.value.args == (expected_code,)
+    assert caught.value.code == expected_code
+    assert caught.value.public_reason == "backup_object_inventory_failed"
+    assert caught.value.diagnostic == diagnostic
+    assert diagnostic not in str(caught.value)
+
+
+def test_non_inventory_stage_discards_typed_tunnel_diagnostic() -> None:
+    def fail() -> None:
+        raise ReadonlyDatabaseTunnelError(
+            "credential",
+            "Unauthorized token=[REDACTED:token]",
+        )
+
+    with pytest.raises(backup_module.BackupError) as caught:
+        backup_module._stage("postgres_dump_failed", fail)
+
+    assert caught.value.code == "postgres_dump_failed"
+    assert caught.value.diagnostic is None
+
+
 def test_stage_reraises_specific_backup_error_unchanged() -> None:
     def limit() -> None:
         raise backup_module.BackupPolicyLimitError(
@@ -3463,18 +3715,37 @@ def test_stage_reraises_specific_backup_error_unchanged() -> None:
 
 def test_all_stage_public_reasons_are_approved() -> None:
     for reason in backup_module._STAGE_PUBLIC_REASONS.values():
-        assert reason in backup_module._BACKUP_PUBLIC_REASONS
+        assert reason in backup_module.BACKUP_PUBLIC_REASONS
 
 
-def test_backup_public_reason_literal_matches_approved_event_tokens() -> None:
-    # The Literal type, the backup module's runtime set, and the event-model
-    # allowlist must all agree, or a raised reason gets rejected at append time.
-    from typing import get_args
+def test_all_backup_failure_callsite_codes_are_classified() -> None:
+    tree = ast.parse(inspect.getsource(backup_module))
+    literal_codes: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Call)
+            or not node.args
+            or not isinstance(node.args[0], ast.Constant)
+            or not isinstance(node.args[0].value, str)
+        ):
+            continue
+        called_name = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else None
+        )
+        if called_name in {"BackupError", "BackupPolicyLimitError", "_stage"}:
+            literal_codes.add(node.args[0].value)
 
-    from loom_cli.rollout.operator.model import APPROVED_BACKUP_EVENT_REASONS
-
-    assert set(get_args(backup_module.BackupPublicReason)) == APPROVED_BACKUP_EVENT_REASONS
-    assert backup_module._BACKUP_PUBLIC_REASONS == APPROVED_BACKUP_EVENT_REASONS
+    classified_codes = set(backup_module._STAGE_PUBLIC_REASONS)
+    assert literal_codes <= classified_codes
+    assert {
+        "latest_publish_failed",
+        "backup_cleanup_failed",
+        "backup_retirement_failed",
+    } <= classified_codes
 
 
 def _incomplete_bundle(tmp_path: Path) -> tuple[BackupCreator, Path]:
@@ -3506,8 +3777,9 @@ def test_cleanup_incomplete_refuses_manifest_backed_or_latest_bundle(tmp_path: P
     manifest.write_bytes(b"{}")
     manifest.chmod(0o600)
 
-    with pytest.raises(BackupError, match="backup_cleanup_failed"):
+    with pytest.raises(BackupError, match="backup_cleanup_failed") as manifest_error:
         manifest_creator.cleanup_incomplete("stg-20260713-abcdef12")
+    assert manifest_error.value.public_reason == "backup_cleanup_failed"
     assert manifest_bundle.exists()
 
     latest_creator, latest_bundle = _incomplete_bundle(tmp_path / "latest")
@@ -3516,6 +3788,44 @@ def test_cleanup_incomplete_refuses_manifest_backed_or_latest_bundle(tmp_path: P
     with pytest.raises(BackupError, match="backup_cleanup_failed"):
         latest_creator.cleanup_incomplete("stg-20260713-abcdef12")
     assert latest_bundle.exists()
+
+
+def test_retire_payload_requires_exact_manifest_and_refuses_latest(tmp_path: Path) -> None:
+    creator, bundle = _incomplete_bundle(tmp_path)
+    manifest = bundle / "backup-manifest.json"
+    manifest.write_bytes(b"{}\n")
+    manifest.chmod(0o600)
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    with pytest.raises(BackupError, match="backup_retirement_failed") as digest_error:
+        creator.retire_payload(
+            "stg-20260713-abcdef12",
+            bundle_name=bundle.name,
+            expected_manifest_sha256="f" * 64,
+        )
+    assert digest_error.value.public_reason == "backup_retirement_failed"
+    assert bundle.exists()
+
+    (bundle.parent / "latest").symlink_to(bundle.name)
+    with pytest.raises(BackupError, match="backup_retirement_failed"):
+        creator.retire_payload(
+            "stg-20260713-abcdef12",
+            bundle_name=bundle.name,
+            expected_manifest_sha256=digest,
+        )
+    (bundle.parent / "latest").unlink()
+
+    assert creator.retire_payload(
+        "stg-20260713-abcdef12",
+        bundle_name=bundle.name,
+        expected_manifest_sha256=digest,
+    )
+    assert not bundle.exists()
+    assert not creator.retire_payload(
+        "stg-20260713-abcdef12",
+        bundle_name=bundle.name,
+        expected_manifest_sha256=digest,
+    )
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo"])
@@ -4019,6 +4329,36 @@ def test_existing_acl_managed_backups_parent_preserves_owner_and_mode(
     assert backups_root.stat().st_mode & 0o777 == 0o770
     assert backup.manifest_path.parent.stat().st_mode & 0o777 == 0o700
     assert backup.manifest_path.parent.stat().st_uid == os.getuid()
+
+
+def test_backup_converges_acl_for_every_private_file_before_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    calls: list[Path] = []
+
+    def record_convergence(fd: int, *, service_uid: int) -> None:
+        metadata = os.fstat(fd)
+        assert metadata.st_uid == service_uid == os.getuid()
+        assert metadata.st_size == 0
+        calls.append(Path(f"/dev/fd/{fd}"))
+
+    monkeypatch.setattr(backup_module, "converge_new_private_file", record_convergence)
+    creator = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=SuccessfulMinioMirror(),
+        now=lambda: FIXED_NOW,
+    )
+
+    backup = creator.create(make_request())
+
+    expected_files = sum(
+        stat.S_ISREG(path.lstat().st_mode) for path in backup.manifest_path.parent.rglob("*")
+    )
+    assert len(calls) == expected_files
 
 
 def test_existing_world_writable_backups_parent_is_rejected_before_commands(

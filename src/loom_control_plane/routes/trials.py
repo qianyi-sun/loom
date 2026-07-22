@@ -7,11 +7,12 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import ValidationError
-from sqlalchemy import insert, select, text
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from loom.auth import verify_bearer_token
 from loom.benchmark_profiles import reject_non_runnable_benchmark_profiles
+from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
 from loom.db.schema import Batch, LlmCall, TeamQuota
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
@@ -323,6 +324,22 @@ async def submit_trial(
                 insert(TrialRow).values(**insert_values).returning(TrialRow.submitted_at),
             )
             submitted_at = result.scalar_one()
+        lifecycle_authority_id = await ensure_trial_lifecycle_authority(
+            session,
+            trial_id=trial_id,
+            team_id=submit_team_id,
+            created_at=submitted_at,
+        )
+        lifecycle_result = await session.execute(
+            update(TrialRow)
+            .where(
+                TrialRow.id == trial_id,
+                TrialRow.lifecycle_authority_id.is_(None),
+            )
+            .values(lifecycle_authority_id=lifecycle_authority_id)
+        )
+        if lifecycle_result.rowcount != 1:
+            raise RuntimeError("trial lifecycle authority binding is stale")
         await session.commit()
 
     return {

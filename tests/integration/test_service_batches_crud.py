@@ -24,6 +24,10 @@ from loom.db.schema import (
     AdminAuditEvent,
     Batch,
     Benchmark,
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
     LlmCall,
     ProviderConnection,
     ProviderModelCache,
@@ -227,6 +231,10 @@ async def camp_setup(
             s.execute(delete(TeamQuota))
             s.execute(delete(TeamMembership))
             s.execute(delete(User).where(User.username_normalized == username.casefold()))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
@@ -268,6 +276,26 @@ async def test_post_batch_materializes_count(
     }
     assert detail_body["submitted_by_user"]["username"].startswith("BatchOwner-")
     assert detail_body["submitted_by_user"]["team_id"] == str(team_id)
+    async with app.state.session_factory() as session:
+        batch, authority = (
+            await session.execute(
+                select(Batch, DataLifecycleAuthority)
+                .join(
+                    DataLifecycleAuthority,
+                    DataLifecycleAuthority.id == Batch.lifecycle_authority_id,
+                )
+                .where(Batch.id == UUID(body["batch_id"]))
+            )
+        ).one()
+    assert authority.environment == "development"
+    assert authority.namespace == "loom"
+    assert authority.team_id == team_id
+    assert authority.data_class == "run"
+    assert authority.owner_kind == "batch"
+    assert authority.owner_id == str(batch.id)
+    assert authority.created_at == batch.created_at
+    assert authority.pinned is True
+    assert authority.expires_at is None
 
 
 async def test_post_batch_accepts_owned_task_set_filter(

@@ -15,6 +15,7 @@ from loom_cli.rollout.operator.config import (
     OperatorConfig,
 )
 from loom_cli.rollout.operator.model import (
+    BACKUP_PUBLIC_REASONS,
     ActivePointer,
     AttemptIdentity,
     CallerIdentity,
@@ -24,18 +25,23 @@ from loom_cli.rollout.operator.model import (
     RolloutRequest,
 )
 
+MERGED_COMMIT = "abcdef1234567890abcdef1234567890abcdef12"
+SEALED_COMMIT = "a" * 40
+SEALED_TREE = "b" * 40
+SEALED_BASE = "c" * 40
+
 VALID_CONFIG = f"""\
 schema_version = 1
 service_user = "loom-rollout"
 operator_group = "loom-staging-operators"
 remote_url = "{APPROVED_REMOTE_URL}"
 target_ref = "refs/heads/dev"
-runner_repo = "/opt/loom-staging-runner/repo"
+runner_repo = "/opt/loom-staging-runner/candidates/{MERGED_COMMIT}/repo"
 state_root = "/var/lib/loom-staging-rollout"
 runtime_root = "/run/loom-staging-rollout"
 rollout_root = "/data/loom-staging"
 kubeconfig_path = "/var/lib/loom-staging-rollout/kubeconfig"
-cluster_config_path = "/opt/loom-staging-runner/repo/deploy/environments/staging.cluster.toml"
+cluster_config_path = "/opt/loom-staging-runner/candidates/{MERGED_COMMIT}/repo/deploy/environments/staging.cluster.toml"
 admin_token_source = "file:/var/lib/loom-staging-rollout/credentials/admin-token"
 worker_token_source = "file:/var/lib/loom-staging-rollout/credentials/worker-token"
 service_token_source = "file:/var/lib/loom-staging-rollout/credentials/service-token"
@@ -51,6 +57,15 @@ gb10_prep_concurrency = 8
 backup_max_objects = 1000000
 backup_max_entries = 16000000
 """
+SEALED_CONFIG = (
+    VALID_CONFIG.replace(MERGED_COMMIT, SEALED_COMMIT).replace(
+        "schema_version = 1", "schema_version = 2", 1
+    )
+    + 'source_mode = "sealed-cumulative"\n'
+    + f'source_commit_sha = "{SEALED_COMMIT}"\n'
+    + f'source_tree_sha = "{SEALED_TREE}"\n'
+    + f'source_base_sha = "{SEALED_BASE}"\n'
+)
 
 
 def _write_config(path: Path, contents: str = VALID_CONFIG) -> Path:
@@ -85,6 +100,9 @@ def make_driver_envelope(**overrides: object) -> DriverEnvelope:
         ),
         "backup_manifest_sha256": "1" * 64,
         "runner_config_sha256": "2" * 64,
+        "preflight_attestation_sha256": "3" * 64,
+        "preflight_registry_sha256": "4" * 64,
+        "preflight_coverage_sha256": "5" * 64,
         "cluster_name": "loom-staging",
         "namespace": "loom-staging",
         "environment": "staging",
@@ -122,6 +140,9 @@ def make_request(**overrides: object) -> RolloutRequest:
         "candidate": candidate,
         "requested_at": "2026-07-13T20:00:01Z",
         "runner_config_sha256": "2" * 64,
+        "preflight_attestation_sha256": "3" * 64,
+        "preflight_registry_sha256": "4" * 64,
+        "preflight_coverage_sha256": "5" * 64,
         "command": "start",
         "status": "pending",
     }
@@ -138,7 +159,7 @@ def test_config_loads_exact_schema_and_records_digest(tmp_path: Path) -> None:
     assert config.service_user == "loom-rollout"
     assert config.remote_url == APPROVED_REMOTE_URL
     assert config.target_ref == "refs/heads/dev"
-    assert config.runner_repo == Path("/opt/loom-staging-runner/repo")
+    assert config.runner_repo == Path(f"/opt/loom-staging-runner/candidates/{MERGED_COMMIT}/repo")
     assert config.state_root == Path("/var/lib/loom-staging-rollout")
     assert config.runtime_root == Path("/run/loom-staging-rollout")
     assert config.cluster_config_path.is_absolute()
@@ -146,6 +167,116 @@ def test_config_loads_exact_schema_and_records_digest(tmp_path: Path) -> None:
     assert config.backup_max_entries == 16_000_000
     assert config.config_path == path
     assert config.config_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_config_loads_exact_sealed_cumulative_binding(tmp_path: Path) -> None:
+    path = _write_config(tmp_path / "staging-rollout.toml", SEALED_CONFIG)
+
+    config = OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+    assert config.source_mode == "sealed-cumulative"
+    assert config.source_commit_sha == SEALED_COMMIT
+    assert config.source_tree_sha == SEALED_TREE
+    assert config.source_base_sha == SEALED_BASE
+
+
+@pytest.mark.parametrize(
+    ("key", "replacement", "message"),
+    [
+        (
+            "runner_repo",
+            'runner_repo = "/opt/loom-staging-runner/repo"',
+            "candidates/<full-sha>/repo",
+        ),
+        (
+            "runner_repo",
+            'runner_repo = "/opt/loom-staging-runner/candidates/ABC/repo"',
+            "candidates/<full-sha>/repo",
+        ),
+        (
+            "cluster_config_path",
+            'cluster_config_path = "/opt/loom-staging-runner/candidates/'
+            f'{MERGED_COMMIT}/other/staging.cluster.toml"',
+            "must belong to the exact candidate repo",
+        ),
+    ],
+)
+def test_config_rejects_unversioned_or_cross_candidate_runtime_paths(
+    tmp_path: Path,
+    key: str,
+    replacement: str,
+    message: str,
+) -> None:
+    path = _write_config(
+        tmp_path / "staging-rollout.toml",
+        _replace_config_value(VALID_CONFIG, key, replacement),
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+
+def test_sealed_config_rejects_runtime_path_commit_drift(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "staging-rollout.toml",
+        _replace_config_value(
+            SEALED_CONFIG,
+            "source_commit_sha",
+            f"source_commit_sha = {'d' * 40!r}",
+        ),
+    )
+
+    with pytest.raises(ConfigError, match="commit must match"):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+
+def test_sealed_candidate_and_envelope_round_trip_exact_provenance() -> None:
+    candidate = CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref="origin/dev",
+        resolved_sha=SEALED_COMMIT,
+        image_tag="staging-aaaaaaa",
+        fetched_at="2026-07-17T13:00:00Z",
+        source_mode="sealed-cumulative",
+        resolved_tree=SEALED_TREE,
+        approved_base_sha=SEALED_BASE,
+    )
+    envelope = make_driver_envelope(
+        resolved_sha=SEALED_COMMIT,
+        image_tag="staging-aaaaaaa",
+        source_mode="sealed-cumulative",
+        resolved_tree=SEALED_TREE,
+        approved_base_sha=SEALED_BASE,
+    )
+
+    assert CandidateBinding.from_dict(candidate.to_dict()) == candidate
+    assert DriverEnvelope.from_dict(envelope.to_dict()) == envelope
+    assert envelope.rollout_inputs()["source_mode"] == "sealed-cumulative"
+    assert envelope.rollout_inputs()["resolved_tree"] == SEALED_TREE
+    assert envelope.rollout_inputs()["approved_base_sha"] == SEALED_BASE
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ('source_mode = "merged-dev"', "source_mode must be sealed-cumulative"),
+        ('source_tree_sha = "ABC"', "exact lowercase Git SHAs"),
+        (f'source_base_sha = "{SEALED_TREE}"', "identities must be distinct"),
+    ],
+)
+def test_config_rejects_unbound_or_malformed_sealed_source(
+    tmp_path: Path,
+    replacement: str,
+    message: str,
+) -> None:
+    key = replacement.split(" = ", 1)[0]
+    path = _write_config(
+        tmp_path / "staging-rollout.toml",
+        _replace_config_value(SEALED_CONFIG, key, replacement),
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
 
 
 def test_config_rejects_non_root_owned_or_writable_file(tmp_path: Path) -> None:
@@ -336,7 +467,7 @@ def test_config_rejects_unknown_and_missing_keys(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("key", "line", "message"),
     [
-        ("schema_version", "schema_version = 2", "schema_version must be 1"),
+        ("schema_version", "schema_version = 3", "schema_version must be 1 or 2"),
         ("service_user", 'service_user = "root"', "service_user must be loom-rollout"),
         (
             "operator_group",
@@ -463,6 +594,21 @@ def test_backup_event_reason_is_limited_to_public_tokens() -> None:
         )
 
 
+@pytest.mark.parametrize("reason", sorted(BACKUP_PUBLIC_REASONS))
+def test_backup_event_accepts_every_public_token_round_trip(reason: str) -> None:
+    event = RequestEvent(
+        request_id="stg-20260713-abcdef12",
+        event="backup_failed",
+        occurred_at="2026-07-13T20:00:00Z",
+        operator="hongjian",
+        operator_uid=2002,
+        status="failed",
+        reason=reason,
+    )
+
+    assert RequestEvent.from_dict(event.to_dict()) == event
+
+
 def test_driver_envelope_keeps_attempt_actor_out_of_immutable_inputs() -> None:
     envelope = make_driver_envelope(
         attempt_number=2,
@@ -485,6 +631,9 @@ def test_driver_envelope_keeps_attempt_actor_out_of_immutable_inputs() -> None:
         "backup_manifest_path": envelope.backup_manifest_path,
         "backup_manifest_sha256": envelope.backup_manifest_sha256,
         "runner_config_sha256": envelope.runner_config_sha256,
+        "preflight_attestation_sha256": envelope.preflight_attestation_sha256,
+        "preflight_registry_sha256": envelope.preflight_registry_sha256,
+        "preflight_coverage_sha256": envelope.preflight_coverage_sha256,
     }
     assert "attempt_operator" not in immutable
     assert "attempt_number" not in immutable

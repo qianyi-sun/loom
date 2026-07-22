@@ -23,6 +23,7 @@
 
 # Kubernetes namespace for your local single-node kind/k3s cluster.
 namespace = "loom-local"
+runtime_environment = "local"
 
 # Localhost routing. A local kind/k3s cluster has no public DNS or TLS;
 # reach the API and web through `kubectl port-forward` (see the runbook).
@@ -31,7 +32,7 @@ ingress_host = "localhost"
 ingress_redirect_hosts = []
 ingress_tls_secret_name = "loom-local-tls"
 
-frontend_environment = "development"
+frontend_environment = "local"
 frontend_environment_label = "Local dev"
 frontend_route_path = "/"
 frontend_api_base_path = "/"

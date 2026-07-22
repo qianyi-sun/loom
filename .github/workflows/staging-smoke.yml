@@ -313,7 +313,7 @@ jobs:
           runtime_environment = "development"
           ingress_host = "yylx.world"
           ingress_redirect_hosts = ["www.yylx.world"]
-          frontend_environment = "staging"
+          frontend_environment = "development"
           frontend_environment_label = "Development / staging"
           frontend_route_path = "/dev"
           frontend_api_base_path = "/dev"
@@ -484,7 +484,7 @@ jobs:
 
           CI=true uv run python scripts/ops/frontend_route_smoke.py \
             --insecure-for-kind \
-            --route staging=https://yylx.world/dev=https://yylx.world/dev/api \
+            --route development=https://yylx.world/dev=https://yylx.world/dev/api \
             --json | tee /tmp/loom-frontend-route-smoke.json
 
           # Validate the exact combined web-origin + ingress browser policy on
@@ -492,7 +492,7 @@ jobs:
           # The redacted report never records response headers or bodies.
           CI=true uv run python scripts/ops/frontend_security_headers.py \
             --insecure-for-kind \
-            --route staging=https://yylx.world/dev \
+            --route development=https://yylx.world/dev \
             --json | tee /tmp/loom-frontend-security-headers.json
 
           # The report contains only requested URLs, methods, statuses, and

@@ -931,6 +931,9 @@ def _handle_envelope_mode(args: argparse.Namespace) -> int:
         backup_manifest_max_total_bytes=backup_limits.max_total_bytes,
         backup_manifest_sha256=envelope.backup_manifest_sha256,
         runner_config_sha256=envelope.runner_config_sha256,
+        preflight_attestation_sha256=envelope.preflight_attestation_sha256,
+        preflight_registry_sha256=envelope.preflight_registry_sha256,
+        preflight_coverage_sha256=envelope.preflight_coverage_sha256,
         request_id=envelope.request_id,
         initiating_operator=envelope.initiating_operator,
         initiating_uid=envelope.initiating_uid,
@@ -942,6 +945,9 @@ def _handle_envelope_mode(args: argparse.Namespace) -> int:
         exclude_oldlab=False,
         gb10_prep_concurrency=envelope.gb10_prep_concurrency,
         resume=envelope.resume,
+        source_mode=envelope.source_mode,
+        resolved_tree=envelope.resolved_tree,
+        approved_base_sha=envelope.approved_base_sha,
         metadata={"rollout_id": envelope.rollout_id},
     )
 

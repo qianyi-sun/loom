@@ -24,6 +24,10 @@ from loom.db.schema import (
     ArtifactLineageEdge,
     Batch,
     Benchmark,
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
     LlmCall,
     ProviderConnection,
     Task,
@@ -469,6 +473,10 @@ async def run_library_setup(
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
             s.execute(delete(User).where(User.id.in_([user_a, user_b])))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()

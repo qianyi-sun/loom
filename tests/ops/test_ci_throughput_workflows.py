@@ -155,7 +155,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     matrix = json.loads(_github_output_value(output, "images"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 9
+    assert len(matrix) == 11
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
         "control-plane",
@@ -163,7 +163,9 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "family-orchestrator",
         "llm-gateway",
         "llm-gateway-sandbox",
+        "rehearsal-postgres",
         "service",
+        "staging-admin-browser-smoke",
         "web",
         "worker",
     }
@@ -188,8 +190,10 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
         "egress-xds",
         "family-orchestrator",
         "llm-gateway",
+        "staging-admin-browser-smoke",
         "web",
         "llm-gateway-sandbox",
+        "rehearsal-postgres",
     }
 
 
@@ -965,7 +969,8 @@ def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
     assert "https://yylx.world/dev/api/v1/health" in script
     assert "https://www.yylx.world/dev?next=%2Fmonitor&x=1" in script
     assert "scripts/ops/frontend_security_headers.py" in script
-    assert "--route staging=https://yylx.world/dev" in script
+    assert "--route development=https://yylx.world/dev" in script
+    assert "--route staging=https://yylx.world/dev" not in script
     assert "--probe web_500=500=http://127.0.0.1:18082/dev/security-header-5xx-probe" in script
     assert "--web-origin-only" in script
     assert "index.html.security-header-smoke" in script
@@ -1061,6 +1066,8 @@ def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() ->
     )["run"]
     assert 'runtime_environment = "development"' in cluster_config
     assert 'runtime_environment = "staging"' not in cluster_config
+    assert 'frontend_environment = "development"' in cluster_config
+    assert 'frontend_environment = "staging"' not in cluster_config
 
     deny_script = steps[deny_index]["run"]
     syntax = subprocess.run(
@@ -1100,9 +1107,9 @@ def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() ->
     operator = (REPO_ROOT / "docs/runbooks/operator-runbook.md").read_text(
         encoding="utf-8",
     )
-    assert "acceptance row remains unmet" in adr
-    assert "this evidence item remains unmet" in launch
-    assert "this acceptance item remains unmet" in operator
+    assert "Broker-owned step 16" in adr
+    assert "broker-owned step 16" in launch
+    assert "Broker-owned step 16" in operator
 
 
 def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:

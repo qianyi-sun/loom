@@ -24,15 +24,19 @@ APPROVED_CP_URL = "http://127.0.0.1:18081"
 APPROVED_SCOPE = "current-gb10"
 APPROVED_BACKUP_MAX_OBJECTS = 1_000_000
 APPROVED_BACKUP_MAX_ENTRIES = 16_000_000
+CANDIDATE_RUNTIME_ROOT = Path("/opt/loom-staging-runner/candidates")
+CANDIDATE_REPO_NAME = "repo"
+CANDIDATE_CLUSTER_CONFIG = Path("deploy/environments/staging.cluster.toml")
 
 ServiceUser = Literal["loom-rollout"]
 OperatorGroup = Literal["loom-staging-operators"]
 Environment = Literal["staging"]
 RolloutScope = Literal["current-gb10"]
+CandidateSourceMode = Literal["merged-dev", "sealed-cumulative"]
 
 _FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{12} len=[1-9][0-9]*$")
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
-_CONFIG_KEYS = frozenset(
+_BASE_CONFIG_KEYS = frozenset(
     {
         "schema_version",
         "service_user",
@@ -61,11 +65,28 @@ _CONFIG_KEYS = frozenset(
         "backup_max_entries",
     }
 )
+_SEALED_CONFIG_KEYS = frozenset(
+    {"source_mode", "source_commit_sha", "source_tree_sha", "source_base_sha"}
+)
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_CONFIG_BYTES = 1 << 20
 
 
 class ConfigError(ValueError):
     """Raised when the protected runner configuration fails closed."""
+
+
+def candidate_sha_from_runner_repo(path: Path) -> str:
+    """Return the full SHA encoded by one installer-published candidate path."""
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or path.name != CANDIDATE_REPO_NAME
+        or path.parent.parent != CANDIDATE_RUNTIME_ROOT
+        or _SHA_RE.fullmatch(path.parent.name) is None
+    ):
+        raise ConfigError("runner_repo must be /opt/loom-staging-runner/candidates/<full-sha>/repo")
+    return path.parent.name
 
 
 def _require_string(raw: dict[str, object], key: str) -> str:
@@ -241,6 +262,10 @@ class OperatorConfig:
     backup_max_entries: int = APPROVED_BACKUP_MAX_ENTRIES
     config_path: Path = Path("/etc/loom/staging-rollout.toml")
     config_sha256: str = "0" * 64
+    source_mode: CandidateSourceMode = "merged-dev"
+    source_commit_sha: str | None = None
+    source_tree_sha: str | None = None
+    source_base_sha: str | None = None
 
     @classmethod
     def load(
@@ -289,17 +314,40 @@ class OperatorConfig:
             raise ConfigError("config must be a TOML table")
         raw = cast(dict[str, object], loaded)
 
+        schema_version = raw.get("schema_version")
+        if type(schema_version) is not int or schema_version not in {1, 2}:
+            raise ConfigError("schema_version must be 1 or 2")
+        expected_keys = (
+            _BASE_CONFIG_KEYS if schema_version == 1 else _BASE_CONFIG_KEYS | _SEALED_CONFIG_KEYS
+        )
         actual_keys = set(raw)
-        unknown = sorted(actual_keys - _CONFIG_KEYS)
-        missing = sorted(_CONFIG_KEYS - actual_keys)
+        unknown = sorted(actual_keys - expected_keys)
+        missing = sorted(expected_keys - actual_keys)
         if unknown:
             raise ConfigError(f"unknown config keys: {unknown}")
         if missing:
             raise ConfigError(f"missing config keys: {missing}")
 
-        schema_version = raw["schema_version"]
-        if type(schema_version) is not int or schema_version != 1:
-            raise ConfigError("schema_version must be 1")
+        source_mode: CandidateSourceMode = "merged-dev"
+        source_commit_sha: str | None = None
+        source_tree_sha: str | None = None
+        source_base_sha: str | None = None
+        if schema_version == 2:
+            if _require_string(raw, "source_mode") != "sealed-cumulative":
+                raise ConfigError("source_mode must be sealed-cumulative")
+            source_mode = "sealed-cumulative"
+            values = {
+                "source_commit_sha": _require_string(raw, "source_commit_sha"),
+                "source_tree_sha": _require_string(raw, "source_tree_sha"),
+                "source_base_sha": _require_string(raw, "source_base_sha"),
+            }
+            if any(_SHA_RE.fullmatch(value) is None for value in values.values()):
+                raise ConfigError("sealed source SHA/tree/base must be exact lowercase Git SHAs")
+            source_commit_sha = values["source_commit_sha"]
+            source_tree_sha = values["source_tree_sha"]
+            source_base_sha = values["source_base_sha"]
+            if len({source_commit_sha, source_tree_sha, source_base_sha}) != 3:
+                raise ConfigError("sealed source SHA/tree/base identities must be distinct")
 
         service_user = _require_literal(raw, "service_user", APPROVED_SERVICE_USER)
         operator_group = _require_literal(raw, "operator_group", APPROVED_OPERATOR_GROUP)
@@ -339,18 +387,26 @@ class OperatorConfig:
                 f"{APPROVED_BACKUP_MAX_ENTRIES}"
             )
 
+        runner_repo = _require_absolute_path(raw, "runner_repo")
+        candidate_sha = candidate_sha_from_runner_repo(runner_repo)
+        cluster_config_path = _require_absolute_path(raw, "cluster_config_path")
+        if cluster_config_path != runner_repo / CANDIDATE_CLUSTER_CONFIG:
+            raise ConfigError("cluster_config_path must belong to the exact candidate repo")
+        if source_commit_sha is not None and source_commit_sha != candidate_sha:
+            raise ConfigError("sealed source commit must match the candidate runtime path")
+
         return cls(
             schema_version=1,
             service_user=cast(ServiceUser, service_user),
             operator_group=cast(OperatorGroup, operator_group),
             remote_url=remote_url,
             target_ref=target_ref,
-            runner_repo=_require_absolute_path(raw, "runner_repo"),
+            runner_repo=runner_repo,
             state_root=_require_absolute_path(raw, "state_root"),
             runtime_root=_require_absolute_path(raw, "runtime_root"),
             rollout_root=_require_absolute_path(raw, "rollout_root"),
             kubeconfig_path=_require_absolute_path(raw, "kubeconfig_path"),
-            cluster_config_path=_require_absolute_path(raw, "cluster_config_path"),
+            cluster_config_path=cluster_config_path,
             admin_token_source=_require_file_source(raw, "admin_token_source"),
             worker_token_source=_require_file_source(raw, "worker_token_source"),
             service_token_source=_require_file_source(raw, "service_token_source"),
@@ -367,6 +423,10 @@ class OperatorConfig:
             backup_max_entries=backup_max_entries,
             config_path=path,
             config_sha256=hashlib.sha256(payload).hexdigest(),
+            source_mode=source_mode,
+            source_commit_sha=source_commit_sha,
+            source_tree_sha=source_tree_sha,
+            source_base_sha=source_base_sha,
         )
 
 
@@ -374,6 +434,10 @@ __all__ = [
     "APPROVED_BACKUP_MAX_ENTRIES",
     "APPROVED_BACKUP_MAX_OBJECTS",
     "APPROVED_REMOTE_URL",
+    "CANDIDATE_CLUSTER_CONFIG",
+    "CANDIDATE_REPO_NAME",
+    "CANDIDATE_RUNTIME_ROOT",
     "ConfigError",
     "OperatorConfig",
+    "candidate_sha_from_runner_repo",
 ]

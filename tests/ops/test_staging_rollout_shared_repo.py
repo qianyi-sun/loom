@@ -9,25 +9,6 @@ import pytest
 from scripts.ops import staging_rollout_shared_repo as helper
 
 
-def _portable_rename_noreplace(
-    source_fd: int,
-    source_name: str,
-    destination_fd: int,
-    destination_name: str,
-) -> None:
-    try:
-        os.stat(destination_name, dir_fd=destination_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        os.rename(
-            source_name,
-            destination_name,
-            src_dir_fd=source_fd,
-            dst_dir_fd=destination_fd,
-        )
-        return
-    raise FileExistsError("destination exists")
-
-
 def test_consumer_identity_keeps_distinct_primary_and_shared_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -45,11 +26,7 @@ def test_consumer_identity_keeps_distinct_primary_and_shared_group(
     assert identity.groups == (2005, 2007)
 
 
-def test_ensure_child_publishes_private_temp_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(helper, "_rename_noreplace", _portable_rename_noreplace)
+def test_ensure_child_claims_final_name_once(tmp_path: Path) -> None:
     parent = helper._open_absolute(tmp_path)
     try:
         child, created = helper._ensure_child(
@@ -65,7 +42,6 @@ def test_ensure_child_publishes_private_temp_once(
             assert stat.S_IMODE(os.fstat(child.fd).st_mode) == 0o750
         finally:
             os.close(child.fd)
-        assert not list(tmp_path.glob(".worker-repos.tmp-*"))
     finally:
         os.close(parent.fd)
 
@@ -75,17 +51,13 @@ def test_ensure_child_never_takes_over_concurrent_destination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parent = helper._open_absolute(tmp_path)
+    original_mkdir = helper.os.mkdir
 
-    def inject_concurrent_destination(
-        _source_fd: int,
-        _source_name: str,
-        _destination_fd: int,
-        destination_name: str,
-    ) -> None:
-        os.mkdir(destination_name, 0o700, dir_fd=parent.fd)
+    def inject_concurrent_destination(name: str, mode: int, *, dir_fd: int) -> None:
+        original_mkdir(name, mode, dir_fd=dir_fd)
         raise FileExistsError("destination exists")
 
-    monkeypatch.setattr(helper, "_rename_noreplace", inject_concurrent_destination)
+    monkeypatch.setattr(helper.os, "mkdir", inject_concurrent_destination)
     try:
         with pytest.raises(helper.AuthorityError, match="metadata"):
             helper._ensure_child(
@@ -96,7 +68,6 @@ def test_ensure_child_never_takes_over_concurrent_destination(
                 mode=0o750,
             )
         assert stat.S_IMODE((tmp_path / "worker-repos").stat().st_mode) == 0o700
-        assert not list(tmp_path.glob(".worker-repos.tmp-*"))
     finally:
         os.close(parent.fd)
 
@@ -115,6 +86,30 @@ def test_ensure_child_rejects_existing_metadata_without_mutation(tmp_path: Path)
                 mode=0o750,
             )
         assert stat.S_IMODE(target.stat().st_mode) == 0o700
+    finally:
+        os.close(parent.fd)
+
+
+def test_ensure_child_removes_only_its_exact_failed_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = helper._open_absolute(tmp_path)
+    monkeypatch.setattr(
+        helper.os,
+        "fchown",
+        lambda *_args: (_ for _ in ()).throw(OSError("injected owner failure")),
+    )
+    try:
+        with pytest.raises(OSError, match="injected owner failure"):
+            helper._ensure_child(
+                parent,
+                "worker-repos",
+                uid=os.geteuid(),
+                gid=os.getegid(),
+                mode=0o750,
+            )
+        assert not (tmp_path / "worker-repos").exists()
     finally:
         os.close(parent.fd)
 
@@ -147,16 +142,16 @@ def test_service_owned_rejects_bad_group_membership(
 ) -> None:
     monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
     monkeypatch.setattr(helper, "_identity", _svc_identity)
-    monkeypatch.setattr(
-        helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=2007)
-    )
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=2007))
     # consumer NOT in sharedwork -> invalid
     monkeypatch.setattr(
         helper,
         "_identity",
-        lambda name, *a, **k: helper.Identity(name, 2001, 2001, (2001,))
-        if name == helper.SERVICE_USER
-        else helper.Identity(name, 2005, 2005, (2005,)),
+        lambda name, *a, **k: (
+            helper.Identity(name, 2001, 2001, (2001,))
+            if name == helper.SERVICE_USER
+            else helper.Identity(name, 2005, 2005, (2005,))
+        ),
     )
     with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
         helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
@@ -166,16 +161,16 @@ def test_service_owned_rejects_service_in_shared_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(
-        helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=2007)
-    )
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=2007))
     # service IS in sharedwork(2007) -> invalid (must not be)
     monkeypatch.setattr(
         helper,
         "_identity",
-        lambda name, *a, **k: helper.Identity(name, 2001, 2001, (2001, 2007))
-        if name == helper.SERVICE_USER
-        else helper.Identity(name, 2005, 2005, (2005, 2007)),
+        lambda name, *a, **k: (
+            helper.Identity(name, 2001, 2001, (2001, 2007))
+            if name == helper.SERVICE_USER
+            else helper.Identity(name, 2005, 2005, (2005, 2007))
+        ),
     )
     with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
         helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
@@ -235,35 +230,3 @@ def test_service_ensure_never_precreates_sha_and_reports_target(
 
     report = _json.loads(capsys.readouterr().out)
     assert report["candidate_target"] == "/shared_work/loom/candidates/staging/" + "a" * 40
-
-
-def _renameat2_available() -> bool:
-    import ctypes
-
-    try:
-        _ = ctypes.CDLL(None, use_errno=True).renameat2
-    except (AttributeError, OSError):
-        return False
-    return True
-
-
-def test_atomic_publish_fails_closed_on_existing_target(tmp_path: Path) -> None:
-    # rename-no-replace is what makes publication all-or-nothing: an existing
-    # final target must fail closed rather than overwrite or expose partial data.
-    # Portable across platforms: where renameat2 exists (Linux) the existing
-    # target raises FileExistsError; where it does not (e.g. macOS) atomic
-    # publication is simply unavailable -- itself fail-closed (it never falls
-    # back to a clobbering rename).
-    parent = tmp_path
-    (parent / "src").mkdir()
-    (parent / "dest").mkdir()  # target already exists
-    parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        if _renameat2_available():
-            with pytest.raises(FileExistsError):
-                helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
-        else:
-            with pytest.raises(helper.AuthorityError):
-                helper._rename_noreplace(parent_fd, "src", parent_fd, "dest")
-    finally:
-        os.close(parent_fd)

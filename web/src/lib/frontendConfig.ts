@@ -44,6 +44,9 @@ interface RawFrontendConfig {
   apiRouteBase?: unknown;
 }
 
+const STAGING_REHEARSAL_ROUTE_PATTERN =
+  /^(\/staging\/rehearsal\/[0-9a-f]{24})(?:\/|$)/u;
+
 function viteApiBase(): string {
   const env = (
     import.meta as unknown as { env: { VITE_API_BASE?: string } }
@@ -69,9 +72,14 @@ function normalizePath(raw: string, field: string): string {
   return raw.replace(/\/+$/u, "");
 }
 
-function detectRoutePath(location: Location | URL): string {
+function detectRoutePath(location: Pick<Location, "pathname">): string {
   const pathname = location.pathname.replace(/\/+$/u, "") || "/";
+  const rehearsal = pathname.match(STAGING_REHEARSAL_ROUTE_PATTERN);
+  if (rehearsal) return rehearsal[1];
   if (pathname === "/prod" || pathname.startsWith("/prod/")) return "/prod";
+  if (pathname === "/staging" || pathname.startsWith("/staging/")) {
+    return "/staging";
+  }
   if (pathname === "/dev" || pathname.startsWith("/dev/")) return "/dev";
   return "";
 }
@@ -172,11 +180,16 @@ export function resolveFrontendConfig(
     );
   }
 
-  if (environment === "production" && routePath !== "/prod") {
-    throw new Error("production frontend config must use routePath /prod");
-  }
-  if (environment !== "production" && routePath === "/prod") {
-    throw new Error("non-production frontend config must not use routePath /prod");
+  const canonicalRoutePaths: Record<FrontendEnvironment, RegExp> = {
+    local: /^$/u,
+    development: /^\/dev$/u,
+    staging: /^\/staging(?:\/rehearsal\/[0-9a-f]{24})?$/u,
+    production: /^\/prod$/u,
+  };
+  if (!canonicalRoutePaths[environment].test(routePath)) {
+    throw new Error(
+      `${environment} frontend config does not use its canonical routePath`,
+    );
   }
   if (environment === "production" && /beta/i.test(environmentLabel)) {
     throw new Error("production frontend label must not contain beta wording");
@@ -284,6 +297,17 @@ export function frontendHomePath(
   locationLike: Pick<Location, "pathname"> = window.location,
 ): string {
   const pathname = locationLike.pathname.replace(/\/+$/u, "") || "/";
+  const rehearsal = pathname.match(STAGING_REHEARSAL_ROUTE_PATTERN);
+  if (rehearsal) return `${rehearsal[1]}/`;
+  if (
+    pathname === "/staging/rehearsal" ||
+    pathname.startsWith("/staging/rehearsal/")
+  ) {
+    return "/";
+  }
+  if (pathname === "/staging" || pathname.startsWith("/staging/")) {
+    return "/staging/";
+  }
   if (pathname === "/prod" || pathname.startsWith("/prod/")) return "/prod/";
   if (pathname === "/dev" || pathname.startsWith("/dev/")) return "/dev/";
   return "/";

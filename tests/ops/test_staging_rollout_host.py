@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import stat
@@ -11,10 +12,14 @@ from typing import ClassVar
 import pytest
 from scripts.ops import staging_rollout_host as host
 
+from loom_cli.rollout.install_attestation import RunnerInstallAttestation
+
 TEAM_ID = "11111111-1111-4111-8111-111111111111"
 TEAM_ID_2 = "22222222-2222-4222-8222-222222222222"
 SERVICE_FINGERPRINT = "SHA256:6JjXfjyF6JMXDB2Wp4t1YgAzFJPaTv5mQJaqodL6GdU"
 OTHER_SERVICE_FINGERPRINT = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+TEST_CANDIDATE_SHA = "a" * 40
+TEST_CANDIDATE_VENV = host._candidate_venv_path(TEST_CANDIDATE_SHA)
 
 
 class FakeSystem:
@@ -47,7 +52,7 @@ class FakeSystem:
         self.events: list[str] = []
         self.removed_members: list[str] = []
         self.trust_ready = False
-        self.dry_runs = 0
+        self.preflights = 0
         self.venv = False
         self.package_ready = True
         self.broker_ready = True
@@ -62,6 +67,15 @@ class FakeSystem:
         self.install_source_sha: str | None = None
         self.install_owner_calls: list[tuple[Path, str, str, int]] = []
         self.shared_worker_identity_ready = True
+        self.shared_work2_mounted = False
+        self.preflight_credentials = False
+        self.credential_refresh_timer = False
+        self.preflight_candidate_source = False
+        self.inotify_capacity = False
+        self.runtime_venvs: set[Path] = set()
+
+    def _observe_runtime_venv(self, venv: Path) -> None:
+        self.runtime_venvs.add(venv)
 
     def validate_prerequisites(self) -> None:
         self.validated += 1
@@ -86,13 +100,25 @@ class FakeSystem:
             self.install_source_sha = self.remote_source_sha
         return host.REPO_ROOT, self.remote_source_sha
 
+    def prepare_sealed_install_source(
+        self,
+        source: host.SealedSource,
+    ) -> tuple[Path, str]:
+        assert source.path == host.REPO_ROOT
+        assert source.commit_sha == "a" * 40
+        assert source.tree_sha == "b" * 40
+        assert source.base_sha == "c" * 40
+        self.validated += 1
+        self.install_source_sha = source.commit_sha
+        return host.INSTALL_SOURCE, source.commit_sha
+
     def validate_invocation_merged(self, invocation_head: str, source_sha: str) -> None:
         assert invocation_head == "a" * 40
         assert source_sha == self.remote_source_sha
         self.validated += 1
 
     def validate_assets(self, source_root: Path, source_sha: str) -> None:
-        assert source_root == host.REPO_ROOT
+        assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
         assert source_sha == self.remote_source_sha
         self.validated += 1
 
@@ -102,8 +128,18 @@ class FakeSystem:
         self.source_reads.append(relative_path)
         return (host.REPO_ROOT / relative_path).read_bytes()
 
-    def validate_installed_source(self, source_sha: str, *, require_checkout: bool) -> None:
+    def validate_installed_source(
+        self,
+        source_sha: str,
+        *,
+        require_checkout: bool,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> None:
         assert source_sha in {"a" * 40, "b" * 40}
+        if source_tree_sha is not None or source_base_sha is not None:
+            assert source_tree_sha == "b" * 40
+            assert source_base_sha == "c" * 40
         if require_checkout:
             assert self.install_source_sha == source_sha
         self.validated += 1
@@ -151,7 +187,11 @@ class FakeSystem:
         return self.docker
 
     def shared_worker_repo_identity(self) -> dict[str, object]:
-        if not self.service_user or not self.shared_worker_identity_ready:
+        if (
+            not self.service_user
+            or not self.shared_worker_identity_ready
+            or not self.shared_work2_mounted
+        ):
             raise host.InstallError("shared worker repository identity is unavailable")
         identity: dict[str, object] = {
             "root": str(host.SHARED_WORKER_REPO_ROOT),
@@ -185,6 +225,12 @@ class FakeSystem:
                     "repository_inode": repository_metadata.st_ino,
                     "service_capability": ("parent-not-writable;repository-writable-searchable"),
                     "consumer_capability": "repository-readable-searchable-not-writable",
+                    "publication_capability": "private-mkdir-publish-verified",
+                    "mount": {
+                        key: value
+                        for key, value in self.shared_work2_mount_identity().items()
+                        if key not in {"mount_id", "parent_id", "device_major", "device_minor"}
+                    },
                     "created": [],
                 }
             )
@@ -202,9 +248,63 @@ class FakeSystem:
     def ensure_shared_worker_repo_root(self) -> bool:
         self.shared_worker_repo_identity()
         changed = False
+        changed = (
+            self.filesystem.ensure_directory(host.SHARED_WORKER_AUTHORITY_ROOT.parent, 0o2775)
+            or changed
+        )
         for path in (host.SHARED_WORKER_AUTHORITY_ROOT, host.SHARED_WORKER_REPO_ROOT):
             changed = self.filesystem.ensure_directory(path, 0o2750) or changed
         return changed
+
+    def shared_work2_mount_identity(self) -> dict[str, object]:
+        if not self.shared_work2_mounted:
+            raise host.InstallError("shared_work2 mount helper failed safely")
+        return {
+            "schema_version": 1,
+            "mount_point": str(host.SHARED_WORK2_MOUNT_POINT),
+            "source": "192.168.20.12:/shared_work2",
+            "filesystem_type": "nfs4",
+            "mount_id": 42,
+            "parent_id": 1,
+            "device_major": 0,
+            "device_minor": 99,
+            "mount_options": ["nodev", "noexec", "nosuid", "rw"],
+            "super_options": [
+                "hard",
+                "proto=tcp",
+                "retrans=2",
+                "rw",
+                "sec=sys",
+                "timeo=600",
+                "vers=4.2",
+            ],
+        }
+
+    def shared_work2_mount_ready(self) -> bool:
+        return self.shared_work2_mounted
+
+    def ensure_shared_work2_mount(self) -> bool:
+        changed = not self.shared_work2_mounted
+        self.shared_work2_mounted = True
+        self.filesystem.ensure_directory(host.SHARED_WORK2_MOUNT_POINT, 0o755)
+        return changed
+
+    def disable_shared_work2_mount(self) -> None:
+        self.shared_work2_mounted = False
+
+    def reload_systemd(self) -> None:
+        return None
+
+    def credential_refresh_timer_ready(self) -> bool:
+        return self.credential_refresh_timer
+
+    def ensure_credential_refresh_timer(self, *, reload_units: bool) -> bool:
+        changed = reload_units or not self.credential_refresh_timer
+        self.credential_refresh_timer = True
+        return changed
+
+    def disable_credential_refresh_timer(self) -> None:
+        self.credential_refresh_timer = False
 
     def ensure_owned_directory(self, path: Path, *, owner: str, mode: int) -> bool:
         assert owner == host.SERVICE_USER
@@ -229,31 +329,67 @@ class FakeSystem:
         mapped = self.filesystem.path(host.RUNTIME_ROOT)
         return mapped.is_dir() and (mapped.stat().st_mode & 0o777) == 0o700
 
-    def ensure_candidate(self, expected_sha: str, *, refresh: bool) -> bool:
+    def inotify_capacity_ready(self) -> bool:
+        return self.inotify_capacity
+
+    def ensure_inotify_capacity(self) -> bool:
+        changed = not self.inotify_capacity
+        self.inotify_capacity = True
+        return changed
+
+    def ensure_candidate(
+        self,
+        expected_sha: str,
+        *,
+        refresh: bool,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> bool:
+        if source_tree_sha is not None or source_base_sha is not None:
+            assert source_tree_sha == "b" * 40
+            assert source_base_sha == "c" * 40
         changed = refresh or self.candidate_sha != expected_sha
         if changed:
             self.candidate_syncs += 1
             self.candidate_sha = expected_sha
         return changed
 
-    def candidate_ready(self, expected_sha: str) -> bool:
+    def candidate_ready(
+        self,
+        expected_sha: str,
+        *,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> bool:
+        if source_tree_sha is not None or source_base_sha is not None:
+            assert source_tree_sha == "b" * 40
+            assert source_base_sha == "c" * 40
         return self.candidate_sha == expected_sha
 
-    def venv_ready(self) -> bool:
+    def venv_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         if self.venv_lock_mode not in {None, 0o600}:
             raise host.InstallError("root venv authority is unsafe")
         return self.venv
 
-    def venv_lock_requires_hardening(self) -> bool:
+    def venv_lock_requires_hardening(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         return self.venv_lock_mode is not None and self.venv_lock_mode != 0o600
 
-    def harden_venv_lock(self) -> None:
+    def harden_venv_lock(self, venv: Path) -> None:
+        self._observe_runtime_venv(venv)
         assert self.venv_lock_mode is not None
         self.venv_lock_mode = 0o600
         self.venv_lock_hardenings += 1
 
-    def sync_venv(self, source_root: Path) -> None:
-        assert source_root == host.REPO_ROOT
+    def sync_venv(
+        self,
+        source_root: Path,
+        *,
+        venv: Path,
+    ) -> None:
+        self._observe_runtime_venv(venv)
+        assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
         self.sync_safety_snapshots.append(
             (self.maintenance, self.filesystem.exists(host.SUDOERS_PATH))
         )
@@ -263,11 +399,46 @@ class FakeSystem:
         self.broker_ready = True
         self.venv_lock_mode = 0o600
 
-    def broker_runtime_ready(self) -> bool:
+    def broker_runtime_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         return self.broker_ready
 
-    def package_runtime_ready(self) -> bool:
+    def package_runtime_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         return self.package_ready
+
+    def preflight_credentials_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
+        return self.preflight_credentials
+
+    def ensure_preflight_credentials(
+        self,
+        team_id: str,
+        *,
+        venv: Path,
+    ) -> bool:
+        self._observe_runtime_venv(venv)
+        assert team_id in {TEAM_ID, TEAM_ID_2}
+        changed = not self.preflight_credentials
+        self.preflight_credentials = True
+        for path in (
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-kubeconfig",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-probe-token",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-database.json",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "rehearsal-kubeconfig",
+        ):
+            self.filesystem.atomic_write(path, b"credential-fixture\n", 0o600)
+        return changed
+
+    def preflight_candidate_source_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
+        return self.preflight_candidate_source
+
+    def ensure_preflight_candidate_source(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
+        changed = not self.preflight_candidate_source
+        self.preflight_candidate_source = True
+        return changed
 
     def ensure_service_key(self) -> bool:
         if self.service_key_present():
@@ -351,12 +522,12 @@ class FakeSystem:
 
     def prepare_gb10_trust_ledger(
         self,
-        source_root: Path,
+        source_sha: str,
         *,
         mode: str,
         previous_source_sha: str | None,
     ) -> None:
-        assert source_root == host.REPO_ROOT
+        assert source_sha in {"a" * 40, "b" * 40}
         assert mode in {"fresh", "legacy", "existing"}
         self.ledger_modes.append(mode)
         self.ledger_previous_source_shas.append(previous_source_sha)
@@ -375,7 +546,9 @@ class FakeSystem:
         if mode == "legacy":
             self._write_trust_ledger([f"trt-gb10-{number}" for number in range(1, 16)])
 
-    def require_gb10_revocation_complete(self) -> None:
+    def require_gb10_revocation_complete(self, venv: Path, source_sha: str) -> None:
+        self._observe_runtime_venv(venv)
+        assert source_sha in {"a" * 40, "b" * 40}
         self.events.append("trust-ledger:finalize-check")
         if self._trust_ledger().get("revocation_hosts") != []:
             raise host.InstallError("fake GB10 trust revocation is incomplete")
@@ -412,14 +585,32 @@ class FakeSystem:
             and (nlink is None or mapped.stat().st_nlink == nlink)
         )
 
-    def gb10_trust_ready(self) -> bool:
+    def gb10_trust_ready(self, venv: Path, source_sha: str) -> bool:
+        self._observe_runtime_venv(venv)
+        assert source_sha in {"a" * 40, "b" * 40}
         return self.trust_ready
 
-    def run_post_install_dry_run(self) -> None:
-        self.dry_runs += 1
+    def run_post_install_preflight(self) -> dict[str, object]:
+        self.preflights += 1
+        return {
+            "assessment_digest": "d" * 64,
+            "blocker_codes": [],
+            "status": "passed",
+        }
 
-    def check_runtime(self, expected_sha: str) -> list[str]:
+    def check_runtime(
+        self,
+        expected_sha: str,
+        *,
+        source_tree_sha: str | None = None,
+        source_base_sha: str | None = None,
+    ) -> list[str]:
+        if source_tree_sha is not None or source_base_sha is not None:
+            assert source_tree_sha == "b" * 40
+            assert source_base_sha == "c" * 40
         failures = [] if self.candidate_sha == expected_sha else ["candidate-checkout"]
+        if not self.shared_work2_mount_ready():
+            failures.append("shared-work2-mount")
         if not self.shared_worker_repo_root_ready():
             failures.append("shared-worker-repo-root")
         return failures
@@ -452,12 +643,16 @@ class FakeSystem:
             self.data_acls.add(Path(f"{grant.path}#{grant.default}"))
         else:
             self.input_acls.add(grant.path)
-        if plan.mask_adjustment is not None:
+        if plan.mask_adjustment is not None or plan.snapshot_adjustment is not None:
             self.acl_adjustment_states[grant] = "after"
         return grant
 
-    def acl_adjustment_state(self, adjustment: host.AclMaskAdjustment) -> str:
-        grant = host.AclGrant(adjustment.path, default=adjustment.default)
+    def acl_adjustment_state(
+        self,
+        adjustment: host.AclMaskAdjustment | host.AclSnapshotAdjustment,
+    ) -> str:
+        default = adjustment.default if isinstance(adjustment, host.AclMaskAdjustment) else False
+        grant = host.AclGrant(adjustment.path, default=default)
         return self.acl_adjustment_states.get(grant, "before")
 
     def ensure_input_acl(self, path: Path) -> tuple[host.AclGrant, ...]:
@@ -491,7 +686,12 @@ class FakeSystem:
         self.maintenance_ends += 1
         self.maintenance = False
 
-    def revoke_gb10_trust(self) -> None:
+    def maintenance_marker_status(self) -> str:
+        return "enabled" if self.maintenance else "disabled"
+
+    def revoke_gb10_trust(self, venv: Path, source_sha: str) -> None:
+        self._observe_runtime_venv(venv)
+        assert source_sha in {"a" * 40, "b" * 40}
         if self.revoke_error is not None:
             raise host.InstallError(self.revoke_error)
         self._trust_ledger()
@@ -502,11 +702,11 @@ class FakeSystem:
     def remove_acl(
         self,
         grant: host.AclGrant,
-        mask_adjustment: host.AclMaskAdjustment | None = None,
+        adjustment: host.AclMaskAdjustment | host.AclSnapshotAdjustment | None = None,
         *,
         remove_service_entry: bool = True,
     ) -> None:
-        if mask_adjustment is not None:
+        if adjustment is not None:
             self.acl_adjustment_states[grant] = "before"
         if remove_service_entry:
             self.input_acls.discard(grant.path)
@@ -621,6 +821,27 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert "admin-token-fixture" not in rendered
     assert "__ADMIN_TOKEN_FINGERPRINT__" not in rendered
     assert "__SMOKE_ON_BEHALF_TEAM_ID__" not in rendered
+    assert "__SOURCE_SHA__" not in rendered
+    candidate_repo = host._candidate_repo_path("a" * 40)
+    candidate_venv = host._candidate_venv_path("a" * 40)
+    assert f'runner_repo = "{candidate_repo}"' in rendered
+    assert (
+        f'cluster_config_path = "{candidate_repo}/deploy/environments/staging.cluster.toml"'
+        in rendered
+    )
+    assert system.runtime_venvs == {candidate_venv}
+    for path in (
+        host.BROKER_PATH,
+        host.REHEARSAL_PATH,
+        host.FINAL_GATE_PATH,
+        host.CREDENTIAL_REFRESH_PATH,
+    ):
+        wrapper = installer.filesystem.path(path).read_text(encoding="utf-8")
+        assert str(candidate_venv / "bin/python") in wrapper
+        assert "PYTHONDONTWRITEBYTECODE=1" in wrapper
+        assert "__CANDIDATE_VENV__" not in wrapper
+        assert str(host.LEGACY_VENV) not in wrapper
+    assert str(host.LEGACY_CANDIDATE_REPO) not in rendered
     config_path = installer.filesystem.path(host.CONFIG_PATH)
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
     assert (
@@ -635,8 +856,27 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         == (host.REPO_ROOT / "deploy/worker-pools/gb10/known_hosts").read_bytes()
     )
     assert stat.S_IMODE(known_hosts.stat().st_mode) == 0o644
+    assert (
+        installer.filesystem.path(host.SYSCTL_PATH).read_text(encoding="ascii")
+        == "fs.inotify.max_user_instances = 1024\n"
+    )
+    assert system.inotify_capacity is True
+    assert "sysctl:fs.inotify.max_user_instances" in first["changed"]
     assert set(system.operator_members) == set(host.OPERATORS)
     assert system.docker is True
+    assert system.preflight_credentials is True
+    assert system.credential_refresh_timer is True
+    assert "preflight-credentials" in first["changed"]
+    assert "credential-refresh-timer" in first["changed"]
+    assert all(
+        stat.S_IMODE(installer.filesystem.path(path).stat().st_mode) == 0o600
+        for path in (
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-kubeconfig",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-probe-token",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "readonly-database.json",
+            host.PREFLIGHT_CREDENTIAL_ROOT / "rehearsal-kubeconfig",
+        )
+    )
     environment_state = Path("/data/loom-staging/environment-state")
     assert Path(f"{environment_state}#False") in system.data_acls
     assert Path(f"{environment_state}#True") in system.data_acls
@@ -648,7 +888,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert system.maintenance_ends == maintenance_ends_after_first
     assert system.maintenance is False
     assert first["post_install_check"] == "awaiting-gb10-trust"
-    assert system.dry_runs == 0
+    assert system.preflights == 0
     generated_template = installer.filesystem.path(host.GENERATED_GB10_ENV_SEED)
     assert generated_template.read_text(encoding="utf-8").endswith(
         "LOOM_WORKER_MINIO_SECRET_KEY=minio-secret\n"
@@ -670,6 +910,36 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     install_record = installer.filesystem.path(host.INSTALL_RECORD)
     assert stat.S_IMODE(install_record.stat().st_mode) == 0o600
     assert (host.INSTALL_RECORD, "root", "root", 0o600) in system.install_owner_calls
+    install_attestation = installer.filesystem.path(host.INSTALL_ATTESTATION)
+    assert stat.S_IMODE(install_attestation.stat().st_mode) == 0o640
+    assert (
+        host.INSTALL_ATTESTATION,
+        "root",
+        host.SERVICE_GROUP,
+        0o640,
+    ) in system.install_owner_calls
+
+    public_statement = json.loads(install_attestation.read_bytes())
+    assert public_statement["schema_version"] == 1
+    assert public_statement["source_mode"] == "merged-dev"
+    assert public_statement["source_sha"] == "a" * 40
+    assert public_statement["source_tree_sha"] == "none"
+    assert public_statement["source_base_sha"] == "none"
+    assert (
+        public_statement["install_record_sha256"]
+        == hashlib.sha256(install_record.read_bytes()).hexdigest()
+    )
+    assert set(public_statement["asset_sha256"]) == host._INSTALL_ATTESTATION_ASSETS
+    # The root-side producer and service-side strict reader must accept the
+    # same exact statement. This is the cross-layer schema gate that prevents
+    # a successful install from failing only when broker preflight starts.
+    assert RunnerInstallAttestation.from_payload(install_attestation.read_bytes()).source_sha == (
+        "a" * 40
+    )
+    assert all(
+        isinstance(value, str) and len(value) == 64
+        for value in public_statement["asset_sha256"].values()
+    )
     for path in (host.SHARED_WORKER_AUTHORITY_ROOT, host.SHARED_WORKER_REPO_ROOT):
         assert stat.S_IMODE(installer.filesystem.path(path).stat().st_mode) == 0o2750
     assert "trust_legacy_source_sha" not in record
@@ -681,12 +951,266 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert set(system.source_reads) >= {
         "deploy/staging-rollout/loom-staging-rollout",
         "deploy/staging-rollout/loom-staging-rollout-broker",
+        "deploy/staging-rollout/loom-staging-rollout-credential-refresh",
+        "deploy/staging-rollout/loom-staging-rollout-credential-refresh.service",
+        "deploy/staging-rollout/loom-staging-rollout-credential-refresh.timer",
+        "deploy/staging-rollout/loom-staging-rollout-final-gate",
+        "deploy/staging-rollout/loom-staging-rollout-rehearsal",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
         "deploy/staging-rollout/loom-staging-rollout.tmpfiles",
+        "deploy/staging-rollout/loom-staging-rollout.sysctl",
+        "deploy/staging-rollout/shared_work2.mount",
         "deploy/staging-rollout/staging-rollout.toml",
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_install_keeps_legacy_repo_and_venv_frozen_across_candidate_updates(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    legacy_repo = installer.filesystem.path(host.LEGACY_CANDIDATE_REPO)
+    legacy_venv = installer.filesystem.path(host.LEGACY_VENV)
+    legacy_repo.mkdir(parents=True)
+    legacy_venv.mkdir(parents=True)
+    repo_sentinel = legacy_repo / "active-pr907-script.py"
+    venv_sentinel = legacy_venv / "active-pr907-python"
+    repo_sentinel.write_bytes(b"legacy-repo-exact-bytes\n")
+    venv_sentinel.write_bytes(b"legacy-venv-exact-bytes\n")
+
+    installer.install(TEAM_ID)
+    system.remote_source_sha = "b" * 40
+    system.status = "done"
+    installer.install(TEAM_ID_2)
+
+    assert repo_sentinel.read_bytes() == b"legacy-repo-exact-bytes\n"
+    assert venv_sentinel.read_bytes() == b"legacy-venv-exact-bytes\n"
+    assert host.LEGACY_VENV not in system.runtime_venvs
+    assert system.runtime_venvs == {
+        host._candidate_venv_path("a" * 40),
+        host._candidate_venv_path("b" * 40),
+    }
+    rendered = installer.filesystem.path(host.CONFIG_PATH).read_text(encoding="utf-8")
+    assert str(host._candidate_repo_path("b" * 40)) in rendered
+    assert str(host._candidate_venv_path("b" * 40)) in installer.filesystem.path(
+        host.BROKER_PATH
+    ).read_text(encoding="utf-8")
+
+
+def test_explicit_maintenance_is_bounded_idempotent_and_visible_to_check(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+
+    enabled = installer.maintenance(enabled=True)
+    enabled_again = installer.maintenance(enabled=True)
+
+    assert enabled == {
+        "ok": True,
+        "changed": True,
+        "maintenance": "enabled",
+        "rollout": "idle",
+        "source_sha": "a" * 40,
+    }
+    assert enabled_again["changed"] is False
+    assert system.maintenance is True
+    assert "maintenance-marker" in installer.check()["failures"]
+
+    disabled = installer.maintenance(enabled=False)
+    disabled_again = installer.maintenance(enabled=False)
+    assert disabled["changed"] is True
+    assert disabled_again["changed"] is False
+    assert system.maintenance is False
+
+
+def test_explicit_maintenance_enable_rolls_back_new_marker_when_active(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.status = "busy"
+
+    with pytest.raises(host.InstallError, match="rollout is active"):
+        installer.maintenance(enabled=True)
+
+    assert system.maintenance is False
+
+
+def test_explicit_maintenance_disable_preserves_marker_when_active(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.maintenance(enabled=True)
+    system.status = "running"
+
+    with pytest.raises(host.InstallError, match="leave maintenance"):
+        installer.maintenance(enabled=False)
+
+    assert system.maintenance is True
+
+
+def test_explicit_maintenance_requires_root(tmp_path: Path) -> None:
+    installer, _system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.euid = 1000
+
+    with pytest.raises(host.InstallError, match="requires root"):
+        installer.maintenance(enabled=True)
+
+
+def test_install_publishes_attestation_and_ready_record_before_sudoers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, _system = _installer(tmp_path)
+    writes: list[Path] = []
+    original_atomic_write = host.LocalFilesystem.atomic_write
+
+    def record_write(
+        filesystem: host.LocalFilesystem,
+        absolute: Path,
+        payload: bytes,
+        mode: int,
+        *,
+        expected_nlink: int | None = None,
+    ) -> bool:
+        writes.append(absolute)
+        return original_atomic_write(
+            filesystem,
+            absolute,
+            payload,
+            mode,
+            expected_nlink=expected_nlink,
+        )
+
+    monkeypatch.setattr(host.LocalFilesystem, "atomic_write", record_write)
+
+    installer.install(TEAM_ID)
+
+    assert writes.index(host.INSTALL_ATTESTATION) < max(
+        index for index, path in enumerate(writes) if path == host.INSTALL_RECORD
+    )
+    assert max(index for index, path in enumerate(writes) if path == host.INSTALL_RECORD) < (
+        writes.index(host.SUDOERS_PATH)
+    )
+    assert writes[-1] == host.SUDOERS_PATH
+
+
+def test_install_attestation_publication_failure_keeps_admission_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    original_atomic_write = host.LocalFilesystem.atomic_write
+
+    def fail_attestation(
+        filesystem: host.LocalFilesystem,
+        absolute: Path,
+        payload: bytes,
+        mode: int,
+        *,
+        expected_nlink: int | None = None,
+    ) -> bool:
+        if absolute == host.INSTALL_ATTESTATION:
+            raise host.InstallError("injected install attestation publication failure")
+        return original_atomic_write(
+            filesystem,
+            absolute,
+            payload,
+            mode,
+            expected_nlink=expected_nlink,
+        )
+
+    monkeypatch.setattr(host.LocalFilesystem, "atomic_write", fail_attestation)
+
+    with pytest.raises(host.InstallError, match="attestation publication failure"):
+        installer.install(TEAM_ID)
+
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+    assert record["maintenance_enabled"] is True
+    assert system.maintenance is True
+    assert system.maintenance_begins == 1
+    assert system.maintenance_ends == 0
+    assert not installer.filesystem.exists(host.INSTALL_ATTESTATION)
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+
+
+def test_missing_install_attestation_is_repaired_in_one_controlled_transaction(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    candidate_syncs = system.candidate_syncs
+    installer.filesystem.remove(host.INSTALL_ATTESTATION)
+    system.maintenance_begins = 0
+    system.maintenance_ends = 0
+
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert "install-attestation" in result["changed"]
+    assert installer.filesystem.exists(host.INSTALL_ATTESTATION)
+    assert installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.candidate_syncs == candidate_syncs
+    assert system.maintenance_begins == 1
+    assert system.maintenance_ends == 1
+    assert system.maintenance is False
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "ready"
+    assert record["admission_enabled"] is True
+    assert record["maintenance_enabled"] is False
+
+
+def test_sealed_cumulative_install_records_exact_source_and_checks_candidate(
+    tmp_path: Path,
+) -> None:
+    assert host.MAX_CUMULATIVE_COMMITS == 512
+    installer, _system = _installer(tmp_path)
+    source = host.SealedSource(
+        path=host.REPO_ROOT,
+        commit_sha="a" * 40,
+        tree_sha="b" * 40,
+        base_sha="c" * 40,
+    )
+
+    result = installer.install(TEAM_ID, sealed_source=source)
+    record = installer.filesystem.load_install_record()
+    rendered = installer.filesystem.path(host.CONFIG_PATH).read_text(encoding="utf-8")
+
+    assert result["ok"] is True
+    assert record is not None
+    assert record["schema_version"] == 4
+    assert record["source_mode"] == "sealed-cumulative"
+    assert record["source_sha"] == source.commit_sha
+    assert record["source_tree_sha"] == source.tree_sha
+    assert record["source_base_sha"] == source.base_sha
+    assert "schema_version = 2" in rendered
+    assert 'source_mode = "sealed-cumulative"' in rendered
+    assert f'source_commit_sha = "{source.commit_sha}"' in rendered
+    assert installer.check() == {"ok": True, "failures": []}
+
+
+def test_sealed_cumulative_install_rejects_invocation_drift_before_host_mutation(
+    tmp_path: Path,
+) -> None:
+    installer, _system = _installer(tmp_path)
+    source = host.SealedSource(
+        path=host.REPO_ROOT,
+        commit_sha="d" * 40,
+        tree_sha="b" * 40,
+        base_sha="c" * 40,
+    )
+
+    with pytest.raises(host.InstallError, match="installer checkout"):
+        installer.install(TEAM_ID, sealed_source=source)
+
+    assert installer.filesystem.load_install_record() is None
+    assert not installer.filesystem.path(host.CONFIG_PATH).exists()
 
 
 def test_worker_env_validation_allows_empty_optional_value() -> None:
@@ -724,6 +1248,28 @@ class SharedWorkerRepoRunner:
     def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
         del kwargs
         call = list(argv)
+        mount_report = {
+            "schema_version": 1,
+            "mount_point": str(host.SHARED_WORK2_MOUNT_POINT),
+            "source": "192.168.20.12:/shared_work2",
+            "filesystem_type": "nfs4",
+            "mount_id": 42,
+            "parent_id": 1,
+            "device_major": 0,
+            "device_minor": 99,
+            "mount_options": ["nodev", "noexec", "nosuid", "rw"],
+            "super_options": [
+                "hard",
+                "proto=tcp",
+                "retrans=2",
+                "rw",
+                "sec=sys",
+                "timeo=600",
+                "vers=4.2",
+            ],
+        }
+        if call == [str(host.SYSTEM_PYTHON), str(host.SHARED_WORK2_MOUNT_HELPER), "check"]:
+            return host.CommandResult(0, json.dumps(mount_report) + "\n")
         if call[:2] == [str(host.SYSTEM_PYTHON), str(host.SHARED_WORKER_REPO_HELPER)]:
             if len(call) != 3 or call[2] not in {"check", "ensure"}:
                 raise AssertionError(f"unexpected command: {call}")
@@ -770,6 +1316,8 @@ class SharedWorkerRepoRunner:
                             "parent-not-writable;repository-writable-searchable"
                         ),
                         "consumer_capability": ("repository-readable-searchable-not-writable"),
+                        "publication_capability": "private-mkdir-publish-verified",
+                        "mount": mount_report,
                         "created": [],
                     }
                 )
@@ -1425,17 +1973,141 @@ def test_reinstall_upgrades_pre_acl_record_before_acl_mutation(
     assert upgraded["schema_version"] == 3
 
 
-def test_install_runs_dry_run_only_after_all_gb10_trust_is_ready(tmp_path: Path) -> None:
+def test_install_runs_requestless_preflight_only_after_all_gb10_trust_is_ready(
+    tmp_path: Path,
+) -> None:
     installer, system = _installer(tmp_path)
     system.trust_ready = True
 
     result = installer.install(TEAM_ID)
 
     assert result["post_install_check"] == "passed"
-    assert system.dry_runs == 1
+    assert system.preflights == 1
 
 
-def test_unchanged_reinstall_does_not_repeat_post_install_dry_run(tmp_path: Path) -> None:
+def test_install_reports_admission_blocker_after_publishing_ready_state(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    system.trust_ready = True
+    system.run_post_install_preflight = lambda: {  # type: ignore[method-assign]
+        "assessment_digest": "e" * 64,
+        "blocker_codes": ["backup.lease.ineligible"],
+        "status": "blocked",
+    }
+
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert result["post_install_check"] == "blocked"
+    assert result["post_install_preflight"] == {
+        "assessment_digest": "e" * 64,
+        "blocker_codes": ["backup.lease.ineligible"],
+        "status": "blocked",
+    }
+    assert installer.filesystem.load_install_record()["installation_state"] == "ready"  # type: ignore[index]
+
+
+def test_post_install_preflight_invokes_requestless_broker_command() -> None:
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs == {"check": False}
+            self.calls.append(list(argv))
+            return host.CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "candidate_sha": "a" * 40,
+                        "candidate_tree": "b" * 40,
+                        "coverage_sha256": "c" * 64,
+                        "mutation_epoch": 8,
+                        "preflight_assessment_sha256": "d" * 64,
+                        "registry_sha256": "e" * 64,
+                        "status": "passed",
+                    }
+                ),
+            )
+
+    runner = RecordingRunner()
+
+    result = host.HostSystem(runner).run_post_install_preflight()
+
+    assert result == {
+        "assessment_digest": "d" * 64,
+        "blocker_codes": [],
+        "status": "passed",
+    }
+
+    assert runner.calls == [
+        [
+            "sudo",
+            "-n",
+            "-u",
+            "qianyi",
+            "--",
+            str(host.CLIENT_PATH),
+            "preflight",
+        ]
+    ]
+
+
+def test_post_install_preflight_preserves_normalized_admission_blockers() -> None:
+    class BlockedRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs == {"check": False}
+            return host.CommandResult(
+                1,
+                stderr=json.dumps(
+                    {
+                        "assessment_digest": "e" * 64,
+                        "blockers": [
+                            {"failure_code": "backup.lease.ineligible"},
+                        ],
+                        "passed": False,
+                    }
+                ),
+            )
+
+    assert host.HostSystem(BlockedRunner()).run_post_install_preflight() == {
+        "assessment_digest": "e" * 64,
+        "blocker_codes": ["backup.lease.ineligible"],
+        "status": "blocked",
+    }
+
+
+def test_post_install_preflight_preserves_legacy_report_blockers() -> None:
+    payload = {
+        "checks": [
+            {"name": "candidate", "passed": True, "remediation": None},
+            {
+                "name": "gb10-shared-source",
+                "passed": False,
+                "remediation": "repair exact shared source",
+            },
+        ],
+        "passed": False,
+    }
+
+    class BlockedRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs == {"check": False}
+            return host.CommandResult(1, stderr=json.dumps(payload))
+
+    result = host.HostSystem(BlockedRunner()).run_post_install_preflight()
+
+    assert result == {
+        "assessment_digest": hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "blocker_codes": ["gb10-shared-source"],
+        "status": "blocked",
+    }
+
+
+def test_unchanged_reinstall_does_not_repeat_post_install_preflight(tmp_path: Path) -> None:
     installer, system = _installer(tmp_path)
     system.trust_ready = True
 
@@ -1444,7 +2116,7 @@ def test_unchanged_reinstall_does_not_repeat_post_install_dry_run(tmp_path: Path
 
     assert first["changed"]
     assert second["changed"] == []
-    assert system.dry_runs == 1
+    assert system.preflights == 1
 
 
 def test_unchanged_reinstall_repairs_broken_broker_runtime(tmp_path: Path) -> None:
@@ -1469,8 +2141,9 @@ def test_same_sha_broker_repair_failure_stays_admission_closed(tmp_path: Path) -
     system.package_ready = False
     system.broker_ready = False
 
-    def fail_sync(source_root: Path) -> None:
+    def fail_sync(source_root: Path, *, venv: Path) -> None:
         assert source_root == host.REPO_ROOT
+        assert venv == host._candidate_venv_path("a" * 40)
         assert system.maintenance is True
         assert not installer.filesystem.exists(host.SUDOERS_PATH)
         raise host.InstallError("injected same-SHA runtime repair failure")
@@ -1585,6 +2258,7 @@ def test_update_failure_stays_fail_closed_with_maintenance_marker(tmp_path: Path
     installer.uninstall(retain_ledger=True)
     assert system.revoked is True
     assert not installer.filesystem.exists(host.INSTALL_RECORD)
+    assert not installer.filesystem.exists(host.INSTALL_ATTESTATION)
 
 
 def test_retry_resyncs_candidate_and_venv_for_non_ready_new_sha_record(
@@ -1596,8 +2270,9 @@ def test_retry_resyncs_candidate_and_venv_for_non_ready_new_sha_record(
     system.status = "done"
     original_sync_venv = system.sync_venv
 
-    def fail_before_venv_sync(source_root: Path) -> None:
+    def fail_before_venv_sync(source_root: Path, *, venv: Path) -> None:
         assert source_root == host.REPO_ROOT
+        assert venv == host._candidate_venv_path("b" * 40)
         assert system.candidate_sha == "b" * 40
         raise host.InstallError("injected pre-venv crash")
 
@@ -1701,6 +2376,73 @@ def test_check_rejects_installed_known_hosts_drift(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert str(host.KNOWN_HOSTS_PATH) in result["failures"]
+
+
+def test_check_rejects_host_inotify_capacity_drift(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.inotify_capacity = False
+
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert "host-inotify-capacity" in result["failures"]
+
+
+def test_check_rejects_disabled_credential_refresh_timer(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.credential_refresh_timer = False
+
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert "credential-refresh-timer" in result["failures"]
+
+
+def test_host_system_converges_only_fixed_inotify_sysctl() -> None:
+    class InotifyRunner:
+        def __init__(self) -> None:
+            self.value = 128
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            self.calls.append(call)
+            if call == ["sysctl", "-n", "fs.inotify.max_user_instances"]:
+                return host.CommandResult(0, f"{self.value}\n")
+            if call == ["sysctl", "--load", str(host.SYSCTL_PATH)]:
+                assert kwargs == {}
+                self.value = host._INOTIFY_MIN_INSTANCES
+                return host.CommandResult(0)
+            raise AssertionError(call)
+
+    runner = InotifyRunner()
+    system = host.HostSystem(runner)
+
+    assert system.inotify_capacity_ready() is False
+    assert system.ensure_inotify_capacity() is True
+    assert system.inotify_capacity_ready() is True
+    assert system.ensure_inotify_capacity() is False
+    assert runner.calls.count(["sysctl", "--load", str(host.SYSCTL_PATH)]) == 1
+
+
+def test_check_rejects_root_install_attestation_drift(tmp_path: Path) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    statement = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
+    statement["asset_sha256"]["broker"] = "f" * 64
+    installer.filesystem.atomic_write(
+        host.INSTALL_ATTESTATION,
+        (json.dumps(statement, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        0o640,
+        expected_nlink=1,
+    )
+
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert str(host.INSTALL_ATTESTATION) in result["failures"]
 
 
 def test_failed_validation_never_replaces_installed_authority_files(tmp_path: Path) -> None:
@@ -1841,6 +2583,8 @@ def test_uninstall_refuses_active_request_and_retains_ledger(tmp_path: Path) -> 
     assert not installer.filesystem.exists(host.INSTALL_RECORD)
     assert not installer.filesystem.exists(host.TRUST_REVOCATION_LEDGER)
     assert not installer.filesystem.exists(host.KNOWN_HOSTS_PATH)
+    assert system.shared_work2_mounted is False
+    assert system.credential_refresh_timer is False
     assert result["removed"][-2:] == [
         str(host.TRUST_REVOCATION_LEDGER),
         str(host.INSTALL_RECORD),
@@ -2125,6 +2869,50 @@ def test_cli_rejects_repository_ref_and_host_overrides() -> None:
         parser.parse_args(["install", "--smoke-on-behalf-team-id", TEAM_ID, "--ref", "dev"])
     with pytest.raises(SystemExit):
         parser.parse_args(["plan", "--host", "example"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "install",
+                "--smoke-on-behalf-team-id",
+                TEAM_ID,
+                "--sealed-source-path",
+                "/tmp/checkout",
+            ]
+        )
+
+
+def test_cli_sealed_mode_requires_complete_binding_and_merged_mode_rejects_it(
+    tmp_path: Path,
+) -> None:
+    installer, _system = _installer(tmp_path)
+
+    assert (
+        host.main(
+            [
+                "install",
+                "--smoke-on-behalf-team-id",
+                TEAM_ID,
+                "--source-mode",
+                "sealed-cumulative",
+            ],
+            installer=installer,
+        )
+        == 1
+    )
+    assert (
+        host.main(
+            [
+                "install",
+                "--smoke-on-behalf-team-id",
+                TEAM_ID,
+                "--sealed-source-sha",
+                "a" * 40,
+            ],
+            installer=installer,
+        )
+        == 1
+    )
+    assert installer.filesystem.load_install_record() is None
 
 
 def test_host_lifecycle_lock_rejects_unsafe_metadata(
@@ -2240,7 +3028,12 @@ def test_system_python_version_probe_fails_closed(returncode: int, version: str)
         )
 
 
-def _runtime_probe_argv(service_uid: int, program: str) -> list[str]:
+def _runtime_probe_argv(
+    service_uid: int,
+    program: str,
+    *,
+    venv: Path = TEST_CANDIDATE_VENV,
+) -> list[str]:
     return [
         "sudo",
         "-n",
@@ -2252,19 +3045,69 @@ def _runtime_probe_argv(service_uid: int, program: str) -> list[str]:
         f"HOME={host.STATE_ROOT}",
         f"USER={host.SERVICE_USER}",
         f"LOGNAME={host.SERVICE_USER}",
-        f"PATH={host.VENV / 'bin'}:{host._ROOT_PATH}",
+        f"PATH={venv / 'bin'}:{host._ROOT_PATH}",
         "LANG=C.UTF-8",
         "LC_ALL=C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE=1",
         f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
         f"KUBECONFIG={host.KUBECONFIG_PATH}",
         f"LOOM_STAGING_ROLLOUT_CONFIG={host.CONFIG_PATH}",
-        str(host.VENV / "bin/python"),
+        str(venv / "bin/python"),
         "-I",
         "-B",
         "-c",
         program,
     ]
+
+
+def _candidate_source_publication_argv(
+    service_uid: int,
+    operation: str,
+    *,
+    venv: Path = TEST_CANDIDATE_VENV,
+) -> list[str]:
+    return [
+        "sudo",
+        "-n",
+        "-u",
+        host.SERVICE_USER,
+        "--",
+        "/usr/bin/env",
+        "-i",
+        f"HOME={host.STATE_ROOT}",
+        f"USER={host.SERVICE_USER}",
+        f"LOGNAME={host.SERVICE_USER}",
+        f"PATH={venv / 'bin'}:{host._ROOT_PATH}",
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE=1",
+        f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+        f"KUBECONFIG={host.KUBECONFIG_PATH}",
+        f"LOOM_STAGING_ROLLOUT_CONFIG={host.CONFIG_PATH}",
+        str(venv / "bin/python"),
+        "-I",
+        "-B",
+        "-m",
+        "loom_cli.rollout.operator.candidate_source_publication",
+        operation,
+    ]
+
+
+def _candidate_source_publication_payload(action: str = "matched") -> str:
+    payload: dict[str, object] = {
+        "action": action,
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "image_tag": "staging-aaaaaaa",
+        "service_uid": 1001,
+        "status": "clean",
+    }
+    payload["evidence_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return json.dumps(payload, sort_keys=True) + "\n"
 
 
 def _service_identity_result(
@@ -2321,15 +3164,19 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
     )
     runner = SyncRunner()
     system = host.HostSystem(runner)
-    monkeypatch.setattr(system, "harden_venv_lock", lambda: events.append("harden-lock"))
+    monkeypatch.setattr(
+        system,
+        "harden_venv_lock",
+        lambda _venv: events.append("harden-lock"),
+    )
     monkeypatch.setattr(
         system,
         "venv_ready",
-        lambda: events.append("validate-authority") or True,
+        lambda _venv: events.append("validate-authority") or True,
     )
     source_root = Path("/opt/loom-staging-runner/source")
 
-    system.sync_venv(source_root)
+    system.sync_venv(source_root, venv=TEST_CANDIDATE_VENV)
 
     sync_call, sync_kwargs = next(
         call for call in runner.calls if call[0][0] == "/usr/local/bin/uv"
@@ -2354,7 +3201,7 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         "PATH": host._ROOT_PATH,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "UV_PROJECT_ENVIRONMENT": str(host.VENV),
+        "UV_PROJECT_ENVIRONMENT": str(TEST_CANDIDATE_VENV),
     }
     assert events == ["uv-sync", "harden-lock", "validate-authority", "broker-import"]
     assert runner.calls[-5:] == [
@@ -2392,11 +3239,14 @@ def test_sync_venv_rejects_broken_installed_broker_import(
         }[path],
     )
     system = host.HostSystem(BrokenBrokerRunner())
-    monkeypatch.setattr(system, "harden_venv_lock", lambda: None)
-    monkeypatch.setattr(system, "venv_ready", lambda: True)
+    monkeypatch.setattr(system, "harden_venv_lock", lambda _venv: None)
+    monkeypatch.setattr(system, "venv_ready", lambda _venv: True)
 
     with pytest.raises(host.InstallError, match="broker import probe failed"):
-        system.sync_venv(Path("/opt/loom-staging-runner/source"))
+        system.sync_venv(
+            Path("/opt/loom-staging-runner/source"),
+            venv=TEST_CANDIDATE_VENV,
+        )
 
 
 def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
@@ -2416,8 +3266,105 @@ def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
 
     runner = ProbeRunner()
 
-    assert host.HostSystem(runner).broker_runtime_ready() is True
+    assert host.HostSystem(runner).broker_runtime_ready(TEST_CANDIDATE_VENV) is True
     assert runner.calls[-1][1] == {"check": False}
+
+
+def test_gb10_trust_probe_binds_exact_candidate_runtime() -> None:
+    class ProbeRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append((list(argv), dict(kwargs)))
+            return host.CommandResult(0)
+
+    runner = ProbeRunner()
+
+    assert host.HostSystem(runner).gb10_trust_ready(
+        TEST_CANDIDATE_VENV,
+        TEST_CANDIDATE_SHA,
+    )
+    assert runner.calls == [
+        (
+            [
+                str(TEST_CANDIDATE_VENV / "bin/python"),
+                "-I",
+                "-B",
+                str(host._candidate_trust_tool_path(TEST_CANDIDATE_SHA)),
+                "--ssh-config",
+                str(host._candidate_ssh_config_path(TEST_CANDIDATE_SHA)),
+                "check",
+            ],
+            {
+                "check": False,
+                "env": {
+                    "PATH": host._ROOT_PATH,
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "HOME": str(host.STATE_ROOT),
+                    "USER": host.SERVICE_USER,
+                    "LOGNAME": host.SERVICE_USER,
+                },
+            },
+        )
+    ]
+
+
+def test_service_git_disables_optional_locks_and_replace_refs() -> None:
+    class GitRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            assert "GIT_NO_REPLACE_OBJECTS=1" in call
+            assert "GIT_OPTIONAL_LOCKS=0" in call
+            assert call[-2:] == ["status", "--porcelain=v1"]
+            assert kwargs == {"check": False}
+            return host.CommandResult(0)
+
+    result = host.HostSystem(GitRunner())._service_git(
+        "status",
+        "--porcelain=v1",
+        check=False,
+    )
+
+    assert result.returncode == 0
+
+
+def test_candidate_source_publication_uses_fixed_service_user_boundary() -> None:
+    class PublicationRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            self.calls.append((call, kwargs))
+            service_identity = _service_identity_result(call)
+            if service_identity is not None:
+                return service_identity
+            assert call == _candidate_source_publication_argv(1001, "check")
+            return host.CommandResult(0, _candidate_source_publication_payload())
+
+    runner = PublicationRunner()
+
+    assert host.HostSystem(runner).preflight_candidate_source_ready(TEST_CANDIDATE_VENV) is True
+    assert runner.calls[-1][1] == {"check": False}
+
+
+def test_candidate_source_publication_rejects_tampered_evidence_digest() -> None:
+    class TamperedRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            service_identity = _service_identity_result(call)
+            if service_identity is not None:
+                return service_identity
+            payload = json.loads(_candidate_source_publication_payload())
+            payload["candidate_tree"] = "c" * 40
+            return host.CommandResult(0, json.dumps(payload) + "\n")
+
+    with pytest.raises(host.InstallError, match="evidence digest"):
+        host.HostSystem(TamperedRunner()).preflight_candidate_source_ready(TEST_CANDIDATE_VENV)
 
 
 @pytest.mark.parametrize(
@@ -2571,9 +3518,9 @@ def test_venv_lock_hardening_converges_root_regular_file_to_mode_0600(
         mode = requested_mode
 
     def fake_lstat(path: Path) -> os.stat_result:
-        if path == host.VENV:
+        if path == TEST_CANDIDATE_VENV:
             return os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
-        assert path == host.VENV / ".lock"
+        assert path == TEST_CANDIDATE_VENV / ".lock"
         return metadata(mode)
 
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
@@ -2582,9 +3529,9 @@ def test_venv_lock_hardening_converges_root_regular_file_to_mode_0600(
     monkeypatch.setattr(host.os, "fchmod", fake_fchmod)
     monkeypatch.setattr(host.os, "close", lambda fd: calls.append(("close", fd)))
 
-    host.HostSystem(RecordingRunner()).harden_venv_lock()
+    host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
-    assert calls[0][0:2] == ("open", host.VENV / ".lock")
+    assert calls[0][0:2] == ("open", TEST_CANDIDATE_VENV / ".lock")
     assert calls[0][2] & getattr(os, "O_NOFOLLOW", 0)
     assert calls[1:] == [("fchmod", descriptor, 0o600), ("close", descriptor)]
 
@@ -2607,9 +3554,9 @@ def test_venv_lock_hardening_rejects_unsafe_authority_before_open(
     metadata = os.stat_result((unsafe_mode, 23, 17, 1, unsafe_uid, unsafe_gid, 0, 0, 0, 0))
 
     def fake_lstat(path: Path) -> os.stat_result:
-        if path == host.VENV:
+        if path == TEST_CANDIDATE_VENV:
             return os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
-        assert path == host.VENV / ".lock"
+        assert path == TEST_CANDIDATE_VENV / ".lock"
         return metadata
 
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
@@ -2620,7 +3567,7 @@ def test_venv_lock_hardening_rejects_unsafe_authority_before_open(
     )
 
     with pytest.raises(host.InstallError, match="lock authority is unsafe"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
 
 def test_venv_lock_hardening_rejects_identity_change_after_open(
@@ -2630,13 +3577,17 @@ def test_venv_lock_hardening_rejects_identity_change_after_open(
     before = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
     after = os.stat_result((stat.S_IFREG | 0o666, 24, 17, 1, 0, 0, 0, 0, 0, 0))
     closed: list[int] = []
-    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else before)
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: root if path == TEST_CANDIDATE_VENV else before,
+    )
     monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
     monkeypatch.setattr(host.os, "fstat", lambda fd: after)
     monkeypatch.setattr(host.os, "close", lambda fd: closed.append(fd))
 
     with pytest.raises(host.InstallError, match="lock authority is unsafe"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
     assert closed == [41]
 
@@ -2646,14 +3597,18 @@ def test_venv_lock_hardening_fails_if_mode_does_not_converge(
 ) -> None:
     root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
     lock = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else lock)
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: root if path == TEST_CANDIDATE_VENV else lock,
+    )
     monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
     monkeypatch.setattr(host.os, "fstat", lambda fd: lock)
     monkeypatch.setattr(host.os, "fchmod", lambda fd, mode: None)
     monkeypatch.setattr(host.os, "close", lambda fd: None)
 
     with pytest.raises(host.InstallError, match="hardening did not converge"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
 
 def test_venv_lock_hardening_converts_fchmod_failure(
@@ -2661,7 +3616,11 @@ def test_venv_lock_hardening_converts_fchmod_failure(
 ) -> None:
     root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
     lock = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else lock)
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: root if path == TEST_CANDIDATE_VENV else lock,
+    )
     monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
     monkeypatch.setattr(host.os, "fstat", lambda fd: lock)
     monkeypatch.setattr(
@@ -2672,7 +3631,7 @@ def test_venv_lock_hardening_converts_fchmod_failure(
     monkeypatch.setattr(host.os, "close", lambda fd: None)
 
     with pytest.raises(host.InstallError, match="lock hardening failed"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
 
 def test_venv_lock_hardening_converts_close_failure_without_masking_authority_error(
@@ -2681,17 +3640,21 @@ def test_venv_lock_hardening_converts_close_failure_without_masking_authority_er
     root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
     before = os.stat_result((stat.S_IFREG | 0o600, 23, 17, 1, 0, 0, 0, 0, 0, 0))
     changed = os.stat_result((stat.S_IFREG | 0o600, 24, 17, 1, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else before)
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: root if path == TEST_CANDIDATE_VENV else before,
+    )
     monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
     monkeypatch.setattr(host.os, "close", lambda fd: (_ for _ in ()).throw(OSError("close")))
 
     monkeypatch.setattr(host.os, "fstat", lambda fd: before)
     with pytest.raises(host.InstallError, match="lock close failed"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
     monkeypatch.setattr(host.os, "fstat", lambda fd: changed)
     with pytest.raises(host.InstallError, match="lock authority is unsafe"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
 
 def test_verify_user_manager_places_clean_connectivity_probe_inside_sudo() -> None:
@@ -3122,17 +4085,17 @@ def test_venv_python_minor_drift_converges_through_resync(
                 assert kwargs == {"check": False}
                 return host.CommandResult(0, "3.13\n")
             assert kwargs == {"check": False}
-            assert call == ["stat", "-c", "%F:%U:%G:%a", str(host.VENV)]
+            assert call == ["stat", "-c", "%F:%U:%G:%a", str(TEST_CANDIDATE_VENV)]
             return host.CommandResult(0, "directory:root:root:755\n")
 
     resolved = {
         host.SYSTEM_PYTHON: Path("/usr/bin/python3.13"),
-        host.VENV / "bin/python": Path("/usr/bin/python3.12"),
+        TEST_CANDIDATE_VENV / "bin/python": Path("/usr/bin/python3.12"),
     }
     monkeypatch.setattr(
         host.os.path,
         "lexists",
-        lambda path: path in {host.VENV, host.VENV / "bin/python"},
+        lambda path: path in {TEST_CANDIDATE_VENV, TEST_CANDIDATE_VENV / "bin/python"},
     )
     monkeypatch.setattr(
         host,
@@ -3145,7 +4108,7 @@ def test_venv_python_minor_drift_converges_through_resync(
         lambda root, *, expected_uid, expected_gid, allowed_external_symlink_targets: None,
     )
 
-    assert host.HostSystem(VenvRunner()).venv_ready() is False
+    assert host.HostSystem(VenvRunner()).venv_ready(TEST_CANDIDATE_VENV) is False
 
 
 def test_dangling_venv_python_converges_only_after_tree_validation(
@@ -3160,7 +4123,7 @@ def test_dangling_venv_python_converges_only_after_tree_validation(
             assert kwargs == {"check": False}
             return host.CommandResult(0, "directory:root:root:755\n")
 
-    python = host.VENV / "bin/python"
+    python = TEST_CANDIDATE_VENV / "bin/python"
     tree_validated = False
 
     def validate_tree(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -3176,11 +4139,15 @@ def test_dangling_venv_python_converges_only_after_tree_validation(
         assert tree_validated
         raise host.InstallError("dangling venv Python")
 
-    monkeypatch.setattr(host.os.path, "lexists", lambda path: path in {host.VENV, python})
+    monkeypatch.setattr(
+        host.os.path,
+        "lexists",
+        lambda path: path in {TEST_CANDIDATE_VENV, python},
+    )
     monkeypatch.setattr(host, "_safe_root_executable", resolve_executable)
     monkeypatch.setattr(host, "_validate_owned_tree", validate_tree)
 
-    assert host.HostSystem(VenvRunner()).venv_ready() is False
+    assert host.HostSystem(VenvRunner()).venv_ready(TEST_CANDIDATE_VENV) is False
     assert tree_validated
 
 
@@ -3221,7 +4188,6 @@ def test_venv_python_link_rejects_non_system_python_target(
             assert kwargs == {"check": False}
             return host.CommandResult(0, "directory:root:root:755\n")
 
-    monkeypatch.setattr(host, "VENV", venv)
     monkeypatch.setattr(
         host,
         "_safe_root_executable",
@@ -3229,7 +4195,7 @@ def test_venv_python_link_rejects_non_system_python_target(
     )
 
     with pytest.raises(host.InstallError, match="link is unsafe"):
-        host.HostSystem(VenvRunner()).venv_ready()
+        host.HostSystem(VenvRunner()).venv_ready(venv)
 
 
 class RecordingRunner:
@@ -3423,6 +4389,129 @@ def test_acl_convergence_uses_named_no_mask_entry_without_owner_or_mode_changes(
     assert "chmod" not in flattened
     assert any(call[:4] == ["setfacl", "-n", "-m", "u:loom-rollout:r--"] for call in runner.calls)
     assert all("admin-token-fixture" not in " ".join(call) for call in runner.calls)
+
+
+def test_protected_input_acl_sanitizes_only_undeclared_named_readers() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    before = (
+        "user::rw-",
+        "user:2012:r--",
+        "user:loom-rollout:r--",
+        "group::r--",
+        "group:obsolete:r--",
+        "mask::r--",
+        "other::---",
+    )
+    runner = StatefulAclRunner()
+    runner.seed(path, access=before)
+    system = host.HostSystem(runner)
+
+    plan = system._plan_acl(
+        path,
+        permissions="r--",
+        default=False,
+        sanitize_named_entries=True,
+    )
+
+    assert plan is not None
+    assert plan.adds_service_entry is False
+    assert plan.mask_adjustment is None
+    assert plan.snapshot_adjustment is not None
+    assert "group::r--" in plan.after_acl
+    assert "user:loom-rollout:r--" in plan.after_acl
+    assert all("2012" not in entry and "obsolete" not in entry for entry in plan.after_acl)
+    system.apply_acl(plan)
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == plan.after_acl
+    assert any(call[:4] == ["setfacl", "-n", "-x", "u:2012,g:obsolete"] for call in runner.calls)
+
+    assert (
+        system._plan_acl(
+            path,
+            permissions="r--",
+            default=False,
+            sanitize_named_entries=True,
+        )
+        is None
+    )
+    system.remove_acl(plan.grant, plan.snapshot_adjustment, remove_service_entry=False)
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == before
+
+
+def test_protected_input_acl_sanitation_adds_service_and_restores_full_preimage() -> None:
+    path = host.PROTECTED_INPUTS[1]
+    before = (
+        "user::rw-",
+        "user:2012:r--",
+        "group::r--",
+        "mask::r--",
+        "other::---",
+    )
+    runner = StatefulAclRunner()
+    runner.seed(path, access=before)
+    system = host.HostSystem(runner)
+
+    plan = system._plan_acl(
+        path,
+        permissions="r--",
+        default=False,
+        sanitize_named_entries=True,
+    )
+
+    assert plan is not None and plan.snapshot_adjustment is not None
+    assert plan.adds_service_entry is True
+    system.apply_acl(plan)
+    assert system._acl_entry(path, default=False) == ("r--", "r--")
+    system.remove_acl(plan.grant, plan.snapshot_adjustment, remove_service_entry=True)
+    assert host._canonical_acl_snapshot(runner.acls[str(path)][False]) == before
+
+
+def test_acl_snapshot_adjustment_record_rejects_drift_and_unmanaged_scope() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    assert host.AclSnapshotAdjustment.from_dict(adjustment.to_dict()) == adjustment
+    assert host.HostInstaller._record_snapshot_adjustments(
+        {"acl_snapshot_adjustments": [adjustment.to_dict()]}
+    ) == {host.AclGrant(path): adjustment}
+
+    value = adjustment.to_dict()
+    value["path"] = "/tmp/unmanaged"
+    with pytest.raises(host.InstallError, match="snapshot ledger"):
+        host.HostInstaller._record_snapshot_adjustments({"acl_snapshot_adjustments": [value]})
+
+    runner = StatefulAclRunner()
+    runner.seed(path, access=adjustment.before_acl)
+    system = host.HostSystem(runner)
+    plan = host.AclPlan(
+        grant=host.AclGrant(path),
+        permissions="r--",
+        adds_service_entry=False,
+        before_acl=adjustment.before_acl,
+        after_acl=adjustment.after_acl,
+        snapshot_adjustment=adjustment,
+    )
+    runner.acls[str(path)][False][("user", "racer")] = "r--"
+    with pytest.raises(host.InstallError, match="changed before convergence"):
+        system.apply_acl(plan)
+    assert all(call[0] != "setfacl" for call in runner.calls)
 
 
 def test_acl_converges_masked_preexisting_service_and_restores_without_removing_it() -> None:
@@ -3728,6 +4817,66 @@ def _fake_mask_plan(path: Path, *, service_preexisting: bool = False) -> host.Ac
         after_acl=adjustment.after_acl,
         mask_adjustment=adjustment,
     )
+
+
+def _fake_snapshot_plan(path: Path, *, service_preexisting: bool = False) -> host.AclPlan:
+    before = ["user::rw-", "user:2012:r--"]
+    if service_preexisting:
+        before.append("user:loom-rollout:r--")
+    before.extend(["group::r--", "mask::r--", "other::---"])
+    after = ["user::rw-", "user:loom-rollout:r--", "group::r--", "mask::r--", "other::---"]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": before,
+            "after_acl": after,
+        }
+    )
+    return host.AclPlan(
+        grant=host.AclGrant(path),
+        permissions="r--",
+        adds_service_entry=not service_preexisting,
+        before_acl=adjustment.before_acl,
+        after_acl=adjustment.after_acl,
+        snapshot_adjustment=adjustment,
+    )
+
+
+def test_install_persists_snapshot_preimage_before_acl_sanitation_and_uninstall_restores_it(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    path = host.PROTECTED_INPUTS[0]
+    plan = _fake_snapshot_plan(path)
+    assert plan.snapshot_adjustment is not None
+
+    def planned_input(candidate: Path) -> tuple[host.AclPlan, ...]:
+        if candidate != path or system.acl_adjustment_states.get(plan.grant) == "after":
+            return ()
+        return (plan,)
+
+    system.plan_input_acl = planned_input  # type: ignore[method-assign]
+    system.plan_data_acl = lambda candidate: ()  # type: ignore[method-assign]
+    original_apply = system.apply_acl
+
+    def assert_preimage_persisted(candidate: host.AclPlan) -> host.AclGrant:
+        record = installer.filesystem.load_install_record()
+        assert record is not None
+        assert record["installation_state"] == "installing"
+        assert record["acl_snapshot_adjustments"] == [plan.snapshot_adjustment.to_dict()]
+        return original_apply(candidate)
+
+    system.apply_acl = assert_preimage_persisted  # type: ignore[method-assign]
+    assert installer.install(TEAM_ID)["ok"] is True
+    ready = installer.filesystem.load_install_record()
+    assert ready is not None
+    assert host.HostInstaller._record_snapshot_adjustments(ready) == {
+        plan.grant: plan.snapshot_adjustment
+    }
+
+    installer.uninstall(retain_ledger=True)
+    assert system.acl_adjustment_states[plan.grant] == "before"
+    assert path not in system.input_acls
 
 
 def test_partial_acl_apply_persists_all_mask_preimages_and_retries(tmp_path: Path) -> None:
@@ -4166,7 +5315,7 @@ def test_candidate_convergence_hardens_existing_checkout_and_uses_fixed_umask(
 ) -> None:
     uid, gid = os.geteuid(), os.getegid()
     sha = "a" * 40
-    candidate = tmp_path / "repo"
+    candidate = tmp_path / sha / "repo"
     git_dir = candidate / ".git"
     git_dir.mkdir(parents=True, mode=0o775)
     config = git_dir / "config"
@@ -4203,7 +5352,7 @@ def test_candidate_convergence_hardens_existing_checkout_and_uses_fixed_umask(
                 return host.CommandResult(0, sha + "\n")
             raise AssertionError(f"unexpected command: {call}")
 
-    monkeypatch.setattr(host, "CANDIDATE_REPO", candidate)
+    monkeypatch.setattr(host, "CANDIDATE_RUNTIME_ROOT", tmp_path)
     runner = CandidateRunner()
 
     assert host.HostSystem(runner).ensure_candidate(sha, refresh=False) is True
@@ -4219,13 +5368,89 @@ def test_candidate_convergence_hardens_existing_checkout_and_uses_fixed_umask(
         for call in runner.calls
         if "/usr/bin/git" in call
     )
+
+
+def test_sealed_candidate_fetch_uses_fixed_install_source_upload_pack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid, gid = os.geteuid(), os.getegid()
+    sha = "a" * 40
+    tree = "b" * 40
+    base = "c" * 40
+    candidate = tmp_path / sha / "repo"
+    (candidate / ".git").mkdir(parents=True)
+
+    class SealedCandidateRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            self.calls.append(call)
+            service_identity = _service_identity_result(call, uid=uid, gid=gid)
+            if service_identity is not None:
+                return service_identity
+            if call[:2] == ["test", "-d"]:
+                return host.CommandResult(0)
+            git_index = call.index("/usr/bin/git")
+            arguments = call[git_index + 1 :]
+            if arguments[-1:] == ["remote"]:
+                return host.CommandResult(0, "origin\n")
+            if arguments[-1:] == ["remote.origin.url"]:
+                return host.CommandResult(0, host.REMOTE_URL + "\n")
+            if arguments[-1:] == ["remote.origin.pushurl"]:
+                return host.CommandResult(1)
+            if "status" in arguments or "checkout" in arguments or "fetch" in arguments:
+                return host.CommandResult(0)
+            if arguments[-2:] == ["rev-parse", "HEAD"]:
+                return host.CommandResult(0, sha + "\n")
+            if arguments[-2:] == ["rev-parse", f"{sha}^{{tree}}"]:
+                return host.CommandResult(0, tree + "\n")
+            if "merge-base" in arguments:
+                return host.CommandResult(0, base + "\n")
+            if "rev-list" in arguments:
+                return host.CommandResult(0, f"{sha} {base}\n")
+            raise AssertionError(f"unexpected command: {call}")
+
+    monkeypatch.setattr(host, "CANDIDATE_RUNTIME_ROOT", tmp_path)
+    monkeypatch.setattr(host, "_validate_git_checkout_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(host, "_harden_owned_tree", lambda *_args, **_kwargs: False)
+    runner = SealedCandidateRunner()
+
+    assert (
+        host.HostSystem(runner).ensure_candidate(
+            sha,
+            refresh=True,
+            source_tree_sha=tree,
+            source_base_sha=base,
+        )
+        is True
+    )
+    fetch = next(call for call in runner.calls if "fetch" in call)
+    git_index = fetch.index("/usr/bin/git")
+    arguments = fetch[git_index + 1 :]
+    assert arguments == [
+        "-C",
+        str(candidate),
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        f"--upload-pack={host.SEALED_SOURCE_UPLOAD_PACK}",
+        str(host.INSTALL_SOURCE),
+        sha,
+    ]
+    assert host.SEALED_SOURCE_UPLOAD_PACK == (
+        "/usr/bin/git -c safe.directory=/opt/loom-staging-runner/source/.git upload-pack"
+    )
     assert all(
         call[call.index("/bin/sh") : call.index("/usr/bin/git") + 1]
         == [
             "/bin/sh",
             "-c",
-            'umask 077; exec "$@"',
-            "loom-staging-git",
+            'umask 022; exec "$@"',
+            "loom-staging-root-git",
             "/usr/bin/git",
         ]
         for call in runner.calls

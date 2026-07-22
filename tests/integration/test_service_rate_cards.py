@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
-from loom.db.schema import Team, TeamQuota, Token
+from loom.db.schema import RateCard, Team, TeamQuota, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -26,7 +26,8 @@ RAW_ADMIN_TOKEN = "loom_admin_" + "R" * 43
 
 @pytest.fixture
 async def rc_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str, str, list[dict[str, str]]]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
@@ -42,7 +43,8 @@ async def rc_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.admin_secret_verifier = AdminSecretVerifier.from_token(
         RAW_ADMIN_TOKEN,
@@ -59,18 +61,22 @@ async def rc_setup(
     captured: list[dict[str, str]] = []
 
     def gw_handler(req: httpx.Request) -> httpx.Response:
-        captured.append({
-            "method": req.method,
-            "path": req.url.path,
-            "auth": req.headers.get("authorization") or "",
-            "body": req.content.decode() if req.content else "",
-        })
+        captured.append(
+            {
+                "method": req.method,
+                "path": req.url.path,
+                "auth": req.headers.get("authorization") or "",
+                "body": req.content.decode() if req.content else "",
+            }
+        )
         if req.method == "GET" and req.url.path == "/admin/rate-cards":
             return httpx.Response(
                 200,
-                json={"items": [
-                    {"id": "rc1", "captured_at": "2026-06-07", "table_hash": "h"},
-                ]},
+                json={
+                    "items": [
+                        {"id": "rc1", "captured_at": "2026-06-07", "table_hash": "h"},
+                    ]
+                },
             )
         if req.method == "GET" and req.url.path.startswith("/admin/rate-cards/"):
             rc_id = req.url.path.rsplit("/", 1)[-1]
@@ -80,10 +86,7 @@ async def rc_setup(
             )
         if req.method == "POST" and req.url.path == "/admin/rate-cards":
             return httpx.Response(201, json={"id": "rc-new"})
-        if (
-            req.method == "POST"
-            and req.url.path == "/admin/rate-cards/sync/yibuapi"
-        ):
+        if req.method == "POST" and req.url.path == "/admin/rate-cards/sync/yibuapi":
             return httpx.Response(
                 201,
                 json={
@@ -108,11 +111,22 @@ async def rc_setup(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(team_raw.encode()).digest(),
-            type="team", scopes=["read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(team_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(RateCard).values(
+                id="rc1",
+                captured_at=datetime(2026, 6, 7, tzinfo=UTC),
+                table={"id": "rc1", "entries": []},
+            )
+        )
         s.commit()
     try:
         yield app, RAW_ADMIN_TOKEN, team_raw, captured
@@ -124,6 +138,7 @@ async def rc_setup(
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
+            s.execute(delete(RateCard))
             s.commit()
         sync_engine.dispose()
 
@@ -134,7 +149,8 @@ async def test_admin_can_list(
     app, admin_raw, _team_raw, captured = rc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/rate-cards",
@@ -142,8 +158,8 @@ async def test_admin_can_list(
         )
     assert r.status_code == 200, r.text
     assert r.json()["items"][0]["id"] == "rc1"
-    assert captured[0]["path"] == "/admin/rate-cards"
-    assert captured[0]["auth"] == f"Bearer {admin_raw}"
+    assert r.json()["items"][0]["table"] == {"id": "rc1", "entries": []}
+    assert captured == []
 
 
 async def test_admin_can_get_detail(
@@ -152,15 +168,16 @@ async def test_admin_can_get_detail(
     app, admin_raw, _team_raw, captured = rc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
-            "/api/v1/rate-cards/rc-foo",
+            "/api/v1/rate-cards/rc1",
             headers={"Authorization": f"Bearer {admin_raw}"},
         )
     assert r.status_code == 200
-    assert r.json()["id"] == "rc-foo"
-    assert captured[0]["path"] == "/admin/rate-cards/rc-foo"
+    assert r.json()["id"] == "rc1"
+    assert captured == []
 
 
 async def test_team_token_can_read_list(
@@ -172,15 +189,15 @@ async def test_team_token_can_read_list(
     app, _admin_raw, team_raw, captured = rc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/rate-cards",
             headers={"Authorization": f"Bearer {team_raw}"},
         )
     assert r.status_code == 200
-    assert captured[0]["method"] == "GET"
-    assert captured[0]["path"] == "/admin/rate-cards"
+    assert captured == []
 
 
 async def test_team_token_403_on_post(
@@ -190,7 +207,8 @@ async def test_team_token_403_on_post(
     app, _admin_raw, team_raw, captured = rc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/rate-cards",
@@ -208,7 +226,8 @@ async def test_admin_can_post(
     app, admin_raw, _team_raw, captured = rc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/rate-cards",
@@ -226,7 +245,8 @@ async def test_admin_can_sync_yibuapi_rate_card(
     app, admin_raw, _team_raw, captured = rc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/rate-cards/sync/yibuapi",
@@ -246,7 +266,8 @@ async def test_unauthenticated_401(
     app, _admin_raw, _team_raw, _captured = rc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get("/api/v1/rate-cards")
     assert r.status_code == 401

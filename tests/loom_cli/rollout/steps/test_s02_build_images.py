@@ -9,6 +9,7 @@ build+load set and the web pod hit ImagePullBackOff after cluster-up.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -16,10 +17,10 @@ import yaml
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.s02_build_images import (
+    AUXILIARY_ROLLOUT_IMAGES,
     ROLLOUT_IMAGES,
     BuildImagesStep,
 )
-from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
 
 def _repo_root() -> Path:
@@ -97,13 +98,56 @@ class TestBuildImagesCoverage:
 
     @pytest.mark.parametrize("image,dockerfile", list(ROLLOUT_IMAGES))
     def test_every_rollout_image_has_a_dockerfile(
-        self, image: str, dockerfile: str,
+        self,
+        image: str,
+        dockerfile: str,
     ) -> None:
         path = _repo_root() / dockerfile
         assert path.is_file(), (
-            f"ROLLOUT_IMAGES entry {image!r} points at {dockerfile!r} "
-            f"which does not exist"
+            f"ROLLOUT_IMAGES entry {image!r} points at {dockerfile!r} which does not exist"
         )
+
+    @pytest.mark.parametrize("image,dockerfile", list(AUXILIARY_ROLLOUT_IMAGES))
+    def test_every_auxiliary_rollout_image_has_a_dockerfile(
+        self,
+        image: str,
+        dockerfile: str,
+    ) -> None:
+        path = _repo_root() / dockerfile
+        assert path.is_file(), f"auxiliary rollout image {image!r} points at missing {dockerfile!r}"
+
+    def test_browser_acceptance_image_is_content_addressed_and_revision_bound(
+        self,
+    ) -> None:
+        dockerfile = (_repo_root() / "deploy/Dockerfile.staging-admin-browser-smoke").read_text(
+            encoding="utf-8"
+        )
+
+        assert (
+            "mcr.microsoft.com/playwright:v1.61.1-noble@sha256:"
+            "5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48" in dockerfile
+        )
+        assert "ARG LOOM_BUILD_SHA" in dockerfile
+        assert 'org.opencontainers.image.revision="${LOOM_BUILD_SHA}"' in dockerfile
+        assert "npm ci --prefix web --ignore-scripts" in dockerfile
+        assert "install -d -o root -g root -m 0755 /opt/loom/web/scripts" in dockerfile
+        assert "COPY --chmod=0444 web/scripts/staging-admin-browser-smoke.mjs" in dockerfile
+        assert (
+            'ENTRYPOINT ["node", "/opt/loom/web/scripts/'
+            'staging-admin-browser-smoke.mjs"]' in dockerfile
+        )
+
+    def test_rehearsal_postgres_image_is_content_addressed_and_revision_bound(self) -> None:
+        dockerfile = (_repo_root() / "deploy/Dockerfile.rehearsal-postgres").read_text(
+            encoding="utf-8"
+        )
+
+        assert (
+            "postgres:16@sha256:"
+            "33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20" in dockerfile
+        )
+        assert "ARG LOOM_BUILD_SHA" in dockerfile
+        assert 'org.opencontainers.image.revision="${LOOM_BUILD_SHA}"' in dockerfile
 
 
 def test_service_image_build_is_bound_to_resolved_candidate_sha(
@@ -117,44 +161,26 @@ def test_service_image_build_is_bound_to_resolved_candidate_sha(
     step_path = rollout_dir / "02-build-images"
     step_path.mkdir()
     step_dir = StepDir(number=2, name="build-images", path=step_path)
-    commands: list[list[str]] = []
+    calls: list[dict[str, object]] = []
 
-    def fake_run(
-        argv: list[str],
-        **_kwargs: object,
-    ) -> SubprocessResult:
-        command = list(argv)
-        commands.append(command)
-        return SubprocessResult(
-            argv=command,
-            returncode=1 if command[1] == "inspect" else 0,
-            stdout="",
-            stderr="",
-        )
+    def fake_build(_run, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(image_digests={"loom-service": "sha256:" + "a" * 64})
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
-        (("loom-service", "deploy/Dockerfile.service"),),
-    )
-    monkeypatch.setattr(
-        "loom_cli.rollout.steps.s02_build_images.run_captured",
-        fake_run,
+        "loom_cli.rollout.steps.s02_build_images.build_exact_images",
+        fake_build,
     )
 
     result = BuildImagesStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
-    build = next(command for command in commands if command[1] == "build")
-    assert build == [
-        "docker",
-        "build",
-        "-f",
-        "deploy/Dockerfile.service",
-        "-t",
-        f"loom-service:{ctx.image_tag}",
-        "--build-arg",
-        f"LOOM_BUILD_SHA={resolved_sha}",
-        ".",
+    assert calls == [
+        {
+            "candidate_root": rollout_dir / "01-worktree" / "src",
+            "image_tag": ctx.image_tag,
+            "resolved_sha": resolved_sha,
+        }
     ]
 
 
@@ -164,42 +190,25 @@ def test_verify_rejects_service_image_with_stale_revision(
 ) -> None:
     ctx = make_ctx(tmp_path, resolved_sha="c" * 40)
     step_dir = StepDir(number=2, name="build-images", path=tmp_path)
-    commands: list[list[str]] = []
+    calls: list[dict[str, object]] = []
 
-    def fake_run(
-        argv: list[str],
-        **_kwargs: object,
-    ) -> SubprocessResult:
-        command = list(argv)
-        commands.append(command)
-        return SubprocessResult(
-            argv=command,
-            returncode=0,
-            stdout="d" * 40,
-            stderr="",
-        )
+    def fake_inspect(_run, **kwargs):
+        calls.append(kwargs)
+        raise ValueError("stale revision")
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
-        (("loom-service", "deploy/Dockerfile.service"),),
-    )
-    monkeypatch.setattr(
-        "loom_cli.rollout.steps.s02_build_images.run_captured",
-        fake_run,
+        "loom_cli.rollout.steps.s02_build_images.inspect_exact_images",
+        fake_inspect,
     )
 
     outcome = BuildImagesStep().verify(ctx, step_dir)
 
     assert outcome.name == "MISMATCH"
-    assert commands == [
-        [
-            "docker",
-            "inspect",
-            "--type=image",
-            "--format",
-            '{{ index .Config.Labels "org.opencontainers.image.revision" }}',
-            f"loom-service:{ctx.image_tag}",
-        ],
+    assert calls == [
+        {
+            "image_tag": ctx.image_tag,
+            "resolved_sha": ctx.resolved_sha,
+        }
     ]
 
 
@@ -213,32 +222,16 @@ def test_run_rebuilds_service_image_with_stale_revision(
     step_path = rollout_dir / "02-build-images"
     step_path.mkdir()
     step_dir = StepDir(number=2, name="build-images", path=step_path)
-    commands: list[list[str]] = []
 
-    def fake_run(
-        argv: list[str],
-        **_kwargs: object,
-    ) -> SubprocessResult:
-        command = list(argv)
-        commands.append(command)
-        return SubprocessResult(
-            argv=command,
-            returncode=0,
-            stdout="d" * 40 if command[1] == "inspect" else "built",
-            stderr="",
-        )
+    def fake_build(_run, **_kwargs):
+        raise ValueError("rollout image contract failed for loom-service")
 
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
-        (("loom-service", "deploy/Dockerfile.service"),),
-    )
-    monkeypatch.setattr(
-        "loom_cli.rollout.steps.s02_build_images.run_captured",
-        fake_run,
+        "loom_cli.rollout.steps.s02_build_images.build_exact_images",
+        fake_build,
     )
 
     result = BuildImagesStep().run(ctx, step_dir)
 
-    assert result.exit_code == 0
-    assert any(command[1] == "build" for command in commands)
-    assert "stale image revision; rebuilding" in step_dir.stdout_path().read_text()
+    assert result.exit_code == 1
+    assert result.error == "rollout image contract failed for loom-service"

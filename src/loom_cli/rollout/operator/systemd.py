@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import subprocess
+import time
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
+from ..systemd_readiness import parse_systemctl_properties
 from .config import OperatorConfig
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
@@ -67,6 +72,12 @@ _ACTIVE_STATES = frozenset(
 )
 _STATUS_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
 _RESULT_TOKEN_RE = re.compile(r"^[a-z0-9-]*$")
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_TRANSIENT_UNIT_RE = re.compile(
+    r"(?:loom-staging-backup-[a-z0-9][a-z0-9-]{7,79}"
+    r"|loom-staging-rollout-[a-z0-9][a-z0-9-]{7,79}-[1-9][0-9]*"
+    r"|loom-preflight-lifecycle-[0-9a-f]{16})[.]service\Z"
+)
 _SHOW_PROPERTIES = (
     "ActiveState",
     "SubState",
@@ -94,6 +105,199 @@ class SystemdUnitStatus:
     @property
     def is_running(self) -> bool:
         return self.active_state in {"activating", "active", "reloading", "deactivating"}
+
+
+@dataclass(frozen=True, slots=True)
+class SystemdLaunchCancelEvidence:
+    """Bounded evidence from one exact pre-request transient unit round trip."""
+
+    ready: bool
+    launched: bool
+    cancelled: bool
+    unit_absent: bool
+    launch_latency_ms: int
+    cancel_latency_ms: int
+    latency_budget_ms: int
+    evidence_digest: str
+
+
+def transient_service_argv(
+    *,
+    unit_name: str,
+    working_directory: Path,
+    command: tuple[str, ...],
+) -> list[str]:
+    """Build the shared transient-unit prefix used by preflight and launch."""
+    if (
+        _TRANSIENT_UNIT_RE.fullmatch(unit_name) is None
+        or not working_directory.is_absolute()
+        or ".." in working_directory.parts
+        or not command
+        or not command[0].startswith("/")
+        or any(not item or "\x00" in item for item in command)
+    ):
+        raise UnitLaunchError("transient service authority is invalid")
+    return [
+        "systemd-run",
+        "--user",
+        "--collect",
+        "--service-type=exec",
+        "--unit",
+        unit_name,
+        "--property",
+        "UMask=0077",
+        "--property",
+        f"WorkingDirectory={working_directory}",
+        *command,
+    ]
+
+
+def probe_transient_launch_cancel(
+    run: CommandRunner,
+    *,
+    candidate_sha: str,
+    working_directory: Path,
+    latency_budget_ms: int = 10_000,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> SystemdLaunchCancelEvidence:
+    """Launch and cancel one isolated unit before any rollout request exists."""
+    if (
+        _SHA_RE.fullmatch(candidate_sha) is None
+        or not working_directory.is_absolute()
+        or ".." in working_directory.parts
+        or not 1_000 <= latency_budget_ms <= 60_000
+    ):
+        raise ValueError("transient launch/cancel probe authority is invalid")
+    identity = hashlib.sha256(f"{candidate_sha}\0{working_directory}".encode()).hexdigest()[:16]
+    unit_name = f"loom-preflight-lifecycle-{identity}.service"
+    launched = False
+    launch_attempted = False
+    cancelled = False
+    unit_absent = False
+    launch_latency_ms = 0
+    cancel_latency_ms = 0
+
+    def command_output_is_safe(result: CommandResult) -> bool:
+        return (
+            isinstance(result.returncode, int)
+            and isinstance(result.stdout, str)
+            and isinstance(result.stderr, str)
+            and "\x00" not in result.stdout
+            and "\x00" not in result.stderr
+            and len(result.stdout.encode("utf-8")) <= 1024 * 1024
+            and len(result.stderr.encode("utf-8")) <= 1024 * 1024
+        )
+
+    def load_state() -> str | None:
+        result = run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                unit_name,
+                "--property=LoadState",
+                "--value",
+            ]
+        )
+        if not command_output_is_safe(result) or result.returncode not in {0, 4}:
+            return None
+        value = result.stdout.strip()
+        if result.returncode == 4 and not value:
+            return "not-found"
+        return value if value in {"loaded", "not-found"} else None
+
+    try:
+        if load_state() != "not-found":
+            raise UnitLaunchError("preflight transient unit identity is already occupied")
+        started = monotonic()
+        launch_attempted = True
+        result = run(
+            transient_service_argv(
+                unit_name=unit_name,
+                working_directory=working_directory,
+                command=("/usr/bin/sleep", "300"),
+            )
+        )
+        launch_latency_ms = max(0, round((monotonic() - started) * 1000))
+        launched = (
+            command_output_is_safe(result)
+            and result.returncode == 0
+            and launch_latency_ms <= latency_budget_ms
+        )
+        if not launched:
+            raise UnitLaunchError("preflight transient unit launch failed")
+        status = run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                unit_name,
+                "--property=LoadState",
+                "--property=ActiveState",
+                "--property=SubState",
+                "--property=Transient",
+                "--property=MainPID",
+            ]
+        )
+        if not command_output_is_safe(status):
+            raise UnitLaunchError("preflight transient unit readback failed")
+        properties = parse_systemctl_properties(status.stdout)
+        if (
+            status.returncode != 0
+            or properties.get("LoadState") != "loaded"
+            or properties.get("ActiveState") != "active"
+            or properties.get("SubState") != "running"
+            or properties.get("Transient") != "yes"
+            or not properties.get("MainPID", "").isdigit()
+            or int(properties["MainPID"]) <= 0
+        ):
+            raise UnitLaunchError("preflight transient unit readback failed")
+        started = monotonic()
+        stopped = run(["systemctl", "--user", "stop", unit_name])
+        reset = run(["systemctl", "--user", "reset-failed", unit_name])
+        cancel_latency_ms = max(0, round((monotonic() - started) * 1000))
+        unit_absent = load_state() == "not-found"
+        cancelled = (
+            command_output_is_safe(stopped)
+            and command_output_is_safe(reset)
+            and stopped.returncode == 0
+            and reset.returncode in {0, 1}
+            and cancel_latency_ms <= latency_budget_ms
+            and unit_absent
+        )
+        if not cancelled:
+            raise UnitLaunchError("preflight transient unit cancellation failed")
+        if not unit_absent:
+            raise UnitLaunchError("preflight transient unit cleanup failed")
+    finally:
+        if launch_attempted and not unit_absent:
+            try:
+                run(["systemctl", "--user", "stop", unit_name])
+                run(["systemctl", "--user", "reset-failed", unit_name])
+                unit_absent = load_state() == "not-found"
+            except Exception:
+                unit_absent = False
+    payload = {
+        "cancel_latency_ms": cancel_latency_ms,
+        "cancelled": cancelled,
+        "launch_latency_ms": launch_latency_ms,
+        "launched": launched,
+        "latency_budget_ms": latency_budget_ms,
+        "unit_absent": unit_absent,
+    }
+    ready = launched and cancelled and unit_absent
+    return SystemdLaunchCancelEvidence(
+        ready=ready,
+        launched=launched,
+        cancelled=cancelled,
+        unit_absent=unit_absent,
+        launch_latency_ms=launch_latency_ms,
+        cancel_latency_ms=cancel_latency_ms,
+        latency_budget_ms=latency_budget_ms,
+        evidence_digest=hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
 
 
 def _parse_unit_name(unit_name: str, *, error_type: type[RuntimeError]) -> tuple[str, int]:
@@ -147,6 +351,31 @@ def _attempt_identity(
     if (unit_request_id, unit_attempt_number) != (request_id, attempt_number):
         raise UnitLaunchError("unit name does not match the protected attempt")
     return request_id, attempt_number
+
+
+def _backup_identity(
+    config: OperatorConfig,
+    job_path: Path,
+    unit_name: str,
+) -> str:
+    prefix = "loom-staging-backup-"
+    suffix = ".service"
+    if not unit_name.startswith(prefix) or not unit_name.endswith(suffix):
+        raise UnitLaunchError("unit name is not an approved backup job")
+    request_id = unit_name[len(prefix) : -len(suffix)]
+    try:
+        validate_safe_identifier(request_id, "request_id")
+    except ValueError as exc:
+        raise UnitLaunchError("backup unit contains an invalid request id") from exc
+    if not job_path.is_absolute() or ".." in job_path.parts:
+        raise UnitLaunchError("backup job path is outside the protected request store")
+    try:
+        relative = job_path.relative_to(config.state_root)
+    except ValueError as exc:
+        raise UnitLaunchError("backup job path is outside the protected request store") from exc
+    if relative.parts != ("requests", request_id, "preflight-backup", "job.json"):
+        raise UnitLaunchError("backup job path does not identify one immutable job")
+    return request_id
 
 
 def _parse_nonnegative_int(value: str, property_name: str) -> int:
@@ -286,36 +515,62 @@ class SystemdUserManager:
             service_uid=self.service_uid,
         )
         python_path = self.config.runner_repo.parent / "venv" / "bin" / "python"
-        return [
-            "systemd-run",
-            "--user",
-            "--collect",
-            "--service-type=exec",
-            "--unit",
-            unit_name,
-            "--property",
-            "UMask=0077",
-            "--property",
-            f"WorkingDirectory={self.config.runner_repo}",
-            "/usr/bin/env",
-            "-i",
-            *(f"{key}={value}" for key, value in environment.items()),
-            str(python_path),
-            "-m",
-            "loom_cli.rollout.operator.worker",
-            "run-attempt",
-            "--envelope",
-            str(envelope_path),
-        ]
+        return transient_service_argv(
+            unit_name=unit_name,
+            working_directory=self.config.runner_repo,
+            command=(
+                "/usr/bin/env",
+                "-i",
+                *(f"{key}={value}" for key, value in environment.items()),
+                str(python_path),
+                "-m",
+                "loom_cli.rollout.operator.worker",
+                "run-attempt",
+                "--envelope",
+                str(envelope_path),
+            ),
+        )
 
     def start_attempt(self, envelope_path: Path, unit_name: str) -> None:
         argv = self.start_argv(envelope_path, unit_name)
         try:
             result = self._run(argv)
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             raise UnitLaunchError("transient rollout unit could not be started") from exc
         if result.returncode != 0:
             raise UnitLaunchError("transient rollout unit launch failed")
+
+    def start_backup_argv(self, job_path: Path, unit_name: str) -> list[str]:
+        _backup_identity(self.config, job_path, unit_name)
+        environment = sanitized_child_environment(
+            self.config,
+            service_uid=self.service_uid,
+        )
+        python_path = self.config.runner_repo.parent / "venv" / "bin" / "python"
+        return transient_service_argv(
+            unit_name=unit_name,
+            working_directory=self.config.runner_repo,
+            command=(
+                "/usr/bin/env",
+                "-i",
+                *(f"{key}={value}" for key, value in environment.items()),
+                str(python_path),
+                "-m",
+                "loom_cli.rollout.operator.worker",
+                "run-backup",
+                "--job",
+                str(job_path),
+            ),
+        )
+
+    def start_backup(self, job_path: Path, unit_name: str) -> None:
+        argv = self.start_backup_argv(job_path, unit_name)
+        try:
+            result = self._run(argv)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise UnitLaunchError("transient backup unit could not be started") from exc
+        if result.returncode != 0:
+            raise UnitLaunchError("transient backup unit launch failed")
 
     def show(self, unit_name: str) -> SystemdUnitStatus | None:
         _parse_unit_name(unit_name, error_type=SystemdQueryError)
@@ -329,7 +584,7 @@ class SystemdUserManager:
         ]
         try:
             result = self._run(argv)
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             raise SystemdQueryError("systemd unit status could not be queried") from exc
         if result.returncode == 4:
             return None

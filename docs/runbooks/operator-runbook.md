@@ -903,8 +903,14 @@ knob you need.
    evidence does not depend on a stale one-time manual copy. It then executes
    the profile's required catalog provisioning command after environment-state
    apply and before environment-state check, writing redacted
-   `catalog-provisioning.*` evidence. The profile lists the
-   operator-only env keys required by that gate: `PUBLISHED_SHA`, `HF_TOKEN`,
+   `catalog-provisioning.*` evidence. The profile may reference a
+   secret-bearing env file, but step 11 always replaces any inherited
+   `XDG_CACHE_HOME`, `HF_HOME`, and `HF_HUB_CACHE` values with a private
+   mode-`0700` cache beneath the current rollout step. This prevents stale
+   breakglass or prior-attempt cache paths from becoming catalog authority.
+   A symlink, foreign owner/group, or mode drift in that cache fails before the
+   catalog command runs. The operator-only env keys required by that gate are
+   `PUBLISHED_SHA`, `HF_TOKEN`,
    `LOOM_SVC_DB_URL`, and `LOOM_SVC_MINIO_*`; secret-bearing values must come
    from the protected `staging-catalog-provisioning.env` file or equivalent
    `env_sources`, not argv or worker pods. The committed staging profile uses
@@ -1413,6 +1419,9 @@ The supported `platform-dev` interface is the root-installed broker, not a
 personal checkout or user-owned systemd unit:
 
 ```bash
+# Verify the installed exact candidate without allocating a request.
+loom-staging-rollout preflight
+
 # Preview caller authorization and the freshly fetched merged dev candidate.
 loom-staging-rollout start --dry-run
 
@@ -1436,21 +1445,171 @@ loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
 `qianyi`, `hongjian`, and `devansh` are members of
-`loom-staging-operators`. The broker derives the authenticated OS caller from
-sudo rather than accepting an actor argument. Every new `start` fresh-fetches
-exactly `refs/heads/dev` from `https://github.com/qianyi-sun/loom.git`, pins
+`loom-staging-operators`. Invoke these broker commands directly as the
+authenticated operator, without a leading `sudo`; the broker derives the OS
+caller rather than accepting an actor argument. Exact-source `install` and
+`check` remain the separate root-owned path documented below. Every new
+`start` fresh-fetches exactly `refs/heads/dev` from
+`https://github.com/qianyi-sun/loom.git`, pins
 that merged 40-character SHA, and derives `staging-<sha7>`. Unmerged pull
 requests, feature branches, tags, historical SHAs, local commits, custom image
 tags, alternate remotes, and target/config/secret overrides are forbidden.
 Rollback is a merged revert on `dev` followed by another normal `start`.
 
-`start --dry-run` writes a non-active preview but creates no backup, systemd
-unit, rollout directory, or staging mutation. A real `start` first writes and
+`preflight` is requestless: it binds the exact candidate and current mutation
+epoch, runs Tier 0-2, and creates no request, lifecycle pointer, backup, systemd
+unit, rollout directory, or staging mutation. The host installer uses only this
+command for its post-install readiness check. The minimal readonly epoch probe
+does not require the later runtime capacity row; the complete Tier 2 database
+check still does, so one requestless run reports that row as a blocker together
+with all independent failures. A missing row is retained as explicit database
+evidence rather than masking health, authentication, catalog or network
+results; only `staging.storage-db` reports
+`dependency-capacity-unready`. Tier 1 feeds the rendered bytes through the same
+`loom-staging-rollout` server-side apply field manager, strict validation, and
+request timeout used by protected convergence. API/schema validation uses a
+mutation-free server dry-run whose conflict forcing is confined to that one
+request. The independent field-ownership check uses the exact no-force
+fixed-manager contract later consumed by protected apply. Schema rejection and
+legacy managed-field ownership conflicts are therefore both reported before a
+request or backup, while only ownership blocks final protected convergence.
+Never use the schema-only force flag to adopt live fields. `start --dry-run` writes a
+non-active preview request but creates no backup, systemd unit, rollout
+directory, or staging mutation. A real `start` first writes and
 verifies a new immutable backup manifest, then publishes the private request
 envelope and launches a detached `loom-rollout` service unit. It never consumes
 a mutable `backups/latest` pointer. `resume` uses the original request's exact
 SHA, image tag, backup manifest and digest, rollout ID, and config binding even
 if `dev` has advanced.
+
+Every private backup file is created with no-follow/exclusive semantics and is
+kept empty until its owner, link count, `0600` mode, and access ACL converge.
+The writer removes an inherited POSIX access ACL and proves that no ACL remains
+before writing PostgreSQL, object, secret, inventory, or manifest bytes. A
+missing removal primitive, metadata drift, or residual named reader fails the
+backup before publication; the later trusted reader remains equally strict.
+The isolated Secret clone requires PostgreSQL credentials plus each service's
+direct DSN and rewrites them to the rehearsal database. PgBouncer DSNs remain
+optional exactly as in the workloads: present pool keys are also rewritten,
+while an absent optional pool key stays absent and the service uses its direct
+DSN fallback.
+The checkpoint also freezes worker heartbeat and staging-capacity timestamps.
+Before the candidate admission smoke, the executor publishes a deterministic
+worker row and refreshes only the cloned capacity row after proving its exact
+policy/evidence digests and counters remain admission-safe. The capacity
+counters are not invented or recollected from protected staging: they remain
+the checkpoint snapshot and are rebound only to the isolated namespace. A
+missing, corrupt, policy-drifted, or high-water row fails rehearsal before the
+candidate submission. HTTP failure evidence retains only a fixed request ID,
+allowlisted reason code, and response digest; raw response bodies are never
+persisted.
+Before apply, the isolated release artifact also uses the API-server canonical
+shape: mapping-valued null fields are omitted and container resource quantities
+are strings. Empty `EnvVar.value` fields are also omitted because the API server
+uses the same empty value while dropping that JSON field. Live readback remains
+an exact subset check; arbitrary numeric and string values are not treated as
+interchangeable.
+
+When `manifests.field-ownership` reports only the recognized legacy lifecycle
+resources, keep rollout admission disabled with the root-owned maintenance
+marker and keep the lifecycle CronJob suspended. From the exact installed
+sealed candidate, first produce a requestless review document:
+
+```bash
+sudo /usr/bin/python3 \
+  /opt/loom-staging-runner/source/scripts/ops/staging_rollout_host.py \
+  maintenance-enable
+loom-staging-rollout manifest-ownership inventory
+```
+
+The root helper validates the exact ready install record/source, publishes the
+marker under the broker launch lock, and proves there is no active pointer or
+rollout unit. It does not remove broker sudo authority: the marker itself makes
+ordinary `start` fail closed while the bounded maintenance subcommand remains
+available. A normal host `check` reports `maintenance-marker` until the window
+is explicitly closed.
+
+Review its candidate/tree, epoch, complete existing rendered-resource set,
+UID/resourceVersion and optional generation records, live/managed-fields/
+desired/overlay digests, and `inventory_sha256`. Cluster-scoped resources use
+an empty namespace identity; not-yet-created candidate resources are excluded
+from adoption and remain owned by the normal protected apply. Only then use a
+new bounded maintenance request ID and repeat that exact digest:
+
+```bash
+loom-staging-rollout manifest-ownership apply \
+  --request-id req-manifest-ownership-EXACTSUFFIX \
+  --approved-inventory-sha256 EXACT_64_HEX_DIGEST
+```
+
+The broker recomputes the inventory before mutation, publishes it once under
+`/var/lib/loom-staging-rollout/maintenance/manifest-ownership/`, claims the
+protected mutation epoch, adopts every existing rendered field set without
+semantic change, and then retires only recognized legacy managed-field entries.
+That cleanup preserves `loom-staging-rollout` and controller ownership, uses an
+exact JSON Patch for each affected resource, and must pass a server-side dry-run
+and semantic comparison before the actual patch. It never clears the complete
+`managedFields` array. Only the three exact NetworkPolicies are then applied
+through the normal no-force manager. Any inventory, UID/resourceVersion, epoch,
+journal, cleanup, apply or post-readback drift stops the request. Never invoke
+`kubectl --force-conflicts` or patch `managedFields` directly, reuse a
+maintenance request ID, or unsuspend the CronJob as part of ownership adoption.
+
+The ownership path and the final rollout share one checked-in mutation-epoch
+CAS renderer. It accepts only bounded request IDs, hexadecimal evidence
+digests, non-negative integer epochs, and an explicit bootstrap boolean; the
+validated literals are rendered into one newline-free SQL argument. Do not
+replace this contract with `psql -v` substitution for `-c` statements or with
+operator-provided SQL.
+
+After server-side apply returns, the operator permits only three read-only
+live-state observations over a bounded one-second window (immediate, +250 ms,
++750 ms). This absorbs a stale API-server read without repeating any mutation;
+the successful observation count is journaled. These observations consume the
+same checked-in semantic comparator as the inventory dry-run, including the
+exact empty NetworkPolicy rule-list and legacy apply-bookkeeping normalization;
+there is no second post-apply predicate. Persistent drift keeps the same
+fail-closed failure code and requires a new request after diagnosis.
+
+Kubernetes may omit an explicitly empty NetworkPolicy `ingress` or `egress`
+array from its live JSON while retaining legacy server-side-apply ownership for
+that field. The adoption overlay includes such an empty field only when the
+exact desired value is `[]` and a recognized legacy manager still owns the
+matching managed-field path. Non-empty or unowned fields remain excluded, and
+the server dry-run must still prove the overlay is a semantic no-op.
+For that proof only, a missing NetworkPolicy rule list is equivalent to `[]`
+when the matching `policyTypes` entry is explicit; a non-empty rule change is
+never normalized away.
+The exact legacy `kubectl.kubernetes.io/last-applied-configuration` annotation
+is also excluded from that semantic comparison because it is client-side
+bookkeeping and server dry-run may omit it. Every other annotation remains
+protected and must match.
+
+If a request claims the epoch and adopts only part of the rendered resource set
+before failing, preserve that request and use a new request only after a new
+inventory. The inventory accepts each existing rendered target when it is
+still held by a recognized legacy manager or is already held by
+`loom-staging-rollout`, which allows exact partial-state convergence. The same
+plan covers spec-bearing resources and top-level authorities such as ConfigMap
+`data`; its force dry-run must prove a semantic no-op for every target before
+mutation. Unknown managers and controller-only ownership remain fail-closed.
+If legacy entries remain after adoption, the next exact request repeats the
+selective cleanup; already-clean resources generate no patch. Cleanup journals
+its exact resource count and aggregate digest before any later convergence
+stage.
+
+After the exact post-readback and final no-force dry-run succeed, close the
+window through the same installed source; the command refuses if any rollout
+pointer or unit is active:
+
+```bash
+sudo /usr/bin/python3 \
+  /opt/loom-staging-runner/source/scripts/ops/staging_rollout_host.py \
+  maintenance-disable
+sudo /usr/bin/python3 \
+  /opt/loom-staging-runner/source/scripts/ops/staging_rollout_host.py \
+  check
+```
 
 The staging sizing policy is based on an aggregate-only live inventory taken
 on 2026-07-15; no keys, credential values, or payloads were emitted. It measured
@@ -1522,7 +1681,10 @@ bootstrap prerequisite: the script cannot establish checkout trust after
 Python has already loaded it. Its in-process ownership check catches accidental
 drift before installer-managed mutation, not a malicious checkout controlled by
 an already root-equivalent operator. The installer takes its assets from the
-exact freshly fetched `dev` head, never from unmerged working-tree content.
+exact freshly fetched `dev` head by default. The only exception is the
+coordinator-only sealed cumulative repair mode below; it still rejects
+working-tree content and binds immutable Git objects rather than a branch or
+arbitrary ref.
 
 The host must provide Ubuntu with systemd, a root-owned `/usr/bin/python3`
 whose resolved executable stays under `/usr` and reports Python 3.11 or newer,
@@ -1569,7 +1731,8 @@ record but before replacing the installed package. A failed package-resource
 probe also forces synchronization at the same SHA, and the exact
 `--reinstall-package loom` option restores the project package even when uv
 would otherwise consider it satisfied. Immediately after `uv sync`, the
-installer opens uv's generated `/opt/loom-staging-runner/venv/.lock` without
+installer opens uv's generated
+`/opt/loom-staging-runner/candidates/<source-sha>/venv/.lock` without
 following symlinks, requires a regular root-owned file, converges it to mode
 `0600`, and only then validates the complete venv authority tree. A symlink,
 non-root owner, special file, or any other writable venv entry fails closed.
@@ -1601,6 +1764,21 @@ path with a fresh single-link inode, detaching it from every pre-existing alias.
 The installed broker wrapper also uses `-I -B -m`, preventing caller
 working-directory module shadowing and bytecode writes.
 
+The complete install transaction and trust/ACL ledger remains root-only at
+`/etc/loom/staging-rollout.install.json` (`root:root`, `0600`). A successful
+ready install additionally publishes
+`/etc/loom/staging-rollout.install-attestation.json` as a single-link
+`root:loom-rollout` `0640` file. This second file contains no credential value,
+team identifier, ACL ledger, or key fingerprint: it contains only the exact
+source identity, a digest of the private record, and SHA-256 digests of the
+fixed client, broker, config, trust tool, known-hosts, mount unit, and tmpfiles
+assets. The sudoers policy remains root-only and is verified directly
+by host `check`; it is not exposed to the service reader. Host `check`
+regenerates and compares the statement from the private authority; Tier 0
+independently re-hashes every service-readable live asset. Do not copy,
+edit, chmod, or synthesize this attestation by hand—rerun the exact sealed host
+installer and `check` when it is absent or drifted.
+
 The service user-manager probe also constructs its clean
 `XDG_RUNTIME_DIR`/D-Bus/`PATH` environment *after* `sudo -u loom-rollout` via
 fixed `/usr/bin/env -i` and `/usr/bin/systemctl` paths. Ubuntu `sudo` may reset
@@ -1612,6 +1790,21 @@ Ubuntu can report the whole user manager as `degraded` because an unrelated
 globally enabled desktop or snap unit failed, even while the D-Bus connection
 and Loom transient-unit boundary are healthy. Loom's own runtime units remain
 subject to the installer check and broker status gates below.
+
+Tier 0 checks Docker with the same three fixed read-only probes used by the
+compatibility preflight: `docker info`, `docker buildx version`, and the numeric
+`fs.inotify.max_user_instances` value through fixed `/usr/sbin/sysctl`. All probes run so the report exposes
+daemon, plugin, and host-capacity blockers together. Their raw output is
+discarded. The host installer owns
+`/etc/sysctl.d/90-loom-staging-rollout.conf` and requires at least 1024 inotify
+instances; rerun the exact sealed installer and its `check` instead of retrying
+a rollout or raising the image-check timeout.
+
+The fixed Kubernetes client probe reads the current context and gets only the
+target namespace using the explicit installed kubeconfig. It does not apply or
+patch resources. Tier 0 binds the result to the kubeconfig metadata digest and
+reports context and namespace failures together; replace the exact installed
+kubeconfig rather than editing context state in place.
 
 The source kubeconfig is the fixed root-only `/root/.kube/config`. The
 installer validates the complete root-owned, non-writable parent chain, opens
@@ -1635,10 +1828,33 @@ records that the whole default ACL was absent. Because the ACL mask is represent
 the numeric group mode bits, inspect `getfacl` raw/effective entries rather than
 using mode alone as the permission proof.
 
+Protected credential leaves have a stricter convergence rule than data
+directories. Their access ACL may retain the owning group object, including its
+existing read permission, but may contain no named user except `loom-rollout`
+and no named group. The installer removes such stale named readers in the same
+planned `setfacl -n` transition that converges the service entry. Before any ACL
+write it persists the complete access-ACL preimage and expected postimage in a
+root-owned snapshot ledger; plan/apply drift fails closed, retry is idempotent,
+`check` requires the postimage, and uninstall restores the exact preimage. Do
+not repair this condition with an ad-hoc `setfacl` command because that bypasses
+the install ledger and rollback authority.
+
 Protected-input parents intentionally grant only traverse (`--x`) permission;
 the leaf grants read (`r--`). Linux preflight opens those parent descriptors
 with `O_PATH|O_DIRECTORY|O_NOFOLLOW`, preserving no-listing access while still
-rejecting symlinked path components. The data contract includes
+rejecting symlinked path components. The Tier 0 `credentials.metadata` gate and
+the final browser/operator consumers use this same reader implementation. It
+reads the POSIX ACL from the already-open descriptor before and after the
+bounded file read, rejects undeclared named users/groups and write/execute
+grants outside the owner, verifies that only the rollout service obtains the
+declared read grant, and fails if inode metadata or the ACL changes during the
+read. Preflight evidence contains only owner/group/mode plus metadata, ACL, and
+bounded content fingerprints; paths and credential values are never emitted.
+The admin-token fingerprint is computed from the same stripped token bytes as
+the installer and final browser/smoke consumers, so a conventional trailing
+newline does not create a false authority drift while any actual token-byte
+change still fails closed.
+The data contract includes
 the declared rollout, Postgres, MinIO, backup, and pre-existing
 `environment-state` subdirectories. Each receives access/default `rwx`; the
 staging root remains read/traverse-only. This explicit environment-state grant
@@ -1665,6 +1881,58 @@ Create the fixed invocation checkout as root with a deterministic umask. On a
 later update, require a clean checkout, fetch `dev`, and detach at the fetched
 remote head. Do not force over local drift:
 
+During `install`, the credential installer atomically creates or reuses the
+dedicated database-backed application probe at the fixed root-only path
+`/etc/loom/staging-rollout-readonly-probe-token`. It converges exactly one
+deployment-managed `readonly_probe` row for the exact smoke team, with only
+`read:own`, no creating user, and no admin/submit scope; authority drift or a
+second active probe fails closed. The file is root:root `0600`, single-link,
+and non-empty. This is a bootstrap authority, not an operator token: never
+reuse the admin, service, worker, browser, or smoke credential and never pass
+the value through argv, environment variables, install records, or rollout
+evidence.
+
+During installation, the exact candidate applies the checked-in readonly and
+rehearsal RBAC/admission manifests with the root kubeconfig, then obtains
+six-hour TokenRequest credentials for the exact service accounts and the fixed
+K3s service-account audience
+`https://kubernetes.default.svc.cluster.local`. The installer rejects and
+rotates a still-fresh token carrying any other audience; metadata freshness
+alone cannot admit a token the API server will reject. It publishes
+minified service-owned `0600` kubeconfigs under
+`/var/lib/loom-staging-rollout/credentials`; inherited root client keys are
+discarded. `check` fails once either token has less than two hours remaining,
+while `install` requires at least four hours remaining and rotates both
+kubeconfigs otherwise. This headroom prevents a token that is still
+runtime-valid at install admission from expiring during the complete
+post-install preflight. The installed root-owned
+`loom-staging-rollout-credential-refresh.timer` checks them hourly and mints
+both before publishing either when refresh is needed. Each service-owned
+kubeconfig is replaced atomically as `loom-rollout:loom-rollout` at mode
+`0600`. The refresh then verifies the exact service-account subject, its
+required capability, and denial of TokenRequest minting authority. Any mint,
+publication, or read-back failure is
+fail-closed and emits no token material. The credential check reports only
+authority metadata and expiry; the deep-preflight attestation retains only
+metadata fingerprints and evidence hashes, never a token value. An
+incident-only host refresh timer may be retired only after installing the exact
+merged SHA and `staging_rollout_host.py check` confirms this managed timer
+and both credential authorities.
+
+The same install transaction creates or reuses a separate root-owned MinIO
+credential and converges one fixed non-mutating policy for
+`loom-staging-trajectories` and `loom-staging-artifacts`. The service copy is a
+single-link mode-0600 file under the credential directory. Its policy permits
+only bucket location/versioning, object/version enumeration, and exact-version
+reads; writes and deletes are absent. The readonly TokenRequest may port-forward only
+to `loom-minio-0` and `loom-postgres-0`. `check` independently compares the
+server-side policy document and user binding, and Tier 0 then proves it by
+enumerating the exact buckets and measuring `/data/loom-staging/minio` as
+`loom-rollout`. Tier 2 proves MinIO reachability with a bounded versioning read
+through the same fixed localhost transport; it does not require Kubernetes
+`services/proxy` authority. Do not replace either probe with the application
+MinIO secret, a broader proxy grant, or a privileged `kubectl exec` inventory.
+
 ```bash
 INSTALLER_CHECKOUT=/root/loom-staging-installer
 sudo /bin/sh -c 'umask 077; exec /usr/bin/git "$@"' loom-staging-git \
@@ -1684,6 +1952,49 @@ sudo "$INSTALLER_CHECKOUT/scripts/ops/staging_rollout_host.py" plan
 sudo "$INSTALLER_CHECKOUT/scripts/ops/staging_rollout_host.py" install \
   --smoke-on-behalf-team-id "<agentic-rl-team-uuid>"
 ```
+
+During one explicitly approved replacement-attempt incident, Qianyi or
+Hongjian may accumulate reviewed fixes locally and install the cumulative
+result before one final durable PR. This is not a general unmerged deployment path. Create a new
+standalone root-owned checkout (a linked Git worktree is not accepted), detach
+it at the independently reviewed exact commit, retain only the approved GitHub
+origin URL, and record the exact commit tree and approved merged base. The
+sealed checkout and every parent must be root-owned and non-group/world-
+writable; it must be clean, detached, free of alternates, grafts, shallow or
+replacement objects, and contain a bounded linear chain of at most 512 commits
+from the approved base. Do not fetch or resolve `origin/dev` in this mode.
+
+```bash
+SEALED_CHECKOUT=/root/loom-staging-sealed-cumulative
+SEALED_SHA=<reviewed-40-character-commit>
+SEALED_TREE=<reviewed-40-character-tree>
+SEALED_BASE=<approved-40-character-merged-base>
+
+sudo "$SEALED_CHECKOUT/scripts/ops/staging_rollout_host.py" install \
+  --source-mode sealed-cumulative \
+  --sealed-source-sha "$SEALED_SHA" \
+  --sealed-source-tree "$SEALED_TREE" \
+  --sealed-approved-base-sha "$SEALED_BASE" \
+  --smoke-on-behalf-team-id "<agentic-rl-team-uuid>"
+sudo "$SEALED_CHECKOUT/scripts/ops/staging_rollout_host.py" check
+```
+
+The installer validates the sealed checkout before any staging mutation,
+copies only the exact commit into its root source without resolving a remote
+ref, imports the same commit into the service candidate, and records source
+mode, commit, tree, and approved base in the install ledger, protected config,
+request, and attempt envelope. In sealed mode only `qianyi` and `hongjian` may
+start or resume; the other operators retain status/log access. A coordinator
+handoff always creates a new request under the new initiator; never resume or
+reuse another initiator's request. A missing or mismatched exact
+argument fails closed. Never bypass this path by copying files into the install
+directory, adding a global/system `safe.directory`, injecting Git objects, or selecting a
+caller-provided source path.
+
+Broker and worker systemd management operations use a bounded two-minute
+budget, separate from the shorter general command budget, so transient manager
+I/O cannot strand a launch. A management timeout still fails closed as an
+explicit launch or query error and is never retried implicitly.
 
 For first installation, run the clone command only when the destination is
 absent. For updates, skip clone and use the three refresh commands. An occupied,
@@ -1715,13 +2026,15 @@ already accept only the service identity. Private hosts converge before the
 jump host; any private-host failure leaves the jump host unchanged:
 
 ```bash
+CANDIDATE_SHA=<exact-40-character-candidate-sha>
+
 # Fresh or same-service-key repair:
-sudo /opt/loom-staging-runner/venv/bin/python \
+sudo "/opt/loom-staging-runner/candidates/${CANDIDATE_SHA}/venv/bin/python" \
   /usr/local/libexec/loom-staging-rollout-gb10-trust bootstrap \
   --bootstrap-identity /secure/path/<approved-admin-ed25519-key>
 
 # Only when that approved bootstrap key occupies the canonical marker:
-sudo /opt/loom-staging-runner/venv/bin/python \
+sudo "/opt/loom-staging-runner/candidates/${CANDIDATE_SHA}/venv/bin/python" \
   /usr/local/libexec/loom-staging-rollout-gb10-trust rotate-bootstrap \
   --bootstrap-identity /secure/path/<approved-admin-ed25519-key>
 
@@ -1864,36 +2177,178 @@ and redacted worker-token fingerprint only. Profiles that do not opt in to
 before rerunning step 11.
 
 For staging GB10, `repo_dir` is an exact image-tagged direct child of
-`/shared_work/qianyi/.loom-staging-rollout/worker-repos`. The root installer
+`/shared_work2/qianyi/.loom-staging-rollout/worker-repos`. First establish the
+checked-in exporter authority boundary on `trt-gb10-2`. The exporter has no
+existing noninteractive root path, so this requires one explicit external
+administrator bootstrap. Provision a standalone root-owned mode-`0700`, clean,
+detached checkout at the fixed path below from the independently reviewed
+sealed bundle. Then the external administrator runs exactly:
+
+```bash
+EXPORTER_SOURCE=/opt/loom-staging-exporter-authority/source
+SEALED_SHA=<reviewed-40-character-cumulative-commit>
+SEALED_TREE=<reviewed-40-character-tree>
+
+/usr/bin/python3 \
+  "$EXPORTER_SOURCE/scripts/ops/staging_rollout_shared_work2_export_authority.py" \
+  bootstrap --source-sha "$SEALED_SHA" --source-tree-sha "$SEALED_TREE"
+```
+
+Do not run that command through the coordinator's sudo identity: bootstrap
+intentionally requires a direct external root administrator and is absent from
+the installed sudoers rule. The fixed approved merged base is embedded in the
+reviewed boundary. Bootstrap validates the checkout and sudoers before
+publication, converges its three root-owned mode-`0755` directory roots inside
+the same transaction, installs sudoers last, and rolls back all directories
+and files created by the failed attempt in reverse order. Pre-existing exact
+directories are retained, while a wrong type, owner, or mode fails closed. It
+does not create a general root command channel.
+
+If `qianyi` already has access to the exporter's rootful Docker daemon, the
+reviewed Docker bootstrap handoff is an equivalent one-time administrator
+channel. It uses the exact ARM64 content-addressed image built from
+`deploy/worker-pools/gb10/Containerfile.shared-work2-export-bootstrap`; its only
+entrypoint is the reviewed Python bootstrap launcher. The container must run
+with `--network none`, `--read-only`, `no-new-privileges`, an exact capability
+mask of `CHOWN`, `DAC_OVERRIDE`, and `FOWNER`, and no command override. Bind
+only the sealed bundle read-only plus `/opt`, `/usr/local`, `/etc`, and
+`/var/lib` at their identical paths with recursive bind propagation disabled.
+These four parent binds are the narrowest atomic route while all four exact
+authority children are absent; a recursive `/var/lib` bind would expose Docker
+state and is forbidden. The launcher refuses wrong mount roots/options,
+usable non-loopback devices or routes, a writable container root, capability drift,
+bundle drift, source drift, or non-atomic source publication. Do not substitute
+an interactive shell, `--privileged`, or a writable `/` bind.
+Do not substitute an AMD64 image or rely on optional binfmt emulation; the
+build and runtime reject any non-ARM64 target.
+
+A reviewed cumulative replacement is permitted only when the installed
+authority is provably unused: its exclusive lock is held, its exact old sealed
+identity and assets validate, and its install journal is empty. Its export
+fragment must either be absent or exactly match the old sealed asset and the
+single canonical `/var/lib/nfs/etab` client/options record. This second state
+captures only a failed post-refresh verification before any install journal
+was written. The new commit must be a descendant of that old commit on the same
+approved base. The Docker launcher removes sudo authority first,
+moves only fixed assets to same-directory no-replace backups, and either
+atomically bootstraps the new identity or restores the old identity with
+sudoers last. Do not use this path after any successful `install`; such an
+authority requires a separately reviewed lifecycle change.
+
+The fixed exporter `install` verb owns convergence of a missing
+`/etc/exports.d` as root-owned mode `0755` before publishing its one fragment.
+It retains a pre-existing exact directory, rejects any type/owner/mode drift,
+and removes a directory created by the failed attempt after fragment and
+`exportfs` rollback.
+
+The sealed checkout may contain a reviewed Git symlink such as
+`deploy/.env -> ../.env`, but validation never follows it. An allowed link must
+be mode `120000` in both the exact tree and stage-zero index, retain the
+expected no-follow owner and single link count, stay lexically within the
+checkout, avoid tracked directories or other symlinks, and hash from its
+literal `readlink` payload to the exact tree blob. After lexical normalization,
+the resolved target must not have the literal, case-sensitive `.git` name as
+its first path component. Absolute, escaping, untracked,
+Git-administration-targeting, retargeted, type-changed, or dirty links fail
+before bootstrap or install.
+
+After bootstrap, the coordinator may run only:
+
+```bash
+sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority install
+sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority check
+```
+
+Neither verb accepts additional arguments, environment overrides, source
+paths, refs, hosts, clients, networks, or fragment content. Root reloads the
+mode-`0600` policy and revalidates the fixed checkout, wrapper, validator, and
+sudoers identities before running the exact helper. The `check` verb uses a
+shared read-only lock and does not append to the journal. The locked `install`
+verb appends only sanitized SHA/tree/base evidence after success.
+
+In sealed cumulative mode the underlying helper requires the same
+`--sealed-source-sha`, `--sealed-source-tree`, and
+`--sealed-approved-base-sha` binding as the host installer and validates that
+fixed script checkout before changing the export. It installs only the exact
+`192.168.50.103/32` allowance, requires the exact effective export options, and
+fails rather than widening or overwriting a drifted fragment. Human-oriented
+`exportfs -v` output proves the exact client is visible but is not an option
+authority because it omits default options; the root-owned, bounded canonical
+`/var/lib/nfs/etab` entry is the exact effective-options authority. A newly created
+fragment is removed and export state refreshed if the first `exportfs -ra`
+fails; pre-existing exact state is never removed. The platform-dev root
+installer then installs and starts the
+fixed `shared_work2.mount` unit and rejects any source other than
+`192.168.20.12:/shared_work2` over NFSv4.2 with the declared hard/TCP and
+`nosuid,nodev,noexec` options. A directory with no matching mountinfo entry is
+not accepted. The root installer
 converges that authority only with admission closed and the service inactive,
 records the resolved `loom-rollout` and `qianyi` UID plus service/sharedwork
 GID values, and verifies effective access: the service owns and writes only
 the dedicated root; the Slurm submitter reads/searches but cannot write it.
-Do not add `loom-rollout` to `sharedwork` or widen the existing traverse-only
-ACL on `/shared_work/qianyi`.
+Do not add `loom-rollout` to `sharedwork`, widen the host-only export, or move
+the private mode-`0600` token/env authority from platform-dev into shared
+storage. Do not request or store the exporter sudo password, enable root SSH,
+add wildcard sudo arguments, or revive the abandoned 14-host authority design.
 
-Repository materialization always clones with `--no-hardlinks` inside a
-service-created unpredictable temp container that inherited the sharedwork
-group and setgid bit from the dedicated root. Before atomic publication it
-rejects authority symlinks, foreign ownership, group/other write, hard-linked
-or special files, extra directories, and non-exact candidate HEADs while
-allowing tracked git symlinks. Publication uses Linux
-`renameat2(RENAME_NOREPLACE)`: an existing exact target is reused only after a
-complete immutable-tree validation, while any drift or different HEAD fails
-closed without replacement, cleanup, or takeover.
+Repository materialization always claims the final candidate directory with
+one atomic no-replace `mkdir`, initially mode `2700`, with the sharedwork group
+and setgid bit inherited from the dedicated root. It clones with
+`--no-hardlinks` while the consumer cannot search or read that private
+directory. Before publication it rejects authority symlinks, foreign
+ownership, group/other write, hard-linked or special files, extra directories,
+and non-exact candidate HEADs while
+allowing tracked git symlinks. Publication is the inode-bound final-directory
+mode transition from private `2700` to immutable consumer-readable `0750` after
+a complete tree validation. An existing exact target is reused only after a
+complete immutable-tree validation, while any private, drifted, or different
+HEAD fails closed without replacement, cleanup, or takeover. The installer
+runs the same private-claim, access-gate, publish, and collision sequence in a
+bounded, randomized, self-cleaning probe under the service identity before
+declaring the NFS authority ready. This avoids assuming optional
+`RENAME_NOREPLACE` support from the NFS server while retaining atomic name
+reservation and fail-closed consumer visibility.
+The platform installer refreshes its service-owned local candidate from the
+root-owned sealed install source through a fixed local `git upload-pack`
+command bound to that source's exact `.git` safe-directory exception. It never
+adds a persistent or wildcard Git safety exception.
 
 Before request creation the broker also checks the exact 14 active GB10 SSH
-targets as `qianyi`: the shared root must have the fixed owner/group/mode and
+targets as `qianyi`: the 13 clients must expose the exact NFSv4 source and
+mount identity, `trt-gb10-2` must expose the ext4 backend, and the shared root
+must have the fixed owner/group/mode and
 be readable/searchable but not writable. Immediately after the one-time
-checkout publish, and before environment-state apply, step 11 streams trusted
-candidate verifier bytes over the protected SSH stdin path to
-`/usr/bin/python3 -`; verifier code is never loaded from the target under test.
+checkout publish, and before environment-state apply, step 11 reads the
+verifier as a commit-bound blob from the exact resolved SHA and streams those
+captured bytes over the protected SSH stdin path to `/usr/bin/python3 -`.
+Verifier code is never loaded from the mutable rollout worktree or the target
+under test.
 All 14 nodes must independently observe the exact HEAD, a zero status including
 ignored and untracked entries, the complete index-derived file/directory modes,
 a readable deterministically selected tracked file, and non-writable
 root/target. Content digests and tracked-entry counts must agree across nodes.
-NFS device/inode
-values are recorded per node only and are not compared across nodes.
+Mount/device/inode values are bound into sanitized per-node evidence. A
+non-zero SSH or remote verifier exit receives at most thirteen exact-command
+observations over a bounded 390-second incremental-backoff window. Structured
+evidence that is valid but content-divergent fails immediately; an exhausted
+transient records only host, attempt count, and a non-sensitive failure class
+before the rollout fails closed.
+
+After that 14/14 consumer proof, sealed-cumulative GB10 prep fetches the exact
+commit from the fixed shared checkout with the system upload-pack and object
+fsck enabled. It does not resolve or fetch `origin/dev`; merged-dev prep keeps
+the existing GitHub-origin fetch path. The shared source path is derived only
+from the candidate-bound image tag beneath the fixed worker-repository root;
+the upload-pack receives an exact per-repository `safe.directory` binding
+without changing global or system Git configuration.
+
+The
+preflight derives the mount major/minor pair from each repository directory's
+`st_dev`; the separately recorded inode is never interpreted as a device
+minor number. It selects the most specific mountinfo entry containing
+`/shared_work2`: clients therefore bind the exact NFSv4 mount while the
+exporter binds the ext4 filesystem that contains its export directory even
+when `/shared_work2` is not a separate mountpoint.
 
 `SERVICE_TOKEN_SOURCE` is a Service API token source reference for
 rollout-owned CLI commands that mutate or verify DB-backed service defaults.
@@ -1906,6 +2361,20 @@ rollout-production-defaults` for the service audit trail. The server URL is
 derived from the rollout cluster config, for example `https://yylx.world/staging`
 for staging and `https://yylx.world/prod` for first prod. Do not use stdin
 `-`; the source must be replayable as `env:VAR` or `file:PATH`.
+
+Deep preflight also normalizes these secret-free desired values into a
+candidate SHA/tree-bound `production-defaults.json` artifact. Detached
+rehearsal and protected final apply consume that exact digest-addressed file;
+neither stage may reopen the environment profile or discover provider defaults
+after backup.
+
+The protected component reads the service token only from the exact `file:`
+source already bound into the request envelope and verifies its preflight
+metadata fingerprint immediately before use. Provider/rate-card classification
+is read-only; only the fixed Service API sync/update operations may mutate, and
+the component journal is not terminal until an identical post-apply classifier
+returns exact. Do not substitute an ambient CLI login, direct SQL update or a
+newly resolved environment profile.
 
 Step 15 defaults to `user-token` mode. In that mode, pass a replayable
 `--smoke-api-token env:VAR` or `--smoke-api-token file:PATH` source; the
@@ -1965,6 +2434,10 @@ operator options:
   `loom-staging-rollout start --dry-run`, which performs broker authorization,
   fresh-fetch, binding, singleton, and redaction checks without launching the
   driver.
+- The post-install readiness command is `loom-staging-rollout preflight`. It
+  performs the exact candidate/epoch Tier 0-2 assessment without publishing a
+  preview request and therefore cannot consume a request identifier merely by
+  installing or checking the runner.
 
 ### Candidate-source tooling contract
 
@@ -2088,11 +2561,12 @@ desired state.
 | 08 | preflight | candidate-source `loom cluster preflight --backup-manifest <path>` using the same manifest and broker-bound traversal ceilings verified by step 05 |
 | 09 | migrate | candidate-source `loom cluster render-migration`, apply the rendered Postgres/MinIO stateful substrate plus static worker trajectory PV/PVC from step 07 and wait for those StatefulSets, then apply/wait for the migration Job (#332, #206). This keeps missing-kind recovery restartable without starting application Deployments before Alembic and without leaving protected preflight with a partial critical PVC set. |
 | 10 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest and broker-bound traversal ceilings verified by step 05 and preflighted by step 08. Running this immediately after migration recreates the Control Plane before env-state uses the CP API during missing-kind recovery (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry). |
-| 11 | env-state | candidate-source `loom admin environment-state apply`, then required profile `catalog_provisioning.command` via protected env/env-source inputs, then `loom admin environment-state check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift, #543 catalog-owned GB10 smoke task provisioning). Before the apply, rollout waits for the private CP URL's `/healthz` and records `control-plane-readiness.json`, so cluster-up pod recreation and managed tunnel restarts cannot race the env-state mutation. Pure GB10 node-status convergence drift is recorded and deferred because step 12 has not started node-agent apply yet; mixed drift still fails immediately. |
+| 11 | env-state | candidate-source `loom admin environment-state apply`, then required profile `catalog_provisioning.command` via protected env/env-source inputs and a rollout-owned private cache namespace, then `loom admin environment-state check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift, #543 catalog-owned GB10 smoke task provisioning). Before the apply, rollout waits for the private CP URL's `/healthz` and records `control-plane-readiness.json`, so cluster-up pod recreation and managed tunnel restarts cannot race the env-state mutation. Pure GB10 node-status convergence drift is recorded and deferred because step 12 has not started node-agent apply yet; mixed drift still fails immediately. |
 | 12 | gb10-prep | SSH ×N hosts after desired-state apply: require `Linger=yes` before any unit mutation; fetch, checkout, write env file, retire the legacy `loom-gb10-worker.service`; install the candidate service+timer; daemon-reload; start the node-agent once; enable/restart its timer; then verify installed bytes and live systemd state. The node-agent service is `Type=oneshot`, so success is `Result=success` / `ExecMainStatus=0` even when it is `inactive/dead`; the timer must be loaded, enabled, active/waiting, point at that service, and need no daemon reload. This step intentionally runs after step 11 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). Under #822, prep targets the exact 14-host active set and leaves node 7 stopped/unreachable. After rollout, disconnect SSH, wait more than one timer period, stop one active canary worker, and require periodic recovery plus a fresh heartbeat while node 7 remains absent. |
 | 13 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
-| 14 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, rerun `loom admin environment-state check --format json`, then `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift, #593 post-prep env-state recheck). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. This retry window includes release-target mismatches returned directly by `loom admin gb10-workers status`, such as a worker registration that exists before its first fresh heartbeat lands. Active GB10 hosts must also show a linked fresh active docker worker registration (`worker_id`, `worker_status=active`, `worker_fresh=true`, `worker_backend_names` contains `docker`), because smoke/admin submission uses `/api/v1/backends`, not node-agent metadata alone. |
+| 14 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, and—only for the fixed staging root `/data/loom-staging`—ask Docker to prune unused images and build cache older than 24 hours before measuring storage headroom. The cleanup writes `staging-host-cache-retention.json`, fails closed on either Docker command, and revalidates the exact candidate image identities before continuing. Then run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, rerun `loom admin environment-state check --format json`, and finally `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift, #593 post-prep env-state recheck). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. This retry window includes release-target mismatches returned directly by `loom admin gb10-workers status`, such as a worker registration that exists before its first fresh heartbeat lands. Active GB10 hosts must also show a linked fresh active docker worker registration (`worker_id`, `worker_status=active`, `worker_fresh=true`, `worker_backend_names` contains `docker`), because smoke/admin submission uses `/api/v1/backends`, not node-agent metadata alone. |
 | 15 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
+| 16 | staging-admin-browser-acceptance | Runs the exact candidate-built Playwright image under the broker attempt, exchanges the singleton admin bearer for the fixed `qianyi` validation principal, verifies authenticated admin surfaces and correlated audit identity, logs out, and stores one sanitized report bound to request, attempt, envelope digest, candidate SHA, and runtime build SHA. |
 | 99 | summary | write `summary.md` from every prior step's result.json |
 
 Step 14 deliberately writes a narrow image-identity artifact instead of full
@@ -3018,6 +3492,20 @@ release-gate --minio-storage-preflight ...` also renders a
 `minio-storage-pressure` component row and fails when the artifact outcome is
 `stop`.
 
+On fixed platform-dev staging, `/data` and Docker share the same ext4 backing
+filesystem. The brokered rollout therefore performs one bounded host-cache
+retention pass immediately before the storage preflight: Docker may remove only
+images and build-cache records it considers unused and older than 24 hours.
+Each Docker prune command has a two-hour fail-closed ceiling so an initial
+convergence with thousands of stale images can finish without becoming an
+unbounded maintenance operation.
+The current candidate is freshly built, then its exact image identities are
+re-read after cleanup. The resulting `staging-host-cache-retention.json` records
+the policy, candidate SHA/tag, command exit codes, and measured free bytes
+before/after without turning the rollout into a generic path or prune surface.
+Do not substitute raw filesystem deletion, prune active images, or apply this
+staging-only policy to production.
+
 Remediation paths, in priority order:
 
 1. **Retention rules missing or stale.** Most common cause for
@@ -3048,6 +3536,32 @@ Remediation paths, in priority order:
    Then apply the retention policy permanently. If the StorageClass
    doesn't support resize, the durable answer is migration to
    external object storage via `loom cluster --storage external`.
+
+On the fixed `platform-dev` host, `/data` and `/shared_work` currently share
+the large ext4 root filesystem.  Do not delete `/shared_work`: it is active
+multi-user data, not rollout cache.  A default five-percent ext4 root reserve
+on this multi-terabyte filesystem can also make MinIO's non-root `df /data`
+view cross the stop threshold even when physical free blocks remain.  The
+sealed-candidate helper below provides the only supported bounded convergence
+for that exact host and device; it keeps a three-percent root reserve, validates
+the exact mount/device/type/ownership and large-filesystem identity before
+mutation, locks concurrent calls, reads back the result, and rolls back to the
+exact prior reserved-block count on a bad readback:
+
+```bash
+sudo /usr/bin/python3 \
+  "$SEALED_CHECKOUT/scripts/ops/staging_rollout_data_reserve.py" check
+sudo /usr/bin/python3 \
+  "$SEALED_CHECKOUT/scripts/ops/staging_rollout_data_reserve.py" install
+sudo /usr/bin/python3 \
+  "$SEALED_CHECKOUT/scripts/ops/staging_rollout_data_reserve.py" check
+```
+
+Run it only with no active rollout attempt and only from an independently
+validated exact sealed checkout.  It is not a storage-stop override: the
+15-percent MinIO threshold remains unchanged, and a new preflight must still
+pass before a replacement rollout.  Device, filesystem, or reserve drift fails
+closed and requires a reviewed repo update rather than ad hoc `tune2fs` flags.
 
 4. **Long-term durability.** Single-node MinIO + a fixed PVC is fine
    for cluster-internal scratch space but is not durable archival
@@ -4295,6 +4809,7 @@ loom datasets hf-boundary-evidence skilllearnbench \
   --namespace "$K8S_NAMESPACE" \
   --cluster-config "$CLUSTER_CONFIG" \
   --gb10-workers-status "$ROLLOUT_DIR/gb10-workers-status-$IMAGE_TAG.json" \
+  --canary-batch-id "$CURRENT_CANDIDATE_SLB_CANARY_BATCH_ID" \
   --output "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json"
 ```
 
@@ -4310,10 +4825,20 @@ candidate or a different status snapshot fails closed. Every canary trial's
 persisted `worker_id` must belong to an active, fresh manifest-selected worker
 registration in that same GB10 status snapshot. A worker restart therefore
 invalidates an older canary even when the batch otherwise succeeded, and an
-explicit `--canary-batch-id` does not bypass this check. Arrange the small
-SkillLearnBench canary after current-candidate GB10 prep and before release-gate;
-if none exists yet, release-gate fails closed and can be resumed after that
-canary completes. The GB10 check uses the same
+explicit `--canary-batch-id` does not bypass this check. Protected rollout
+step 14 now submits and waits for a deterministic one-trial
+`skilllearnbench/fix-security-bug/fix-security-bug-1` oracle canary after the
+GB10 status artifact proves all manifest-active hosts have fresh current
+registrations. The canary name binds the image tag and a stable digest of the
+exact host-to-worker registration set, so heartbeat timestamp changes reuse the
+same batch while a worker restart creates a new canary. Evidence generation is
+then pinned to the returned batch id instead of discovering an older succeeded
+batch. Manual investigations must preserve the same order and pass their exact
+current-candidate batch id explicitly. The status and environment-state
+subcommands each retain a bounded 180-second timeout because a protected status
+snapshot can include the complete retained unlinked-worker audit ledger; a
+timeout remains a release-gate failure rather than permission to skip or reuse
+older status. The GB10 check uses the same
 `[gb10_pool].ssh_config`, `ssh_identity_file`, and optional
 `ssh_certificate_file` as rollout GB10 prep; failed SSH, failed container
 listing or inspection, or no running inspected worker container on any active
@@ -4681,12 +5206,12 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    the build identity exposed by the running service, not an ambient checkout
    or PR ref:
 
-   The broker-owned rollout sequence must be extended to execute this command
-   and store its report with the request/attempt evidence. Until that integration
-   exists and succeeds, this acceptance item remains unmet; do not run it
-   manually against shared staging from an ambient checkout. Once integrated,
-   operators inspect the evidence with `loom-staging-rollout status REQUEST_ID`
-   and `loom-staging-rollout logs REQUEST_ID`.
+   Broker-owned step 16 executes this check from the candidate-built,
+   revision-labelled browser image and stores its report with request/attempt
+   evidence. Do not run it manually against shared staging from an ambient
+   checkout. Operators inspect the evidence with
+   `loom-staging-rollout status REQUEST_ID` and
+   `loom-staging-rollout logs REQUEST_ID`.
 
    The following illustrates the required broker-owned step, not an authorized
    standalone operator command:

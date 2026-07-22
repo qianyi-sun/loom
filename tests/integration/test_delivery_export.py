@@ -22,6 +22,10 @@ from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
     Batch,
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
     LlmCall,
     Task,
     Team,
@@ -350,6 +354,10 @@ async def delivery_setup(
             s.execute(delete(Batch))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota).where(TeamQuota.team_id == team_id))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team).where(Team.id == team_id))
             s.commit()
         sync_engine.dispose()
@@ -480,6 +488,30 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
                 str(supplemental_batch_id),
                 str(targeted_batch_id),
             ]
+            authority = s.get(DataLifecycleAuthority, artifact.lifecycle_authority_id)
+            assert authority is not None
+            assert authority.data_class == "artifact"
+            assert authority.owner_id == str(artifact.id)
+            registered_objects = list(s.scalars(
+                select(DataLifecycleObject)
+                .where(DataLifecycleObject.authority_id == authority.id)
+                .order_by(DataLifecycleObject.object_key)
+            ))
+            assert len(registered_objects) == 2
+            by_key = {row.object_key: row for row in registered_objects}
+            archive_object = by_key[archive_key]
+            assert archive_object.size_bytes == len(archive_bytes)
+            assert archive_object.content_sha256 == body["sha256"]
+            checksum_key = f"{archive_key}.sha256"
+            checksum_bytes = fake_s3.objects[(body["storage"]["bucket"], checksum_key)]  # type: ignore[attr-defined]
+            checksum_object = by_key[checksum_key]
+            assert checksum_object.size_bytes == len(checksum_bytes)
+            assert checksum_object.content_sha256 == hashlib.sha256(
+                checksum_bytes
+            ).hexdigest()
+            batch = s.get(Batch, main_batch_id)
+            assert batch is not None
+            assert batch.lifecycle_authority_id is not None
     finally:
         sync_engine.dispose()
 

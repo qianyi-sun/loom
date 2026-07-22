@@ -612,7 +612,11 @@ def _queued_trial_matches_policy(
     if isinstance(backend, str) and backend != policy_backend:
         return False
     worker_pool = requires_caps.get("worker_pool")
-    if isinstance(worker_pool, str) and worker_pool.strip() and worker_pool.strip() != row.pool_name:
+    if (
+        isinstance(worker_pool, str)
+        and worker_pool.strip()
+        and worker_pool.strip() != row.pool_name
+    ):
         return False
     cpu_arch = requires_caps.get("cpu_arch")
     if isinstance(cpu_arch, str) and cpu_arch not in {policy_arch, "any"}:
@@ -683,8 +687,7 @@ def _slurm_release_state_drift(
 
     if expected_worker_token_fingerprint:
         return (
-            redacted_env.get(WORKER_AUTH_FINGERPRINT_ENV_KEY)
-            != expected_worker_token_fingerprint
+            redacted_env.get(WORKER_AUTH_FINGERPRINT_ENV_KEY) != expected_worker_token_fingerprint
         )
     return False
 
@@ -782,8 +785,7 @@ async def _load_observation(
                     release_drift_hostnames.add(str(nodelist))
                 linked_worker = (
                     worker_by_id.get(worker_id)
-                    if worker_id is not None
-                    and active_job_count_by_worker_id.get(worker_id) == 1
+                    if worker_id is not None and active_job_count_by_worker_id.get(worker_id) == 1
                     else None
                 )
                 if linked_worker is not None and str(linked_worker.hostname) != str(nodelist):
@@ -811,9 +813,13 @@ async def _load_observation(
     active_idle: list[tuple[str, int]] = []
     drained_worker_ids: list[str] = []
     for worker in workers:
-        if worker.id in release_drift_worker_ids or str(
-            getattr(worker, "hostname", ""),
-        ) in release_drift_hostnames:
+        if (
+            worker.id in release_drift_worker_ids
+            or str(
+                getattr(worker, "hostname", ""),
+            )
+            in release_drift_hostnames
+        ):
             continue
         slots = max(1, int(worker.max_concurrent or 1))
         in_flight = in_flight_by_worker.get(worker.id, 0)
@@ -1124,7 +1130,9 @@ def _no_safe_slurm_nodes_details(
     }
 
 
-def _slurm_config_blocker(row: WorkerPoolAutoscalerPolicy, exc: ValueError) -> tuple[str, dict[str, object]]:
+def _slurm_config_blocker(
+    row: WorkerPoolAutoscalerPolicy, exc: ValueError
+) -> tuple[str, dict[str, object]]:
     message = str(exc)
     actor_config = row.actuator_config or {}
     allowed_nodes = actor_config.get("allowed_nodes")
@@ -1391,9 +1399,7 @@ async def _apply_slurm_release_drained(
     release_workers = (
         (
             await session.execute(
-                select(Worker)
-                .where(Worker.id.in_(released_worker_ids))
-                .with_for_update(),
+                select(Worker).where(Worker.id.in_(released_worker_ids)).with_for_update(),
             )
         )
         .scalars()
@@ -1444,9 +1450,8 @@ async def _apply_slurm_release_drained(
         if worker is None:
             guard_errors.append(f"{worker_id}: fresh active worker missing")
             continue
-        if (
-            worker.status != "active"
-            or worker.last_seen_at < now - timedelta(seconds=freshness_sec)
+        if worker.status != "active" or worker.last_seen_at < now - timedelta(
+            seconds=freshness_sec
         ):
             guard_errors.append(f"{worker_id}: worker is not fresh and active")
         if worker.drain_state not in {"draining", "drained"}:
@@ -1461,10 +1466,7 @@ async def _apply_slurm_release_drained(
         if not worker_jobs:
             continue
         job = worker_jobs[0]
-        if (
-            job.environment != current_row.environment
-            or job.pool_name != current_row.pool_name
-        ):
+        if job.environment != current_row.environment or job.pool_name != current_row.pool_name:
             guard_errors.append(f"{worker_id}: Slurm job belongs to another policy")
         if job.state != "running":
             guard_errors.append(f"{worker_id}: Slurm job is not running")
@@ -1771,9 +1773,24 @@ async def _apply_gb10_scale_up(
         )
 
 
+def _exact_autoscaler_environment(environment: str) -> str:
+    if (
+        not isinstance(environment, str)
+        or not environment
+        or environment != environment.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in environment)
+    ):
+        raise ValueError(
+            "worker pool autoscaler environment must be an exact non-empty value "
+            "without surrounding whitespace"
+        )
+    return environment
+
+
 async def reconcile_worker_pool_autoscaler_once(
     session: AsyncSession,
     *,
+    environment: str,
     now: datetime | None = None,
     freshness_sec: int = 120,
     slurm_runner: SlurmWorkerCommandRunner | None = None,
@@ -1782,8 +1799,10 @@ async def reconcile_worker_pool_autoscaler_once(
     pool_names: tuple[str, ...] | None = None,
 ) -> list[AutoscalerDecision]:
     now = now or datetime.now(UTC)
+    scoped_environment = _exact_autoscaler_environment(environment)
     stmt = select(WorkerPoolAutoscalerPolicy).where(
         WorkerPoolAutoscalerPolicy.enabled.is_(True),
+        WorkerPoolAutoscalerPolicy.environment == scoped_environment,
     )
     if pool_names:
         cleaned_pool_names = tuple(
@@ -1961,6 +1980,7 @@ async def reconcile_worker_pool_autoscaler_once(
 async def run_worker_pool_autoscaler_loop(
     *,
     session_factory: Any,
+    environment: str,
     interval_sec: int = 30,
     freshness_sec: int = 120,
     include_external_policies: bool = False,
@@ -1972,6 +1992,7 @@ async def run_worker_pool_autoscaler_loop(
             async with session_factory() as session:
                 await reconcile_worker_pool_autoscaler_once(
                     session,
+                    environment=environment,
                     freshness_sec=freshness_sec,
                     include_external_policies=include_external_policies,
                     external_only=external_only,

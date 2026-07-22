@@ -1,0 +1,76 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  namespace: loom
+  name: loom-staging-data-lifecycle
+  labels: { app: loom-staging-data-lifecycle }
+spec:
+  schedule: "*/5 * * * *"
+  suspend: false
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: loom-staging-data-lifecycle }
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: lifecycle
+              image: loom-control-plane:0.7
+              command: ["python", "-I", "-B", "-m", "loom.data_lifecycle_maintenance"]
+              args:
+                - --action
+                - auto
+                - --namespace
+                - loom
+                - --bucket
+                - trajectories
+                - --bucket
+                - artifacts
+                - --filesystem-path
+                - /var/lib/loom-minio-capacity/0
+              env:
+                - name: LOOM_LIFECYCLE_DB_URL
+                  valueFrom:
+                    secretKeyRef: { name: loom-secrets, key: cp-db-url }
+                - name: LOOM_LIFECYCLE_MINIO_ENDPOINT
+                  value: "http://loom-minio:9000"
+                - name: LOOM_LIFECYCLE_MINIO_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef: { name: loom-secrets, key: minio-access-key }
+                - name: LOOM_LIFECYCLE_MINIO_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef: { name: loom-secrets, key: minio-secret-key }
+                - name: LOOM_LIFECYCLE_MINIO_REGION
+                  value: "us-east-1"
+                - name: LOOM_LIFECYCLE_STORAGE_AUTH_KIND
+                  value: "static_keys"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: true
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { cpu: 1, memory: 1Gi }
+              volumeMounts:
+                - name: minio-capacity-0
+                  mountPath: /var/lib/loom-minio-capacity/0
+                  readOnly: true
+          volumes:
+            - name: minio-capacity-0
+              persistentVolumeClaim:
+                claimName: data-loom-minio-0
+                readOnly: true

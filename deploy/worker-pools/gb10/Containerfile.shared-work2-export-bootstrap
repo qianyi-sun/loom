@@ -1,0 +1,19 @@
+FROM debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+
+ARG TARGETARCH
+
+RUN test "$TARGETARCH" = arm64 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git=1:2.39.5-0+deb12u3 \
+        python3=3.11.2-1+b1 \
+        sudo=1.9.13p3-1+deb12u4 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --chown=0:0 scripts/ops/staging_rollout_shared_work2_export_docker_bootstrap.py \
+    /usr/libexec/loom-staging-rollout-shared-work2-export-docker-bootstrap.py
+
+RUN chmod 0555 /usr/libexec/loom-staging-rollout-shared-work2-export-docker-bootstrap.py
+
+USER 0:0
+ENTRYPOINT ["/usr/bin/python3", "/usr/libexec/loom-staging-rollout-shared-work2-export-docker-bootstrap.py"]

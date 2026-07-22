@@ -10,6 +10,7 @@ import pytest
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
 from loom_cli.rollout.operator.redaction import rollout_redaction_scope
+from loom_cli.rollout.steps.base import RunResult
 from loom_cli.rollout.steps.s01_worktree import WorktreeStep
 from loom_cli.rollout.steps.s02_build_images import BuildImagesStep
 from loom_cli.rollout.steps.s07_render import RenderStep, rendered_yaml_path
@@ -106,6 +107,10 @@ def test_build_failure_logs_redact_without_driver_cleanup(
     monkeypatch.setattr(
         "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
         (("loom-service", "deploy/Dockerfile.service"),),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.AUXILIARY_ROLLOUT_IMAGES",
+        (),
     )
     monkeypatch.setattr("loom_cli.rollout.steps.s02_build_images.run_captured", fake_run)
 
@@ -291,6 +296,14 @@ def test_release_gate_nested_retry_artifact_redacts_raw_stderr(
         ReleaseGateStep,
         "_write_expected_image_identities",
         lambda _self, _ctx, sd: sd.artifact_path("image-identities.json"),
+    )
+    monkeypatch.setattr(
+        ReleaseGateStep,
+        "_run_candidate_bound_hf_canary",
+        lambda _self, _ctx, _step_dir: RunResult(
+            exit_code=0,
+            artifacts={"batch_id": "00000000-0000-4000-8000-000000000001"},
+        ),
     )
     monkeypatch.setattr(ReleaseGateStep, "_gb10_desired_state_count", lambda *_args: 1)
     monkeypatch.setattr(

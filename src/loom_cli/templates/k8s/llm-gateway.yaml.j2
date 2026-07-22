@@ -31,6 +31,8 @@ spec:
                   key: secret-store-master-key
             - name: LOOM_ENV
               value: "{{ runtime_environment }}"
+            - name: LOOM_NAMESPACE
+              value: "{{ namespace }}"
           ports:
             - containerPort: 9100
           readinessProbe:

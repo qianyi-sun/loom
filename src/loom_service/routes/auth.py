@@ -371,6 +371,8 @@ def _credential_type(ctx: AuthContext) -> str:
         return "service_credential"
     if ctx.type == "team":
         return "legacy_team_token"
+    if ctx.type == "readonly_probe":
+        return "staging_readonly_probe"
     if ctx.type == "admin":
         return "admin_bearer_token"
     if ctx.type == "worker":
@@ -1104,7 +1106,7 @@ async def whoami(sc: SessionAndCtx) -> dict[str, Any]:
         username = user.username if user is not None else None
 
     await session.commit()
-    return {
+    result = {
         "auth_kind": ctx.auth_kind,
         "credential_type": _credential_type(ctx),
         "principal_type": ctx.type,
@@ -1121,6 +1123,10 @@ async def whoami(sc: SessionAndCtx) -> dict[str, Any]:
             ctx.expires_at.isoformat() if ctx.expires_at else None
         ),
     }
+    if ctx.type == "readonly_probe":
+        result["allowed_http_methods"] = ["GET", "HEAD"]
+        result["readonly_authority_version"] = "v1"
+    return result
 
 
 @router.post("/team")

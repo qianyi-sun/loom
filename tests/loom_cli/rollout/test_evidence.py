@@ -123,6 +123,29 @@ class TestEvidenceDirectory:
         assert raw.index("cluster_name") < raw.index("image_tag")
         assert stat.S_IMODE(ev.inputs_path().stat().st_mode) == 0o600
 
+    def test_write_and_read_failure_is_atomic_private_and_redacted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ev = EvidenceDirectory(tmp_path, "rid")
+        ev.ensure()
+        with rollout_redaction_scope(("sensitive-value",)):
+            ev.write_failure(
+                {
+                    "check_id": "final.smoke",
+                    "failure_code": "final.smoke.failed",
+                    "reason": "sensitive-value was rejected",
+                }
+            )
+
+        payload = ev.read_failure()
+        assert payload == {
+            "check_id": "final.smoke",
+            "failure_code": "final.smoke.failed",
+            "reason": "[REDACTED:known-secret] was rejected",
+        }
+        assert stat.S_IMODE(ev.failure_path().stat().st_mode) == 0o600
+
     def test_write_state_is_atomic_private_and_redacted(self, tmp_path: Path) -> None:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()

@@ -1139,7 +1139,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}"
 python_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/.venv/bin/python"
 script_path = "/home/qianyi/dev/loom-worktrees/${IMAGE_TAG}/scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "oldlab", "--namespace", "loom-staging"]
+args = ["--environment", "staging", "--pool-name", "oldlab", "--namespace", "loom-staging"]
 requires = ["network-online.target", "loom-staging-postgres-port-forward.service"]
 timer_on_boot_sec = "45"
 timer_on_unit_active_sec = "30"
@@ -1159,6 +1159,7 @@ active = true
     assert profile.external_slurm_autoscaler_supervisors == [
         {
             "environment": "staging",
+            "control_plane_environment": "staging",
             "name": "oldlab",
             "pool_name": "oldlab",
             "service_name": "loom-oldlab-autoscaler.service",
@@ -1169,7 +1170,14 @@ active = true
                 "/home/qianyi/dev/loom-worktrees/staging-052e420/"
                 "scripts/ops/worker_pool_autoscaler_external_once.py"
             ),
-            "args": ["--pool-name", "oldlab", "--namespace", "loom-staging"],
+            "args": [
+                "--environment",
+                "staging",
+                "--pool-name",
+                "oldlab",
+                "--namespace",
+                "loom-staging",
+            ],
             "requires": [
                 "network-online.target",
                 "loom-staging-postgres-port-forward.service",
@@ -1177,10 +1185,265 @@ active = true
             "timer_on_boot_sec": "45",
             "timer_on_unit_active_sec": "30",
             "timer_accuracy_sec": "5",
+            "service_timeout_sec": "180",
             "enabled": True,
             "active": True,
         },
     ]
+
+
+def test_external_supervisor_environment_arg_binds_control_plane_alias(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        """\
+environment = "staging"
+control_plane_environment = "production"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom/staging"
+python_path = "/srv/loom/staging/.venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--environment", "production", "--pool-name", "oldlab"]
+requires = ["network-online.target"]
+""",
+        encoding="utf-8",
+    )
+
+    profile = load_environment_state_profile(profile_path)
+
+    assert profile.environment == "staging"
+    assert profile.control_plane_environment == "production"
+    supervisor = profile.external_slurm_autoscaler_supervisors[0]
+    assert supervisor["environment"] == "staging"
+    assert supervisor["control_plane_environment"] == "production"
+    assert supervisor["args"][:2] == ["--environment", "production"]
+
+
+def test_external_supervisor_rejects_deployment_environment_for_aliased_cp(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        """\
+environment = "staging"
+control_plane_environment = "production"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom/staging"
+python_path = "/srv/loom/staging/.venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--environment", "staging", "--pool-name", "oldlab"]
+requires = ["network-online.target"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EnvironmentStateProfileError,
+        match="exactly one --environment production",
+    ):
+        load_environment_state_profile(profile_path)
+
+
+@pytest.mark.parametrize("field", ["enabled", "active"])
+def test_external_slurm_autoscaler_supervisor_requires_strict_boolean(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        f"""\
+environment = "staging"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom/staging"
+python_path = "/srv/loom/staging/.venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--environment", "staging", "--pool-name", "oldlab"]
+requires = ["network-online.target"]
+{field} = "false"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EnvironmentStateProfileError, match=rf"{field} must be a boolean"):
+        load_environment_state_profile(profile_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("pool_name", 'pool_name = """oldlab\nExecStart=/bin/false"""'),
+        (
+            "working_directory",
+            'working_directory = """/srv/loom/staging\nExecStart=/bin/false"""',
+        ),
+        (
+            "python_path",
+            'python_path = """/srv/loom/staging/.venv/bin/python\nExecStart=/bin/false"""',
+        ),
+        (
+            "script_path",
+            'script_path = """scripts/ops/worker_pool_autoscaler_external_once.py\n'
+            'ExecStart=/bin/false"""',
+        ),
+        (
+            "args",
+            'args = ["--environment", "staging", "--pool-name", "oldlab", '
+            '"""safe\nExecStart=/bin/false"""]',
+        ),
+        (
+            "requires",
+            'requires = ["network-online.target", """safe.target\nExecStart=/bin/false"""]',
+        ),
+    ],
+)
+def test_external_slurm_autoscaler_supervisor_rejects_directive_injection(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    lines = [
+        'environment = "staging"',
+        "",
+        "[[external_slurm_autoscaler_supervisors]]",
+        'name = "oldlab"',
+        'pool_name = "oldlab"',
+        'service_name = "loom-oldlab-autoscaler.service"',
+        'timer_name = "loom-oldlab-autoscaler.timer"',
+        'working_directory = "/srv/loom/staging"',
+        'python_path = "/srv/loom/staging/.venv/bin/python"',
+        'script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"',
+        'args = ["--environment", "staging", "--pool-name", "oldlab"]',
+        'requires = ["network-online.target"]',
+    ]
+    prefix = f"{field} = "
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        "\n".join(replacement if line.startswith(prefix) else line for line in lines) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EnvironmentStateProfileError, match="control-free"):
+        load_environment_state_profile(profile_path)
+
+
+def test_external_slurm_autoscaler_supervisor_rejects_unsafe_dependency_basename(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        """\
+environment = "staging"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom/staging"
+python_path = "/srv/loom/staging/.venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--environment", "staging", "--pool-name", "oldlab"]
+requires = ["../unsafe.target"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EnvironmentStateProfileError, match="safe systemd unit basename"):
+        load_environment_state_profile(profile_path)
+
+
+def test_external_slurm_autoscaler_supervisor_rejects_c1_control_character(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        """\
+environment = "staging"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "loom-oldlab-autoscaler.service"
+timer_name = "loom-oldlab-autoscaler.timer"
+working_directory = "/srv/loom\u0085ExecStart=/bin/false"
+python_path = "/srv/loom/staging/.venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--environment", "staging", "--pool-name", "oldlab"]
+requires = ["network-online.target"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EnvironmentStateProfileError, match="control-free"):
+        load_environment_state_profile(profile_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("service_name", "loom-safe.service\\nEnvironment=BAD=1"),
+        ("timer_name", "../loom-safe.timer"),
+        ("timer_on_boot_sec", "0"),
+        ("timer_on_unit_active_sec", "30s"),
+        ("timer_accuracy_sec", "5\\nOnBootSec=1"),
+        ("service_timeout_sec", "7201"),
+    ],
+)
+def test_external_slurm_autoscaler_supervisor_rejects_unsafe_unit_fields(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    values = {
+        "service_name": "loom-oldlab-autoscaler.service",
+        "timer_name": "loom-oldlab-autoscaler.timer",
+        "timer_on_boot_sec": "45",
+        "timer_on_unit_active_sec": "30",
+        "timer_accuracy_sec": "5",
+        "service_timeout_sec": "180",
+    }
+    values[field] = value
+    profile_path = tmp_path / "staging.state.toml"
+    profile_path.write_text(
+        f'''\
+environment = "staging"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab"
+pool_name = "oldlab"
+service_name = "{values["service_name"]}"
+timer_name = "{values["timer_name"]}"
+working_directory = "/srv/loom/staging"
+python_path = "/srv/loom/staging/.venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--environment", "staging", "--pool-name", "oldlab"]
+requires = ["network-online.target"]
+timer_on_boot_sec = "{values["timer_on_boot_sec"]}"
+timer_on_unit_active_sec = "{values["timer_on_unit_active_sec"]}"
+timer_accuracy_sec = "{values["timer_accuracy_sec"]}"
+service_timeout_sec = "{values["service_timeout_sec"]}"
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EnvironmentStateProfileError):
+        load_environment_state_profile(profile_path)
 
 
 def test_external_slurm_autoscaler_supervisor_check_reports_stale_inactive_unit(
@@ -1207,7 +1470,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "{workdir}"
 python_path = "{python_path}"
 script_path = "{script}"
-args = ["--pool-name", "oldlab", "--namespace", "loom-staging"]
+args = ["--environment", "staging", "--pool-name", "oldlab", "--namespace", "loom-staging"]
 requires = ["network-online.target", "loom-staging-postgres-port-forward.service"]
 timer_on_boot_sec = "45"
 timer_on_unit_active_sec = "30"
@@ -1297,7 +1560,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "{workdir}"
 python_path = "{python_path}"
 script_path = "{script}"
-args = ["--pool-name", "oldlab", "--namespace", "loom-staging"]
+args = ["--environment", "staging", "--pool-name", "oldlab", "--namespace", "loom-staging"]
 enabled = true
 active = true
 """.strip()
@@ -1363,7 +1626,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "{workdir}"
 python_path = "{python_path}"
 script_path = "{script}"
-args = ["--pool-name", "oldlab"]
+args = ["--environment", "staging", "--pool-name", "oldlab"]
 enabled = true
 active = true
 """.strip()
@@ -1429,7 +1692,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "{workdir}"
 python_path = "{python_path}"
 script_path = "{script}"
-args = ["--pool-name", "oldlab", "--namespace", "loom-staging"]
+args = ["--environment", "staging", "--pool-name", "oldlab", "--namespace", "loom-staging"]
 enabled = true
 active = true
 """.strip()
@@ -1498,7 +1761,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "/srv/loom/staging-052e420"
 python_path = "/srv/loom/staging-052e420/.venv/bin/python"
 script_path = "/srv/loom/staging-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "oldlab"]
+args = ["--environment", "staging", "--pool-name", "oldlab"]
 requires = ["network-online.target"]
 timer_on_boot_sec = "45"
 timer_on_unit_active_sec = "30"
@@ -1571,7 +1834,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "/srv/loom/staging-052e420"
 python_path = "/srv/loom/staging-052e420/.venv/bin/python"
 script_path = "/srv/loom/staging-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "oldlab"]
+args = ["--environment", "staging", "--pool-name", "oldlab"]
 requires = ["network-online.target"]
 timer_on_boot_sec = "45"
 timer_on_unit_active_sec = "30"
@@ -1634,7 +1897,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "/srv/loom/staging-052e420"
 python_path = "/srv/loom/staging-052e420/.venv/bin/python"
 script_path = "/srv/loom/staging-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "oldlab"]
+args = ["--environment", "staging", "--pool-name", "oldlab"]
 requires = ["network-online.target"]
 timer_on_boot_sec = "45"
 timer_on_unit_active_sec = "30"
@@ -1689,7 +1952,7 @@ timer_name = "loom-oldlab-autoscaler.timer"
 working_directory = "/srv/loom/staging-052e420"
 python_path = "/srv/loom/staging-052e420/.venv/bin/python"
 script_path = "/srv/loom/staging-052e420/scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "oldlab"]
+args = ["--environment", "staging", "--pool-name", "oldlab"]
 requires = ["network-online.target"]
 timer_on_boot_sec = "45"
 timer_on_unit_active_sec = "30"
@@ -1885,7 +2148,8 @@ def test_committed_staging_profile_ships_active_gb10_supervisor() -> None:
 
 
 def _supervisor_profile_payload(*, second_service: str, second_port: str) -> str:
-    return f"""
+    return (
+        f"""
 environment = "development"
 
 [[external_slurm_autoscaler_supervisors]]
@@ -1896,7 +2160,7 @@ timer_name = "loom-autoscaler-oldlab-dev.timer"
 working_directory = "/opt/loom-development-runner/repo"
 python_path = "/opt/loom-development-runner/venv/bin/python"
 script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "oldlab", "--db-local-port", "15447"]
+args = ["--environment", "development", "--pool-name", "oldlab", "--db-local-port", "15447"]
 enabled = false
 active = false
 
@@ -1908,10 +2172,12 @@ timer_name = "loom-autoscaler-gb10-dev.timer"
 working_directory = "/opt/loom-development-runner/repo"
 python_path = "/opt/loom-development-runner/venv/bin/python"
 script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "gb10", "--db-local-port", "{second_port}"]
+args = ["--environment", "development", "--pool-name", "gb10", "--db-local-port", "{second_port}"]
 enabled = false
 active = false
-""".strip() + "\n"
+""".strip()
+        + "\n"
+    )
 
 
 def test_supervisor_collision_rejects_duplicate_service_name(tmp_path: Path) -> None:
@@ -1963,10 +2229,15 @@ def test_render_supervisor_service_and_timer_contain_full_execstart() -> None:
     service_unit = render_external_slurm_autoscaler_service(supervisor)
     assert "ExecStart=" in service_unit
     assert "worker_pool_autoscaler_external_once.py" in service_unit
+    assert "--environment staging" in service_unit
     assert "--pool-name gb10" in service_unit
     assert "--namespace loom-staging" in service_unit
     assert "--db-local-port 15451" in service_unit
-    assert "WorkingDirectory=/opt/loom-staging-runner/repo" in service_unit
+    runtime = "/opt/loom-staging-runner/candidates/" + "a" * 40
+    assert f"WorkingDirectory={runtime}/repo" in service_unit
+    assert f"Environment=PYTHONPATH={runtime}/repo/src" in service_unit
+    assert "Environment=PYTHONDONTWRITEBYTECODE=1" in service_unit
+    assert f"ExecStart={runtime}/venv/bin/python {runtime}/repo/" in service_unit
 
     timer_unit = render_external_slurm_autoscaler_timer(supervisor)
     assert "Unit=loom-autoscaler-gb10-staging.service" in timer_unit

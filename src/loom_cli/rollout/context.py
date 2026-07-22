@@ -118,6 +118,9 @@ class RolloutContext:
     backup_manifest_max_total_bytes: int | None = None
     backup_manifest_sha256: str | None = None
     runner_config_sha256: str | None = None
+    preflight_attestation_sha256: str | None = None
+    preflight_registry_sha256: str | None = None
+    preflight_coverage_sha256: str | None = None
     request_id: str | None = None
     initiating_operator: str | None = None
     initiating_uid: int | None = None
@@ -141,11 +144,29 @@ class RolloutContext:
     exclude_oldlab: bool = False
     gb10_prep_concurrency: int | None = None
     resume: bool = False
+    source_mode: str = "merged-dev"
+    resolved_tree: str | None = None
+    approved_base_sha: str | None = None
 
     # Extra state — not hashed into inputs, just carried for convenience.
     metadata: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.source_mode == "sealed-cumulative":
+            for label, sealed_value in (
+                ("resolved tree", self.resolved_tree),
+                ("approved base", self.approved_base_sha),
+            ):
+                if (
+                    sealed_value is None
+                    or len(sealed_value) != 40
+                    or any(character not in "0123456789abcdef" for character in sealed_value)
+                ):
+                    raise ValueError(f"sealed cumulative {label} SHA is invalid")
+        elif self.source_mode != "merged-dev":
+            raise ValueError("rollout source mode is invalid")
+        elif self.resolved_tree is not None or self.approved_base_sha is not None:
+            raise ValueError("merged-dev context cannot carry sealed source identities")
         values = (
             self.backup_manifest_max_files,
             self.backup_manifest_max_entries,
@@ -158,6 +179,16 @@ class RolloutContext:
         for value in values:
             if value is not None and (type(value) is not int or value <= 0):
                 raise ValueError("backup traversal limits must be positive integers")
+        if self.request_id is not None:
+            for label, digest in (
+                ("preflight attestation", self.preflight_attestation_sha256),
+                ("preflight registry", self.preflight_registry_sha256),
+                ("preflight coverage", self.preflight_coverage_sha256),
+            ):
+                if digest is None or len(digest) != 64 or any(
+                    character not in "0123456789abcdef" for character in digest
+                ):
+                    raise ValueError(f"brokered {label} digest is invalid")
 
     def backup_traversal_limits(self) -> tuple[int, int, int] | None:
         if self.backup_manifest_max_files is None:
@@ -205,6 +236,14 @@ class RolloutContext:
         }
         if self.request_id is None:
             return inputs
+        if self.source_mode == "sealed-cumulative":
+            inputs.update(
+                {
+                    "source_mode": self.source_mode,
+                    "resolved_tree": self.resolved_tree,
+                    "approved_base_sha": self.approved_base_sha,
+                }
+            )
         traversal_limits = self.backup_traversal_limits()
         if traversal_limits is not None:
             inputs["backup_manifest_traversal_limits"] = {
@@ -221,6 +260,9 @@ class RolloutContext:
                 "backup_manifest_path": str(self.backup_manifest_path),
                 "backup_manifest_sha256": self.backup_manifest_sha256,
                 "runner_config_sha256": self.runner_config_sha256,
+                "preflight_attestation_sha256": self.preflight_attestation_sha256,
+                "preflight_registry_sha256": self.preflight_registry_sha256,
+                "preflight_coverage_sha256": self.preflight_coverage_sha256,
                 "request_id": self.request_id,
                 "initiating_operator": self.initiating_operator,
                 "initiating_uid": self.initiating_uid,

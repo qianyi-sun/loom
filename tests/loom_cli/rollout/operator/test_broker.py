@@ -19,6 +19,7 @@ from loom_cli.rollout.operator.backup import (
     BackupPolicyLimitError,
     VerifiedBackup,
 )
+from loom_cli.rollout.operator.backup_rotation import begin_candidate, fail_candidate
 from loom_cli.rollout.operator.broker import BrokerDependencies
 from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -33,6 +34,13 @@ from loom_cli.rollout.operator.model import (
 )
 from loom_cli.rollout.operator.policy import sanitized_child_environment
 from loom_cli.rollout.operator.preflight import PreflightCheck, PreflightReport
+from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
+from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
+from loom_cli.rollout.preflight_pipeline import PreflightPipeline
+from tests.loom_cli.rollout.test_preflight_pipeline import (
+    _context as pipeline_context,
+)
+from tests.loom_cli.rollout.test_preflight_pipeline import _registry as pipeline_registry
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 SHA = "a" * 40
@@ -235,6 +243,13 @@ class FakeSystemd:
         self.visible_units: set[str] = set()
         self.terminate_error: Exception | None = None
         self.on_terminate = None
+        self.backup_starts: list[tuple[Path, str]] = []
+        self.backup_start_error: Exception | None = None
+
+    def start_backup(self, job_path: Path, unit_name: str) -> None:
+        self.backup_starts.append((job_path, unit_name))
+        if self.backup_start_error is not None:
+            raise self.backup_start_error
 
     def terminate(self, unit_name: str) -> None:
         if self.on_terminate is not None:
@@ -258,6 +273,7 @@ class FakeLifecycle:
         self.guard_depth = 0
         self.reconciled: ReconciliationResult | None = None
         self.maintenance = False
+        self.retention_claim = False
 
     @contextmanager
     def launch_guard(self):  # type: ignore[no-untyped-def]
@@ -284,6 +300,24 @@ class FakeLifecycle:
             raise LifecycleBusyError(
                 "staging rollout admission is disabled for maintenance",
                 {"status": "busy", "reason": "maintenance"},
+            )
+        if self.retention_claim:
+            raise LifecycleBusyError(
+                "backup retention maintenance is still in progress",
+                {"status": "busy", "reason": "backup_retention_busy"},
+            )
+
+    def assert_maintenance_active(self) -> None:
+        assert self.guard_depth > 0
+        if not self.maintenance:
+            raise RuntimeError("maintenance marker is unavailable")
+
+    def assert_maintenance_idle(self) -> None:
+        self.assert_maintenance_active()
+        if self.store.active is not None:
+            raise LifecycleBusyError(
+                "a staging rollout attempt is already pending or running",
+                {"request_id": self.store.active.request_id},
             )
 
     def launch(self, envelope: DriverEnvelope) -> ActivePointer:
@@ -344,6 +378,13 @@ def fakes(tmp_path: Path, *, backup: FakeBackup | None = None) -> FakeBundle:
         stdout=stdout,
         stderr=stderr,
         known_secrets=lambda: ("known-secret",),
+        authorize_preflight=lambda _candidate: SimpleNamespace(
+            passed=True,
+            attestation=SimpleNamespace(attestation_digest="3" * 64),
+            registry_digest="4" * 64,
+            coverage_digest="5" * 64,
+            to_dict=lambda: {"passed": True},
+        ),
     )
     return FakeBundle(
         deps,
@@ -378,6 +419,274 @@ def test_public_surface_rejects_unapproved_arguments(tmp_path: Path, argv: list[
     assert deps.order == []
 
 
+class _ManifestOwnership:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def inventory(self, candidate: CandidateBinding) -> dict[str, object]:
+        self.calls.append(("inventory", candidate.resolved_sha))
+        return {"action": "inventory", "inventory_sha256": "d" * 64}
+
+    def apply(
+        self,
+        candidate: CandidateBinding,
+        *,
+        request_id: str,
+        approved_inventory_sha256: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "apply",
+                candidate.resolved_sha,
+                request_id,
+                approved_inventory_sha256,
+            )
+        )
+        return {"action": "apply", "request_id": request_id}
+
+
+def test_manifest_ownership_requires_frozen_exact_coordinator_lane(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    service = _ManifestOwnership()
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    candidate = CandidateBinding(
+        remote_url="https://github.com/qianyi-sun/loom.git",
+        target_ref="origin/dev",
+        resolved_sha=SHA,
+        image_tag="staging-aaaaaaa",
+        fetched_at="2026-07-14T12:00:00Z",
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        bind_candidate=lambda: candidate,
+        config=sealed_config,
+        manifest_ownership=service,
+    )
+
+    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+    deps.lifecycle.maintenance = True
+    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 0
+    assert service.calls == [("inventory", SHA)]
+    assert _last_json(deps.stdout)["inventory_sha256"] == "d" * 64
+
+    assert (
+        broker_main(
+            [
+                "manifest-ownership",
+                "apply",
+                "--request-id",
+                "req-manifest-ownership-12345678",
+                "--approved-inventory-sha256",
+                "d" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    assert service.calls[-1] == (
+        "apply",
+        SHA,
+        "req-manifest-ownership-12345678",
+        "d" * 64,
+    )
+
+
+def test_manifest_ownership_rejects_non_coordinator_before_candidate_read(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    deps.lifecycle.maintenance = True
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        manifest_ownership=_ManifestOwnership(),
+    )
+    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 1
+    assert deps.order == []
+
+
+class _LifecycleCapacity:
+    def __init__(self, lifecycle: FakeLifecycle) -> None:
+        self.lifecycle = lifecycle
+        self.calls: list[tuple[str, object]] = []
+        self.plan = SimpleNamespace(
+            plan_digest="e" * 64,
+            to_dict=lambda: {"plan_digest": "e" * 64, "schema_version": 1},
+        )
+
+    def inventory(self):  # type: ignore[no-untyped-def]
+        self.calls.append(("inventory", self.lifecycle.guard_depth))
+        return self.plan
+
+    def prepare_apply(self, *, approved_plan_digest: str):  # type: ignore[no-untyped-def]
+        self.calls.append(("prepare", self.lifecycle.guard_depth))
+        assert approved_plan_digest == "e" * 64
+        return self.plan
+
+    def execute_claimed(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("execute", self.lifecycle.guard_depth))
+        assert plan is self.plan
+        return {"evidence_sha256": "f" * 64, "schema_version": 1}
+
+
+def test_lifecycle_capacity_uses_digest_approval_and_releases_launch_lock(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    service = _LifecycleCapacity(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        config=sealed_config,
+        lifecycle_capacity=service,
+    )
+
+    assert broker_main(["lifecycle-capacity", "inventory"], dependencies=dependencies) == 0
+    assert service.calls == [("inventory", 0)]
+
+    assert (
+        broker_main(
+            [
+                "lifecycle-capacity",
+                "apply",
+                "--approved-plan-sha256",
+                "e" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 1
+    )
+    assert service.calls == [("inventory", 0)]
+
+    deps.lifecycle.maintenance = True
+    assert (
+        broker_main(
+            [
+                "lifecycle-capacity",
+                "apply",
+                "--approved-plan-sha256",
+                "e" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    assert service.calls[-2:] == [("prepare", 1), ("execute", 0)]
+
+
+def test_lifecycle_capacity_rejects_non_coordinator(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    service = _LifecycleCapacity(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        lifecycle_capacity=service,
+    )
+
+    assert broker_main(["lifecycle-capacity", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+
+class _BackupRetention:
+    def __init__(self, lifecycle: FakeLifecycle) -> None:
+        self.lifecycle = lifecycle
+        self.calls: list[tuple[str, object]] = []
+        self.plan = SimpleNamespace(
+            plan_digest="f" * 64,
+            to_dict=lambda: {"rotation_generation": 7, "schema_version": 1},
+        )
+
+    def inventory(self):  # type: ignore[no-untyped-def]
+        self.calls.append(("inventory", self.lifecycle.guard_depth))
+        return self.plan
+
+    def load_claim(self, digest: str):  # type: ignore[no-untyped-def]
+        self.calls.append(("load", self.lifecycle.guard_depth))
+        assert digest == "f" * 64
+        return self.plan
+
+    def claim(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("claim", self.lifecycle.guard_depth))
+        assert plan is self.plan
+
+    def apply(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("apply", self.lifecycle.guard_depth))
+        assert plan is self.plan
+        return {"retired_payload_ids": ["payload-failed01"], "schema_version": 1}
+
+
+def test_backup_retention_requires_maintenance_and_digest_approval(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    service = _BackupRetention(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        config=sealed_config,
+        backup_retention=service,
+    )
+
+    assert broker_main(["backup-retention", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+    deps.lifecycle.maintenance = True
+    assert broker_main(["backup-retention", "inventory"], dependencies=dependencies) == 0
+    assert service.calls == [("inventory", 1)]
+    assert _last_json(deps.stdout)["plan_sha256"] == "f" * 64
+
+    assert (
+        broker_main(
+            [
+                "backup-retention",
+                "apply",
+                "--approved-plan-sha256",
+                "f" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    assert service.calls[-3:] == [("load", 1), ("claim", 1), ("apply", 0)]
+
+
+def test_backup_retention_rejects_non_coordinator(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    service = _BackupRetention(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        backup_retention=service,
+    )
+
+    assert broker_main(["backup-retention", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+
 @pytest.mark.parametrize("reason", ["", "   ", "x" * 501])
 def test_cancel_reason_is_nonempty_and_bounded(tmp_path: Path, reason: str) -> None:
     deps = fakes(tmp_path)
@@ -400,6 +709,128 @@ def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
     assert deps.store.read_events(REQUEST_ID)[-1].event == "preview"
 
 
+def test_preflight_assesses_exact_candidate_without_publishing_request(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    registry = pipeline_registry()
+    assessment = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "preflight-attestations"),
+        now=lambda: NOW,
+    ).assess(context=pipeline_context(registry))
+    expected_candidate = deps.candidate.bind()
+    deps.order.clear()
+
+    def assess(candidate: CandidateBinding, epoch: int):  # type: ignore[no-untyped-def]
+        assert candidate == expected_candidate
+        assert epoch == 7
+        return assessment
+
+    dependencies = replace(
+        deps.dependencies,
+        assess_preflight=assess,
+        read_mutation_epoch=lambda: 7,
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 0
+    assert deps.order == ["preflight", "fetch"]
+    assert deps.store.requests == {}
+    assert deps.backup.create_count == 0
+    assert deps.systemd.start_count == 0
+    result = _last_json(deps.stdout)
+    assert result == {
+        "candidate_sha": SHA,
+        "candidate_tree": None,
+        "coverage_sha256": assessment.coverage_digest,
+        "mutation_epoch": 7,
+        "preflight_assessment_sha256": assessment.assessment_digest,
+        "registry_sha256": assessment.registry_digest,
+        "status": "passed",
+    }
+
+
+def test_preflight_reports_all_deep_blockers_without_publishing_request(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    registry = pipeline_registry(failed_check="candidate.identity")
+    assessment = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "preflight-attestations"),
+        now=lambda: NOW,
+    ).assess(context=pipeline_context(registry))
+    dependencies = replace(
+        deps.dependencies,
+        assess_preflight=lambda _candidate, _epoch: assessment,
+        read_mutation_epoch=lambda: 7,
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 1
+    assert deps.order == ["preflight", "fetch"]
+    assert deps.store.requests == {}
+    assert deps.backup.create_count == 0
+    assert deps.systemd.start_count == 0
+    result = _last_json(deps.stderr)
+    assert result["passed"] is False
+    assert "candidate.identity" in {blocker["check_id"] for blocker in result["blockers"]}
+
+
+def test_sealed_cumulative_preflight_rejects_non_coordinator_without_side_effects(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        config=replace(
+            deps.config,
+            source_mode="sealed-cumulative",
+            source_commit_sha=SHA,
+            source_tree_sha="b" * 40,
+            source_base_sha="c" * 40,
+        ),
+    )
+
+    assert broker_main(["preflight"], dependencies=dependencies) == 1
+    assert deps.order == []
+    assert deps.store.requests == {}
+    assert deps.backup.create_count == 0
+    assert deps.systemd.start_count == 0
+    assert "coordinator authority" in deps.stderr.getvalue()
+
+
+def test_start_refuses_missing_deep_preflight_before_request_or_backup(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    deps.dependencies.authorize_preflight = None
+
+    assert broker_main(["start"], dependencies=deps.dependencies) == 1
+    assert deps.store.requests == {}
+    assert deps.backup.create_count == 0
+    assert "deep rollout preflight is not configured" in deps.stderr.getvalue()
+
+
+def test_sealed_cumulative_start_rejects_non_coordinator_before_preflight_or_request(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    dependencies = replace(deps.dependencies, config=sealed_config)
+    dependencies = replace(
+        dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+    )
+
+    assert broker_main(["start", "--dry-run"], dependencies=dependencies) == 1
+    assert deps.order == []
+    assert deps.store.requests == {}
+    assert "coordinator authority" in deps.stderr.getvalue()
+
+
 def test_maintenance_marker_blocks_start_before_preflight(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     deps.lifecycle.maintenance = True
@@ -409,6 +840,28 @@ def test_maintenance_marker_blocks_start_before_preflight(tmp_path: Path) -> Non
     assert rc == 1
     assert deps.order == []
     assert '"reason":"maintenance"' in deps.stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["start"],
+        ["resume", REQUEST_ID],
+        ["cleanup-incomplete-backup", REQUEST_ID],
+    ],
+)
+def test_durable_retention_claim_blocks_start_and_resume_before_side_effects(
+    tmp_path: Path,
+    command: list[str],
+) -> None:
+    deps = fakes(tmp_path)
+    deps.lifecycle.retention_claim = True
+
+    assert broker_main(command, dependencies=deps.dependencies) == 1
+
+    assert deps.order == []
+    assert deps.store.requests == {}
+    assert '"reason":"backup_retention_busy"' in deps.stderr.getvalue()
 
 
 def test_start_reserves_before_launch_and_returns_detached_request(tmp_path: Path) -> None:
@@ -428,6 +881,154 @@ def test_start_reserves_before_launch_and_returns_detached_request(tmp_path: Pat
     assert SHA in deps.stdout.getvalue()
 
 
+def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    store = RequestStore(tmp_path / "staged-state")
+    initial_rotation = store.read_backup_rotation()
+    reserved_failed = begin_candidate(
+        initial_rotation,
+        payload_id="payload-failed00",
+        request_id="req-failed000",
+        bundle_name="20260714T110000Z-req-failed000",
+        created_at=NOW,
+    ).state
+    store.replace_backup_rotation(
+        reserved_failed,
+        expected_generation=initial_rotation.generation,
+    )
+    failed_rotation = fail_candidate(
+        reserved_failed,
+        payload_id="payload-failed00",
+        failure_code="rehearsal_failed",
+    ).state
+    store.replace_backup_rotation(
+        failed_rotation,
+        expected_generation=reserved_failed.generation,
+    )
+    registry = pipeline_registry()
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "staged-attestations"),
+        now=lambda: NOW,
+    )
+    assessment = pipeline.assess(context=pipeline_context(registry))
+
+    class StagedLifecycle:
+        depth = 0
+
+        @contextmanager
+        def launch_guard(self):  # type: ignore[no-untyped-def]
+            self.depth += 1
+            try:
+                yield
+            finally:
+                self.depth -= 1
+
+        def assert_admission_open(self) -> None:
+            assert self.depth == 1
+            if store.read_backup_retention_claim() is not None:
+                raise LifecycleBusyError(
+                    "backup retention maintenance is still in progress",
+                    {"status": "busy", "reason": "backup_retention_busy"},
+                )
+
+        def reconcile_active(self) -> ReconciliationResult:
+            return ReconciliationResult(
+                outcome="idle",
+                pointer=None,
+                cleared=False,
+                safe_status={},
+            )
+
+    candidate = replace(
+        deps.candidate.bind(),
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+
+    def assess(found: CandidateBinding, epoch: int):  # type: ignore[no-untyped-def]
+        assert found == candidate
+        assert epoch == 7
+        return assessment
+
+    staged = replace(
+        deps.dependencies,
+        config=replace(
+            deps.config,
+            source_mode="sealed-cumulative",
+            source_commit_sha=SHA,
+            source_tree_sha="b" * 40,
+            source_base_sha="c" * 40,
+        ),
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        store=store,
+        lifecycle=StagedLifecycle(),
+        bind_candidate=lambda: candidate,
+        assess_preflight=assess,
+        read_mutation_epoch=lambda: 7,
+        new_request_id=lambda: "req-staged0001",
+        new_backup_job_id=lambda: "job-staged0001",
+        new_payload_id=lambda: "payload-staged01",
+    )
+
+    store.claim_backup_retention("e" * 64, ("payload-failed00",))
+    assert broker_main(["start"], dependencies=staged) == 1
+    assert store.read_backup_rotation().candidate is None
+    with pytest.raises(RequestStoreError, match="does not exist"):
+        store.read_preflight_request("req-staged0001")
+    assert deps.systemd.backup_starts == []
+    assert store.clear_backup_retention_claim("e" * 64) is True
+
+    rc = broker_main(["start"], dependencies=staged)
+
+    assert rc == 0, deps.stderr.getvalue()
+    preliminary = store.read_preflight_request("req-staged0001")
+    assert preliminary.candidate == candidate
+    assert preliminary.preflight_assessment_sha256 == assessment.assessment_digest
+    assert store.read_preflight_assessment("req-staged0001") == assessment
+    job = store.read_preflight_backup_job("req-staged0001")
+    assert job.payload_id == "payload-staged01"
+    rotation = store.read_backup_rotation()
+    assert rotation.candidate is not None
+    assert rotation.candidate.payload_id == job.payload_id
+    assert tuple(record.payload_id for record in rotation.retirements) == ("payload-failed00",)
+    assert rotation.payload_count == 2
+    assert deps.backup.create_count == 0
+    assert deps.systemd.backup_starts == [
+        (
+            tmp_path / "staged-state/requests/req-staged0001/preflight-backup/job.json",
+            "loom-staging-backup-req-staged0001.service",
+        )
+    ]
+    assert '"status":"backup_pending"' in deps.stdout.getvalue()
+
+    failed_store = RequestStore(tmp_path / "failed-staged-state")
+    deps.systemd.backup_start_error = RuntimeError("secret-bearing systemd detail")
+    failed_staged = replace(
+        staged,
+        store=failed_store,
+        new_request_id=lambda: "req-staged0002",
+        new_backup_job_id=lambda: "job-staged0002",
+        new_payload_id=lambda: "payload-staged02",
+    )
+
+    assert broker_main(["start"], dependencies=failed_staged) == 1
+    failed_event = failed_store.read_events("req-staged0002")[-1]
+    assert failed_event.event == "backup_failed"
+    assert failed_event.reason == "backup_precondition_failed"
+    failed_job = failed_store.read_preflight_backup_job_state("req-staged0002")
+    assert failed_job.phase.value == "backup_failed"
+    assert failed_job.failure_code == "backup_launch_failed"
+    failed_rotation = failed_store.read_backup_rotation()
+    assert failed_rotation.candidate is None
+    assert tuple(record.payload_id for record in failed_rotation.retirements) == (
+        "payload-staged02",
+    )
+    assert failed_rotation.retirements[0].reason == "failed"
+    assert failed_store.read_active() is None
+
+
 def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) -> None:
     deps = fakes(tmp_path, backup=FailingBackup([]))
     assert broker_main(["start"], dependencies=deps.dependencies) == 1
@@ -438,6 +1039,21 @@ def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) 
     # FailingBackup fails the postgres stage; the durable reason names it end to
     # end through the broker instead of collapsing to a generic backup_failed.
     assert deps.store.read_events(REQUEST_ID)[-1].reason == "backup_postgres_failed"
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+    status = _last_json(deps.stdout)
+    assert status["stage"] == "backup_failed"
+    assert status["reason"] == "backup_postgres_failed"
+
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", REQUEST_ID],
+            dependencies=deps.dependencies,
+        )
+        == 0
+    )
+    cleaned = deps.store.read_events(REQUEST_ID)[-1]
+    assert cleaned.event == "backup_cleanup_done"
+    assert cleaned.reason == "backup_postgres_failed"
 
 
 def test_object_limit_failure_has_stable_public_reason_and_supported_cleanup(
@@ -1077,10 +1693,12 @@ def test_default_broker_run_and_stream_use_exact_sanitized_environment(
     config = make_config(tmp_path)
     expected = sanitized_child_environment(config, service_uid=1234)
     run_environments: list[dict[str, str] | None] = []
+    run_timeouts: list[object] = []
     popen_environments: list[dict[str, str] | None] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         run_environments.append(kwargs.get("env"))  # type: ignore[arg-type]
+        run_timeouts.append(kwargs.get("timeout"))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     class FakePopen:
@@ -1103,9 +1721,12 @@ def test_default_broker_run_and_stream_use_exact_sanitized_environment(
     monkeypatch.setattr(subprocess, "Popen", FakePopen)
 
     broker_module._run(["git", "status"], environment=expected)
+    broker_module._run(["systemd-run", "--user"], environment=expected)
+    broker_module._run(["systemctl", "--user", "show"], environment=expected)
     stream = broker_module._stream(["journalctl"], environment=expected)
     stream.close()
-    assert run_environments == [expected]
+    assert run_environments == [expected, expected, expected]
+    assert run_timeouts == [30, 120, 120]
     assert popen_environments == [expected]
 
 

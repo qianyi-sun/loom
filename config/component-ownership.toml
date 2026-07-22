@@ -183,6 +183,39 @@ release_digest = "loom-web"
 runtime_policy = "start"
 
 [[components]]
+id = "staging-admin-browser-smoke"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.staging-admin-browser-smoke"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.staging-admin-browser-smoke",
+  "web/package.json",
+  "web/package-lock.json",
+  "web/scripts/staging-admin-browser-smoke.mjs",
+]
+smoke_owner = "frontend-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-staging-admin-browser-smoke"
+runtime_policy = "conformance"
+
+[[components]]
+id = "rehearsal-postgres"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.rehearsal-postgres"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.rehearsal-postgres",
+]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-rehearsal-postgres"
+runtime_policy = "conformance"
+
+[[components]]
 id = "worker"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.worker"
@@ -376,6 +409,7 @@ include_paths = [
   "tests/loom_cli/**/*.py",
   "tests/loom_config/**/*.py",
   "tests/loom_egress_xds/**/*.py",
+  "tests/loom_service/**/*.py",
   "tests/ops/**/*.py",
   "tests/property/**/*.py",
   "tests/unit/**/*.py",

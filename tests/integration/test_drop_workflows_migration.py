@@ -27,12 +27,13 @@ def _cfg(url: str) -> Config:
 
 @pytest.fixture
 def at_revision_0011(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch,
+    isolated_migration_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
     """Roll back to just BEFORE the workflow drop, yield, then
     bring back to head."""
-    monkeypatch.setenv("LOOM_DB_URL", postgres_url)
-    cfg = _cfg(postgres_url)
+    monkeypatch.setenv("LOOM_DB_URL", isolated_migration_postgres_url)
+    cfg = _cfg(isolated_migration_postgres_url)
     command.downgrade(cfg, "0011")
     try:
         yield
@@ -41,12 +42,13 @@ def at_revision_0011(
 
 
 def test_0012_drops_workflows_table_and_batches_workflow_id(
-    postgres_url: str, at_revision_0011: None,
+    isolated_migration_postgres_url: str,
+    at_revision_0011: None,
 ) -> None:
-    cfg = _cfg(postgres_url)
+    cfg = _cfg(isolated_migration_postgres_url)
 
     # Sanity-check state at 0011: workflows + workflow_id both exist.
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     insp = inspect(engine)
     assert "workflows" in insp.get_table_names()
     batch_cols = {c["name"] for c in insp.get_columns("batches")}
@@ -55,7 +57,7 @@ def test_0012_drops_workflows_table_and_batches_workflow_id(
 
     # Apply 0012.
     command.upgrade(cfg, "0012")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     insp = inspect(engine)
     tables = insp.get_table_names()
     assert "workflows" not in tables
@@ -65,12 +67,13 @@ def test_0012_drops_workflows_table_and_batches_workflow_id(
 
 
 def test_0012_downgrade_recreates_workflows_and_workflow_id(
-    postgres_url: str, at_revision_0011: None,
+    isolated_migration_postgres_url: str,
+    at_revision_0011: None,
 ) -> None:
-    cfg = _cfg(postgres_url)
+    cfg = _cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0012")
     command.downgrade(cfg, "0011")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     insp = inspect(engine)
     assert "workflows" in insp.get_table_names()
     batch_cols = {c["name"] for c in insp.get_columns("batches")}

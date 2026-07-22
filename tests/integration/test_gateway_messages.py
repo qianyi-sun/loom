@@ -18,10 +18,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.auth import mint_step_jwt
-from loom.db.schema import LlmCall, RateCard
+from loom.db.schema import LlmCall, RateCard, Team
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
+from tests.integration.gateway_db import (
+    delete_gateway_trial,
+    delete_team_and_quota,
+    insert_gateway_trial,
+)
 
 
 @pytest.fixture
@@ -101,6 +106,10 @@ async def gateway_setup(
 
     team_id = uuid4()
     trial_id = uuid4()
+    with session_local() as s:
+        s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        task_id = insert_gateway_trial(s, team_id=team_id, trial_id=trial_id)
+        s.commit()
     step_jwt = mint_step_jwt(
         team_id=team_id,
         trial_id=trial_id,
@@ -116,6 +125,8 @@ async def gateway_setup(
         await async_engine.dispose()
         with session_local() as s:
             s.execute(delete(LlmCall))
+            delete_gateway_trial(s, trial_id=trial_id, task_id=task_id)
+            delete_team_and_quota(s, team_id)
             s.execute(delete(RateCard))
             s.commit()
         sync_engine.dispose()

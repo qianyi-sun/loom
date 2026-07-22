@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import traceback
 from collections.abc import Awaitable, Callable
@@ -37,7 +38,7 @@ from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.llm_call_events import llm_call_row_to_event
 from loom.trajectory.storage import ObjectStore
 from loom.trajectory.writer import TrajectoryWriter
-from loom.trial.finalize import finalize_trajectory
+from loom.trial.finalize import finalize_trajectory_with_metadata
 from loom.trial.step_runner import run_step
 from loom.trial.watchdog_cancellation import (
     WatchdogTriggerReason,
@@ -405,9 +406,12 @@ class Trial:
                     logger.exception("failed to append TrialEndEvent")
         finally:
             try:
-                atif_uri = await asyncio.wait_for(
+                trajectory_body = self.ctx.local_trajectory_path.read_bytes()
+                result.trajectory_sha256 = hashlib.sha256(trajectory_body).hexdigest()
+                result.trajectory_size_bytes = len(trajectory_body)
+                finalized = await asyncio.wait_for(
                     asyncio.shield(
-                        finalize_trajectory(
+                        finalize_trajectory_with_metadata(
                             local_path=self.ctx.local_trajectory_path,
                             store=self.ctx.object_store,
                             team_id=str(self.ctx.team_id),
@@ -420,7 +424,9 @@ class Trial:
                     ),
                     timeout=_FINALIZE_TIMEOUT_SEC,
                 )
-                result.atif_uri = atif_uri
+                result.atif_uri = finalized.uri
+                result.atif_sha256 = finalized.sha256
+                result.atif_size_bytes = finalized.size_bytes
                 result.atif_schema_version = "1.7"
             except (Exception, TimeoutError) as exc:
                 if result.state == TrialState.SUCCEEDED:

@@ -38,6 +38,7 @@ Install one root-managed runner on `platform-dev` with a non-login
 `qianyi`, `hongjian`, and `devansh`. The root-owned client exposes only:
 
 ```text
+loom-staging-rollout preflight
 loom-staging-rollout start [--dry-run]
 loom-staging-rollout status [REQUEST_ID]
 loom-staging-rollout logs REQUEST_ID [--follow]
@@ -45,6 +46,13 @@ loom-staging-rollout resume REQUEST_ID
 loom-staging-rollout cancel REQUEST_ID --reason TEXT
 loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
+
+`preflight` is the requestless installation and readiness probe. It binds the
+exact candidate and current staging mutation epoch, runs the complete Tier 0-2
+graph, and emits only safe assessment identities; it does not allocate a
+request, backup, lifecycle pointer, systemd unit, or rollout directory.
+`start --dry-run` remains the explicit operator preview and intentionally
+publishes a non-active preview request for auditability.
 
 The broker derives the caller from the authenticated sudo context and records
 the initiating and attempt operators. It accepts no caller, repository, ref,
@@ -63,15 +71,92 @@ image tag, backup, config digest, and rollout ID even when `dev` has advanced.
 Rollback of code is a merged revert on `dev` followed by a new request. Direct
 deployment of an older SHA is not an operational rollback mechanism.
 
+### Coordinator-only sealed cumulative repair amendment
+
+For an explicitly approved replacement-attempt incident, Qianyi or Hongjian
+may batch multiple independently reviewed local fixes and defer the single
+durable PR until staging acceptance succeeds. The default remains merged-only. The root
+installer exposes one explicit `sealed-cumulative` mode that accepts no path or
+ref override and binds the fixed invocation checkout to an exact commit, tree,
+and approved merged base. It requires a standalone root-owned clean detached
+checkout, rejects Git indirection and non-linear or over-64-commit history,
+and copies only that exact commit into the root install source and service
+candidate without fetching or resolving `origin/dev`.
+
+The checkout validator does not follow repository symlinks. It permits only
+mode-`120000` paths that agree between the exact sealed tree and stage-zero
+index, whose no-follow ownership and link count are safe, and whose literal
+`readlink` payload hashes to the exact tree blob. Absolute, escaping, chained,
+directory-targeting, untracked, type-drifted, `.git`, or otherwise dirty
+symlinks remain fail-closed.
+
+The shared-work2 exporter consumes the same exact source validator before its
+first mutation. The install ledger and protected config record the source mode,
+commit, tree, and base; immutable requests and attempt envelopes carry and
+revalidate the same provenance. While that config is installed, broker
+`start`/`resume` is restricted to Qianyi and Hongjian before preflight or request
+creation. A coordinator handoff creates a new request under the new initiator;
+it never resumes or reuses the prior initiator's request. Status and logs remain
+available to the other operators. Manual file copying,
+Git-object injection, alternate source paths, and implicit fallback to merged
+or cached refs remain unsupported. After the accepted rollout, the accumulated
+changes return through the normal reviewed PR and protected-gate process.
+
+The exporter does not gain general remote-root authority from this amendment.
+Its coordinator account may invoke only two exact `NOSETENV` sudo commands:
+the fixed root wrapper's `install` and read-only `check` verbs. The wrapper
+accepts no SHA, path, network, environment, or arbitrary argument. It reloads a
+root-owned policy, verifies its own bytes and sudoers bytes, revalidates the
+fixed root-owned detached checkout against the exact cumulative commit, tree,
+and approved base, and only then invokes the one fixed export helper with those
+policy values. The helper itself revalidates the same source and exact export
+fragment before mutation. Install is serialized and journaled; check takes a
+shared read-only lock and writes no evidence file.
+
+The exporter currently has no supported noninteractive root bootstrap channel.
+Therefore a one-time external administrator must provision the fixed sealed
+checkout and run the reviewed bootstrap entrypoint locally as root. Bootstrap
+validates the sealed checkout and sudoers asset before mutation, installs the
+root-owned wrapper, validator, policy, lock, journal, and exact command-only
+sudoers rule with sudoers last. Its root-owned mode-`0755` directory roots are
+part of the same transaction; pre-existing exact directories are retained,
+wrong metadata fails closed, and a failed first publication removes all
+directories and files created by that attempt in reverse order. This explicit
+external authority requirement must not be replaced with a password request,
+root SSH, a sudo wildcard, or the abandoned multi-host root-helper design.
+
+An operator who already controls the rootful Docker daemon may satisfy the
+same one-time boundary with the content-addressed exporter-bootstrap image.
+That path grants no new authority: the GB10 image is ARM64-only, has a fixed Python entrypoint,
+network disabled, a read-only root filesystem, no-new-privileges, and only the
+three filesystem capabilities required to publish root-owned exact assets. It
+binds the sealed bundle read-only and the four required host parents with
+recursive bind propagation disabled. The entrypoint proves the mount roots,
+capability mask, bundle digest, source identity, detached checkout, and
+bootstrap result, and rolls back a newly published source if bootstrap fails.
+Privileged containers, writable host-root binds, interactive entrypoints, and
+recursive exposure of Docker state are outside the accepted authority model.
+Both the build and entrypoint reject an architecture mismatch.
+
 Candidate-bound authenticated staging browser acceptance follows the same
-authority. Only a broker-owned rollout step may exchange the singleton admin
-bearer, and its sanitized report must bind the request/attempt envelope's
-resolved SHA to the build SHA read from the running service. Pull-request kind
-CI remains credential-free and non-protected; its `development` runtime may
-only prove that the staging-only exchange returns `404`. A kind artifact,
-manual invocation, ambient checkout, or unmerged ref is never candidate
-evidence. Until the broker-owned positive browser step completes, this
-acceptance row remains unmet.
+authority. Broker-owned step 16 is the only path allowed to exchange the
+singleton admin bearer. It runs a revision-labelled browser image built from
+the exact candidate and writes one sanitized report that binds request,
+attempt, envelope digest, resolved SHA, and the build SHA read from the running
+service. Pull-request kind CI remains credential-free and non-protected; its
+`development` runtime may only prove that the staging-only exchange returns
+`404`. A kind artifact, manual invocation, ambient checkout, or unmerged ref is
+never candidate evidence.
+The image publishes its non-secret entrypoint read-only and makes only the
+required parent directories traversable, so the broker's numeric service UID
+can execute it even when the sealed build context was created under a
+service-private umask. The image remains non-writable at runtime.
+The step consumes the same installer-validated credential authority as broker
+preflight: a root-, service-, or Qianyi-owned single-link regular file may be
+group-readable for the `loom-rollout` read-only ACL, but must not grant group
+write/execute or any other-user access. Every parent and the token itself are
+opened without following symlinks and the file identity must remain stable
+before Docker receives the fixed read-only bind.
 
 ### Service authority and secrets
 
@@ -120,37 +205,81 @@ a safe private template nor a safe legacy bootstrap source exists. Runtime
 materialization likewise rejects symlinked, hard-linked, non-regular, oversized,
 or non-`0600` private env sources before reading them.
 
-Shared GB10 worker checkouts use a separate authority instead of the
-operator-owned `/shared_work/qianyi` root. During an inactive,
-admission-closed transaction, the installer creates
-`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+Shared GB10 worker checkouts use the GB10 NFS export mounted at
+`/shared_work2`, not the separate OLDLAB/token storage at `/shared_work`.
+The exporter allowance is a repository-managed exact
+`192.168.50.103/32` entry with the existing `/shared_work2` export options;
+the platform-dev installer owns a fixed `shared_work2.mount` unit for exact
+source `192.168.20.12:/shared_work2`, NFSv4.2, hard TCP mounts, and
+`nosuid,nodev,noexec`. Both installer and broker verify the exact mountinfo
+source, mountpoint, filesystem type, options, and device identity so a local
+empty directory cannot satisfy readiness. During an inactive,
+admission-closed transaction, the installer creates the previously absent
+`/shared_work2/qianyi` parent as `qianyi:sharedwork` mode `2775`, then creates
+`/shared_work2/qianyi/.loom-staging-rollout/worker-repos` as
 `loom-rollout:sharedwork` mode `2750` and records the resolved owner and
 consumer UID/GID values. It does not add the service to `sharedwork` or grant
 write on the operator parent. Runtime checks prove the service can write/search
 the dedicated root and the `qianyi` Slurm submitter can read/search but not
-write it.
+write it. Secret/token env files remain private mode `0600` platform-dev-local
+state and are never materialized into `/shared_work2`.
 
-Candidate checkout publication is a single-writer lifecycle. Step 11 accepts
-only the exact image-tagged direct child, verifies every authority path with
-no-follow metadata, and clones with `--no-hardlinks` inside an unpredictable
-private temp directory that inherited sharedwork/setgid from the authority
-root. It permits tracked git symlinks but rejects authority symlinks, foreign
-ownership, group/other write, hard-linked or special files, and a non-exact
-resolved HEAD. After permission normalization it uses a same-root atomic
-Linux `renameat2(RENAME_NOREPLACE)`. The candidate path is immutable: an
-existing exact checkout is reused only after full index/physical-tree
-validation, while any different HEAD, mode/content drift, or extra directory
-fails without replacement. Materialization cleans only the unchanged inode it
-created for its own temp container and never removes or takes over an ambient
-path.
+The constrained Docker bootstrap may transactionally advance an exporter
+authority only before its first successful install. It holds the old exclusive
+authority lock, requires an empty journal and either no export fragment or the
+exact old fragment bound to the single exact canonical NFS `etab` record,
+proves a same-base descendant sealed commit, disables sudoers first, and keeps rollback
+copies beside the fixed files. New bootstrap failure restores the old exact
+identity with sudoers last; success removes the copies only after new identity
+validation. This is not a general authority-upgrade mechanism and refuses any
+authority with install evidence.
+
+Candidate checkout publication is a single-source lifecycle. During an
+admission-closed installer transaction, the fixed service-user publication
+command prepares the exact image-tagged direct child before requestless
+preflight. Step 11 calls the same materializer and normally observes the exact
+immutable target as already matched. Both paths verify every authority path
+with no-follow metadata and atomically claim an absent final child with
+no-replace `mkdir` at private mode `2700`, inheriting sharedwork/setgid from the
+authority root. Neither installer publication nor its read-only check installs
+or activates GB10 units. All installer-side Git identity probes disable
+optional locks and replacement refs. Published-index validation does not
+invoke Git at all: it performs one bounded, no-follow, stable read, verifies
+the index checksum and canonical v2/v3 entries plus optional cache-tree
+extension, and compares those entries to the exact commit tree. This prevents
+Git's optional index refresh from rewriting ownership or mode on the
+NFS-backed checkout during a nominal read-only install check. The materializer
+clones with `--no-hardlinks` while
+consumers cannot search the claimed directory. It permits tracked git symlinks
+but rejects authority symlinks,
+foreign ownership, group/other write, hard-linked or special files, and a
+non-exact resolved HEAD. After complete validation, an inode-bound `fchmod`
+from `2700` to immutable consumer-readable `0750` is the publication point.
+The candidate path is immutable: an existing exact checkout is reused only
+after full index/physical-tree validation, while any private, different HEAD,
+mode/content drift, or extra directory fails without replacement.
+Materialization cleans only the unchanged private inode it created and never
+removes or takes over an ambient path. Install/check also performs a bounded,
+self-cleaning private-claim/access-gate/publish/collision probe as the service
+identity. The protocol requires only NFSv4 `mkdir` and mode semantics and does
+not assume optional Linux `RENAME_NOREPLACE` support from the NFS server.
+When a sealed cumulative source refreshes the service-owned local candidate,
+the fixed local fetch uses an exact `git upload-pack` command whose sole
+`safe.directory` value is the root-owned install source's `.git` directory.
+It does not persist a wildcard or user-controlled Git safety exception.
 
 The broker preflight verifies the fixed 14 active GB10 nodes can consume the
-shared root as `qianyi` without writing it. After publication and before
-environment-state mutation, step 11 streams verifier bytes from the trusted
-candidate worktree over the protected SSH stdin path. It does not execute code
-from the checkout under verification. Exact HEAD/status/index/mode/readability
+shared root as `qianyi` without writing it. The 13 NFS clients must report the
+exact source and NFSv4 mount identity; `trt-gb10-2` must report the ext4 export
+backend at the same mountpoint. After publication and before
+environment-state mutation, step 11 captures verifier bytes from the exact
+resolved commit's Git blob and streams them over the protected SSH stdin path.
+It does not execute code from the mutable rollout worktree or checkout under
+verification. Exact HEAD/status/index/mode/readability
 and non-write checks must agree on all nodes; per-node NFS device/inode evidence
-is retained without cross-node equality assumptions.
+is retained without cross-node equality assumptions. Non-zero transport or
+verifier exits receive a thirteen-observation, 390-second bounded retry before
+failing closed, while valid divergent content evidence is never retried.
 
 The root venv is built only with a fixed root-owned `/usr/local/bin/uv` and the
 safe resolved target of `/usr/bin/python3`, which must be Python 3.11 or newer
@@ -182,6 +311,14 @@ loader and host readiness check enforce the same `root:loom-rollout`, `0640`,
 `nlink=1` authority. The installed broker entry point uses the same
 isolated/no-bytecode interpreter boundary, so an operator-controlled working
 directory cannot shadow `loom_cli`.
+
+The private install ledger remains `root:root` `0600`. Root derives a separate
+single-link `root:loom-rollout` `0640` install attestation only after a ready
+transaction. It exposes exact source identity plus hashes of the private record
+and fixed installed assets, never the record contents or secret-bearing
+authority ledgers. The Tier 0 `runner.install` predicate no-follows that
+statement and re-hashes every declared asset before the broker may import
+candidate code or publish a request.
 
 The service account receives traverse-only parent ACLs and leaf-read ACLs only
 for the declared staging token and catalog inputs. Preflight traverses those
@@ -216,7 +353,36 @@ complete initialization remains reversible. POSIX ACL masks are also reflected i
 numeric group mode bits, so validation uses raw and effective ACL entries rather
 than claiming that `st_mode` is unchanged.
 
+Protected credential leaves are also normalized to a single named principal:
+`loom-rollout`. Stale named users and named groups are removed while the
+pre-existing owning group object and its raw permissions remain unchanged. This
+is a distinct, reversible snapshot transition: the root install record stores
+the exact before/after access ACL before mutation, install retries accept only
+one of those states, runtime check requires the after state, and uninstall
+restores the before state. Parent traversal ACLs and writable data-directory
+ACLs are outside this sanitation scope.
+
 ### Backup and locking
+
+A request directory has two non-interchangeable immutable identities. A
+Tier 0-2 `preflight.json` may authorize only a detached backup job; it is not a
+rollout request and cannot publish an attempt envelope. Only after the backup
+lease is restore-verified and Tier 3 succeeds may the broker publish the full
+Tier 0-3 `request.json` beside the retained assessment evidence. Identity drift
+across candidate/tree, config, registry, coverage, epoch, environment, or
+namespace rejects that promotion.
+
+The detached worker surface has a separate fixed
+`run-backup --job <state-root>/requests/<request-id>/preflight-backup/job.json`
+unit. Both the user-manager launcher and worker independently derive and
+validate the request identity from that exact path. The worker moves the
+immutable job through compare-and-swap lifecycle generations and may publish a
+verified state only with exact manifest and lease digests. Cancellation is a
+durable `backup_cancel_requested` transition; a cancelled or failed job cannot
+publish launch authority. The long backup operation therefore does not require
+the admission mutex. The broker does not use this surface until the default
+backup implementation, lease verifier, and post-backup Tier 3 promotion are
+wired together and validated.
 
 A non-dry `start` creates and verifies a new immutable backup manifest before
 the rollout can mutate staging. It never relies on a mutable `latest` pointer.

@@ -1,4 +1,5 @@
 namespace = "loom-dev"
+runtime_environment = "development"
 ingress_host = "yylx.world"
 ingress_redirect_hosts = ["www.yylx.world"]
 ingress_tls_secret_name = "loom-dev-tls"

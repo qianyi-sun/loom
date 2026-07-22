@@ -48,3 +48,9 @@ def test_bundled_cluster_runtime_assets_are_declared_as_wheel_package_data() -> 
         "envoy/*.yaml",
     }
     assert set(package_data["loom_cli.templates.k8s"]) >= {"*.yaml.j2", "_env.j2"}
+    assert "*.json" in package_data["loom_cli.data"]
+    assert (
+        resources.files("loom_cli.data")
+        .joinpath("staging-rollout-preflight-coverage.json")
+        .is_file()
+    )

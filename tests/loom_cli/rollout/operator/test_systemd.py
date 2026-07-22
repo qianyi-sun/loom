@@ -15,9 +15,15 @@ from loom_cli.rollout.operator.systemd import (
     SystemdUnitStatus,
     SystemdUserManager,
     UnitLaunchError,
+    probe_transient_launch_cancel,
+    transient_service_argv,
 )
 
 SERVICE_UID = 2222
+CANDIDATE_SHA = "a" * 40
+CANDIDATE_RUNTIME = Path(f"/opt/loom-staging-runner/candidates/{CANDIDATE_SHA}")
+CANDIDATE_REPO = CANDIDATE_RUNTIME / "repo"
+CANDIDATE_VENV = CANDIDATE_RUNTIME / "venv"
 
 
 def make_config() -> OperatorConfig:
@@ -27,14 +33,12 @@ def make_config() -> OperatorConfig:
         operator_group="loom-staging-operators",
         remote_url="https://github.com/qianyi-sun/loom.git",
         target_ref="refs/heads/dev",
-        runner_repo=Path("/opt/loom-staging-runner/repo"),
+        runner_repo=CANDIDATE_REPO,
         state_root=Path("/var/lib/loom-staging-rollout"),
         runtime_root=Path("/run/loom-staging-rollout"),
         rollout_root=Path("/data/loom-staging"),
         kubeconfig_path=Path("/var/lib/loom-staging-rollout/kubeconfig"),
-        cluster_config_path=Path(
-            "/opt/loom-staging-runner/repo/deploy/environments/staging.cluster.toml"
-        ),
+        cluster_config_path=CANDIDATE_REPO / "deploy/environments/staging.cluster.toml",
         admin_token_source="file:/var/lib/loom-staging-rollout/credentials/admin-token",
         worker_token_source="file:/var/lib/loom-staging-rollout/credentials/worker-token",
         service_token_source="file:/var/lib/loom-staging-rollout/credentials/service-token",
@@ -170,6 +174,111 @@ def assert_sanitized_operation_error(
     assert sentinel not in rendered
 
 
+def test_transient_service_builder_and_probe_share_exact_launch_prefix() -> None:
+    running = False
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        nonlocal running
+        command = tuple(argv)
+        calls.append(command)
+        if command[0] == "systemd-run":
+            running = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "show"):
+            if "--property=Transient" in command:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    (
+                        "LoadState=loaded\nActiveState=active\nSubState=running\n"
+                        "Transient=yes\nMainPID=4242\n"
+                    ),
+                    "",
+                )
+            return subprocess.CompletedProcess(
+                argv,
+                0 if running else 4,
+                "loaded\n" if running else "not-found\n",
+                "",
+            )
+        if command[:3] == ("systemctl", "--user", "stop"):
+            running = False
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "reset-failed"):
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        raise AssertionError(command)
+
+    clock = iter((0.0, 0.011, 0.011, 0.020))
+    evidence = probe_transient_launch_cancel(
+        run,
+        candidate_sha=CANDIDATE_SHA,
+        working_directory=CANDIDATE_REPO,
+        monotonic=lambda: next(clock),
+    )
+
+    expected = transient_service_argv(
+        unit_name=calls[1][5],
+        working_directory=CANDIDATE_REPO,
+        command=("/usr/bin/sleep", "300"),
+    )
+    assert calls[1] == tuple(expected)
+    assert evidence.ready
+    assert evidence.launch_latency_ms == 11
+    assert evidence.cancel_latency_ms == 9
+    assert evidence.unit_absent
+
+
+def test_transient_probe_failure_attempts_only_exact_cleanup() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        command = tuple(argv)
+        calls.append(command)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(argv, 4, "not-found\n", "")
+        if command[0] == "systemd-run":
+            return subprocess.CompletedProcess(argv, 1, "", "launch failed")
+        return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+
+    with pytest.raises(UnitLaunchError, match="launch failed"):
+        probe_transient_launch_cancel(
+            run,
+            candidate_sha=CANDIDATE_SHA,
+            working_directory=CANDIDATE_REPO,
+            monotonic=lambda: 0.0,
+        )
+
+    unit_names = {
+        item[3] if item[0] == "systemctl" else item[5]
+        for item in calls
+        if item[0] in {"systemctl", "systemd-run"}
+    }
+    assert len(unit_names) == 1
+    assert all("loom-preflight-lifecycle-" in name for name in unit_names)
+
+
+@pytest.mark.parametrize(
+    ("unit_name", "working_directory", "command"),
+    (
+        ("other.service", Path("/fixed"), ("/usr/bin/true",)),
+        ("loom-preflight-lifecycle-0123456789abcdef.service", Path("relative"), ("/usr/bin/true",)),
+        ("loom-preflight-lifecycle-0123456789abcdef.service", Path("/fixed"), ("true",)),
+    ),
+)
+def test_transient_service_builder_rejects_authority_drift(
+    unit_name: str,
+    working_directory: Path,
+    command: tuple[str, ...],
+) -> None:
+    with pytest.raises(UnitLaunchError, match="authority"):
+        transient_service_argv(
+            unit_name=unit_name,
+            working_directory=working_directory,
+            command=command,
+        )
+
+
 def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
     manager = make_manager()
     envelope = Path("/var/lib/loom-staging-rollout/requests/req-alpha/attempts/1/envelope.json")
@@ -187,13 +296,14 @@ def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
         "--property",
         "UMask=0077",
         "--property",
-        "WorkingDirectory=/opt/loom-staging-runner/repo",
+        f"WorkingDirectory={CANDIDATE_REPO}",
         "/usr/bin/env",
         "-i",
         "HOME=/var/lib/loom-staging-rollout",
         "USER=loom-rollout",
         "LOGNAME=loom-rollout",
-        "PATH=/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin",
+        f"PATH={CANDIDATE_VENV}/bin:/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE=1",
         f"XDG_RUNTIME_DIR=/run/user/{SERVICE_UID}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{SERVICE_UID}/bus",
         "KUBECONFIG=/var/lib/loom-staging-rollout/kubeconfig",
@@ -202,13 +312,88 @@ def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
         "GIT_CONFIG_GLOBAL=/dev/null",
         "GIT_TERMINAL_PROMPT=0",
         "LOOM_STAGING_ROLLOUT_CONFIG=/etc/loom/staging-rollout.toml",
-        "/opt/loom-staging-runner/venv/bin/python",
+        str(CANDIDATE_VENV / "bin/python"),
         "-m",
         "loom_cli.rollout.operator.worker",
         "run-attempt",
         "--envelope",
         str(envelope),
     ]
+
+
+def test_backup_start_argv_is_fixed_to_one_preflight_job() -> None:
+    manager = make_manager()
+    job = Path("/var/lib/loom-staging-rollout/requests/req-alpha/preflight-backup/job.json")
+
+    argv = manager.start_backup_argv(
+        job,
+        "loom-staging-backup-req-alpha.service",
+    )
+
+    assert argv[-5:] == [
+        "-m",
+        "loom_cli.rollout.operator.worker",
+        "run-backup",
+        "--job",
+        str(job),
+    ]
+    assert "--collect" in argv
+    assert "UMask=0077" in argv
+
+
+@pytest.mark.parametrize(
+    ("job", "unit"),
+    [
+        (
+            Path("requests/req-alpha/preflight-backup/job.json"),
+            "loom-staging-backup-req-alpha.service",
+        ),
+        (
+            Path("/tmp/requests/req-alpha/preflight-backup/job.json"),
+            "loom-staging-backup-req-alpha.service",
+        ),
+        (
+            Path("/var/lib/loom-staging-rollout/requests/req-other/preflight-backup/job.json"),
+            "loom-staging-backup-req-alpha.service",
+        ),
+    ],
+)
+def test_backup_start_rejects_path_or_identity_escape(job: Path, unit: str) -> None:
+    with pytest.raises(UnitLaunchError):
+        make_manager().start_backup_argv(job, unit)
+
+
+def test_start_timeout_is_a_fail_closed_launch_error() -> None:
+    def timeout_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, timeout=120)
+
+    manager = SystemdUserManager(
+        make_config(),
+        service_uid=SERVICE_UID,
+        run=timeout_runner,
+    )
+    envelope = Path("/var/lib/loom-staging-rollout/requests/req-alpha/attempts/1/envelope.json")
+
+    with pytest.raises(UnitLaunchError) as captured:
+        manager.start_attempt(envelope, "loom-staging-rollout-req-alpha-1.service")
+
+    assert str(captured.value) == "transient rollout unit could not be started"
+
+
+def test_show_timeout_is_a_fail_closed_query_error() -> None:
+    def timeout_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, timeout=120)
+
+    manager = SystemdUserManager(
+        make_config(),
+        service_uid=SERVICE_UID,
+        run=timeout_runner,
+    )
+
+    with pytest.raises(SystemdQueryError) as captured:
+        manager.show("loom-staging-rollout-req-alpha-1.service")
+
+    assert str(captured.value) == "systemd unit status could not be queried"
 
 
 @pytest.mark.parametrize(

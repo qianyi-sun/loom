@@ -26,23 +26,18 @@ import pytest
 from botocore.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
     AdminAuditEvent,
     Artifact,
-    ArtifactLineageEdge,
     Batch,
     ProviderConnection,
     ProviderConnectionShare,
     ProviderModelCache,
-    Secret,
     Task,
-    TaskSet,
-    TaskSetManifest,
-    TaskSetMaterializationJob,
     Team,
     TeamMembership,
     TeamQuota,
@@ -55,6 +50,7 @@ from loom.db.schema import (
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.session_auth import hash_secret
+from tests.integration.gateway_db import delete_lifecycle_authorities
 
 
 def _valid_task_config(task_id: str) -> dict[str, object]:
@@ -70,7 +66,8 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
 
 @pytest.fixture
 async def app_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, dict[str, str], dict[str, UUID]]]:
     """Boot the app + seed two teams (A, B), each with a token + a
     provider_connection. Returns (app, tokens, ids) where ids holds
@@ -90,7 +87,8 @@ async def app_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -106,7 +104,8 @@ async def app_setup(
     def cp_handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/trials" and req.method == "POST":
             return httpx.Response(
-                201, json={
+                201,
+                json={
                     "trial_id": "00000000-0000-0000-0000-000000000099",
                     "state": "queued",
                 },
@@ -134,6 +133,7 @@ async def app_setup(
     user_a = uuid4()
     user_b = uuid4()
     admin_user = uuid4()
+    worker_id = uuid4()
     now = datetime.now(UTC)
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -146,77 +146,104 @@ async def app_setup(
             (user_b, f"user-b-{user_b.hex[:8]}", False),
             (admin_user, f"admin-{admin_user.hex[:8]}", True),
         ):
-            s.execute(insert(User).values(
-                id=uid,
-                username=username,
-                username_normalized=username,
-                is_platform_admin=is_platform_admin,
-                status="active",
-            ))
+            s.execute(
+                insert(User).values(
+                    id=uid,
+                    username=username,
+                    username_normalized=username,
+                    is_platform_admin=is_platform_admin,
+                    status="active",
+                )
+            )
         for tid, uid in (
             (team_a, user_a),
             (team_b, user_b),
             (team_a, admin_user),
         ):
-            s.execute(insert(TeamMembership).values(
-                team_id=tid,
-                user_id=uid,
-                role="owner",
-            ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_a.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_a,
-            created_by_user_id=user_a,
-            issued_at=now,
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_b.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_b,
-            created_by_user_id=user_b,
-            issued_at=now,
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_admin_api.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_a,
-            created_by_user_id=admin_user,
-            issued_at=now,
-        ))
-        s.execute(insert(UserSession).values(
-            session_hash=hash_secret(raw_admin_session),
-            user_id=admin_user,
-            current_team_id=team_a,
-            csrf_hash=hash_secret(raw_admin_csrf),
-            issued_at=now,
-            expires_at=now + timedelta(hours=1),
-        ))
-        s.execute(insert(Task).values(
-            id=task_id,
-            checksum="x" * 64,
-            config=_valid_task_config(task_id),
-            source="local",
-        ))
+            s.execute(
+                insert(TeamMembership).values(
+                    team_id=tid,
+                    user_id=uid,
+                    role="owner",
+                )
+            )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_a.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_a,
+                created_by_user_id=user_a,
+                issued_at=now,
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_b.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_b,
+                created_by_user_id=user_b,
+                issued_at=now,
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_admin_api.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_a,
+                created_by_user_id=admin_user,
+                issued_at=now,
+            )
+        )
+        s.execute(
+            insert(UserSession).values(
+                session_hash=hash_secret(raw_admin_session),
+                user_id=admin_user,
+                current_team_id=team_a,
+                csrf_hash=hash_secret(raw_admin_csrf),
+                issued_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(task_id),
+                source="local",
+            )
+        )
         for cid, t, name in (
             (conn_a, team_a, "active-a"),
             (conn_b, team_b, "active-b"),
             (conn_a_deleted, team_a, "deleted-a"),
         ):
-            s.execute(insert(ProviderConnection).values(
-                id=cid, team_id=t, provider_type="openai-compatible",
-                display_name=name, base_url="https://api.openai.com/v1",
-                upstream_host="api.openai.com",
-                encrypted_api_key_ref=f"loom://team:{t}/{cid}",
-                created_by="admin:0",
-            ))
+            s.execute(
+                insert(ProviderConnection).values(
+                    id=cid,
+                    team_id=t,
+                    provider_type="openai-compatible",
+                    display_name=name,
+                    base_url="https://api.openai.com/v1",
+                    upstream_host="api.openai.com",
+                    encrypted_api_key_ref=f"loom://team:{t}/{cid}",
+                    created_by="admin:0",
+                )
+            )
         for cid, model_id in (
             (conn_a, "gpt-4o"),
             (conn_b, "gpt-4o-mini"),
         ):
-            s.execute(insert(ProviderModelCache).values(
-                provider_connection_id=cid,
-                model_id=model_id,
-                upstream_present=True,
-                visible=True,
-            ))
+            s.execute(
+                insert(ProviderModelCache).values(
+                    provider_connection_id=cid,
+                    model_id=model_id,
+                    upstream_present=True,
+                    visible=True,
+                )
+            )
         # Soft-delete one of team_a's connections.
         s.execute(
             ProviderConnection.__table__.update()
@@ -225,16 +252,22 @@ async def app_setup(
         )
         # Live worker advertising every backend Loom ships drivers for —
         # required by the POST /batches reject-when-no-worker check.
-        s.execute(insert(Worker).values(
-            id=uuid4(), hostname="fixture-worker", version="test",
-            capabilities=[
-                {"backend": "docker"}, {"backend": "fake"},
-                {"backend": "daytona"}, {"backend": "modal"},
-            ],
-            registered_at=now,
-            last_seen_at=now,
-            status="active",
-        ))
+        s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="fixture-worker",
+                version="test",
+                capabilities=[
+                    {"backend": "docker"},
+                    {"backend": "fake"},
+                    {"backend": "daytona"},
+                    {"backend": "modal"},
+                ],
+                registered_at=now,
+                last_seen_at=now,
+                status="active",
+            )
+        )
         s.commit()
 
     tokens = {
@@ -245,8 +278,11 @@ async def app_setup(
         "admin_csrf": raw_admin_csrf,
     }
     ids = {
-        "team_a": team_a, "team_b": team_b,
-        "conn_a": conn_a, "conn_a_deleted": conn_a_deleted, "conn_b": conn_b,
+        "team_a": team_a,
+        "team_b": team_b,
+        "conn_a": conn_a,
+        "conn_a_deleted": conn_a_deleted,
+        "conn_b": conn_b,
         "task_id": task_id,
         "admin_user": admin_user,
     }
@@ -257,25 +293,53 @@ async def app_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
-            s.execute(delete(Trial))
-            s.execute(delete(ArtifactLineageEdge))
-            s.execute(delete(Artifact))
-            s.execute(delete(Batch))
-            s.execute(delete(AdminAuditEvent))
-            s.execute(delete(ProviderConnectionShare))
-            s.execute(delete(ProviderConnection))
-            s.execute(delete(Secret))
-            s.execute(delete(TaskSetMaterializationJob))
-            s.execute(delete(TaskSetManifest))
-            s.execute(delete(TaskSet))
-            s.execute(delete(Token))
-            s.execute(delete(UserSession))
-            s.execute(delete(TeamMembership))
-            s.execute(delete(User))
-            s.execute(delete(Task))
-            s.execute(delete(Worker))
-            s.execute(delete(TeamQuota))
-            s.execute(delete(Team))
+            owned_team_ids = (team_a, team_b)
+            owned_user_ids = (user_a, user_b, admin_user)
+            owned_connection_ids = (conn_a, conn_a_deleted, conn_b)
+            trial_rows = tuple(
+                s.execute(
+                    select(Trial.id, Trial.team_id).where(Trial.team_id.in_(owned_team_ids))
+                ).all()
+            )
+            batch_rows = tuple(
+                s.execute(
+                    select(Batch.id, Batch.team_id).where(Batch.team_id.in_(owned_team_ids))
+                ).all()
+            )
+            s.execute(delete(Artifact).where(Artifact.team_id.in_(owned_team_ids)))
+            s.execute(delete(Trial).where(Trial.team_id.in_(owned_team_ids)))
+            s.execute(delete(Batch).where(Batch.team_id.in_(owned_team_ids)))
+            s.execute(
+                delete(AdminAuditEvent).where(
+                    AdminAuditEvent.target_id.in_(
+                        tuple(str(connection_id) for connection_id in owned_connection_ids)
+                    )
+                )
+            )
+            s.execute(
+                delete(ProviderConnectionShare).where(
+                    ProviderConnectionShare.provider_connection_id.in_(owned_connection_ids)
+                )
+            )
+            s.execute(
+                delete(ProviderConnection).where(ProviderConnection.id.in_(owned_connection_ids))
+            )
+            s.execute(delete(Token).where(Token.team_id.in_(owned_team_ids)))
+            s.execute(delete(UserSession).where(UserSession.user_id.in_(owned_user_ids)))
+            s.execute(delete(TeamMembership).where(TeamMembership.team_id.in_(owned_team_ids)))
+            s.execute(delete(User).where(User.id.in_(owned_user_ids)))
+            s.execute(delete(Task).where(Task.id == task_id))
+            s.execute(delete(Worker).where(Worker.id == worker_id))
+            delete_lifecycle_authorities(
+                s,
+                bindings=(
+                    *(("trial", "trial", str(row.id), row.team_id) for row in trial_rows),
+                    *(("event", "trial", str(row.id), row.team_id) for row in trial_rows),
+                    *(("run", "batch", str(row.id), row.team_id) for row in batch_rows),
+                ),
+            )
+            s.execute(delete(TeamQuota).where(TeamQuota.team_id.in_(owned_team_ids)))
+            s.execute(delete(Team).where(Team.id.in_(owned_team_ids)))
             s.commit()
         sync_engine.dispose()
 
@@ -422,16 +486,16 @@ def test_batch_create_with_known_failed_preflight_model_returns_400(
     sync_engine = create_engine(str(app.state.settings.db_url))
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(ProviderModelCache).values(
-            provider_connection_id=ids["conn_a"],
-            model_id="gpt-private",
-            last_preflight_status="failed",
-            last_preflight_http_status=403,
-            last_preflight_error_code="access-denied",
-            last_preflight_error_message=(
-                "HTTP 403 from upstream: [REDACTED]"
-            ),
-        ))
+        s.execute(
+            insert(ProviderModelCache).values(
+                provider_connection_id=ids["conn_a"],
+                model_id="gpt-private",
+                last_preflight_status="failed",
+                last_preflight_http_status=403,
+                last_preflight_error_code="access-denied",
+                last_preflight_error_message=("HTTP 403 from upstream: [REDACTED]"),
+            )
+        )
         s.commit()
     sync_engine.dispose()
 
@@ -585,8 +649,7 @@ def test_platform_admin_shares_provider_with_target_team_and_audits(
     )
     assert audit.status_code == 200, audit.text
     event = next(
-        item for item in audit.json()["items"]
-        if item["action"] == "provider_connection.share"
+        item for item in audit.json()["items"] if item["action"] == "provider_connection.share"
     )
     assert event["actor"] == f"user:{ids['admin_user']}"
     assert event["target_id"] == str(ids["conn_a"])
@@ -603,11 +666,13 @@ def test_shared_provider_can_be_used_by_target_team_for_batch_create(
     sync_engine = create_engine(str(app.state.settings.db_url))
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(ProviderConnectionShare).values(
-            provider_connection_id=ids["conn_a"],
-            target_team_id=ids["team_b"],
-            created_by_actor="test",
-        ))
+        s.execute(
+            insert(ProviderConnectionShare).values(
+                provider_connection_id=ids["conn_a"],
+                target_team_id=ids["team_b"],
+                created_by_actor="test",
+            )
+        )
         s.commit()
     sync_engine.dispose()
 
@@ -645,11 +710,13 @@ def test_shared_provider_batch_create_with_uncached_model_returns_400(
     sync_engine = create_engine(str(app.state.settings.db_url))
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(ProviderConnectionShare).values(
-            provider_connection_id=ids["conn_a"],
-            target_team_id=ids["team_b"],
-            created_by_actor="test",
-        ))
+        s.execute(
+            insert(ProviderConnectionShare).values(
+                provider_connection_id=ids["conn_a"],
+                target_team_id=ids["team_b"],
+                created_by_actor="test",
+            )
+        )
         s.commit()
     sync_engine.dispose()
 

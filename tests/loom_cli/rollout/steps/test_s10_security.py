@@ -94,6 +94,44 @@ def test_catalog_output_redacts_values_not_listed_as_required() -> None:
     assert "[REDACTED:OPTIONAL_VALUE]" in rendered
 
 
+def test_catalog_cache_rejects_symlink_authority_without_running_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step_dir = _step_dir(tmp_path)
+    outside = tmp_path / "outside-cache"
+    outside.mkdir(mode=0o700)
+    step_dir.artifact_path("catalog-cache").symlink_to(outside, target_is_directory=True)
+    called = False
+
+    def unexpected_run(argv: list[str], **kwargs: Any) -> SubprocessResult:
+        nonlocal called
+        called = True
+        return SubprocessResult(argv=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state.run_captured",
+        unexpected_run,
+    )
+    plan = CatalogProvisioningPlan(
+        command="loom datasets audit --all",
+        env={"PATH": "/usr/bin"},
+        required_env=[],
+        env_file=None,
+        env_sources={},
+        kubernetes_port_forward=None,
+    )
+
+    result = _run_catalog_provisioning(plan, cwd=tmp_path, step_dir=step_dir)
+
+    assert result is not None
+    assert result.exit_code == 1
+    assert "cache authority is unsafe" in (result.error or "")
+    assert called is False
+    assert outside.is_dir()
+    assert list(outside.iterdir()) == []
+
+
 def test_catalog_env_file_is_private_bounded_and_never_exposes_source_path(
     tmp_path: Path,
 ) -> None:

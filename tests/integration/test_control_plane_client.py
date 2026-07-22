@@ -19,6 +19,10 @@ from sqlalchemy.orm import sessionmaker
 from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
     Task,
     Team,
     TeamQuota,
@@ -78,6 +82,10 @@ async def cp_setup(
         s.execute(delete(Worker))
         s.execute(delete(Token))
         s.execute(delete(TeamQuota))
+        s.execute(delete(DataLifecycleGcItem))
+        s.execute(delete(DataLifecycleGcRun))
+        s.execute(delete(DataLifecycleObject))
+        s.execute(delete(DataLifecycleAuthority))
         s.execute(delete(Team))
         s.execute(delete(Task))
         s.execute(insert(Token).values(
@@ -99,6 +107,10 @@ async def cp_setup(
             s.execute(delete(Worker))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team))
             s.execute(delete(Task))
             s.commit()
@@ -549,7 +561,9 @@ async def test_patch_trajectory_index_returns_true_when_owner(  # type: ignore[n
 
         assert await cp.patch_trajectory_index(
             trial_id=trial_id, worker_id=wid,
-            uri="s3://trajectories/x.jsonl", bytes_written=42,
+            trajectory_uri="s3://trajectories/x.jsonl",
+            trajectory_size_bytes=42,
+            trajectory_sha256="1" * 64,
         ) is True
     finally:
         await http.aclose()
@@ -589,12 +603,17 @@ async def test_patch_trajectory_index_persists_result_projection(  # type: ignor
             worker_id=wid,
             result=result_payload,
             trajectory_uri=f"s3://trajectories/{team_id}/{trial_id}/events.jsonl",
+            trajectory_size_bytes=42,
+            trajectory_sha256="2" * 64,
             atif_uri=f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+            atif_size_bytes=84,
+            atif_sha256="3" * 64,
             artifacts=[{
                 "step_name": "main",
                 "bucket": "artifacts",
                 "key": f"{team_id}/{trial_id}/main/result.txt",
                 "size": 5,
+                "content_hash": "sha256:" + ("4" * 64),
             }],
         ) is True
 
@@ -656,13 +675,18 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
             "team_id": str(team_id),
             "task_id": "t",
             "trajectory_uri": f"s3://trajectories/{team_id}/{trial_id}/events.jsonl",
+            "trajectory_size_bytes": 42,
+            "trajectory_sha256": "5" * 64,
             "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+            "atif_size_bytes": 84,
+            "atif_sha256": "6" * 64,
             "atif_schema_version": "1.7",
             "artifacts": [{
                 "step_name": "main",
                 "bucket": "artifacts",
                 "key": f"{team_id}/{trial_id}/main/result.txt",
                 "size": 5,
+                "content_hash": "sha256:" + ("7" * 64),
             }],
         }
         assert await cp.patch_output_projection(

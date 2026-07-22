@@ -81,7 +81,7 @@ spec:
             - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ENV_FILE
               value: ""
             - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ENVIRONMENT
-              value: "development"
+              value: "production"
             - name: LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS
               value: "0"
             - name: LOOM_CP_SLURM_WORKER_CONTROLLER_MIN_QUEUED_TRIALS
@@ -150,6 +150,8 @@ spec:
               value: "/var/run/loom/secrets/admin/secrets.toml"
             - name: LOOM_ENV
               value: "production"
+            - name: LOOM_NAMESPACE
+              value: "loom"
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin

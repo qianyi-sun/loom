@@ -120,7 +120,8 @@ Both operations derive and send only public keys; they do not copy or print a
 private key. Normal verification uses the service identity:
 
 ```bash
-sudo /opt/loom-staging-runner/venv/bin/python \
+CANDIDATE_SHA=<exact-40-character-candidate-sha>
+sudo "/opt/loom-staging-runner/candidates/${CANDIDATE_SHA}/venv/bin/python" \
   /usr/local/libexec/loom-staging-rollout-gb10-trust check
 
 loom-staging-rollout start --dry-run
@@ -224,8 +225,8 @@ Each environment's env-state profile carries an
 entrypoint `scripts/ops/worker_pool_autoscaler_external_once.py` for one pool.
 `loom admin environment-state apply` writes the unit files under
 `~/.config/systemd/user`, and `check` reports drift when a unit is missing,
-points at a stale checkout, omits `--pool-name`, or is not enabled/active as
-declared.
+points at a stale checkout, omits the exact `--environment` or `--pool-name`
+binding, or is not enabled/active as declared.
 
 Each supervisor tunnels to the environment's Postgres on a reserved local port,
 so no two supervisors on one host collide. The `--db-local-port` scheme is:
@@ -239,7 +240,9 @@ Supporting layout, shared across environments:
 
 - Runner checkout and virtualenv: `/opt/loom-<environment>-runner/repo` and
   `/opt/loom-<environment>-runner/venv`.
-- Kubeconfig: `/etc/loom/kubeconfig/<environment>.yaml`.
+- Kubeconfig: the environment runner's least-privilege kubeconfig. Staging uses
+  `/var/lib/loom-staging-rollout/kubeconfig`; other environments retain their
+  explicitly configured `/etc/loom/kubeconfig/<environment>.yaml` authority.
 - Health check: `systemctl --user is-active loom-autoscaler-gb10-<env>.timer`.
 
 The staging GB10 supervisor ships `enabled=true` and `active=true`: applying the
@@ -254,9 +257,67 @@ start the timer, mirroring the pool's own `enabled=false` gate pending #827
 Use each GB10 node's local ext4 root disk for Docker data and worker hot paths.
 Do not put Docker `overlay2`, trajectory/benchmark cache, trial scratch,
 Postgres, MinIO backend data, kind volumes, or Kubernetes PV data on
-`/shared_work`. That NFS export is suitable for read-mostly cache staging or
-evidence transfer, not high-churn runtime state. Trial artifacts return through
-Loom's artifact/trajectory object-store path.
+`/shared_work2`. That NFS export is suitable for immutable/read-mostly candidate
+checkout staging or evidence transfer, not high-churn runtime state. Trial
+artifacts return through Loom's artifact/trajectory object-store path.
+
+The exporter account has no general noninteractive root authority. A reviewed
+sealed-cumulative repair uses the repository-owned
+`staging_rollout_shared_work2_export_authority.py` boundary instead. An
+external administrator first provisions the exact detached root-owned checkout
+at `/opt/loom-staging-exporter-authority/source` and runs its `bootstrap` verb
+locally as root with the independently reviewed commit and tree. Bootstrap
+owns idempotent creation of `/usr/local/libexec`, `/etc/loom`, and its dedicated
+state root as root-owned mode-`0755` directories in the same transaction as its
+assets. Pre-existing exact directories are retained; a wrong type, owner, or
+mode fails closed. Any failed first publication removes every directory and
+asset created by that attempt in reverse order. Bootstrap is not present in
+the operator sudoers rule. It grants only two exact commands to `qianyi`:
+
+```text
+sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority install
+sudo /usr/local/libexec/loom-staging-rollout-shared-work2-export-authority check
+```
+
+The commands accept no further arguments. Root reloads the fixed sealed policy,
+validates wrapper/sudoers/source identity, and invokes only the exact export
+fragment helper. `check` is read-only; `install` is locked, journaled, atomic,
+idempotent, creates a missing exact root-owned mode-`0755` `/etc/exports.d`,
+and rolls back the fragment and a directory created by that attempt if
+`exportfs -ra` fails. A pre-existing wrong directory fails closed.
+Do not request a sudo password, allow a shell or wildcard command, enable root
+SSH, or reuse the rejected 14-host root-helper design.
+
+When the exporter operator already has access to the rootful Docker daemon, a
+sealed one-time bootstrap image may replace the external console action. Build
+that ARM64 image only from the reviewed cumulative source with
+`Containerfile.shared-work2-export-bootstrap`, export and hash the exact image,
+and run it by content ID with no command override. The accepted invocation has
+no network, a read-only container root, no new privileges, and only
+`CHOWN`, `DAC_OVERRIDE`, and `FOWNER`; it binds the bundle read-only and the
+four necessary host parent directories with recursive bind propagation
+disabled. Those parent binds are required because the exact authority
+directories are initially absent and must remain inside one rollback domain.
+The fixed Python entrypoint validates its capability, mount, usable-network,
+bundle, and sealed-source identities before any mutation. An interactive entrypoint,
+`--privileged`, a writable host-root bind, a recursive `/var/lib` bind, or a
+different image/argv/environment is not an accepted bootstrap channel.
+The build and entrypoint both reject a non-ARM64 target so an AMD64 artifact
+cannot depend on optional host emulation.
+
+If bootstrap completed but the fixed `install` verb never succeeded, a later
+reviewed cumulative image may replace that unused authority without reopening
+a general root channel. The launcher takes the old authority's exclusive lock,
+revalidates its exact policy/assets/source, requires an empty install journal
+and either an absent export fragment or the exact old fragment already present
+as the single exact canonical `/var/lib/nfs/etab` client/options record, and
+proves the new sealed commit is a descendant on the same approved base. It
+disables sudoers first, moves only the six fixed
+authority assets and source to same-directory no-replace backups, publishes the
+new exact source, and invokes the normal atomic bootstrap. Failure removes the
+new source and restores the old source/assets with sudoers last; success
+revalidates the new identity before deleting the old backups. An authority with
+any completed install evidence cannot use this replacement path.
 
 ## Health And Scheduling Gates
 

@@ -37,8 +37,10 @@ from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
 from tests.integration.gateway_db import (
-    delete_all_teams_and_quotas,
+    delete_gateway_trial,
     delete_team_and_quota,
+    delete_teams_and_quotas,
+    insert_gateway_trial,
 )
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
@@ -163,6 +165,9 @@ async def facade_setup(
     )
 
     trial_id = uuid4()
+    with session_local() as s:
+        task_id = insert_gateway_trial(s, team_id=team_id, trial_id=trial_id)
+        s.commit()
     step_jwt = mint_step_jwt(
         team_id=team_id,
         trial_id=trial_id,
@@ -179,11 +184,12 @@ async def facade_setup(
         await async_engine.dispose()
         with session_local() as s:
             s.execute(delete(LlmCall))
+            delete_gateway_trial(s, trial_id=trial_id, task_id=task_id)
             s.execute(delete(RateCard))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(Token))
-            delete_all_teams_and_quotas(s)
+            delete_teams_and_quotas(s, (team_id,))
             s.commit()
         sync_engine.dispose()
 
@@ -481,21 +487,23 @@ async def test_facade_returns_404_for_cross_team_connection(
     )
     sync_engine = create_engine(postgres_url)
     session_local = sessionmaker(sync_engine)
-    with session_local() as s:
-        s.execute(insert(Team).values(id=other_team, name=f"t-{other_team}"))
-        s.commit()
-    sync_engine.dispose()
+    try:
+        with session_local() as s:
+            s.execute(insert(Team).values(id=other_team, name=f"t-{other_team}"))
+            s.commit()
 
-    r = await _post(
-        app,
-        other_jwt,
-        **{"x-loom-provider-connection-id": str(conn_id)},
-    )
-    sync_engine = create_engine(postgres_url)
-    with session_local() as s:
-        delete_team_and_quota(s, other_team)
-        s.commit()
-    sync_engine.dispose()
+        r = await _post(
+            app,
+            other_jwt,
+            **{"x-loom-provider-connection-id": str(conn_id)},
+        )
+    finally:
+        try:
+            with session_local() as s:
+                delete_team_and_quota(s, other_team)
+                s.commit()
+        finally:
+            sync_engine.dispose()
     assert r.status_code == 404
     # Upstream never called.
     assert len(captures["requests"]) == 0  # type: ignore[arg-type]

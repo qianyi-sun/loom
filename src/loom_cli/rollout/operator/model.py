@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 APPROVED_REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
 APPROVED_FETCH_REF = "refs/heads/dev"
 PINNED_TARGET_REF = "origin/dev"
 
 SchemaVersion = Literal[1]
+CandidateSourceMode = Literal["merged-dev", "sealed-cumulative"]
 RequestCommand = Literal["start"]
 RequestStatus = Literal["pending", "preview"]
 ActiveStatus = Literal["pending", "running"]
@@ -36,6 +39,22 @@ RequestEventType = Literal[
     "cancelled",
 ]
 EventStatus = Literal["pending", "preview", "running", "done", "failed", "cancelled"]
+BackupPublicReason = Literal[
+    "backup_failed",
+    "backup_precondition_failed",
+    "backup_capacity_exhausted",
+    "backup_config_invalid",
+    "backup_postgres_failed",
+    "backup_minio_failed",
+    "backup_transport_failed",
+    "backup_object_limit_exceeded",
+    "backup_object_inventory_failed",
+    "backup_secrets_failed",
+    "backup_manifest_failed",
+    "backup_cleanup_failed",
+    "backup_retirement_failed",
+]
+BACKUP_PUBLIC_REASONS: frozenset[str] = frozenset(get_args(BackupPublicReason))
 
 _SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
@@ -69,24 +88,6 @@ _REQUEST_EVENTS = frozenset(
     }
 )
 _EVENT_STATUSES = frozenset({"pending", "preview", "running", "done", "failed", "cancelled"})
-
-# Single source of truth for the durable, secret-safe public reason tokens
-# permitted on backup lifecycle events. The backup module imports this so the
-# per-stage reasons it raises and the tokens accepted here can never drift.
-APPROVED_BACKUP_EVENT_REASONS = frozenset(
-    {
-        "backup_failed",
-        "backup_precondition_failed",
-        "backup_capacity_exhausted",
-        "backup_config_invalid",
-        "backup_postgres_failed",
-        "backup_minio_failed",
-        "backup_transport_failed",
-        "backup_object_limit_exceeded",
-        "backup_secrets_failed",
-        "backup_manifest_failed",
-    }
-)
 
 
 def validate_safe_identifier(value: object, field_name: str) -> str:
@@ -247,6 +248,9 @@ class CandidateBinding:
     image_tag: str
     fetched_at: str
     schema_version: SchemaVersion = 1
+    source_mode: CandidateSourceMode = "merged-dev"
+    resolved_tree: str | None = None
+    approved_base_sha: str | None = None
 
     def __post_init__(self) -> None:
         if self.remote_url != APPROVED_REMOTE_URL:
@@ -257,10 +261,19 @@ class CandidateBinding:
         if self.image_tag != f"staging-{sha[:7]}":
             raise ValueError("image_tag must be staging-<resolved_sha[:7]>")
         _require_string(self.fetched_at, "fetched_at")
+        if self.source_mode not in {"merged-dev", "sealed-cumulative"}:
+            raise ValueError("source_mode is invalid")
+        if self.source_mode == "sealed-cumulative":
+            if self.resolved_tree is None or self.approved_base_sha is None:
+                raise ValueError("sealed candidate source binding is incomplete")
+            _require_sha(self.resolved_tree, "resolved_tree")
+            _require_sha(self.approved_base_sha, "approved_base_sha")
+        elif self.resolved_tree is not None or self.approved_base_sha is not None:
+            raise ValueError("merged candidate must not carry sealed source binding")
         _require_schema(self.schema_version)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "remote_url": self.remote_url,
             "target_ref": self.target_ref,
             "resolved_sha": self.resolved_sha,
@@ -268,6 +281,15 @@ class CandidateBinding:
             "fetched_at": self.fetched_at,
             "schema_version": self.schema_version,
         }
+        if self.source_mode == "sealed-cumulative":
+            value.update(
+                {
+                    "source_mode": self.source_mode,
+                    "resolved_tree": self.resolved_tree,
+                    "approved_base_sha": self.approved_base_sha,
+                }
+            )
+        return value
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CandidateBinding:
@@ -279,6 +301,9 @@ class CandidateBinding:
             "fetched_at",
             "schema_version",
         }
+        sealed = data.get("source_mode") == "sealed-cumulative"
+        if sealed:
+            expected.update({"source_mode", "resolved_tree", "approved_base_sha"})
         _require_exact_keys(data, expected, "candidate binding")
         return cls(
             remote_url=_require_string(data["remote_url"], "remote_url"),
@@ -286,6 +311,133 @@ class CandidateBinding:
             resolved_sha=_require_sha(data["resolved_sha"], "resolved_sha"),
             image_tag=_require_string(data["image_tag"], "image_tag"),
             fetched_at=_require_string(data["fetched_at"], "fetched_at"),
+            schema_version=_require_schema(data["schema_version"]),
+            source_mode="sealed-cumulative" if sealed else "merged-dev",
+            resolved_tree=(
+                _require_sha(data["resolved_tree"], "resolved_tree") if sealed else None
+            ),
+            approved_base_sha=(
+                _require_sha(data["approved_base_sha"], "approved_base_sha") if sealed else None
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightRequest:
+    """Immutable Tier 0-2 admission identity created before backup I/O."""
+
+    request_id: str
+    rollout_id: str
+    caller: CallerIdentity
+    candidate: CandidateBinding
+    candidate_tree: str
+    requested_at: str
+    runner_config_sha256: str
+    preflight_assessment_sha256: str
+    preflight_registry_sha256: str
+    preflight_coverage_sha256: str
+    mutation_epoch: int
+    environment: str
+    namespace: str
+    command: RequestCommand = "start"
+    status: RequestStatus = "pending"
+    schema_version: SchemaVersion = 1
+
+    def __post_init__(self) -> None:
+        validate_safe_identifier(self.request_id, "request_id")
+        validate_safe_identifier(self.rollout_id, "rollout_id")
+        if not isinstance(self.caller, CallerIdentity):
+            raise ValueError("caller must be a CallerIdentity")
+        if not isinstance(self.candidate, CandidateBinding):
+            raise ValueError("candidate must be a CandidateBinding")
+        _require_sha(self.candidate_tree, "candidate_tree")
+        if (
+            self.candidate.resolved_tree is not None
+            and self.candidate.resolved_tree != self.candidate_tree
+        ):
+            raise ValueError("candidate_tree does not match sealed candidate")
+        _require_string(self.requested_at, "requested_at")
+        _require_sha256(self.runner_config_sha256, "runner_config_sha256")
+        _require_sha256(self.preflight_assessment_sha256, "preflight_assessment_sha256")
+        _require_sha256(self.preflight_registry_sha256, "preflight_registry_sha256")
+        _require_sha256(self.preflight_coverage_sha256, "preflight_coverage_sha256")
+        _require_nonnegative_int(self.mutation_epoch, "mutation_epoch")
+        if self.environment != "staging":
+            raise ValueError("preflight request environment must be staging")
+        namespace = _require_string(self.namespace, "namespace")
+        if namespace != namespace.strip():
+            raise ValueError("namespace must not contain surrounding whitespace")
+        _require_literal(self.command, _REQUEST_COMMANDS, "command", "request command")
+        _require_literal(self.status, _REQUEST_STATUSES, "status", "request status")
+        _require_schema(self.schema_version)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "rollout_id": self.rollout_id,
+            "caller": self.caller.to_dict(),
+            "candidate": self.candidate.to_dict(),
+            "candidate_tree": self.candidate_tree,
+            "requested_at": self.requested_at,
+            "runner_config_sha256": self.runner_config_sha256,
+            "preflight_assessment_sha256": self.preflight_assessment_sha256,
+            "preflight_registry_sha256": self.preflight_registry_sha256,
+            "preflight_coverage_sha256": self.preflight_coverage_sha256,
+            "mutation_epoch": self.mutation_epoch,
+            "environment": self.environment,
+            "namespace": self.namespace,
+            "command": self.command,
+            "status": self.status,
+            "schema_version": self.schema_version,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> PreflightRequest:
+        expected = {
+            "request_id",
+            "rollout_id",
+            "caller",
+            "candidate",
+            "candidate_tree",
+            "requested_at",
+            "runner_config_sha256",
+            "preflight_assessment_sha256",
+            "preflight_registry_sha256",
+            "preflight_coverage_sha256",
+            "mutation_epoch",
+            "environment",
+            "namespace",
+            "command",
+            "status",
+            "schema_version",
+        }
+        _require_exact_keys(data, expected, "preflight request")
+        command = _require_literal(data["command"], _REQUEST_COMMANDS, "command", "request command")
+        status = _require_literal(data["status"], _REQUEST_STATUSES, "status", "request status")
+        return cls(
+            request_id=validate_safe_identifier(data["request_id"], "request_id"),
+            rollout_id=validate_safe_identifier(data["rollout_id"], "rollout_id"),
+            caller=CallerIdentity.from_dict(_require_mapping(data["caller"], "caller")),
+            candidate=CandidateBinding.from_dict(_require_mapping(data["candidate"], "candidate")),
+            candidate_tree=_require_sha(data["candidate_tree"], "candidate_tree"),
+            requested_at=_require_string(data["requested_at"], "requested_at"),
+            runner_config_sha256=_require_sha256(
+                data["runner_config_sha256"], "runner_config_sha256"
+            ),
+            preflight_assessment_sha256=_require_sha256(
+                data["preflight_assessment_sha256"], "preflight_assessment_sha256"
+            ),
+            preflight_registry_sha256=_require_sha256(
+                data["preflight_registry_sha256"], "preflight_registry_sha256"
+            ),
+            preflight_coverage_sha256=_require_sha256(
+                data["preflight_coverage_sha256"], "preflight_coverage_sha256"
+            ),
+            mutation_epoch=_require_nonnegative_int(data["mutation_epoch"], "mutation_epoch"),
+            environment=_require_string(data["environment"], "environment"),
+            namespace=_require_string(data["namespace"], "namespace"),
+            command=cast(RequestCommand, command),
+            status=cast(RequestStatus, status),
             schema_version=_require_schema(data["schema_version"]),
         )
 
@@ -300,6 +452,9 @@ class RolloutRequest:
     candidate: CandidateBinding
     requested_at: str
     runner_config_sha256: str
+    preflight_attestation_sha256: str
+    preflight_registry_sha256: str
+    preflight_coverage_sha256: str
     command: RequestCommand = "start"
     status: RequestStatus = "pending"
     schema_version: SchemaVersion = 1
@@ -313,6 +468,9 @@ class RolloutRequest:
             raise ValueError("candidate must be a CandidateBinding")
         _require_string(self.requested_at, "requested_at")
         _require_sha256(self.runner_config_sha256, "runner_config_sha256")
+        _require_sha256(self.preflight_attestation_sha256, "preflight_attestation_sha256")
+        _require_sha256(self.preflight_registry_sha256, "preflight_registry_sha256")
+        _require_sha256(self.preflight_coverage_sha256, "preflight_coverage_sha256")
         _require_literal(self.command, _REQUEST_COMMANDS, "command", "request command")
         _require_literal(self.status, _REQUEST_STATUSES, "status", "request status")
         _require_schema(self.schema_version)
@@ -325,6 +483,9 @@ class RolloutRequest:
             "candidate": self.candidate.to_dict(),
             "requested_at": self.requested_at,
             "runner_config_sha256": self.runner_config_sha256,
+            "preflight_attestation_sha256": self.preflight_attestation_sha256,
+            "preflight_registry_sha256": self.preflight_registry_sha256,
+            "preflight_coverage_sha256": self.preflight_coverage_sha256,
             "command": self.command,
             "status": self.status,
             "schema_version": self.schema_version,
@@ -339,6 +500,9 @@ class RolloutRequest:
             "candidate",
             "requested_at",
             "runner_config_sha256",
+            "preflight_attestation_sha256",
+            "preflight_registry_sha256",
+            "preflight_coverage_sha256",
             "command",
             "status",
             "schema_version",
@@ -354,6 +518,15 @@ class RolloutRequest:
             requested_at=_require_string(data["requested_at"], "requested_at"),
             runner_config_sha256=_require_sha256(
                 data["runner_config_sha256"], "runner_config_sha256"
+            ),
+            preflight_attestation_sha256=_require_sha256(
+                data["preflight_attestation_sha256"], "preflight_attestation_sha256"
+            ),
+            preflight_registry_sha256=_require_sha256(
+                data["preflight_registry_sha256"], "preflight_registry_sha256"
+            ),
+            preflight_coverage_sha256=_require_sha256(
+                data["preflight_coverage_sha256"], "preflight_coverage_sha256"
             ),
             command=cast(RequestCommand, command),
             status=cast(RequestStatus, status),
@@ -455,6 +628,9 @@ class DriverEnvelope:
     backup_manifest_path: str
     backup_manifest_sha256: str
     runner_config_sha256: str
+    preflight_attestation_sha256: str
+    preflight_registry_sha256: str
+    preflight_coverage_sha256: str
     cluster_name: str
     namespace: str
     environment: str
@@ -470,6 +646,9 @@ class DriverEnvelope:
     scope: str
     gb10_prep_concurrency: int
     resume: bool
+    source_mode: CandidateSourceMode = "merged-dev"
+    resolved_tree: str | None = None
+    approved_base_sha: str | None = None
 
     def __post_init__(self) -> None:
         _require_schema(self.schema_version)
@@ -487,10 +666,22 @@ class DriverEnvelope:
         sha = _require_sha(self.resolved_sha, "resolved_sha")
         if self.image_tag != f"staging-{sha[:7]}":
             raise ValueError("image_tag must be staging-<resolved_sha[:7]>")
+        if self.source_mode not in {"merged-dev", "sealed-cumulative"}:
+            raise ValueError("source_mode is invalid")
+        if self.source_mode == "sealed-cumulative":
+            if self.resolved_tree is None or self.approved_base_sha is None:
+                raise ValueError("sealed envelope source binding is incomplete")
+            _require_sha(self.resolved_tree, "resolved_tree")
+            _require_sha(self.approved_base_sha, "approved_base_sha")
+        elif self.resolved_tree is not None or self.approved_base_sha is not None:
+            raise ValueError("merged envelope must not carry sealed source binding")
         _require_string(self.fetched_at, "fetched_at")
         _require_absolute_path(self.backup_manifest_path, "backup_manifest_path")
         _require_sha256(self.backup_manifest_sha256, "backup_manifest_sha256")
         _require_sha256(self.runner_config_sha256, "runner_config_sha256")
+        _require_sha256(self.preflight_attestation_sha256, "preflight_attestation_sha256")
+        _require_sha256(self.preflight_registry_sha256, "preflight_registry_sha256")
+        _require_sha256(self.preflight_coverage_sha256, "preflight_coverage_sha256")
         if self.cluster_name != "loom-staging":
             raise ValueError("cluster_name must be loom-staging")
         if self.namespace != "loom-staging":
@@ -519,7 +710,7 @@ class DriverEnvelope:
             raise ValueError("resume must be true after attempt 1")
 
     def rollout_inputs(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "request_id": self.request_id,
             "rollout_id": self.rollout_id,
             "initiating_operator": self.initiating_operator,
@@ -531,14 +722,33 @@ class DriverEnvelope:
             "backup_manifest_path": self.backup_manifest_path,
             "backup_manifest_sha256": self.backup_manifest_sha256,
             "runner_config_sha256": self.runner_config_sha256,
+            "preflight_attestation_sha256": self.preflight_attestation_sha256,
+            "preflight_registry_sha256": self.preflight_registry_sha256,
+            "preflight_coverage_sha256": self.preflight_coverage_sha256,
         }
+        if self.source_mode == "sealed-cumulative":
+            value.update(
+                {
+                    "source_mode": self.source_mode,
+                    "resolved_tree": self.resolved_tree,
+                    "approved_base_sha": self.approved_base_sha,
+                }
+            )
+        return value
 
     def to_dict(self) -> dict[str, object]:
-        return {field.name: getattr(self, field.name) for field in fields(self)}
+        value = {field.name: getattr(self, field.name) for field in fields(self)}
+        if self.source_mode == "merged-dev":
+            for key in ("source_mode", "resolved_tree", "approved_base_sha"):
+                value.pop(key)
+        return value
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> DriverEnvelope:
         expected = {field.name for field in fields(cls)}
+        sealed = data.get("source_mode") == "sealed-cumulative"
+        if not sealed:
+            expected.difference_update({"source_mode", "resolved_tree", "approved_base_sha"})
         _require_exact_keys(data, expected, "driver envelope")
         return cls(
             schema_version=_require_schema(data["schema_version"]),
@@ -564,6 +774,15 @@ class DriverEnvelope:
             ),
             runner_config_sha256=_require_sha256(
                 data["runner_config_sha256"], "runner_config_sha256"
+            ),
+            preflight_attestation_sha256=_require_sha256(
+                data["preflight_attestation_sha256"], "preflight_attestation_sha256"
+            ),
+            preflight_registry_sha256=_require_sha256(
+                data["preflight_registry_sha256"], "preflight_registry_sha256"
+            ),
+            preflight_coverage_sha256=_require_sha256(
+                data["preflight_coverage_sha256"], "preflight_coverage_sha256"
             ),
             cluster_name=_require_string(data["cluster_name"], "cluster_name"),
             namespace=_require_string(data["namespace"], "namespace"),
@@ -597,7 +816,23 @@ class DriverEnvelope:
                 data["gb10_prep_concurrency"], "gb10_prep_concurrency"
             ),
             resume=_require_bool(data["resume"], "resume"),
+            source_mode="sealed-cumulative" if sealed else "merged-dev",
+            resolved_tree=(
+                _require_sha(data["resolved_tree"], "resolved_tree") if sealed else None
+            ),
+            approved_base_sha=(
+                _require_sha(data["approved_base_sha"], "approved_base_sha") if sealed else None
+            ),
         )
+
+
+def driver_envelope_bytes(envelope: DriverEnvelope) -> bytes:
+    """Return the exact immutable store representation for one driver envelope."""
+    return (json.dumps(envelope.to_dict(), sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def driver_envelope_sha256(envelope: DriverEnvelope) -> str:
+    return hashlib.sha256(driver_envelope_bytes(envelope)).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,7 +872,7 @@ class RequestEvent:
                     "backup_cleanup_done",
                     "backup_cleanup_failed",
                 }
-                and reason not in APPROVED_BACKUP_EVENT_REASONS
+                and reason not in BACKUP_PUBLIC_REASONS
             ):
                 raise ValueError("backup event reason is not an approved public token")
         if (

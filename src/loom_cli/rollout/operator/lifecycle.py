@@ -219,7 +219,35 @@ class LifecycleCoordinator:
         try:
             metadata = os.lstat(marker)
         except FileNotFoundError:
-            return
+            metadata = None
+        except OSError as exc:
+            raise LifecycleError("maintenance admission marker is unavailable") from exc
+        if metadata is not None:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != self._maintenance_owner_uid
+                or metadata.st_gid != self._maintenance_owner_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise LifecycleError("maintenance admission marker is unsafe")
+            raise LifecycleBusyError(
+                "staging rollout admission is disabled for maintenance",
+                {"status": "busy", "reason": "maintenance"},
+            )
+        if self.store.read_backup_retention_claim() is not None:
+            raise LifecycleBusyError(
+                "backup retention maintenance is still in progress",
+                {"status": "busy", "reason": "backup_retention_busy"},
+            )
+
+    def assert_maintenance_active(self) -> None:
+        """Require the root-owned admission freeze for protected maintenance."""
+
+        if "launch.lock" not in self._held_guards.get():
+            raise LifecycleError("maintenance state must be checked under the launch lock")
+        marker = self.config.runtime_root / "maintenance"
+        try:
+            metadata = os.lstat(marker)
         except OSError as exc:
             raise LifecycleError("maintenance admission marker is unavailable") from exc
         if (
@@ -229,10 +257,17 @@ class LifecycleCoordinator:
             or stat.S_IMODE(metadata.st_mode) != 0o600
         ):
             raise LifecycleError("maintenance admission marker is unsafe")
-        raise LifecycleBusyError(
-            "staging rollout admission is disabled for maintenance",
-            {"status": "busy", "reason": "maintenance"},
-        )
+
+    def assert_maintenance_idle(self) -> None:
+        """Prove maintenance has no active pointer without reconciling state."""
+
+        self.assert_maintenance_active()
+        pointer = self.store.read_active()
+        if pointer is not None:
+            raise LifecycleBusyError(
+                "a staging rollout attempt is already pending or running",
+                self._safe_status(pointer),
+            )
 
     def driver_guard(self) -> AbstractContextManager[None]:
         return self._guard("staging.driver.lock")
@@ -614,7 +649,13 @@ def _binding_matches(request: RolloutRequest, envelope: DriverEnvelope) -> bool:
         and request.candidate.resolved_sha == envelope.resolved_sha
         and request.candidate.image_tag == envelope.image_tag
         and request.candidate.fetched_at == envelope.fetched_at
+        and request.candidate.source_mode == envelope.source_mode
+        and request.candidate.resolved_tree == envelope.resolved_tree
+        and request.candidate.approved_base_sha == envelope.approved_base_sha
         and request.runner_config_sha256 == envelope.runner_config_sha256
+        and request.preflight_attestation_sha256 == envelope.preflight_attestation_sha256
+        and request.preflight_registry_sha256 == envelope.preflight_registry_sha256
+        and request.preflight_coverage_sha256 == envelope.preflight_coverage_sha256
     )
 
 

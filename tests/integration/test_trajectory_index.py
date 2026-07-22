@@ -12,6 +12,10 @@ from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
     Batch,
+    DataLifecycleAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
+    DataLifecycleObject,
     Task,
     TaskSet,
     TaskSetManifest,
@@ -67,6 +71,10 @@ def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, str]]:
             s.execute(delete(Worker))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
+            s.execute(delete(DataLifecycleGcItem))
+            s.execute(delete(DataLifecycleGcRun))
+            s.execute(delete(DataLifecycleObject))
+            s.execute(delete(DataLifecycleAuthority))
             s.execute(delete(Team))
             s.execute(delete(Task))
             s.commit()
@@ -98,12 +106,47 @@ def test_index_patch(app, traj_seed):  # type: ignore[no-untyped-def]
             json={
                 "worker_id": str(worker_id),
                 "trajectory_uri": f"s3://trajectories/x/{trial_id}/events.jsonl",
+                "trajectory_size_bytes": 1024,
+                "trajectory_sha256": "a" * 64,
                 "bytes_uploaded": 1024,
                 "events_count": 25,
-                "checksum_sha256": "abcd",
+                "checksum_sha256": "a" * 64,
             },
         )
         assert r.status_code == 200
+
+
+def test_index_patch_rejects_unclassified_object_evidence(
+    app,
+    traj_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    trial_id, worker_id, raw = traj_seed
+    with TestClient(app) as client:
+        r = client.patch(
+            f"/trials/{trial_id}/trajectory_index",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "worker_id": str(worker_id),
+                "trajectory_uri": f"s3://trajectories/x/{trial_id}/events.jsonl",
+                "trajectory_size_bytes": 1024,
+            },
+        )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "trajectory_lifecycle_evidence_invalid"
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.execute(
+                select(Trial).where(Trial.id == trial_id)
+            ).scalar_one()
+            artifacts = list(session.execute(
+                select(Artifact.id).where(Artifact.trial_id == trial_id)
+            ))
+        assert trial.trajectory_index is None
+        assert artifacts == []
+    finally:
+        engine.dispose()
 
 
 def test_index_patch_populates_typed_artifacts_and_lineage(
@@ -177,7 +220,11 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
                 "trajectory_uri": (
                     f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
                 ),
+                "trajectory_size_bytes": 10,
+                "trajectory_sha256": "3" * 64,
                 "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+                "atif_size_bytes": 20,
+                "atif_sha256": "4" * 64,
                 "atif_schema_version": "1.7",
                 "artifacts": [{
                     "step_name": "main",
@@ -203,12 +250,45 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
                 ArtifactLineageEdge.parent_artifact_id == parent_artifact_id,
             ),
         ).scalars())
-    engine.dispose()
-
     by_type = {artifact.artifact_type: artifact for artifact in artifacts}
     assert {"trajectory", "atif_projection", "evidence_bundle"}.issubset(by_type)
     assert by_type["evidence_bundle"].content_hash == "sha256:" + ("2" * 64)
     assert by_type["evidence_bundle"].storage["key"].endswith("/main/result.txt")
+    assert all(artifact.lifecycle_authority_id is not None for artifact in artifacts)
+    with sessionmaker(engine)() as s:
+        authorities = list(s.scalars(
+            select(DataLifecycleAuthority).where(
+                DataLifecycleAuthority.id.in_([
+                    artifact.lifecycle_authority_id for artifact in artifacts
+                ])
+            )
+        ))
+    assert len(authorities) == len(artifacts)
+    assert all(authority.data_class == "artifact" for authority in authorities)
+    assert {authority.owner_id for authority in authorities} == {
+        str(artifact.id) for artifact in artifacts
+    }
+    with sessionmaker(engine)() as s:
+        objects = list(s.scalars(
+            select(DataLifecycleObject).where(
+                DataLifecycleObject.authority_id.in_([
+                    authority.id for authority in authorities
+                ])
+            )
+        ))
+    assert len(objects) == 3
+    by_object_key = {obj.object_key: obj for obj in objects}
+    assert by_object_key[f"{team_id}/{trial_id}/events.jsonl"].content_sha256 == (
+        "3" * 64
+    )
+    assert by_object_key[f"{team_id}/{trial_id}/events.jsonl"].size_bytes == 10
+    assert by_object_key[f"{team_id}/{trial_id}/atif.json"].content_sha256 == (
+        "4" * 64
+    )
+    result_key = f"{team_id}/{trial_id}/main/result.txt"
+    assert by_object_key[result_key].content_sha256 == "2" * 64
+    assert by_object_key[result_key].size_bytes == 5
+    engine.dispose()
     assert all(edge.relation == "reused_as_input" for edge in edges)
     assert {edge.child_artifact_id for edge in edges} == {
         artifact.id for artifact in artifacts

@@ -99,7 +99,10 @@ async def authed_session(
             request.app.state, "admin_secret_verifier", None,
         )
         ctx_optional = await verify_bearer_token(
-            session, authorization, admin_verifier=admin_verifier,
+            session,
+            authorization,
+            admin_verifier=admin_verifier,
+            allow_readonly_probe=request.method.upper() in {"GET", "HEAD"},
         ) if authorization else None
         if ctx_optional is None and not authorization:
             settings = getattr(request.app.state, "settings", None)

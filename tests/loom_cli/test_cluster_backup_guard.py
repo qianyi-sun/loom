@@ -12,6 +12,7 @@ import pytest
 from loom_cli.__main__ import main
 from loom_cli.cluster_backup_guard import (
     REQUIRED_BACKUP_COMPONENTS,
+    ROLLOUT_CHECKPOINT_COMPONENTS,
     BackupTraversalLimits,
     backup_manifest_created_at,
     backup_manifest_sha256,
@@ -173,6 +174,66 @@ def test_backup_manifest_records_components_without_secret_contents(tmp_path):
         )
         == []
     )
+
+
+def test_rollout_checkpoint_manifest_replaces_minio_payload_with_inventory(tmp_path):
+    postgres = tmp_path / "postgres.dump"
+    postgres.write_bytes(b"postgres")
+    inventory = tmp_path / "object-inventory.json"
+    inventory.write_text('{"inventory_root":"abc"}\n', encoding="utf-8")
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "loom-secrets.yaml").write_bytes(b"secret")
+    manifest_path = tmp_path / "backup-manifest.json"
+
+    manifest = write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest_path,
+        components={
+            "postgres": postgres,
+            "object_inventory": inventory,
+            "k8s_secrets": secrets,
+        },
+        now=datetime(2026, 6, 29, 12, 0, tzinfo=UTC),
+        schema_version=2,
+    )
+
+    assert manifest["schema_version"] == 2
+    assert set(manifest["components"]) == set(ROLLOUT_CHECKPOINT_COMPONENTS)
+    assert "minio" not in manifest["components"]
+    assert (
+        validate_backup_manifest(
+            manifest_path,
+            environment="staging",
+            namespace="loom-staging",
+            now=datetime(2026, 6, 29, 12, 5, tzinfo=UTC),
+        )
+        == []
+    )
+
+
+def test_manifest_schema_required_components_cannot_be_substituted(tmp_path):
+    manifest_path = _write_private_bundle(
+        tmp_path / "bundle",
+        created_at=datetime(2026, 6, 30, 12, 0, tzinfo=UTC),
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 2
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path.chmod(0o600)
+
+    problems = validate_backup_manifest(
+        manifest_path,
+        environment="staging",
+        namespace="loom-staging",
+        expected_owner_uid=os.getuid(),
+        require_private_files=True,
+        now=datetime(2026, 6, 30, 12, 1, tzinfo=UTC),
+    )
+
+    assert any("required_components" in problem for problem in problems)
+    assert any("object_inventory" in problem for problem in problems)
 
 
 def test_validate_backup_manifest_rejects_component_changed_after_manifest(tmp_path):

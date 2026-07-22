@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, BinaryIO, Literal, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import boto3
@@ -37,6 +37,7 @@ from loom_cli.cluster_backup_guard import (
     write_backup_manifest,
 )
 from loom_cli.cluster_config import load_cluster_config
+from loom_cli.rollout.credential_authority import converge_new_private_file
 
 from .backup_limits import (
     BACKUP_MAX_TOTAL_BYTES,
@@ -48,7 +49,14 @@ from .config import (
     APPROVED_BACKUP_MAX_OBJECTS,
     OperatorConfig,
 )
-from .model import APPROVED_BACKUP_EVENT_REASONS, RolloutRequest
+from .model import (
+    BACKUP_PUBLIC_REASONS,
+    BackupPublicReason,
+    PreflightRequest,
+    RolloutRequest,
+)
+from .readonly_database_client import ReadonlyDatabaseTunnelError
+from .rollout_checkpoint import ImmutableObjectInventory
 
 logger = logging.getLogger(__name__)
 
@@ -155,33 +163,19 @@ DeadlineWaiter = Callable[[threading.Event, float], bool]
 
 
 Clock = Callable[[], datetime]
-BackupPublicReason = Literal[
-    "backup_failed",
-    "backup_precondition_failed",
-    "backup_capacity_exhausted",
-    "backup_config_invalid",
-    "backup_postgres_failed",
-    "backup_minio_failed",
-    "backup_transport_failed",
-    "backup_object_limit_exceeded",
-    "backup_secrets_failed",
-    "backup_manifest_failed",
-]
-# Imported from the model so the accepted event tokens and the reasons raised
-# here share one definition and cannot drift.
-_BACKUP_PUBLIC_REASONS = APPROVED_BACKUP_EVENT_REASONS
 
 # Map each internal stage code to a durable, secret-safe public reason so an
 # operator can see *which* backup stage failed via `status`, instead of every
 # failure collapsing to a generic `backup_failed`. Codes absent here default to
 # `backup_failed` (the safe, non-committal fallback).
 _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
+    "backup_launch_failed": "backup_precondition_failed",
     "backup_request_not_pending": "backup_precondition_failed",
     "backup_clock_invalid": "backup_precondition_failed",
     "service_account_unavailable": "backup_precondition_failed",
     "backup_path_not_approved": "backup_precondition_failed",
     "backup_cleanup_request_invalid": "backup_precondition_failed",
-    "backup_revalidation_failed": "backup_manifest_failed",
+    "object_inventory_provider_unavailable": "backup_precondition_failed",
     "backup_capacity_unavailable": "backup_capacity_exhausted",
     "backup_root_create_failed": "backup_capacity_exhausted",
     "component_sync_failed": "backup_capacity_exhausted",
@@ -198,15 +192,26 @@ _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
     "manifest_hash_failed": "backup_manifest_failed",
     "manifest_publish_failed": "backup_manifest_failed",
     "backup_manifest_digest_mismatch": "backup_manifest_failed",
+    "backup_revalidation_failed": "backup_manifest_failed",
+    "backup_retirement_manifest_invalid": "backup_manifest_failed",
+    "object_inventory_failed": "backup_object_inventory_failed",
+    "object_inventory_credentials_failed": "backup_object_inventory_failed",
+    "object_inventory_transport_failed": "backup_object_inventory_failed",
+    "object_inventory_timeout": "backup_object_inventory_failed",
+    "object_inventory_binding_failed": "backup_object_inventory_failed",
+    "object_inventory_write_failed": "backup_object_inventory_failed",
+    "latest_publish_failed": "backup_manifest_failed",
+    "backup_cleanup_failed": "backup_cleanup_failed",
+    "backup_retirement_failed": "backup_retirement_failed",
 }
 
 
-def _public_reason_for_code(code: str) -> BackupPublicReason:
+def backup_public_reason_for_code(code: str) -> BackupPublicReason:
     return _STAGE_PUBLIC_REASONS.get(code, "backup_failed")
 
 
 def normalize_backup_public_reason(value: object) -> BackupPublicReason:
-    if isinstance(value, str) and value in _BACKUP_PUBLIC_REASONS:
+    if isinstance(value, str) and value in BACKUP_PUBLIC_REASONS:
         return cast(BackupPublicReason, value)
     return "backup_failed"
 
@@ -454,18 +459,17 @@ class BackupError(RuntimeError):
         code: str,
         *,
         public_reason: BackupPublicReason | None = None,
+        diagnostic: str | None = None,
     ) -> None:
-        # Derive the durable, secret-safe operator reason from the stage code
-        # unless a caller pins one explicitly (object-limit, transport). This
-        # keeps the failing stage diagnosable through `status` for every raise
-        # site — staged or direct — instead of collapsing to `backup_failed`.
-        if public_reason is None:
-            public_reason = _public_reason_for_code(code)
-        if public_reason not in _BACKUP_PUBLIC_REASONS:
+        resolved_reason = (
+            backup_public_reason_for_code(code) if public_reason is None else public_reason
+        )
+        if resolved_reason not in BACKUP_PUBLIC_REASONS:
             raise ValueError("backup public reason is not approved")
         super().__init__(code)
         self.code = code
-        self.public_reason = public_reason
+        self.public_reason = resolved_reason
+        self.diagnostic = diagnostic
 
 
 class BackupPolicyLimitError(BackupError, ValueError):
@@ -680,6 +684,14 @@ def _stage(code: str, operation: Callable[[], _T]) -> _T:
         result = operation()
     except BackupError:
         raise
+    except ReadonlyDatabaseTunnelError as exc:
+        if code == "object_inventory_failed":
+            inventory_code = {
+                "credential": "object_inventory_credentials_failed",
+                "transport": "object_inventory_transport_failed",
+                "timeout": "object_inventory_timeout",
+            }[exc.kind]
+            raise BackupError(inventory_code, diagnostic=exc.diagnostic) from None
     except Exception:
         pass
     else:
@@ -910,7 +922,7 @@ def _write_private_bytes(
         resources.release_entry(account)
         raise
     try:
-        os.fchmod(fd, _PRIVATE_FILE_MODE)
+        converge_new_private_file(fd, service_uid=os.geteuid())
         with os.fdopen(fd, "wb", closefd=False) as sink:
             guarded_sink = _BudgetedWriter(
                 sink,
@@ -1246,7 +1258,12 @@ class _CleanupTraversal:
                 raise ValueError("backup cleanup exceeded byte limit")
 
 
-def _require_cleanup_entry(metadata: os.stat_result, *, service_uid: int) -> None:
+def _require_cleanup_entry(
+    metadata: os.stat_result,
+    *,
+    service_uid: int,
+    allow_regular_hardlinks: bool = False,
+) -> None:
     if metadata.st_uid != service_uid:
         raise ValueError("backup cleanup entry owner does not match service account")
     mode = stat.S_IMODE(metadata.st_mode)
@@ -1255,7 +1272,7 @@ def _require_cleanup_entry(metadata: os.stat_result, *, service_uid: int) -> Non
             raise ValueError("backup cleanup directory mode must be 0700")
         return
     if stat.S_ISREG(metadata.st_mode):
-        if mode != _PRIVATE_FILE_MODE or metadata.st_nlink != 1:
+        if mode != _PRIVATE_FILE_MODE or (not allow_regular_hardlinks and metadata.st_nlink != 1):
             raise ValueError("backup cleanup file metadata is unsafe")
         return
     raise ValueError("backup cleanup tree contains a non-regular entry")
@@ -1267,6 +1284,7 @@ def _validate_cleanup_directory(
     service_uid: int,
     budget: _CleanupTraversal,
     depth: int,
+    allow_regular_hardlinks: bool = False,
 ) -> None:
     directory_metadata = os.fstat(directory_fd)
     _require_cleanup_entry(directory_metadata, service_uid=service_uid)
@@ -1281,7 +1299,11 @@ def _validate_cleanup_directory(
                 raise ValueError("backup cleanup exceeded directory entry limit")
     for name in names:
         metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        _require_cleanup_entry(metadata, service_uid=service_uid)
+        _require_cleanup_entry(
+            metadata,
+            service_uid=service_uid,
+            allow_regular_hardlinks=allow_regular_hardlinks,
+        )
         budget.check(metadata, depth=depth)
         if not stat.S_ISDIR(metadata.st_mode):
             continue
@@ -1295,6 +1317,7 @@ def _validate_cleanup_directory(
                 service_uid=service_uid,
                 budget=budget,
                 depth=depth + 1,
+                allow_regular_hardlinks=allow_regular_hardlinks,
             )
         finally:
             os.close(child_fd)
@@ -1306,6 +1329,8 @@ def _remove_cleanup_directory(
     service_uid: int,
     budget: _CleanupTraversal,
     depth: int,
+    allow_root_manifest: bool = False,
+    allow_regular_hardlinks: bool = False,
 ) -> None:
     directory_metadata = os.fstat(directory_fd)
     _require_cleanup_entry(directory_metadata, service_uid=service_uid)
@@ -1318,11 +1343,15 @@ def _remove_cleanup_directory(
             names.append(entry.name)
             if len(names) > budget.limits.max_directory_entries:
                 raise ValueError("backup cleanup exceeded directory entry limit")
-    if depth == 1 and "backup-manifest.json" in names:
+    if depth == 1 and "backup-manifest.json" in names and not allow_root_manifest:
         raise ValueError("manifest-backed backup cannot be cleaned")
     for name in names:
         metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        _require_cleanup_entry(metadata, service_uid=service_uid)
+        _require_cleanup_entry(
+            metadata,
+            service_uid=service_uid,
+            allow_regular_hardlinks=allow_regular_hardlinks,
+        )
         budget.check(metadata, depth=depth)
         if stat.S_ISDIR(metadata.st_mode):
             budget.check_deadline()
@@ -1336,6 +1365,8 @@ def _remove_cleanup_directory(
                     service_uid=service_uid,
                     budget=budget,
                     depth=depth + 1,
+                    allow_root_manifest=False,
+                    allow_regular_hardlinks=allow_regular_hardlinks,
                 )
             finally:
                 os.close(child_fd)
@@ -1513,7 +1544,7 @@ def _stream_s3_object(
             resources.release_entry(temp_account)
             raise
         temp_exists = True
-        os.fchmod(fd, _PRIVATE_FILE_MODE)
+        converge_new_private_file(fd, service_uid=os.geteuid())
         total_size = 0
         with os.fdopen(fd, "wb", closefd=True) as sink:
             fd = None
@@ -2098,6 +2129,8 @@ class BackupCreator:
         inode_reserve: int = _MINIO_INODE_RESERVE,
         capacity_provider: CapacityProvider = _capacity_snapshot,
         traversal_limits: BackupTraversalLimits | None = None,
+        object_inventory_provider: Callable[[datetime], ImmutableObjectInventory] | None = None,
+        publish_latest: bool = True,
     ) -> None:
         self.config = config
         if service_uid is None:
@@ -2140,8 +2173,128 @@ class BackupCreator:
             config,
             max_total_bytes=max_total_bytes,
         )
+        self._object_inventory_provider = object_inventory_provider
+        self._publish_latest = publish_latest
 
-    def _bundle_root(self, request: RolloutRequest, created_at: datetime) -> Path:
+    def latest_points_to(self, bundle_name: str) -> bool:
+        """Return whether a stable, private ``latest`` names one exact bundle.
+
+        This is intentionally metadata-only.  A safe exact match lets replay
+        avoid another full payload validation; missing ``latest`` returns
+        false so activation can converge it.  Every malformed, untrusted, or
+        racing pointer fails closed.
+        """
+        if _BUNDLE_NAME_RE.fullmatch(bundle_name) is None:
+            raise BackupError("backup_path_not_approved")
+        backups_fd: int | None = None
+        target_fd: int | None = None
+        try:
+            backups_fd = _open_directory_no_follow(self.config.rollout_root / "backups")
+            backups_metadata = os.fstat(backups_fd)
+            if not _existing_backups_directory_is_approved(
+                backups_metadata,
+                service_uid=self.service_uid,
+            ):
+                raise ValueError("backups directory metadata is not approved")
+            try:
+                latest_metadata = os.stat(
+                    "latest",
+                    dir_fd=backups_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return False
+            if (
+                not stat.S_ISLNK(latest_metadata.st_mode)
+                or latest_metadata.st_uid != self.service_uid
+                or latest_metadata.st_nlink != 1
+            ):
+                raise ValueError("latest backup pointer metadata is unsafe")
+            target = _read_previous_latest_target(backups_fd)
+            if target is None:
+                raise ValueError("latest backup pointer disappeared")
+            named_target_metadata = os.stat(
+                target,
+                dir_fd=backups_fd,
+                follow_symlinks=False,
+            )
+            target_fd = os.open(target, _directory_open_flags(), dir_fd=backups_fd)
+            target_metadata = os.fstat(target_fd)
+            if (
+                target_metadata.st_dev,
+                target_metadata.st_ino,
+            ) != (
+                named_target_metadata.st_dev,
+                named_target_metadata.st_ino,
+            ):
+                raise ValueError("latest backup target changed before opening")
+            _require_cleanup_entry(target_metadata, service_uid=self.service_uid)
+            if target_metadata.st_dev != backups_metadata.st_dev:
+                raise ValueError("latest backup pointer crosses a filesystem boundary")
+            observed = os.stat(
+                "latest",
+                dir_fd=backups_fd,
+                follow_symlinks=False,
+            )
+            if (observed.st_dev, observed.st_ino) != (
+                latest_metadata.st_dev,
+                latest_metadata.st_ino,
+            ) or os.readlink("latest", dir_fd=backups_fd) != target:
+                raise ValueError("latest backup pointer changed during validation")
+            final_target_metadata = os.stat(
+                target,
+                dir_fd=backups_fd,
+                follow_symlinks=False,
+            )
+            if (
+                final_target_metadata.st_dev,
+                final_target_metadata.st_ino,
+            ) != (target_metadata.st_dev, target_metadata.st_ino):
+                raise ValueError("latest backup target changed during validation")
+            return hmac.compare_digest(target, bundle_name)
+        except BackupError:
+            raise
+        except Exception:
+            raise BackupError("latest_publish_failed") from None
+        finally:
+            if target_fd is not None:
+                os.close(target_fd)
+            if backups_fd is not None:
+                os.close(backups_fd)
+
+    def activate(
+        self,
+        backup: VerifiedBackup,
+        *,
+        enforce_freshness: bool = True,
+    ) -> None:
+        """Atomically publish one restore-verified payload as legacy ``latest``.
+
+        Critical-checkpoint creation deliberately defers this compatibility
+        pointer until the detached restore rehearsal has passed and the
+        rotation state has promoted the payload.  Legacy callers keep the
+        historical create-time publication behavior by default.  Recovery may
+        replay an already-promoted active record after its lease has aged; that
+        path still verifies the exact manifest and payload integrity but does
+        not reuse the payload as fresh rollout authority.
+        """
+        self.revalidate(backup, enforce_freshness=enforce_freshness)
+        resources = _BackupResourceBudget(
+            self.config.rollout_root,
+            max_postgres_bytes=self._max_postgres_bytes,
+            max_total_bytes=self._max_total_bytes,
+            disk_reserve_bytes=self._disk_reserve_bytes,
+            inode_reserve=self._inode_reserve,
+            capacity_provider=self._capacity_provider,
+            max_entries=self._traversal_limits.max_entries,
+        )
+        _publish_latest_stage(backup.manifest_path.parent, resources=resources)
+
+    def _bundle_root(
+        self,
+        request: PreflightRequest | RolloutRequest,
+        created_at: datetime,
+    ) -> Path:
         return (
             self.config.rollout_root
             / "backups"
@@ -2186,7 +2339,7 @@ class BackupCreator:
             resources.release_entry(account)
             raise
         try:
-            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            converge_new_private_file(fd, service_uid=self.service_uid)
             with os.fdopen(fd, "wb", closefd=False) as sink:
                 guarded_sink = _BudgetedWriter(
                     sink,
@@ -2341,16 +2494,23 @@ class BackupCreator:
         minio_path: Path,
         secrets_path: Path,
         resources: _BackupResourceBudget,
+        object_inventory_path: Path | None = None,
     ) -> None:
+        components = {
+            "postgres": postgres_path,
+            "k8s_secrets": secrets_path,
+        }
+        if object_inventory_path is None:
+            components["minio"] = minio_path
+            schema_version = 1
+        else:
+            components["object_inventory"] = object_inventory_path
+            schema_version = 2
         write_backup_manifest(
             environment=self.config.environment,
             namespace=self.config.namespace,
             output_path=manifest_path,
-            components={
-                "postgres": postgres_path,
-                "minio": minio_path,
-                "k8s_secrets": secrets_path,
-            },
+            components=components,
             now=created_at,
             limits=self._traversal_limits,
             write_output=lambda path, payload: _write_private_bytes(
@@ -2359,6 +2519,7 @@ class BackupCreator:
                 resources=resources,
                 component="manifest",
             ),
+            schema_version=schema_version,
         )
         _fsync_private_file(manifest_path)
         _fsync_directory(manifest_path.parent)
@@ -2448,6 +2609,44 @@ class BackupCreator:
 
     def cleanup_incomplete(self, request_id: str, *, bundle_name: str | None = None) -> bool:
         """Remove only the no-manifest backup root bound to one failed request."""
+        return self._remove_bound_payload(
+            request_id,
+            bundle_name=bundle_name,
+            expected_manifest_sha256=None,
+        )
+
+    def retire_payload(
+        self,
+        request_id: str,
+        *,
+        bundle_name: str,
+        expected_manifest_sha256: str,
+    ) -> bool:
+        """Remove one exact non-latest manifest-backed payload after compaction.
+
+        The caller must first persist compact retirement evidence.  This method
+        revalidates the request/root/manifest identity immediately before and
+        during bounded no-follow deletion and is idempotent only after the
+        exact root has disappeared.
+        """
+        if len(expected_manifest_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_manifest_sha256
+        ):
+            raise BackupError("backup_retirement_manifest_invalid")
+        return self._remove_bound_payload(
+            request_id,
+            bundle_name=bundle_name,
+            expected_manifest_sha256=expected_manifest_sha256,
+        )
+
+    def _remove_bound_payload(
+        self,
+        request_id: str,
+        *,
+        bundle_name: str | None,
+        expected_manifest_sha256: str | None,
+    ) -> bool:
+        """Bounded no-follow removal for incomplete or retired exact payloads."""
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,79}", request_id):
             raise BackupError("backup_cleanup_request_invalid")
 
@@ -2527,15 +2726,30 @@ class BackupCreator:
                         follow_symlinks=False,
                     )
                 except FileNotFoundError:
-                    pass
+                    if expected_manifest_sha256 is not None:
+                        raise ValueError("retired backup manifest is missing") from None
                 else:
-                    del manifest_metadata
-                    raise ValueError("manifest-backed backup cannot be cleaned")
+                    if expected_manifest_sha256 is None:
+                        raise ValueError("manifest-backed backup cannot be cleaned")
+                    if not stat.S_ISREG(manifest_metadata.st_mode):
+                        raise ValueError("retired backup manifest is not a regular file")
+                    actual_manifest_sha256 = backup_manifest_sha256(
+                        backups_root / bundle_name / "backup-manifest.json",
+                        expected_owner_uid=self.service_uid,
+                        require_private_file=True,
+                        limits=self._traversal_limits,
+                    )
+                    if not hmac.compare_digest(
+                        actual_manifest_sha256,
+                        expected_manifest_sha256,
+                    ):
+                        raise ValueError("retired backup manifest digest drifted")
                 _validate_cleanup_directory(
                     bundle_fd,
                     service_uid=self.service_uid,
                     budget=traversal,
                     depth=1,
+                    allow_regular_hardlinks=expected_manifest_sha256 is not None,
                 )
                 current = os.stat(bundle_name, dir_fd=backups_fd, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) != (
@@ -2552,14 +2766,29 @@ class BackupCreator:
                         follow_symlinks=False,
                     )
                 except FileNotFoundError:
-                    pass
+                    if expected_manifest_sha256 is not None:
+                        raise ValueError("retired backup manifest disappeared") from None
                 else:
-                    raise ValueError("manifest-backed backup cannot be cleaned")
+                    if expected_manifest_sha256 is None:
+                        raise ValueError("manifest-backed backup cannot be cleaned")
+                    actual_manifest_sha256 = backup_manifest_sha256(
+                        backups_root / bundle_name / "backup-manifest.json",
+                        expected_owner_uid=self.service_uid,
+                        require_private_file=True,
+                        limits=self._traversal_limits,
+                    )
+                    if not hmac.compare_digest(
+                        actual_manifest_sha256,
+                        expected_manifest_sha256,
+                    ):
+                        raise ValueError("retired backup manifest digest drifted")
                 _remove_cleanup_directory(
                     bundle_fd,
                     service_uid=self.service_uid,
                     budget=traversal.fresh_pass(),
                     depth=1,
+                    allow_root_manifest=expected_manifest_sha256 is not None,
+                    allow_regular_hardlinks=expected_manifest_sha256 is not None,
                 )
                 traversal.check_deadline()
                 os.close(bundle_fd)
@@ -2580,11 +2809,16 @@ class BackupCreator:
                     os.close(bundle_fd)
                 os.close(backups_fd)
 
-        return _stage("backup_cleanup_failed", cleanup)
+        failure_code = (
+            "backup_cleanup_failed"
+            if expected_manifest_sha256 is None
+            else "backup_retirement_failed"
+        )
+        return _stage(failure_code, cleanup)
 
     def create(
         self,
-        request: RolloutRequest,
+        request: PreflightRequest | RolloutRequest,
         *,
         created_at: datetime | None = None,
     ) -> VerifiedBackup:
@@ -2624,25 +2858,68 @@ class BackupCreator:
         postgres_dir = bundle_root / "postgres"
         minio_dir = bundle_root / "minio"
         secrets_dir = bundle_root / "secrets"
-        for directory in (postgres_dir, minio_dir, secrets_dir):
+        component_directories = [postgres_dir, secrets_dir]
+        if self._object_inventory_provider is None:
+            component_directories.append(minio_dir)
+        for directory in component_directories:
             _stage(
                 "backup_root_create_failed",
                 partial(_private_directory, directory, resources=resources),
             )
 
-        buckets = _stage("minio_bucket_config_invalid", self._load_buckets)
-        transport_failed = False
-        try:
-            local_port, stop_port_forward = self._start_minio_transport()
-        except Exception:
-            transport_failed = True
-        if transport_failed:
-            raise BackupError(
-                "minio_transport_failed",
-                public_reason="backup_transport_failed",
-            )
-        operation_failure: BaseException | None = None
-        try:
+        object_inventory_path: Path | None = None
+        if self._object_inventory_provider is None:
+            buckets = _stage("minio_bucket_config_invalid", self._load_buckets)
+            transport_failed = False
+            try:
+                local_port, stop_port_forward = self._start_minio_transport()
+            except Exception:
+                transport_failed = True
+            if transport_failed:
+                raise BackupError(
+                    "minio_transport_failed",
+                    public_reason="backup_transport_failed",
+                )
+            operation_failure: BaseException | None = None
+            try:
+                _stage(
+                    "postgres_dump_failed",
+                    lambda: self._dump_postgres(
+                        postgres_dir / "loom.dump",
+                        resources=resources,
+                    ),
+                )
+                access_key, secret_key = _stage(
+                    "minio_credentials_failed",
+                    self._read_minio_credentials,
+                )
+                _stage(
+                    "minio_snapshot_failed",
+                    lambda: self._mirror_minio(
+                        minio_dir,
+                        local_port=local_port,
+                        stop_port_forward=stop_port_forward,
+                        buckets=buckets,
+                        access_key=access_key,
+                        secret_key=secret_key,
+                        resources=resources,
+                    ),
+                )
+            except BaseException as exc:
+                operation_failure = exc
+            cleanup_failed = False
+            try:
+                stop_port_forward()
+            except BaseException:
+                cleanup_failed = True
+            if cleanup_failed:
+                raise BackupError(
+                    "minio_transport_cleanup_failed",
+                    public_reason="backup_transport_failed",
+                )
+            if operation_failure is not None:
+                raise operation_failure
+        else:
             _stage(
                 "postgres_dump_failed",
                 lambda: self._dump_postgres(
@@ -2650,36 +2927,40 @@ class BackupCreator:
                     resources=resources,
                 ),
             )
-            access_key, secret_key = _stage(
-                "minio_credentials_failed",
-                self._read_minio_credentials,
+            inventory_provider = self._object_inventory_provider
+            if inventory_provider is None:
+                raise BackupError("object_inventory_provider_unavailable")
+            inventory = _stage(
+                "object_inventory_failed",
+                lambda: inventory_provider(created_at),
             )
+            if (
+                inventory.environment != self.config.environment
+                or inventory.namespace != self.config.namespace
+                or inventory.created_at != created_at
+            ):
+                raise BackupError("object_inventory_binding_failed")
+            object_inventory_path = bundle_root / "object-inventory.json"
+            payload = (
+                json.dumps(
+                    {
+                        **inventory.to_dict(),
+                        "inventory_root": inventory.inventory_root,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
             _stage(
-                "minio_snapshot_failed",
-                lambda: self._mirror_minio(
-                    minio_dir,
-                    local_port=local_port,
-                    stop_port_forward=stop_port_forward,
-                    buckets=buckets,
-                    access_key=access_key,
-                    secret_key=secret_key,
+                "object_inventory_write_failed",
+                lambda: _write_private_bytes(
+                    object_inventory_path,
+                    payload,
                     resources=resources,
+                    component="object_inventory",
                 ),
             )
-        except BaseException as exc:
-            operation_failure = exc
-        cleanup_failed = False
-        try:
-            stop_port_forward()
-        except BaseException:
-            cleanup_failed = True
-        if cleanup_failed:
-            raise BackupError(
-                "minio_transport_cleanup_failed",
-                public_reason="backup_transport_failed",
-            )
-        if operation_failure is not None:
-            raise operation_failure
         for secret_name in _RESTORE_SECRET_NAMES:
             _stage(
                 "secret_export_failed",
@@ -2703,6 +2984,7 @@ class BackupCreator:
                     minio_path=minio_dir,
                     secrets_path=secrets_dir,
                     resources=resources,
+                    object_inventory_path=object_inventory_path,
                 ),
             )
             validation_time = _stage(
@@ -2744,7 +3026,8 @@ class BackupCreator:
                     resources=resources,
                 ),
             )
-            _publish_latest_stage(bundle_root, resources=resources)
+            if self._publish_latest:
+                _publish_latest_stage(bundle_root, resources=resources)
         except _LatestStageError as exc:
             if exc.rollback_confirmed:
                 _remove_failed_manifests(pending_manifest_path, manifest_path)
@@ -2770,5 +3053,6 @@ __all__ = [
     "PortForwardHandle",
     "SubprocessBackupCommandRunner",
     "VerifiedBackup",
+    "backup_public_reason_for_code",
     "normalize_backup_public_reason",
 ]
