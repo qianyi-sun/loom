@@ -216,6 +216,42 @@ def test_validate_executable_shell_accepts_prefixed_javascript_and_css() -> None
     )
 
 
+def test_validate_executable_shell_accepts_staging_prefixed_assets() -> None:
+    # /staging is a first-class route surface (#857/#873), not just /dev + /prod.
+    shell = HttpResponse(
+        url="https://yylx.world/staging/",
+        status=200,
+        headers={"content-type": "text/html; charset=utf-8"},
+        body=(
+            b'<link rel="stylesheet" href="/staging/assets/index.css">'
+            b'<script type="module" src="/staging/assets/index.js"></script>'
+        ),
+    )
+    assets = [
+        HttpResponse(
+            url="https://yylx.world/staging/assets/index.js",
+            status=200,
+            headers={"content-type": "application/javascript"},
+            body=b"export {};",
+        ),
+        HttpResponse(
+            url="https://yylx.world/staging/assets/index.css",
+            status=200,
+            headers={"content-type": "text/css"},
+            body=b"#root {}",
+        ),
+    ]
+
+    assert (
+        validate_executable_shell(
+            route_url="https://yylx.world/staging",
+            shell=shell,
+            assets=assets,
+        )
+        == []
+    )
+
+
 def test_validate_executable_shell_rejects_asset_html_fallback() -> None:
     shell = HttpResponse(
         url="https://yylx.world/dev/",

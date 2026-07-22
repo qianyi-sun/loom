@@ -80,6 +80,60 @@ loom service up            # docker compose + migrations + token
 cd web && npm install && npm run dev
 ```
 
+## Frontend recovery contract
+
+The SPA must remain visible and recoverable when runtime config, browser
+session loading, the root render tree, or one routed page fails. Read
+[`frontend-error-recovery.md`](../architecture/frontend-error-recovery.md)
+before changing `web/src/main.tsx`, `web/src/bootstrap/FrontendBootstrap.tsx`,
+`web/src/auth/AuthContext.tsx`, the root/route boundaries, or their reporter.
+
+Keep these invariants when adding a new failure path:
+
+- Render fixed, kind-specific safe copy plus a generated `WEB-*` reference;
+  never render an API/browser error message or response body.
+- Keep raw URLs, query strings, tokens, cookies, CSRF values, stacks, component
+  stacks, and raw throwables out of both UI state and reporter payloads.
+- Treat only the exact `/api/v1/auth/me` `401` as `signed-out`. Network,
+  non-401 HTTP, `204`, malformed, and invalid-schema responses are
+  `unavailable`, not a reason to show a login form. A successful response must
+  include the declared identity, authorization, membership, and non-empty CSRF
+  fields; do not silently default a malformed session into authenticated state.
+- Treat an ambiguous response from login completion, password login, invite
+  acceptance, or team switching as `unavailable`: clear old authorization,
+  CSRF, and query trust, then reconcile through `/api/v1/auth/me`. The server
+  may have committed the session mutation before the response was lost.
+- Keep auth reads, session-producing mutations, and logout on the shared query
+  client's session-operation queue. Root recovery remounts must wait for an old
+  operation to settle and then read authoritative `/auth/me`; an older response
+  must never reinstall CSRF after an exact unauthorized event.
+- Offer Retry only when a fresh in-document attempt can work. A cached
+  `React.lazy` rejection must use `retryPolicy="reload-required"` and omit the
+  misleading Retry action.
+- Preserve route-aware Home (`/dev/`, `/prod/`, or `/`), keyboard focus, a
+  single `main#main-content`, and distinct reference/report correlation.
+- Keep `BrowserFailureReport` bounded to reference, allowlisted kind, redacted
+  pathname, and optional safe same-origin source position. The current reporter
+  is an in-memory hook, not a telemetry transport; do not attach the original
+  throwable when adding a transport later.
+
+Run the focused recovery tests before the full web suite:
+
+```bash
+cd web
+npm test -- \
+  src/__tests__/AuthContext.test.tsx \
+  src/__tests__/bootstrap/FrontendBootstrap.test.tsx \
+  src/__tests__/components/BrowserErrorBoundary.test.tsx \
+  src/__tests__/components/Layout.test.tsx \
+  src/__tests__/components/RecoveryPanel.test.tsx \
+  src/__tests__/components/RootErrorBoundary.test.tsx \
+  src/__tests__/components/RouteRecoveryBoundary.test.tsx
+npm test
+npm run lint
+npm run build
+```
+
 ## Tests
 
 Every PR and merge-group candidate reports four stable validation contexts:
@@ -99,6 +153,46 @@ fast-tier coverage summary. The mypy step uses a GitHub Actions cache for
 `.mypy_cache`; a restored cache is only a speed-up, not a replacement for
 running `uv run mypy`. `dev` pushes skip the Python gate because the
 squash-merged PR already produced the required context.
+
+Frontend, SPA image/runtime-config, and frontend gate changes additionally
+select the required `web-checks` job. `repository-checks` fails when that
+selected job fails or is missing. Reproduce the complete frontend gate with a
+frozen install:
+
+```bash
+cd web
+npm ci
+npm run typecheck
+npm run lint
+npm run test:coverage
+npm run build
+npx --no-install playwright install chromium
+npm run test:e2e
+```
+
+The Playwright command defaults to the local `/dev` prefix. To exercise the
+same generic production-build harness at the production basename without
+contacting a live environment, use:
+
+```bash
+LOOM_E2E_ROUTE_PREFIX=/prod npm run test:e2e
+```
+
+`LOOM_E2E_ORIGIN` may select a different localhost port. Both inputs are
+validated and never authorize staging or production access. The harness never
+reuses an existing server: if the selected local origin is occupied, stop that
+process or select another localhost port so Playwright can build and serve its
+own browser-test bundle.
+
+Vitest enforces statements, lines, and functions at 80% and branches at 75%;
+only the generated `src/api/schema.d.ts` production source is excluded. The
+Playwright gate serves the production build at `/dev` by default and supports
+the same local contract at `/prod`. It exercises logged-out, user, and admin
+routes at 1440x900 and 390x844, reloads deep links, and rejects empty roots,
+page errors, unexpected console output, same-origin request failures, failed
+browser assets, and script/style MIME mismatches. Axe must report zero serious
+or critical violations. Its exact request/response fixtures are local-only and
+contain no deployment credentials.
 
 ```bash
 uv run ruff check src tests packages migrations
@@ -135,13 +229,10 @@ filename shards and start directly after the planner, in parallel with the
 fast tier. The local commands remain serial equivalents so they are easy to
 reproduce.
 
-PR CI has two execution levels. Ordinary, non-draft PRs run the fast
-`repository-checks-preflight` lane and do not emit any branch-protection
-context. The merge coordinator applies the single-owner `ci:merge-ready` label
-only to the queue head; that candidate runs all selected validations and emits
-the four protected contexts. Removing that label or converting the candidate
-back to draft explicitly invalidates its protected contexts. Unrelated label
-changes and PR title/body edits run only the planner and a `*-filtered` check.
+Every relevant non-draft PR runs its path-selected validation plan and emits
+the four protected contexts. Drafts and unrelated metadata events use only a
+`*-filtered` context. No label, author, reviewer, or merge coordinator grants
+gate authority; validation labels only add work to the path-inferred plan.
 
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
@@ -155,7 +246,15 @@ query one path with:
 ```bash
 python3 scripts/component_ownership.py validate
 python3 scripts/component_ownership.py query tests/integration/test_trial_e2e_docker.py
+python3 scripts/component_ownership.py test-paths --lane frontend
 ```
+
+When the authority exposes its frontend-lane query, `web-checks` consumes that
+output instead of copying the owned web test patterns into the workflow. Until
+that command is available, the job runs the complete Vitest suite. The quality
+gate still owns thresholds, build/browser behavior, and the two specialized
+route-smoke unit harnesses; component and test ownership remains the manifest's
+responsibility.
 
 The validator fails for missing or ambiguous ownership, stale patterns,
 undeclared owner names, and a `pytest.mark.docker` module outside the Docker
@@ -181,8 +280,8 @@ pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
 dispatch is build-only. Only the checked-in `publish` job on a push to `dev` or
 `main` requests job-scoped `packages: write` authority and publishes multi-arch
-images. Advisory CODEOWNERS on `dev` does not stop a same-repository branch
-workflow from running; autonomous-agent hard isolation still requires
+images. Same-repository branch workflow code still runs on the read-only PR
+path; autonomous-agent hard isolation requires
 fork-only execution or an external trusted workflow/App.
 
 `staging-smoke-gate` proves the credential-free kind deployment smoke only. It
@@ -243,46 +342,38 @@ and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
 and follow the normal `dev` auto-merge policy.
 
-Only the current `dev` queue head carries `ci:merge-ready` and uses squash
-auto-merge. GitHub keeps that candidate queued until `repository-checks`, `images-gate`,
+Every non-draft `dev` PR uses squash auto-merge. The trusted base-branch
+controller enables it without checking out PR code or considering author or
+reviewer identity. GitHub keeps each candidate queued until `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate` are visible and successful on
 the current head SHA. Those four strict, GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
 approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
 
-`main` accepts only a production release promotion from `dev`. Qianyi
-(`@qianyi-sun`) personally reviews the fixed candidate and evidence and
-performs the manual squash merge. Never enable auto-merge for that PR. The
-repository-wide `allow_auto_merge` capability cannot express a `main`-only
-prohibition, so the release operator enforces this rule.
+`main` accepts only a production release promotion from `dev`. The same trusted
+controller enables squash auto-merge after release evidence is attached. The
+four current-head gates are the only merge authority; no human or CODEOWNER
+approval is required.
 
 Current `dev` branch-protection settings (verified by Task 6):
 - Squash-only (no rebase merge, no merge commits)
 - `required_linear_history: true`
 - `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate` are the required stable status checks
-- `allow_auto_merge: true`; the coordinator enables it together with
-  `ci:merge-ready` only for the queue head, and GitHub holds that candidate
-  until the policy above passes
+- `allow_auto_merge: true`; the trusted controller enables it for every
+  non-draft PR, and GitHub holds each candidate until the policy above passes
 - `enforce_admins: true` on `dev` - admins go through the gate too
-- no human approval, no CODEOWNER approval, and no conversation resolution;
-  CODEOWNERS is advisory routing on `dev`, not a merge gate
+- no human approval, no CODEOWNER approval, and no conversation resolution
 
 Current `main` promotion policy:
 
-- the four strict current-head checks remain required, along with the existing
-  generic one-approval, CODEOWNER-review, conversation-resolution, admin, and
-  linear-history protections;
-- Qianyi reviews the candidate/evidence and manually squash merges; auto-merge
-  is never enabled;
-- GitHub evaluates the target branch's CODEOWNERS. The first promotion that
-  carries the Qianyi-only catch-all still sees `main`'s invalid legacy
-  `@carinrc` owners, so its generic one-approval rule and Qianyi's manual
-  process are the bootstrap controls. A non-Qianyi identity or future
-  restricted bot should author that PR because GitHub users cannot approve
-  their own pull requests. Later promotions require Qianyi's CODEOWNER
-  approval.
+- the four strict current-head checks, admin enforcement, and linear history
+  remain required;
+- human approval, CODEOWNER review, and conversation resolution are not merge
+  gates;
+- only a same-repository `dev` -> `main` promotion is eligible for the trusted
+  auto-merge controller.
 
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and

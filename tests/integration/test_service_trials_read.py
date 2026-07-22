@@ -738,7 +738,7 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
                 version="test",
                 capabilities=[],
                 max_concurrent=1,
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 registered_at=now - timedelta(minutes=5),
                 last_seen_at=now - timedelta(seconds=5),
                 status="active",
@@ -887,7 +887,7 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
     assert body["lifecycle"]["runtime_sec"] is not None
     assert body["agent"]["timeout"]["agent_timeout_sec"] == 2400.0
     assert body["worker"]["worker_id"] == str(worker_id)
-    assert body["worker"]["pool_name"] == "gb10-arm64"
+    assert body["worker"]["pool_name"] == "gb10"
     assert body["worker"]["heartbeat_fresh"] is True
     assert body["activity"]["last_trial_event"]["kind"] == "stdout"
     assert body["activity"]["last_trial_event"]["seq"] == 7

@@ -8,7 +8,7 @@ from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 def _active_node(hostname: str) -> dict[str, Any]:
     return {
         "environment": "staging",
-        "pool_name": "gb10-arm64",
+        "pool_name": "gb10",
         "hostname": hostname,
         "apply_state": "applied",
         "current_image_tag": "staging-abc1234",
@@ -34,7 +34,7 @@ def _status_with_excluded_node(node7: dict[str, Any] | None) -> dict[str, Any]:
         "desired_states": [
             {
                 "environment": "staging",
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
                 "image_tag": "staging-abc1234",
                 "max_concurrent": 10,
                 "env_config_version": "staging-abc1234",
@@ -125,7 +125,7 @@ def test_release_gate_rejects_duplicate_node_evidence() -> None:
         release_env_config_version="staging-abc1234",
     )
 
-    assert mismatches == ["nodes contains duplicate staging/gb10-arm64/trt-gb10-1"]
+    assert mismatches == ["nodes contains duplicate staging/gb10/trt-gb10-1"]
 
 
 def test_release_gate_rejects_node_source_with_suffix_after_full_desired_sha() -> None:
@@ -148,7 +148,7 @@ def test_release_gate_rejects_fresh_worker_without_node_status() -> None:
         {
             "worker_id": "worker-node7-direct",
             "hostname": "trt-gb10-7",
-            "pool_name": "gb10-arm64",
+            "pool_name": "gb10",
             "worker_status": "active",
             "worker_fresh": True,
             "worker_drain_state": "active",
@@ -172,7 +172,7 @@ def test_release_gate_rejects_second_fresh_registration_for_active_host() -> Non
         {
             "worker_id": "worker-node1-duplicate",
             "hostname": "trt-gb10-1",
-            "pool_name": "gb10-arm64",
+            "pool_name": "gb10",
             "worker_status": "active",
             "worker_fresh": True,
             "worker_drain_state": "active",
@@ -208,7 +208,7 @@ def test_release_gate_rejects_unlinked_worker_without_boolean_freshness() -> Non
         {
             "worker_id": "worker-node7-direct",
             "hostname": "trt-gb10-7",
-            "pool_name": "gb10-arm64",
+            "pool_name": "gb10",
             "worker_fresh": "true",
         }
     ]
@@ -245,7 +245,7 @@ def test_release_gate_rejects_worker_id_in_node_and_unlinked_inventory() -> None
         {
             "worker_id": status["nodes"][0]["worker_id"],
             "hostname": "trt-gb10-7",
-            "pool_name": "gb10-arm64",
+            "pool_name": "gb10",
             "worker_fresh": False,
         }
     ]

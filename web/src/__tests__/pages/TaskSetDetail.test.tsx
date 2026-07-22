@@ -40,7 +40,7 @@ function renderPage(initialPath = "/task-sets/task-set-1"): void {
   });
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[initialPath]}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[initialPath]}>
         <Routes>
           <Route path="/task-sets/:id" element={<TaskSetDetail />} />
         </Routes>

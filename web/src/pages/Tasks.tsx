@@ -32,25 +32,6 @@ import {
 import { SubmitTrialModal } from "../components/SubmitTrialModal";
 import { cn } from "../lib/cn";
 
-// The /api/v1/tasks shape includes fields not yet exposed in the
-// generated schema (name, description, agent_name, verifier_name,
-// step_count). Hand-rolled until the next openapi-typescript run.
-interface TaskRow {
-  id: string;
-  name: string | null;
-  description: string | null;
-  agent_name: string | null;
-  verifier_name: string | null;
-  step_count: number;
-  benchmark_id: string | null;
-  source: string | null;
-}
-
-interface TaskListResponse {
-  items: TaskRow[];
-  next_cursor: string | null;
-}
-
 function Badge({
   children,
   tone = "slate",
@@ -95,7 +76,7 @@ export default function Tasks(): JSX.Element {
         q: search.trim() || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
-      }) as Promise<TaskListResponse>,
+      }),
   });
 
   const benchmarkOptions = useMemo(() => {

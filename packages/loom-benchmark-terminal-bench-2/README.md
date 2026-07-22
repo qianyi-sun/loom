@@ -50,7 +50,11 @@ options are preserved as primary sandbox create options in the generated
 `/app/environment/tb2-tests`, sets `TEST_DIR` for the primary container, and
 uses a script verifier at `/app/verifier/run.sh` that executes upstream
 `run-tests.sh` with `bash` and emits Loom `VerifierResult` JSON through
-`LOOM_VERIFIER_OUTPUT`.
+`LOOM_VERIFIER_OUTPUT`. The bridge resolves its workspace from
+`LOOM_TASK_DIR` (with `/app` only as the legacy default), keeps test output
+visible to the verifier caller, and writes a best-effort, 1 MiB-capped
+`pytest.log` plus schema-versioned metadata under
+`$LOOM_TASK_DIR/.loom/verifier/` for raw-Harbor delivery auditing.
 
 For deterministic oracle smokes, the adapter stages upstream reference
 solutions under `solution/`. TB-2 tasks may ship either `solution.sh` or

@@ -15,7 +15,6 @@ HEAVY_CHECKS = (
 )
 
 SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch"}
-FULL_GATE_LABEL = "ci:merge-ready"
 
 LABEL_TO_CHECK = {
     "ci:integration": "integration",
@@ -62,6 +61,9 @@ PROTECTED_STAGING_ROLLOUT_EXACT = {
     "deploy/worker-pools/gb10/known_hosts",
     "deploy/worker-pools/gb10/ssh_config",
     "scripts/ops/verify_staging_rollout_secret_boundary.py",
+    "src/loom_cli/rollout/steps/s04_gb10_prep.py",
+    "src/loom_cli/rollout/steps/s10_env_state.py",
+    "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
     "tests/loom_cli/test_cluster_render.py",
     "tests/loom_cli/test_environment_state.py",
 }
@@ -88,6 +90,7 @@ class ValidationPlan:
     cluster_smoke: bool
     staging_smoke: bool
     coverage_summary: bool
+    web_checks: bool
     reasons: dict[str, tuple[str, ...]]
 
     def selected_heavy_checks(self) -> set[str]:
@@ -103,6 +106,7 @@ class ValidationPlan:
                 "unowned_runtime",
                 *HEAVY_CHECKS,
                 "coverage_summary",
+                "web_checks",
             )
         }
         outputs["gate_mode"] = self.gate_mode
@@ -120,27 +124,17 @@ def _pull_request_gate_mode(
 ) -> tuple[bool, bool, str]:
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
-    Only the coordinator-owned ``ci:merge-ready`` label authorizes a PR to
-    emit the four protected contexts. Drafts are filtered; non-queue-head PRs
-    retain a fast preflight without producing names branch protection accepts.
-    Removing merge readiness or converting a labeled PR back to draft emits an
-    explicit protected-context failure so a prior green result on the same SHA
-    cannot remain merge-authoritative.
+    Every relevant non-draft PR event emits the four protected contexts. Drafts
+    and unrelated metadata changes are filtered. Validation labels remain
+    additive selectors, but no label, author, reviewer, or coordinator grants
+    merge authority.
     """
 
-    label_set = set(labels)
-    full_gate = FULL_GATE_LABEL in label_set and not draft
-    relevant_labels = {*LABEL_TO_CHECK, FULL_GATE_LABEL}
-
-    if action == "unlabeled" and action_label == FULL_GATE_LABEL:
-        return True, False, "invalidate"
-    if action == "converted_to_draft" and FULL_GATE_LABEL in label_set:
-        return True, False, "invalidate"
     if draft:
         return False, False, "filtered"
 
     if action in {"labeled", "unlabeled"}:
-        event_relevant = action_label in relevant_labels
+        event_relevant = action_label in LABEL_TO_CHECK
     elif action == "edited":
         event_relevant = base_changed
     else:
@@ -152,10 +146,8 @@ def _pull_request_gate_mode(
         }
 
     if not event_relevant:
-        return False, full_gate, "filtered"
-    if full_gate:
-        return True, True, "full"
-    return True, False, "preflight"
+        return False, False, "filtered"
+    return True, True, "full"
 
 
 def _is_documentation_path(path: str) -> bool:
@@ -206,7 +198,9 @@ def plan_validations(
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
-    selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary")}
+    selected = {
+        name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")
+    }
     reasons: dict[str, list[str]] = {name: [] for name in selected}
 
     def select(name: str, reason: str) -> None:
@@ -216,6 +210,7 @@ def plan_validations(
     if event_name == "merge_group":
         for name in HEAVY_CHECKS:
             select(name, "merge_group")
+        select("web_checks", "merge_group")
 
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
@@ -336,6 +331,15 @@ def plan_validations(
         "packages/",
         "web/",
     )
+    web_quality_exact = {
+        ".github/workflows/ci.yml",
+        "config/component-ownership.toml",
+        "deploy/Dockerfile.web",
+        "deploy/nginx-spa.conf",
+        "deploy/nginx-spa-security-headers.conf",
+        "deploy/web-runtime-config.sh",
+        "scripts/component_ownership.py",
+    }
 
     for path in paths:
         if _is_documentation_path(path):
@@ -363,6 +367,9 @@ def plan_validations(
         if _matches(path, exact=staging_exact, prefixes=staging_prefixes):
             select("staging_smoke", f"path:{path}")
             matched_owner = True
+        if path.startswith("web/") or path in web_quality_exact:
+            select("web_checks", f"path:{path}")
+            matched_owner = True
         if not matched_owner:
             unowned_runtime = True
             reason = f"unowned-runtime-path:{path}"
@@ -387,6 +394,7 @@ def plan_validations(
         cluster_smoke=selected["cluster_smoke"],
         staging_smoke=selected["staging_smoke"],
         coverage_summary=selected["coverage_summary"],
+        web_checks=selected["web_checks"],
         reasons={name: tuple(values) for name, values in reasons.items()},
     )
 

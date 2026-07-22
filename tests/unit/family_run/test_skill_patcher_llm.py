@@ -84,6 +84,8 @@ class _FakeGateway:
         dialect: str,
         max_tokens: int,
         timeout_sec: float,
+        team_id: str,
+        trial_id: str,
         provider_connection_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
@@ -93,6 +95,8 @@ class _FakeGateway:
                 "dialect": dialect,
                 "max_tokens": max_tokens,
                 "timeout_sec": timeout_sec,
+                "team_id": team_id,
+                "trial_id": trial_id,
                 "provider_connection_id": provider_connection_id,
             },
         )
@@ -110,6 +114,7 @@ def _fake_response(patch: dict[str, Any]) -> dict[str, Any]:
 @dataclass
 class _Trial:
     id: object = field(default_factory=uuid4)
+    team_id: object = field(default_factory=uuid4)
     task_id: str = "family_a/task_1"
     state: str = "succeeded"
     reward: float | None = 1.0

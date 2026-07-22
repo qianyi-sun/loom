@@ -34,6 +34,9 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX",
     "LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC",
     "LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC",
+    "LOOM_WORKER_CONTAINER_CPUS",
+    "LOOM_WORKER_CONTAINER_MEMORY_MIB",
+    "LOOM_WORKER_CONTAINER_PIDS",
     "HF_TOKEN",
 ]
 
@@ -65,7 +68,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT", "2")
     monkeypatch.setenv("LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC", "12.5")
     monkeypatch.setenv("LOOM_WORKER_MAX_CONCURRENT", "10")
-    monkeypatch.setenv("LOOM_WORKER_POOL_NAME", "gb10-arm64")
+    monkeypatch.setenv("LOOM_WORKER_POOL_NAME", "gb10")
     monkeypatch.setenv("LOOM_WORKER_BLOCKING_IO_MAX_WORKERS", "40")
     monkeypatch.setenv("LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS", "300")
     monkeypatch.setenv("LOOM_WORKER_TRAJECTORY_CACHE_DIR", str(tmp_path))
@@ -82,7 +85,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     )
     s = WorkerSettings(_env_file=None)
     assert s.max_concurrent == 10
-    assert s.pool_name == "gb10-arm64"
+    assert s.pool_name == "gb10"
     assert s.minio_max_pool_connections == 512
     assert s.minio_connect_timeout_sec == 7.5
     assert s.minio_read_timeout_sec == 180
@@ -126,6 +129,41 @@ def test_idle_exit_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert s.setup_health_dstate_max == 32
     assert s.setup_health_wait_timeout_sec == 300.0
     assert s.setup_health_poll_interval_sec == 5.0
+
+
+def test_container_caps_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #896: per-container caps parse from LOOM_WORKER_CONTAINER_* env.
+    monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp:8080")
+    monkeypatch.setenv("LOOM_WORKER_GATEWAY_URL", "http://gw:9100")
+    monkeypatch.setenv("LOOM_WORKER_TOKEN", "loom_w_test")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_ENDPOINT", "http://m:9000")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_ACCESS_KEY", "x")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "y")
+    monkeypatch.setenv("LOOM_WORKER_CONTAINER_CPUS", "4.0")
+    monkeypatch.setenv("LOOM_WORKER_CONTAINER_MEMORY_MIB", "512")
+    monkeypatch.setenv("LOOM_WORKER_CONTAINER_PIDS", "256")
+
+    s = WorkerSettings(_env_file=None)
+
+    assert s.container_cpus == 4.0
+    assert s.container_memory_mib == 512
+    assert s.container_pids == 256
+
+
+def test_container_caps_default_unbounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #896: absent env → 0/unbounded so exclusive pools are unchanged.
+    monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp:8080")
+    monkeypatch.setenv("LOOM_WORKER_GATEWAY_URL", "http://gw:9100")
+    monkeypatch.setenv("LOOM_WORKER_TOKEN", "loom_w_test")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_ENDPOINT", "http://m:9000")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_ACCESS_KEY", "x")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "y")
+
+    s = WorkerSettings(_env_file=None)
+
+    assert s.container_cpus == 0.0
+    assert s.container_memory_mib == 0
+    assert s.container_pids == 0
 
 
 def test_token_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:

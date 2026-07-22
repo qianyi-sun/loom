@@ -37,6 +37,16 @@ services:
       - LOOM_WORKER_LOG_LEVEL=${LOOM_WORKER_LOG_LEVEL:-info}
       - LOOM_WORKER_TRAJECTORY_CACHE_DIR=/var/lib/loom/trajectories
       - LOOM_WORKER_BENCHMARK_CACHE=/var/lib/loom/benchmarks
+      # #896: pass the per-container caps into the worker PROCESS so
+      # WorkerSettings picks them up and re-applies them to the trial +
+      # setup-sidecar containers it creates. Default 0 == the schema
+      # default (unbounded); it must be numeric, not empty, because the
+      # WorkerSettings float/int fields cannot parse an empty string. This
+      # is separate from the compose-level cpus/mem_limit/pids_limit that
+      # bound THIS container.
+      - LOOM_WORKER_CONTAINER_CPUS=${LOOM_WORKER_CONTAINER_CPUS:-0}
+      - LOOM_WORKER_CONTAINER_MEMORY_MIB=${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}
+      - LOOM_WORKER_CONTAINER_PIDS=${LOOM_WORKER_CONTAINER_PIDS:-0}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - remote_worker_trajectories:/var/lib/loom/trajectories
@@ -45,6 +55,12 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    # #896: per-container hard caps for non-exclusive (packed) workers. Defaults
+    # are unbounded (cpus 0 / mem 0m / pids -1 all mean "no limit" to Docker), so
+    # exclusive pools that never set LOOM_WORKER_CONTAINER_* are unchanged.
+    cpus: ${LOOM_WORKER_CONTAINER_CPUS:-0}
+    mem_limit: ${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}m
+    pids_limit: ${LOOM_WORKER_CONTAINER_PIDS:--1}
     restart: on-failure
 
 volumes:

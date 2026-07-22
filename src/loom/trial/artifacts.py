@@ -56,13 +56,23 @@ class ArtifactCollector:
         env: Driver,
         patterns: Sequence[str],
         required_patterns: Sequence[str] = (),
+        platform_patterns: Sequence[str] = (),
     ) -> ArtifactCollection:
         self.local_root.mkdir(parents=True, exist_ok=True)
         artifacts: list[CollectedArtifact] = []
         missing_required: list[str] = []
         required = set(required_patterns)
         seen: set[str] = set()
-        for pattern in _ordered_unique((*patterns, *required_patterns)):
+        pattern_specs = [
+            (pattern, False)
+            for pattern in _ordered_unique((*patterns, *required_patterns))
+        ]
+        pattern_specs.extend(
+            (pattern, True) for pattern in _ordered_unique(platform_patterns)
+        )
+        for pattern, allow_reserved_verifier in pattern_specs:
+            if allow_reserved_verifier and not _is_exact_verifier_pattern(pattern):
+                continue
             anchored = f"{self.workspace_root.as_posix()}/{pattern}"
             cmd = (
                 f"find {shlex.quote(self.workspace_root.as_posix())} "
@@ -79,6 +89,10 @@ class ArtifactCollector:
                     continue
                 p = PurePosixPath(sandbox_path.decode())
                 rel = p.relative_to(self.workspace_root)
+                if allow_reserved_verifier and rel.as_posix() != pattern:
+                    continue
+                if _is_reserved_verifier_path(rel) and not allow_reserved_verifier:
+                    continue
                 matched = True
                 if rel.as_posix() in seen:
                     continue
@@ -123,3 +137,17 @@ def _ordered_unique(values: Sequence[str]) -> list[str]:
         seen.add(value)
         out.append(value)
     return out
+
+
+def _is_reserved_verifier_path(path: PurePosixPath) -> bool:
+    parts = path.parts
+    return len(parts) >= 2 and parts[:2] == (".loom", "verifier")
+
+
+def _is_exact_verifier_pattern(pattern: str) -> bool:
+    path = PurePosixPath(pattern)
+    return (
+        path.as_posix() == pattern
+        and _is_reserved_verifier_path(path)
+        and not any(char in pattern for char in "*?[")
+    )

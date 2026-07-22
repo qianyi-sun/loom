@@ -172,9 +172,10 @@ the benchmark when `script_path` is absent. If the generated script wraps an
 upstream `tests/test.sh`, run that upstream script from the materialized task
 root rather than from the verifier directory or an inherited cwd, because many
 third-party test scripts resolve inputs and expected outputs with relative
-paths. Wrappers should also preserve useful upstream logs, for example by
-copying a bounded `/logs/verifier/output.log` tail into the structured
-verifier payload.
+paths. Do not copy raw log tails into the structured verifier payload. Loom's
+shared verifier-artifact channel retains bounded raw stdout/stderr under exact
+`.loom/verifier/` artifact names and places only a bounded redacted summary and
+artifact refs in the reserved `loom_verifier_audit` namespace.
 
 `environment.docker_build_context` lets an adapter keep Docker build-only
 files under a subdirectory such as `.loom-build/client`. The worker builds from

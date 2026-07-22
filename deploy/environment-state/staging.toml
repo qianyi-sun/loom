@@ -11,7 +11,7 @@ environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
 # #822: active capacity is 14 hosts / 140 slots; node 7 remains stopped below.
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 min_slots = 0
@@ -44,7 +44,7 @@ allowed_nodes = [
   "trt-gb10-15",
 ]
 env_file = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-${IMAGE_TAG}.env"
-repo_dir = "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}"
+repo_dir = "/shared_work/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
@@ -55,7 +55,7 @@ exclusive = true
 external_runner = true
 
 [[gb10_worker_pool_desired_states]]
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
@@ -119,9 +119,30 @@ rate_card_provider = "yibuapi"
 required = true
 
 [external_slurm_runner_prerequisites]
-pools = ["gb10-arm64"]
+pools = ["gb10"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true
 materialize = true
 env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
+
+# --- External autoscaler supervisor (systemd --user timer) -------------------
+# Renders a `systemctl --user` service+timer that periodically runs
+# scripts/ops/worker_pool_autoscaler_external_once.py for the GB10 pool. The
+# --db-local-port values follow the reserved per-env/per-pool scheme so no two
+# supervisors on the same host collide:
+#   oldlab  dev/staging/prod = 15447 / 15448 / 15449
+#   gb10    dev/staging/prod = 15450 / 15451 / 15452
+# Staging is a live environment, so this ships enabled=true + active=true:
+# applying the profile installs, enables (for boot) and starts the timer.
+[[external_slurm_autoscaler_supervisors]]
+name = "gb10-staging"
+pool_name = "gb10"
+service_name = "loom-autoscaler-gb10-staging.service"
+timer_name = "loom-autoscaler-gb10-staging.timer"
+working_directory = "/opt/loom-staging-runner/repo"
+python_path = "/opt/loom-staging-runner/venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "gb10", "--namespace", "loom-staging", "--kubeconfig", "/etc/loom/kubeconfig/staging.yaml", "--db-local-port", "15451", "--freshness-sec", "120"]
+enabled = true
+active = true

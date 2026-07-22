@@ -14,6 +14,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 const ownerMe = {
   user: {
     id: "owner-user",
+    username: "Owner",
     email: "owner@example.com",
     display_name: "Owner Example",
     is_platform_admin: false,
@@ -120,7 +121,7 @@ function overview(overrides: Record<string, unknown> = {}) {
 }
 
 function mockHomeFetch(payload = overview()) {
-  vi.spyOn(global, "fetch").mockImplementation(
+  vi.spyOn(globalThis, "fetch").mockImplementation(
     async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/v1/auth/me")) {

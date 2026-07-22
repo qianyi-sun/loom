@@ -70,8 +70,7 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
     )
     assert _checkout_steps(build)
     assert all(
-        step.get("with", {}).get("persist-credentials") is False
-        for step in _checkout_steps(build)
+        step.get("with", {}).get("persist-credentials") is False for step in _checkout_steps(build)
     )
 
     script = "\n".join(_run_blocks(build))
@@ -131,12 +130,8 @@ def test_images_manual_dispatch_is_build_only() -> None:
     publish = workflow["jobs"]["publish"]
 
     assert "workflow_dispatch" in on_config
-    assert _normalized_expression(build["if"]).startswith(
-        "github.event_name != 'push' &&"
-    )
-    assert _normalized_expression(publish["if"]).startswith(
-        "github.event_name == 'push' &&"
-    )
+    assert _normalized_expression(build["if"]).startswith("github.event_name != 'push' &&")
+    assert _normalized_expression(publish["if"]).startswith("github.event_name == 'push' &&")
 
 
 def test_images_permissions_are_an_exact_job_allowlist() -> None:
@@ -445,12 +440,5 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
     assert result.returncode == 0, result.stderr
 
 
-def test_secret_isolation_contract_is_covered_by_advisory_catch_all() -> None:
-    codeowners = (REPO_ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
-    entries = {
-        line.strip()
-        for line in codeowners.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    assert entries == {"* @qianyi-sun"}
-    assert "not a `dev` merge gate" in codeowners
+def test_secret_isolation_contract_does_not_depend_on_one_reviewer() -> None:
+    assert not (REPO_ROOT / ".github/CODEOWNERS").exists()

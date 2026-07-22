@@ -299,6 +299,10 @@ class _FakeSettings:
     # reads it to construct the LocalTrialRunner.
     sandbox_step_jwt_ttl_sec = 600
     docker_api_timeout_sec = 1800
+    # #896: per-container caps threaded into LocalTrialRunner (0 = unbounded).
+    container_cpus = 0.0
+    container_memory_mib = 0
+    container_pids = 0
     # #360 / #378: cancellation watchdog config. Fast poll and permissive
     # deadline so tests don't trigger the backstop.
     trial_cancel_poll_interval_sec = 0.05

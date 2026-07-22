@@ -53,7 +53,7 @@ describe("AdminAccess", () => {
 
   it("reviews registrations and reveals approved invite link once", async () => {
     window.localStorage.setItem("loom_token", "loom_admin_secret");
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -330,7 +330,7 @@ describe("AdminAccess", () => {
   });
 
   it("shows pending username account approvals on the default requests tab", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(
+    vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -404,7 +404,7 @@ describe("AdminAccess", () => {
   });
 
   it("approves username accounts and password resets with manual links", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -535,7 +535,7 @@ describe("AdminAccess", () => {
 
   it("keeps invite links visible when multiple registrations are approved", async () => {
     window.localStorage.setItem("loom_token", "loom_admin_secret");
-    vi.spyOn(global, "fetch").mockImplementation(
+    vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -693,7 +693,7 @@ describe("AdminAccess", () => {
   });
 
   it("creates invites with a team selector instead of raw team ids", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -800,7 +800,7 @@ describe("AdminAccess", () => {
       apiBase: "/dev",
       apiRouteBase: `${window.location.origin}/dev/api`,
     });
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -947,7 +947,7 @@ describe("AdminAccess", () => {
   });
 
   it("lets team owners manage invites and tokens without platform-admin registration calls", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {

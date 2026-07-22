@@ -311,17 +311,12 @@ def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
 
     for job_name, step_name in expected_steps.items():
         step = next(
-            step
-            for step in workflow["jobs"][job_name]["steps"]
-            if step.get("name") == step_name
+            step for step in workflow["jobs"][job_name]["steps"] if step.get("name") == step_name
         )
         script = step["run"]
         assert step["env"]["HEAD_SHA"] == "${{ github.sha }}"
         assert step["env"]["BUILD_CONTEXT"] == "${{ matrix.context }}"
-        assert (
-            '--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"'
-            in script
-        )
+        assert '--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"' in script
         assert 'build_args+=("$BUILD_CONTEXT")' in script
         assert script.index("LOOM_BUILD_SHA=${HEAD_SHA}") < script.index(
             'build_args+=("$BUILD_CONTEXT")'
@@ -363,16 +358,16 @@ def test_protected_workflows_cover_gate_authority_pr_transitions() -> None:
         } <= set(pull_request["types"]), workflow_path
 
 
-def test_manual_aggregate_contexts_have_distinct_event_specific_names() -> None:
+def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> None:
     for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
         workflow = _workflow(workflow_path)
         gate_name = workflow["jobs"][gate_id]["name"]
 
         assert f"'{protected_name}-manual'" in gate_name
         assert f"'{protected_name}'" in gate_name
-        assert f"'{protected_name}-preflight'" in gate_name
         assert f"'{protected_name}-filtered'" in gate_name
-        assert "gate_mode == 'invalidate'" in gate_name
+        assert "preflight" not in gate_name
+        assert "invalidate" not in gate_name
 
 
 @pytest.mark.parametrize("required", ["", "invalid"])
@@ -545,6 +540,7 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
         "INTEGRATION_SELECTED",
         "DOCKER_SELECTED",
         "COVERAGE_SELECTED",
+        "WEB_SELECTED",
     ],
 )
 def test_repository_checks_fails_closed_for_invalid_planner_booleans(
@@ -563,6 +559,8 @@ def test_repository_checks_fails_closed_for_invalid_planner_booleans(
         "DOCKER_RESULT": "skipped",
         "COVERAGE_SELECTED": "false",
         "COVERAGE_RESULT": "skipped",
+        "WEB_SELECTED": "false",
+        "WEB_RESULT": "skipped",
     }
     env[planner_name] = planner_value
 
@@ -604,6 +602,8 @@ def test_repository_checks_preserves_result_semantics(
             "DOCKER_RESULT": validation_result,
             "COVERAGE_SELECTED": selected,
             "COVERAGE_RESULT": validation_result,
+            "WEB_SELECTED": selected,
+            "WEB_RESULT": validation_result,
         },
         check=False,
     )
@@ -679,7 +679,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "tests-packages",
     }
     assert "gate_mode == 'full'" in jobs["fast-checks"]["if"]
-    assert "gate_mode == 'preflight'" in jobs["fast-checks"]["if"]
+    assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
     assert jobs["integration"]["needs"] == "workflow-plan"
     assert jobs["integration-docker"]["needs"] == "workflow-plan"
     assert "gate_mode == 'full'" in jobs["integration"]["if"]
@@ -692,6 +692,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "integration",
         "integration-docker",
         "coverage-summary",
+        "web-checks",
     }
     assert "always()" in jobs["repository-checks"]["if"]
     assert jobs["lint-and-static"]["needs"] == "workflow-plan"
@@ -709,6 +710,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "cluster_smoke",
         "staging_smoke",
         "coverage_summary",
+        "web_checks",
     } <= set(jobs["workflow-plan"]["outputs"])
 
     aggregate_step = next(
@@ -728,6 +730,8 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "DOCKER_RESULT": "${{ needs.integration-docker.result }}",
         "COVERAGE_SELECTED": "${{ needs.workflow-plan.outputs.coverage_summary }}",
         "COVERAGE_RESULT": "${{ needs.coverage-summary.result }}",
+        "WEB_SELECTED": "${{ needs.workflow-plan.outputs.web_checks }}",
+        "WEB_RESULT": "${{ needs.web-checks.result }}",
     }
     aggregate_script = aggregate_step["run"]
     for result_name in (
@@ -737,8 +741,23 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "INTEGRATION_RESULT",
         "DOCKER_RESULT",
         "COVERAGE_RESULT",
+        "WEB_RESULT",
     ):
         assert f'"${result_name}"' in aggregate_script
+
+    assert jobs["web-checks"]["needs"] == "workflow-plan"
+    assert "needs.workflow-plan.outputs.web_checks == 'true'" in jobs["web-checks"]["if"]
+    web_script = "\n".join(
+        step.get("run", "") for step in jobs["web-checks"]["steps"] if "run" in step
+    )
+    assert "component_ownership.py test-paths --lane frontend" in web_script
+    assert "component_ownership.py --help | grep -q -- 'test-paths'" in web_script
+    assert "npm run typecheck" in web_script
+    assert "npm run lint" in web_script
+    assert "vitest run --coverage" in web_script
+    assert "npm run test:coverage" in web_script
+    assert "npm run build" in web_script
+    assert "npm run test:e2e" in web_script
 
 
 def test_python_test_shards_are_complete_and_non_overlapping() -> None:
@@ -753,11 +772,7 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
             "test_paths": "tests/loom_cli tests/contract tests/property",
         },
     ]
-    root_paths = [
-        path
-        for shard in root_matrix
-        for path in shard["test_paths"].split()
-    ]
+    root_paths = [path for shard in root_matrix for path in shard["test_paths"].split()]
     assert len(root_paths) == len(set(root_paths))
     assert set(root_paths) == {
         "tests/unit",
@@ -773,19 +788,18 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
         {"shard": "s-z", "test_glob": "tests/integration/test_[s-z]*.py"},
     ]
     all_tests = set((REPO_ROOT / "tests/integration").glob("test_*.py"))
-    expanded = [
-        set(REPO_ROOT.glob(shard["test_glob"]))
-        for shard in integration_matrix
-    ]
+    expanded = [set(REPO_ROOT.glob(shard["test_glob"])) for shard in integration_matrix]
     assert expanded[0].isdisjoint(expanded[1])
     assert expanded[0] | expanded[1] == all_tests
 
     root_upload = next(
-        step for step in jobs["tests-root"]["steps"]
+        step
+        for step in jobs["tests-root"]["steps"]
         if step.get("name") == "Upload root coverage data"
     )
     integration_upload = next(
-        step for step in jobs["integration"]["steps"]
+        step
+        for step in jobs["integration"]["steps"]
         if step.get("name") == "Upload integration coverage data"
     )
     assert "${{ matrix.shard }}" in root_upload["with"]["name"]
@@ -813,18 +827,28 @@ def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
     assert "pull_request|merge_group)" not in plan_script
 
 
-def test_opt_in_pr_smokes_cancel_superseded_pr_runs() -> None:
-    for workflow_path in (
-        ".github/workflows/cluster-smoke.yml",
-        ".github/workflows/cluster-deploy-spikes.yml",
-        ".github/workflows/staging-smoke.yml",
-    ):
+def test_protected_workflows_cancel_only_superseded_gate_runs() -> None:
+    for workflow_path in GATE_CONTRACTS:
         workflow = _workflow(workflow_path)
+        cancel = workflow["concurrency"]["cancel-in-progress"]
 
-        assert workflow["concurrency"]["cancel-in-progress"] == (
-            "${{ github.event_name == 'pull_request' }}"
-        )
-        assert "github.event.pull_request.number || github.ref" in workflow["concurrency"]["group"]
+        assert "github.event_name == 'pull_request'" in cancel
+        assert "synchronize" in cancel
+        assert "ready_for_review" in cancel
+        assert "converted_to_draft" in cancel
+        assert "ci:integration" in cancel
+        assert "ci:coverage-summary" in cancel
+        assert "github.event.changes.base != null" in cancel
+        assert "ci:merge-ready" not in cancel
+
+
+def test_cluster_deploy_spikes_cancel_superseded_pr_runs() -> None:
+    workflow = _workflow(".github/workflows/cluster-deploy-spikes.yml")
+
+    assert workflow["concurrency"]["cancel-in-progress"] == (
+        "${{ github.event_name == 'pull_request' }}"
+    )
+    assert "github.event.pull_request.number || github.ref" in workflow["concurrency"]["group"]
 
 
 def test_pinned_ingress_controller_config_has_trusted_raw_path_guard() -> None:
@@ -1026,9 +1050,9 @@ def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() ->
         assert forbidden_step not in names
     assert "smoke:staging-admin" not in str(workflow)
 
-    bootstrap = next(
-        step for step in steps if step.get("name") == "Bootstrap namespace + Secrets"
-    )["run"]
+    bootstrap = next(step for step in steps if step.get("name") == "Bootstrap namespace + Secrets")[
+        "run"
+    ]
     assert "/tmp/loom-staging-admin-token" not in bootstrap
     assert "$GITHUB_ENV" not in bootstrap
 
@@ -1051,7 +1075,7 @@ def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() ->
     assert "--data-binary '{'" in deny_script
     assert "https://yylx.world/dev/api/v1/auth/staging-admin-browser-session" in deny_script
     assert '[[ "$status" != "404" ]]' in deny_script
-    assert "!= '{\"detail\":\"not found\"}'" in deny_script
+    assert '!= \'{"detail":"not found"}\'' in deny_script
     assert "grep -Eqi '^(location|set-cookie|x-loom-build-sha):'" in deny_script
     for forbidden in (
         "Authorization",
@@ -1061,20 +1085,15 @@ def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() ->
     ):
         assert forbidden not in deny_script
 
-    build = next(
-        step for step in steps if step.get("name") == "Build images (parallel)"
-    )
+    build = next(step for step in steps if step.get("name") == "Build images (parallel)")
     assert "checkout_sha=$(git rev-parse HEAD)" in build["run"]
-    assert (
-        'build_args+=(--build-arg "LOOM_BUILD_SHA=${checkout_sha}")'
-        in build["run"]
-    )
+    assert 'build_args+=(--build-arg "LOOM_BUILD_SHA=${checkout_sha}")' in build["run"]
     assert "org.opencontainers.image.revision" in build["run"]
     assert '[[ "$service_revision" == "$checkout_sha" ]]' in build["run"]
 
-    adr = (
-        REPO_ROOT / "docs/architecture/adr/independent-staging-rollout-runner.md"
-    ).read_text(encoding="utf-8")
+    adr = (REPO_ROOT / "docs/architecture/adr/independent-staging-rollout-runner.md").read_text(
+        encoding="utf-8"
+    )
     launch = (REPO_ROOT / "docs/runbooks/staging-launch.md").read_text(
         encoding="utf-8",
     )
@@ -1098,9 +1117,9 @@ def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:
     smoke = (REPO_ROOT / "web/scripts/staging-admin-browser-smoke.mjs").read_text(
         encoding="utf-8",
     )
-    assert '`${options.route}/api/v1/auth/logout`' in smoke
+    assert "`${options.route}/api/v1/auth/logout`" in smoke
     assert "cleanup.auth_me_after_logout_status" in smoke
-    assert 'recordVideo: undefined' in smoke
+    assert "recordVideo: undefined" in smoke
     for api_path in (
         "/api/v1/admin/registration-requests?status=pending",
         "/api/v1/admin/team-registrations?status=pending",
@@ -1132,12 +1151,8 @@ def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:
     ):
         assert f'"{query_name}"' in smoke
     assert "await pageMonitor.waitForQuiet(options.timeoutMs)" in smoke
-    assert smoke.index("await pageMonitor.waitForQuiet") < smoke.index(
-        "await page.close()"
-    )
-    assert smoke.index("await page.close()") < smoke.index(
-        "pageMonitor.applyChecks(checks)"
-    )
+    assert smoke.index("await pageMonitor.waitForQuiet") < smoke.index("await page.close()")
+    assert smoke.index("await page.close()") < smoke.index("pageMonitor.applyChecks(checks)")
     assert "name: auditIdentity.requestId" in smoke
     assert "name: `user:${auditIdentity.targetUserId}`" in smoke
     assert smoke.count("exact: true") >= 6
@@ -1158,7 +1173,10 @@ def test_staging_browser_route_smoke_waits_for_explicit_settled_state() -> None:
 
     assert 'data-loom-mounted", "true"' in main
     assert 'data-loom-auth-settled", "true"' in main
-    assert 'isAuthenticated ? "authenticated" : "anonymous"' in main
+    assert 'sessionStatus === "authenticated"' in main
+    assert 'sessionStatus === "unavailable"' in main
+    assert '? "error"' in main
+    assert ': "anonymous"' in main
     assert 'waitUntil: "domcontentloaded"' in smoke
     assert "BLOCKING_ACTIVITY_QUIET_WINDOW_MS" in smoke
     assert "requestBlocksQuiescence" in smoke

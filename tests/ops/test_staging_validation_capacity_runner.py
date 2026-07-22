@@ -9,7 +9,7 @@ import pytest
 from scripts.ops import staging_validation_capacity_runner as runner
 
 ENVIRONMENT = "staging"
-POOL_NAME = "gb10-arm64"
+POOL_NAME = "gb10"
 SOURCE_SHA = "abc1234" + "a" * 33
 
 
@@ -475,7 +475,7 @@ def test_status_mismatches_rejects_fresh_unlinked_worker(hostname: str) -> None:
                 {
                     "worker_id": f"duplicate-{hostname}",
                     "hostname": hostname,
-                    "pool_name": "gb10-arm64",
+                    "pool_name": "gb10",
                     "worker_fresh": True,
                 }
             ],

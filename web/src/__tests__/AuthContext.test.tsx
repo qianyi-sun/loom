@@ -1,10 +1,20 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  apiFetch,
+  setCsrfToken,
+  setUnauthorizedHandler,
+} from "../api/client";
 import { AuthProvider } from "../auth/AuthContext";
 import { useAuth } from "../auth/useAuth";
+import {
+  setBrowserFailureReporter,
+  type BrowserFailureReport,
+} from "../lib/errorReporting";
 
 const memberMe = {
   user: {
@@ -31,8 +41,9 @@ function Display(): JSX.Element {
     isAuthenticated,
     isLoading,
     isAdmin,
-    authError,
     currentTeamId,
+    sessionFailure,
+    sessionStatus,
     loginStart,
     loginComplete,
     loginPassword,
@@ -48,18 +59,23 @@ function Display(): JSX.Element {
       <span data-testid="email">{me?.user.email ?? "none"}</span>
       <span data-testid="team">{currentTeamId ?? "none"}</span>
       <span data-testid="admin">{isAdmin ? "admin" : "not-admin"}</span>
-      <span data-testid="err">{authError ?? "no-error"}</span>
+      <span data-testid="status">{sessionStatus}</span>
+      <span data-testid="failure">
+        {sessionFailure
+          ? `${sessionFailure.kind}:${sessionFailure.referenceId}`
+          : "no-failure"}
+      </span>
       <button onClick={() => void loginStart("owner@example.com")}>start</button>
-      <button onClick={() => void loginComplete("login-token")}>complete</button>
-      <button onClick={() => void loginPassword("Owner", "long-passphrase-1")}>password</button>
-      <button onClick={() => void switchTeam("team-b")}>switch</button>
+      <button onClick={() => void loginComplete("login-token").catch(() => undefined)}>complete</button>
+      <button onClick={() => void loginPassword("Owner", "long-passphrase-1").catch(() => undefined)}>password</button>
+      <button onClick={() => void switchTeam("team-b").catch(() => undefined)}>switch</button>
       <button onClick={() => void logout()}>logout</button>
       <button onClick={() => void refreshMe()}>refresh</button>
     </div>
   );
 }
 
-function withQueryClient(ui: React.ReactNode, qc?: QueryClient): JSX.Element {
+function withQueryClient(ui: ReactNode, qc?: QueryClient): JSX.Element {
   const client = qc ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={client}>{ui}</QueryClientProvider>;
 }
@@ -70,7 +86,11 @@ describe("AuthContext", () => {
   });
 
   afterEach(() => {
+    setBrowserFailureReporter(null);
+    setUnauthorizedHandler(() => undefined);
+    setCsrfToken(null);
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("loads the browser session from /auth/me on mount", async () => {
@@ -91,9 +111,29 @@ describe("AuthContext", () => {
       ),
     );
     await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("in"));
+    expect(screen.getByTestId("status").textContent).toBe("authenticated");
+    expect(screen.getByTestId("failure").textContent).toBe("no-failure");
     expect(screen.getByTestId("email").textContent).toBe("owner@example.com");
     expect(screen.getByTestId("team").textContent).toBe("team-a");
     expect(window.localStorage.getItem("loom_token")).toBe(null);
+  });
+
+  it("clears cached data with unknown authorization before establishing identity", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(memberMe), { status: 200 }),
+      ),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["unknown-owner"], { secret: "untrusted" });
+
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("authenticated"),
+    );
+    expect(qc.getQueryData(["unknown-owner"])).toBeUndefined();
   });
 
   it("treats 401 on mount as a signed-out expired session", async () => {
@@ -107,10 +147,13 @@ describe("AuthContext", () => {
     );
     await waitFor(() => expect(screen.getByTestId("loading").textContent).toBe("ready"));
     expect(screen.getByTestId("auth").textContent).toBe("out");
-    expect(screen.getByTestId("err").textContent).toBe("no-error");
+    expect(screen.getByTestId("status").textContent).toBe("signed-out");
+    expect(screen.getByTestId("failure").textContent).toBe("no-failure");
   });
 
-  it("clears a prior auth error when refresh resolves to an exact 401", async () => {
+  it("clears a prior unavailable state when refresh resolves to an exact 401", async () => {
+    const reports: BrowserFailureReport[] = [];
+    setBrowserFailureReporter((report) => reports.push(report));
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -131,15 +174,27 @@ describe("AuthContext", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByTestId("err").textContent).toContain("service unavailable"),
+      expect(screen.getByTestId("status").textContent).toBe("unavailable"),
     );
+    const firstFailure = screen.getByTestId("failure").textContent ?? "";
+    expect(firstFailure).toMatch(/^http:WEB-[0-9A-F]{8}$/);
+    expect(firstFailure).not.toContain("service unavailable");
     await user.click(screen.getByRole("button", { name: "refresh" }));
-    await waitFor(() => expect(screen.getByTestId("err").textContent).toBe("no-error"));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("signed-out"),
+    );
+    expect(screen.getByTestId("failure").textContent).toBe("no-failure");
     expect(screen.getByTestId("auth").textContent).toBe("out");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(reports).toEqual([
+      expect.objectContaining({
+        kind: "auth-session-http",
+        referenceId: firstFailure.replace("http:", ""),
+      }),
+    ]);
   });
 
-  it("preserves cached page data when /auth/me fails for a non-auth reason", async () => {
+  it("clears cache with unknown authorization before an initial session failure", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -160,16 +215,24 @@ describe("AuthContext", () => {
       ),
     );
 
-    await waitFor(() => expect(screen.getByTestId("loading").textContent).toBe("ready"));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("unavailable"),
+    );
     expect(screen.getByTestId("auth").textContent).toBe("out");
-    expect(screen.getByTestId("err").textContent).toContain("service unavailable");
-    expect(qc.getQueryData(["tasks"])).toEqual({ items: [{ id: "existing" }] });
+    expect(screen.getByTestId("failure").textContent).toMatch(
+      /^http:WEB-[0-9A-F]{8}$/,
+    );
+    expect(screen.getByTestId("failure").textContent).not.toContain(
+      "service unavailable",
+    );
+    expect(qc.getQueryData(["tasks"])).toBeUndefined();
   });
 
   it.each([
-    ["204", () => Promise.resolve(new Response(null, { status: 204 }))],
+    ["204", "invalid", () => Promise.resolve(new Response(null, { status: 204 }))],
     [
       "malformed 200",
+      "invalid",
       () =>
         Promise.resolve(
           new Response("not-json", {
@@ -180,6 +243,7 @@ describe("AuthContext", () => {
     ],
     [
       "500",
+      "http",
       () =>
         Promise.resolve(
           new Response(JSON.stringify({ detail: "service unavailable" }), {
@@ -188,8 +252,16 @@ describe("AuthContext", () => {
           }),
         ),
     ],
-    ["network failure", () => Promise.reject(new TypeError("network failed"))],
-  ])("marks %s auth/me outcomes as errors rather than anonymous", async (_, reply) => {
+    [
+      "network failure",
+      "network",
+      () => Promise.reject(new TypeError("network failed with token=secret")),
+    ],
+  ] as const)("marks %s auth/me outcomes as unavailable rather than anonymous", async (
+    _,
+    expectedKind,
+    reply,
+  ) => {
     vi.stubGlobal("fetch", vi.fn().mockImplementation(reply));
     render(
       withQueryClient(
@@ -199,9 +271,417 @@ describe("AuthContext", () => {
       ),
     );
 
-    await waitFor(() => expect(screen.getByTestId("loading").textContent).toBe("ready"));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("unavailable"),
+    );
     expect(screen.getByTestId("auth").textContent).toBe("out");
-    expect(screen.getByTestId("err").textContent).not.toBe("no-error");
+    expect(screen.getByTestId("failure").textContent).toMatch(
+      new RegExp(`^${expectedKind}:WEB-[0-9A-F]{8}$`),
+    );
+    expect(screen.getByTestId("failure").textContent).not.toContain("secret");
+  });
+
+  it("deduplicates the initial session request and report under StrictMode", async () => {
+    const reports: BrowserFailureReport[] = [];
+    setBrowserFailureReporter((report) => reports.push(report));
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "upstream token=secret" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      withQueryClient(
+        <StrictMode>
+          <AuthProvider>
+            <Display />
+          </AuthProvider>
+        </StrictMode>,
+      ),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("unavailable"),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ kind: "auth-session-http" });
+    expect(JSON.stringify(reports[0])).not.toContain("secret");
+  });
+
+  it("retries an unavailable session without clearing same-identity cached data", async () => {
+    const reports: BrowserFailureReport[] = [];
+    setBrowserFailureReporter((report) => reports.push(report));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "proxy secret" }), { status: 503 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("authenticated"),
+    );
+    qc.setQueryData(["tasks"], { items: [{ id: "existing" }] });
+
+    await user.click(screen.getByRole("button", { name: "refresh" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("unavailable"),
+    );
+    const referenceId = (screen.getByTestId("failure").textContent ?? "").replace(
+      "http:",
+      "",
+    );
+    expect(qc.getQueryData(["tasks"])).toEqual({ items: [{ id: "existing" }] });
+
+    await user.click(screen.getByRole("button", { name: "refresh" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("authenticated"),
+    );
+    expect(qc.getQueryData(["tasks"])).toEqual({ items: [{ id: "existing" }] });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(reports).toEqual([
+      expect.objectContaining({ kind: "auth-session-http", referenceId }),
+    ]);
+  });
+
+  it("clears cached data when a refreshed session changes identity", async () => {
+    const replacementMe = {
+      ...memberMe,
+      user: { ...memberMe.user, id: "user-2", username: "Other" },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(replacementMe), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+
+    await waitFor(() => expect(screen.getByTestId("username")).toHaveTextContent("Owner"));
+    qc.setQueryData(["tasks"], { items: [{ id: "old-user" }] });
+    await user.click(screen.getByRole("button", { name: "refresh" }));
+
+    await waitFor(() => expect(screen.getByTestId("username")).toHaveTextContent("Other"));
+    expect(qc.getQueryData(["tasks"])).toBeUndefined();
+  });
+
+  it("clears cached data when the same identity loses authorization", async () => {
+    const privilegedMe = {
+      ...memberMe,
+      teams: [
+        { id: "team-a", name: "Alpha", role: "owner" },
+        memberMe.teams[1],
+      ],
+      current_team: { id: "team-a", name: "Alpha", role: "owner" },
+      role: "owner",
+      scopes: ["read:own", "submit", "team:manage"],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(privilegedMe), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("authenticated"));
+    qc.setQueryData(["team-owner-data"], { secret: "old-authorization" });
+    await user.click(screen.getByRole("button", { name: "refresh" }));
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("authenticated"));
+    expect(qc.getQueryData(["team-owner-data"])).toBeUndefined();
+  });
+
+  it("clears shared cached data when a remounted provider establishes identity", async () => {
+    const replacementMe = {
+      ...memberMe,
+      user: { ...memberMe.user, id: "user-2", username: "Other" },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(replacementMe), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const firstMount = render(
+      withQueryClient(<AuthProvider><Display /></AuthProvider>, qc),
+    );
+    await waitFor(() => expect(screen.getByTestId("username")).toHaveTextContent("Owner"));
+    qc.setQueryData(["private", "user-1"], { value: "must-not-cross-provider" });
+    firstMount.unmount();
+
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+
+    await waitFor(() => expect(screen.getByTestId("username")).toHaveTextContent("Other"));
+    expect(qc.getQueryData(["private", "user-1"])).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves cached data across a remount with the same authorization", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const firstMount = render(
+      withQueryClient(<AuthProvider><Display /></AuthProvider>, qc),
+    );
+    await waitFor(() => expect(screen.getByTestId("username")).toHaveTextContent("Owner"));
+    qc.setQueryData(["private", "user-1"], { value: "same-authorization" });
+    firstMount.unmount();
+
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+
+    await waitFor(() => expect(screen.getByTestId("username")).toHaveTextContent("Owner"));
+    expect(qc.getQueryData(["private", "user-1"])).toEqual({
+      value: "same-authorization",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("serializes authoritative session reads across provider remounts", async () => {
+    let resolveOldSession!: (response: Response) => void;
+    const oldSession = new Promise<Response>((resolve) => {
+      resolveOldSession = resolve;
+    });
+    const lateSession = { ...memberMe, csrf_token: "csrf-late-old" };
+    const currentSession = { ...memberMe, csrf_token: "csrf-current" };
+    const finalSession = { ...memberMe, csrf_token: "csrf-final" };
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(oldSession)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(currentSession), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(finalSession), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const oldMount = render(
+      withQueryClient(<AuthProvider><Display /></AuthProvider>, qc),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    oldMount.unmount();
+
+    const currentMount = render(
+      withQueryClient(<AuthProvider><Display /></AuthProvider>, qc),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveOldSession(
+        new Response(JSON.stringify(lateSession), { status: 200 }),
+      );
+      await oldSession;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("authenticated"),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    qc.setQueryData(["private", "user-1"], { value: "current-session" });
+
+    await apiFetch("/api/v1/probe", { method: "POST", body: "{}" });
+    const probe = fetchMock.mock.calls[2][1] as RequestInit;
+    expect((probe.headers as Record<string, string>)["X-Loom-CSRF"]).toBe(
+      "csrf-current",
+    );
+
+    currentMount.unmount();
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("authenticated"),
+    );
+    expect(qc.getQueryData(["private", "user-1"])).toEqual({
+      value: "current-session",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("reconciles a session mutation that settles after provider unmount", async () => {
+    let resolveSwitch!: (response: Response) => void;
+    const pendingSwitch = new Promise<Response>((resolve) => {
+      resolveSwitch = resolve;
+    });
+    const switched = {
+      ...memberMe,
+      current_team: { id: "team-b", name: "Beta", role: "owner" },
+      role: "owner",
+      csrf_token: "csrf-switch-response",
+    };
+    const reconciled = { ...switched, csrf_token: "csrf-reconciled" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(memberMe), { status: 200 }),
+      )
+      .mockReturnValueOnce(pendingSwitch)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(reconciled), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+
+    const oldMount = render(
+      withQueryClient(<AuthProvider><Display /></AuthProvider>, qc),
+    );
+    await waitFor(() => expect(screen.getByTestId("team")).toHaveTextContent("team-a"));
+    await user.click(screen.getByRole("button", { name: "switch" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    oldMount.unmount();
+
+    render(
+      withQueryClient(<AuthProvider><Display /></AuthProvider>, qc),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveSwitch(new Response(JSON.stringify(switched), { status: 200 }));
+      await pendingSwitch;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("team")).toHaveTextContent("team-b"),
+    );
+    expect(screen.getByTestId("status")).toHaveTextContent("authenticated");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await apiFetch("/api/v1/probe", { method: "POST", body: "{}" });
+    const probe = fetchMock.mock.calls[3][1] as RequestInit;
+    expect((probe.headers as Record<string, string>)["X-Loom-CSRF"]).toBe(
+      "csrf-reconciled",
+    );
+  });
+
+  it("reconciles a logout that settles after provider unmount", async () => {
+    let resolveLogout!: (response: Response) => void;
+    const pendingLogout = new Promise<Response>((resolve) => {
+      resolveLogout = resolve;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(memberMe), { status: 200 }),
+      )
+      .mockReturnValueOnce(pendingLogout)
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const oldMount = render(
+      withQueryClient(<AuthProvider><Display /></AuthProvider>, qc),
+    );
+    await waitFor(() => expect(screen.getByTestId("auth")).toHaveTextContent("in"));
+    await user.click(screen.getByRole("button", { name: "logout" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    oldMount.unmount();
+
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveLogout(new Response(null, { status: 204 }));
+      await pendingLogout;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await apiFetch("/api/v1/probe", { method: "POST", body: "{}" });
+    const probe = fetchMock.mock.calls[3][1] as RequestInit;
+    expect(probe.headers).not.toHaveProperty("X-Loom-CSRF");
+  });
+
+  it("does not let a stale session response override an external 401", async () => {
+    let resolveSession!: (response: Response) => void;
+    const pendingSession = new Promise<Response>((resolve) => {
+      resolveSession = resolve;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(pendingSession)
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    let requestError: unknown;
+    await act(async () => {
+      requestError = await apiFetch("/api/v1/trials").catch((error: unknown) => error);
+    });
+    expect(requestError).toMatchObject({ status: 401, detail: "unauthorized" });
+    expect(screen.getByTestId("status")).toHaveTextContent("signed-out");
+
+    await act(async () => {
+      resolveSession(new Response(JSON.stringify(memberMe), { status: 200 }));
+      await pendingSession;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("signed-out"),
+    );
+    expect(screen.getByTestId("auth")).toHaveTextContent("out");
+    expect(screen.getByTestId("username")).toHaveTextContent("none");
+
+    await apiFetch("/api/v1/probe", { method: "POST", body: "{}" });
+    const probe = fetchMock.mock.calls[2][1] as RequestInit;
+    expect(probe.headers).not.toHaveProperty("X-Loom-CSRF");
+  });
+
+  it("clears the CSRF token while the session is unavailable", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }))
+      .mockResolvedValueOnce(new Response("", { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("authenticated"),
+    );
+    await user.click(screen.getByRole("button", { name: "refresh" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("unavailable"),
+    );
+    await apiFetch("/api/v1/probe", { method: "POST", body: "{}" });
+
+    const request = fetchMock.mock.calls[2][1] as RequestInit;
+    expect(request.headers).not.toHaveProperty("X-Loom-CSRF");
   });
 
   it("loginComplete stores the returned session state and clears cached team data", async () => {
@@ -216,7 +696,6 @@ describe("AuthContext", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    qc.setQueryData(["batches"], { items: [{ id: "old" }] });
     const user = userEvent.setup();
     render(
       withQueryClient(
@@ -227,6 +706,7 @@ describe("AuthContext", () => {
       ),
     );
     await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("out"));
+    qc.setQueryData(["batches"], { items: [{ id: "old" }] });
     await user.click(screen.getByText("complete"));
     await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("in"));
     expect(qc.getQueryData(["batches"])).toBeUndefined();
@@ -249,7 +729,6 @@ describe("AuthContext", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    qc.setQueryData(["batches"], { items: [{ id: "old" }] });
     const user = userEvent.setup();
     render(
       withQueryClient(
@@ -261,6 +740,7 @@ describe("AuthContext", () => {
     );
 
     await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("out"));
+    qc.setQueryData(["batches"], { items: [{ id: "old" }] });
     await user.click(screen.getByText("password"));
 
     await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("in"));
@@ -322,10 +802,10 @@ describe("AuthContext", () => {
       fetchMock,
     );
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    qc.setQueryData(["tokens"], { items: [{ id: "old" }] });
     const user = userEvent.setup();
     render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
     await waitFor(() => expect(screen.getByTestId("team").textContent).toBe("team-a"));
+    qc.setQueryData(["tokens"], { items: [{ id: "old" }] });
     await user.click(screen.getByText("switch"));
     await waitFor(() => expect(screen.getByTestId("team").textContent).toBe("team-b"));
     expect(qc.getQueryData(["tokens"])).toBeUndefined();
@@ -333,6 +813,50 @@ describe("AuthContext", () => {
     expect((switchInit.headers as Record<string, string>)["X-Loom-CSRF"]).toBe(
       "csrf-initial",
     );
+  });
+
+  it("fails closed and reconciles an ambiguous team-switch response", async () => {
+    const switched = {
+      ...memberMe,
+      current_team: { id: "team-b", name: "Beta", role: "owner" },
+      role: "owner",
+      csrf_token: "csrf-switched",
+    };
+    const reports: BrowserFailureReport[] = [];
+    setBrowserFailureReporter((report) => reports.push(report));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }))
+      .mockResolvedValueOnce(new Response("not-json", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(switched), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+    await waitFor(() => expect(screen.getByTestId("team")).toHaveTextContent("team-a"));
+    qc.setQueryData(["team", "team-a"], { secret: "old-team" });
+
+    await user.click(screen.getByRole("button", { name: "switch" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("unavailable"),
+    );
+    const failure = screen.getByTestId("failure").textContent ?? "";
+    expect(failure).toMatch(/^invalid:WEB-[0-9A-F]{8}$/);
+    expect(screen.getByTestId("team")).toHaveTextContent("none");
+    expect(qc.getQueryData(["team", "team-a"])).toBeUndefined();
+    expect(reports).toEqual([
+      expect.objectContaining({
+        kind: "auth-session-invalid",
+        referenceId: failure.replace("invalid:", ""),
+      }),
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "refresh" }));
+
+    await waitFor(() => expect(screen.getByTestId("team")).toHaveTextContent("team-b"));
+    expect(screen.getByTestId("status")).toHaveTextContent("authenticated");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("logout clears auth state and cache", async () => {
@@ -345,10 +869,10 @@ describe("AuthContext", () => {
       fetchMock,
     );
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    qc.setQueryData(["batches"], { items: [{ id: "old" }] });
     const user = userEvent.setup();
     render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
     await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("in"));
+    qc.setQueryData(["batches"], { items: [{ id: "old" }] });
     await user.click(screen.getByText("logout"));
     await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("out"));
     expect(qc.getQueryData(["batches"])).toBeUndefined();

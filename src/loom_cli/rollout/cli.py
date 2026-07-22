@@ -25,6 +25,7 @@ from pathlib import Path
 from loom_cli.rollout.context import RolloutContext, sha256_of_file
 from loom_cli.rollout.driver import DriverError, run_rollout
 from loom_cli.rollout.evidence import EvidenceDirectory, new_rollout_id
+from loom_cli.rollout.operator.backup_limits import operator_backup_traversal_limits
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.envelope import (
     fixed_operator_config_path,
@@ -186,7 +187,7 @@ _ROLLOUT_PRESETS: dict[str, RolloutPreset] = {
         ),
         smoke_submit_mode="admin-on-behalf",
         smoke_task_id="loom-smoke/gb10-oracle-hello-world",
-        smoke_required_worker_pool="gb10-arm64",
+        smoke_required_worker_pool="gb10",
         smoke_agent="oracle",
         smoke_on_behalf_username="devansh",
         smoke_on_behalf_team_id="env:LOOM_SMOKE_ON_BEHALF_TEAM_ID",
@@ -899,6 +900,7 @@ def _handle_envelope_mode(args: argparse.Namespace) -> int:
 
     staging_preset = _ROLLOUT_PRESETS["staging"]
     evidence = EvidenceDirectory(config.rollout_root, envelope.rollout_id)
+    backup_limits = operator_backup_traversal_limits(config)
     ctx = RolloutContext(
         image_tag=envelope.image_tag,
         target_ref=envelope.target_ref,
@@ -924,6 +926,9 @@ def _handle_envelope_mode(args: argparse.Namespace) -> int:
         rollout_root=config.rollout_root,
         backup_manifest_path=Path(envelope.backup_manifest_path),
         backup_manifest_min_remaining_hours=2,
+        backup_manifest_max_files=backup_limits.max_files,
+        backup_manifest_max_entries=backup_limits.max_entries,
+        backup_manifest_max_total_bytes=backup_limits.max_total_bytes,
         backup_manifest_sha256=envelope.backup_manifest_sha256,
         runner_config_sha256=envelope.runner_config_sha256,
         request_id=envelope.request_id,
@@ -1101,7 +1106,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         action=_ExplicitStoreAction,
         help=(
             "Optional worker-pool requirement for smoke submission. "
-            "current-gb10 defaults to gb10-arm64 when the task id is not "
+            "current-gb10 defaults to gb10 when the task id is not "
             "overridden."
         ),
     )

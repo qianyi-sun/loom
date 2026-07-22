@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import UsageDashboard from "../../pages/UsageDashboard";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -40,14 +41,15 @@ describe("UsageDashboard", () => {
   }: {
     platformAdmin?: boolean;
     usageBody?: Record<string, unknown>;
-  } = {}): ReturnType<typeof vi.spyOn> {
-    return vi.spyOn(global, "fetch").mockImplementation(
+  } = {}): FetchMock {
+    return vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
           return jsonResponse({
             user: {
               id: "user-1",
+              username: platformAdmin ? "PlatformAdmin" : "Member",
               email: "user@example.com",
               display_name: null,
               is_platform_admin: platformAdmin,

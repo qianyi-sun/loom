@@ -185,7 +185,7 @@ export default function RateCardsAdmin(): JSX.Element {
         <p className="mt-1 text-sm text-slate-500">
           Pricing the LLM Gateway uses to derive `cost_usd` per call.
           Reads are open to all team users; publishing requires the{" "}
-          <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">
+          <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs text-slate-700">
             admin:rate_cards
           </code>{" "}
           scope.
@@ -247,6 +247,7 @@ export default function RateCardsAdmin(): JSX.Element {
           />
           <Card.Body className="space-y-3">
             <Textarea
+              aria-label="Rate card JSON payload"
               value={bodyText}
               onChange={(e) => setBodyText(e.target.value)}
               rows={14}

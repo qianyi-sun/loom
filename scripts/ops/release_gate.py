@@ -38,9 +38,9 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "frontend_route_evidence": (
         "url",
         "production_route",
-        "development_route",
+        "staging_route",
         "production_api_base",
-        "development_api_base",
+        "staging_api_base",
     ),
     "secret_redaction": ("url",),
     "provider_smoke": ("url", "provider_path"),
@@ -71,9 +71,9 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
 }
 CANONICAL_FRONTEND_ROUTES = {
     "production_route": "https://yylx.world/prod",
-    "development_route": "https://yylx.world/dev",
+    "staging_route": "https://yylx.world/staging",
     "production_api_base": "https://yylx.world/prod/api",
-    "development_api_base": "https://yylx.world/dev/api",
+    "staging_api_base": "https://yylx.world/staging/api",
 }
 CANONICAL_STATE_IDENTITIES: dict[str, dict[str, Any]] = {
     "production": {
@@ -337,9 +337,9 @@ def _validate_frontend_route_evidence(check: dict[str, Any]) -> list[str]:
     for field, expected in CANONICAL_FRONTEND_ROUTES.items():
         if check.get(field) != expected:
             errors.append(f"frontend_route_evidence.{field} must be {expected}")
-    if check.get("production_route") == check.get("development_route"):
+    if check.get("production_route") == check.get("staging_route"):
         errors.append("frontend_route_evidence production and staging routes must differ")
-    if check.get("production_api_base") == check.get("development_api_base"):
+    if check.get("production_api_base") == check.get("staging_api_base"):
         errors.append("frontend_route_evidence production and staging API bases must differ")
     prod_label = check.get("production_environment_label")
     if isinstance(prod_label, str) and "beta" in prod_label.lower():
@@ -663,8 +663,8 @@ def _validate_prod_staging_frontend(
                 f"prod_staging_isolation.frontend.production.{field} must be {expected}",
             )
     staging_expected = {
-        "route": CANONICAL_FRONTEND_ROUTES["development_route"],
-        "api_base": CANONICAL_FRONTEND_ROUTES["development_api_base"],
+        "route": CANONICAL_FRONTEND_ROUTES["staging_route"],
+        "api_base": CANONICAL_FRONTEND_ROUTES["staging_api_base"],
     }
     for field, expected in staging_expected.items():
         if staging_frontend.get(field) != expected:
@@ -707,10 +707,10 @@ def _validate_prod_staging_workers(
             "prod_staging_isolation.workers.production.api_url must be "
             f"{CANONICAL_FRONTEND_ROUTES['production_api_base']}",
         )
-    if staging_api != CANONICAL_FRONTEND_ROUTES["development_api_base"]:
+    if staging_api != CANONICAL_FRONTEND_ROUTES["staging_api_base"]:
         errors.append(
             "prod_staging_isolation.workers.staging.api_url must be "
-            f"{CANONICAL_FRONTEND_ROUTES['development_api_base']}",
+            f"{CANONICAL_FRONTEND_ROUTES['staging_api_base']}",
         )
     if prod_api == staging_api:
         errors.append("prod_staging_isolation.workers production and staging api_url must differ")

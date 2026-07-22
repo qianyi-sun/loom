@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import RunLibrary from "../../pages/RunLibrary";
 import RunLibraryBatchDetail from "../../pages/RunLibraryBatchDetail";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const sharedBatch = {
@@ -338,7 +339,7 @@ function mockRunLibrary({
     };
   };
   detailOverride?: Record<string, unknown> | null;
-} = {}): ReturnType<typeof vi.spyOn> {
+} = {}): FetchMock {
   const selectedDetail = detailOverride ?? detailBatch;
   return vi
     .spyOn(globalThis, "fetch")

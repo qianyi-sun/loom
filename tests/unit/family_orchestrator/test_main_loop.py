@@ -18,6 +18,8 @@ import pytest
 from loom.family_run.spec import FailureAction, PluginRef, ResolvedFamilyRunSpec
 from loom_family_orchestrator.main_loop import OrchestratorContext, run_once
 
+_TEAM_ID = uuid4()
+
 
 def _spec(
     *,
@@ -170,6 +172,7 @@ async def test_run_once_success_bumps_index_to_pending(monkeypatch):
         }]),
         ("FROM batches", [{
             "family_run_spec": _spec().model_dump(),
+            "team_id": _TEAM_ID,
         }]),
         ("FROM trials", [{
             "id": trial_id,
@@ -214,7 +217,9 @@ async def test_run_once_success_end_of_sequence_marks_done(monkeypatch):
             "attempt_count": 0,
             "next_attempt_at": None,
         }]),
-        ("FROM batches", [{"family_run_spec": _spec().model_dump()}]),
+        ("FROM batches", [{
+            "family_run_spec": _spec().model_dump(), "team_id": _TEAM_ID,
+        }]),
         ("FROM trials", [{
             "id": trial_id,
             "task_id": "b",
@@ -262,7 +267,9 @@ async def test_run_once_stall_family_retry_writes_backoff(monkeypatch):
             "attempt_count": 0,  # first failure -> retry with backoff
             "next_attempt_at": None,
         }]),
-        ("FROM batches", [{"family_run_spec": spec.model_dump()}]),
+        ("FROM batches", [{
+            "family_run_spec": spec.model_dump(), "team_id": _TEAM_ID,
+        }]),
         ("FROM trials", [{
             "id": trial_id, "task_id": "a", "state": "succeeded",
             "result": None, "attempt_count": 1, "trajectory_uri": None,
@@ -304,7 +311,9 @@ async def test_run_once_stall_family_exhausted_stalls(monkeypatch):
             "attempt_count": 2,  # already at max -> policy returns abort
             "next_attempt_at": None,
         }]),
-        ("FROM batches", [{"family_run_spec": spec.model_dump()}]),
+        ("FROM batches", [{
+            "family_run_spec": spec.model_dump(), "team_id": _TEAM_ID,
+        }]),
         ("FROM trials", [{
             "id": trial_id, "task_id": "a", "state": "succeeded",
             "result": None, "attempt_count": 1, "trajectory_uri": None,
@@ -340,7 +349,9 @@ async def test_run_once_skip_and_advance_bumps_index(monkeypatch):
             "attempt_count": 0,
             "next_attempt_at": None,
         }]),
-        ("FROM batches", [{"family_run_spec": spec.model_dump()}]),
+        ("FROM batches", [{
+            "family_run_spec": spec.model_dump(), "team_id": _TEAM_ID,
+        }]),
         ("FROM trials", [{
             "id": trial_id, "task_id": "b", "state": "succeeded",
             "result": None, "attempt_count": 1, "trajectory_uri": None,
@@ -380,7 +391,9 @@ async def test_run_once_abort_family_marks_aborted_and_cancels_queued(monkeypatc
             "attempt_count": 0,
             "next_attempt_at": None,
         }]),
-        ("FROM batches", [{"family_run_spec": spec.model_dump()}]),
+        ("FROM batches", [{
+            "family_run_spec": spec.model_dump(), "team_id": _TEAM_ID,
+        }]),
         ("FROM trials", [{
             "id": trial_id, "task_id": "a", "state": "succeeded",
             "result": None, "attempt_count": 1, "trajectory_uri": None,
@@ -418,7 +431,9 @@ async def test_run_once_missing_trial_stalls_family(monkeypatch):
             "attempt_count": 0,
             "next_attempt_at": None,
         }]),
-        ("FROM batches", [{"family_run_spec": _spec().model_dump()}]),
+        ("FROM batches", [{
+            "family_run_spec": _spec().model_dump(), "team_id": _TEAM_ID,
+        }]),
         # no trials row
     ])
     ctx = _ctx(session, adapter=_AdapterOK())
@@ -448,7 +463,7 @@ async def test_run_once_missing_batch_spec_stalls(monkeypatch):
             "attempt_count": 0,
             "next_attempt_at": None,
         }]),
-        ("FROM batches", [{"family_run_spec": None}]),
+        ("FROM batches", [{"family_run_spec": None, "team_id": _TEAM_ID}]),
     ])
     ctx = _ctx(session, adapter=_AdapterOK())
     await run_once(ctx)

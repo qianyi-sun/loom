@@ -18,6 +18,7 @@ from loom.db.schema import (
     Token,
     Trial,
     Worker,
+    WorkerPoolAutoscalerPolicy,
 )
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
@@ -68,6 +69,7 @@ def claim_seed(postgres_url: str) -> Iterator[tuple[UUID, str, UUID]]:
     finally:
         with session_factory() as s:
             s.execute(delete(AdminAuditEvent))
+            s.execute(delete(WorkerPoolAutoscalerPolicy))
             s.execute(delete(GB10WorkerNodeStatus))
             s.execute(delete(GB10WorkerPoolDesiredState))
             s.execute(delete(Trial))
@@ -379,6 +381,97 @@ def test_prod_pressure_preempts_busy_host_only_after_zero_grace(
         assert audit is not None
         assert audit.event_metadata["retryable_preemption_trials"] == 1
     engine.dispose()
+
+
+def test_neutral_prod_pressure_route_records_slurm_drain_intent(
+    app,
+    claim_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    admin_headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as session:
+        session.execute(insert(WorkerPoolAutoscalerPolicy).values(
+            environment="staging",
+            pool_name="slurm-pool",
+            actuator="slurm",
+            enabled=True,
+            min_slots=0,
+            max_slots=6,
+            actuator_config={"backend": "docker", "cpu_arch": "x86_64"},
+        ))
+        session.commit()
+    engine.dispose()
+
+    with TestClient(app) as client:
+        # #892: the actuator-neutral route drives a Slurm pool and records
+        # drain intent (no GB10 desired state exists for this pool).
+        drain = client.post(
+            "/admin/worker-pools/staging/slurm-pool/prod-pressure",
+            headers=admin_headers,
+            json={
+                "prod_pending_count": 2,
+                "prod_active_count": 0,
+                "prod_capacity_shortfall": 2,
+                "preemptible": True,
+                "grace_period_seconds": 600,
+            },
+        )
+        assert drain.status_code == 200, drain.text
+        body = drain.json()
+        assert body["action"] == "draining"
+        assert body["actuator"] == "slurm"
+        assert body["new_staging_claims_allowed"] is False
+        assert body["drain_intent_active"] is True
+
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as session:
+        policy = session.execute(
+            select(WorkerPoolAutoscalerPolicy).where(
+                WorkerPoolAutoscalerPolicy.pool_name == "slurm-pool",
+            ),
+        ).scalar_one()
+        assert policy.prod_pressure_state is not None
+        assert policy.prod_pressure_state["state"] == "draining"
+    engine.dispose()
+
+
+def test_gb10_prod_pressure_alias_route_still_drains_gb10_pool(
+    app,
+    claim_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    admin_headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+    with TestClient(app) as client:
+        assert client.put(
+            "/admin/gb10-worker-pools/staging/default/desired-state",
+            headers=admin_headers,
+            json={
+                "image_tag": "staging-local",
+                "max_concurrent": 1,
+                "env_config_version": "staging-local",
+                "target_slots": 1,
+                "host_intents": {"h": "active"},
+            },
+        ).status_code == 200
+
+        # The legacy alias keeps driving the GB10 desired-state path.
+        drain = client.post(
+            "/admin/gb10-worker-pools/staging/default/prod-pressure",
+            headers=admin_headers,
+            json={
+                "prod_pending_count": 1,
+                "prod_active_count": 0,
+                "prod_capacity_shortfall": 1,
+                "preemptible": True,
+                "grace_period_seconds": 600,
+            },
+        )
+        assert drain.status_code == 200, drain.text
+        body = drain.json()
+        assert body["action"] == "draining"
+        assert body["new_staging_claims_allowed"] is False
+        assert body["host_intents"] == {"h": "stopped"}
 
 
 def test_claim_clears_stale_failure_diagnostic(

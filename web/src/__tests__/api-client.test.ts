@@ -3,17 +3,36 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api, apiFetch, setCsrfToken, setUnauthorizedHandler } from "../api/client";
 import { setFrontendConfigForTests } from "../lib/frontendConfig";
 
+function validAuthSessionPayload() {
+  return {
+    user: {
+      id: "user-1",
+      username: "Owner",
+      email: "owner@example.com",
+      display_name: "Owner Example",
+      is_platform_admin: false,
+    },
+    teams: [{ id: "team-a", name: "Alpha", role: "owner" }],
+    current_team: { id: "team-a", name: "Alpha", role: "owner" },
+    role: "owner",
+    scopes: ["read:own"],
+    is_platform_admin: false,
+    csrf_token: "csrf-safe-session-value",
+  };
+}
+
 describe("apiFetch", () => {
   beforeEach(() => {
     window.localStorage.clear();
     setFrontendConfigForTests(null);
     setCsrfToken(null);
+    setUnauthorizedHandler(() => undefined);
     vi.restoreAllMocks();
   });
 
   it("uses cookie credentials and ignores localStorage bearer tokens", async () => {
     window.localStorage.setItem("loom_token", "abc");
-    const spy = vi.spyOn(global, "fetch").mockResolvedValue(
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -28,7 +47,7 @@ describe("apiFetch", () => {
 
   it("attaches CSRF header on unsafe requests from the in-memory token", async () => {
     setCsrfToken("csrf-123");
-    const spy = vi.spyOn(global, "fetch").mockResolvedValue(
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -42,7 +61,7 @@ describe("apiFetch", () => {
   });
 
   it("calls unauthorized handler on 401", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("", { status: 401 }),
     );
     const onAuth = vi.fn();
@@ -53,8 +72,30 @@ describe("apiFetch", () => {
     expect(onAuth).toHaveBeenCalled();
   });
 
+  it("keeps a request bound to the unauthorized handler active at its start", async () => {
+    let resolveResponse!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockReturnValue(response);
+    const oldHandler = vi.fn();
+    const newHandler = vi.fn();
+    setUnauthorizedHandler(oldHandler);
+
+    const request = apiFetch("/api/v1/trials");
+    setUnauthorizedHandler(newHandler);
+    resolveResponse(new Response("", { status: 401 }));
+
+    await expect(request).rejects.toMatchObject({
+      status: 401,
+      detail: "unauthorized",
+    });
+    expect(oldHandler).toHaveBeenCalledOnce();
+    expect(newHandler).not.toHaveBeenCalled();
+  });
+
   it("throws ApiError with detail on 403", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ detail: "nope" }), {
         status: 403,
         headers: { "Content-Type": "application/json" },
@@ -67,7 +108,7 @@ describe("apiFetch", () => {
   });
 
   it("returns undefined on 204", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(null, { status: 204 }),
     );
     const result = await apiFetch("/api/v1/tokens/abc12345");
@@ -82,7 +123,7 @@ describe("apiFetch", () => {
       apiBase: "/prod",
       apiRouteBase: "https://yylx.world/prod/api",
     });
-    const spy = vi.spyOn(global, "fetch").mockResolvedValue(
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -98,7 +139,7 @@ describe("apiFetch", () => {
   });
 
   it("sends admin actor header when approving a team registration", async () => {
-    const spy = vi.spyOn(global, "fetch").mockResolvedValue(
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ registration: { id: "reg-1" } }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -125,6 +166,197 @@ describe("apiFetch", () => {
   });
 });
 
+describe("auth session loader", () => {
+  beforeEach(() => {
+    setFrontendConfigForTests(null);
+    setUnauthorizedHandler(() => undefined);
+    vi.restoreAllMocks();
+  });
+
+  it("whitelists a valid session response", async () => {
+    const payload = validAuthSessionPayload();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ...payload,
+          user: {
+            ...payload.user,
+            raw_secret: "must-not-survive",
+          },
+          debug_response_body: "must-not-survive",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const session = await api.authMe();
+
+    expect(session).toEqual({
+      user: {
+        id: "user-1",
+        username: "Owner",
+        email: "owner@example.com",
+        display_name: "Owner Example",
+        is_platform_admin: false,
+      },
+      teams: [{ id: "team-a", name: "Alpha", role: "owner" }],
+      current_team: { id: "team-a", name: "Alpha", role: "owner" },
+      role: "owner",
+      scopes: ["read:own"],
+      is_platform_admin: false,
+      csrf_token: "csrf-safe-session-value",
+    });
+    expect(JSON.stringify(session)).not.toContain("must-not-survive");
+  });
+
+  it.each([
+    [401, "unauthorized"],
+    [403, "http"],
+    [503, "http"],
+  ])("classifies HTTP %s without consuming its body", async (status, kind) => {
+    const response = new Response("raw upstream token=secret", { status });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    await expect(api.authMe()).rejects.toMatchObject({
+      kind,
+      message: expect.not.stringContaining("raw upstream"),
+    });
+    expect(response.bodyUsed).toBe(false);
+  });
+
+  it("replaces a raw network exception with a fixed failure", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("raw network token=secret"),
+    );
+
+    await expect(api.authMe()).rejects.toMatchObject({
+      kind: "network",
+      message: "browser session request failed",
+    });
+  });
+
+  it.each([
+    ["empty", () => new Response(null, { status: 204 })],
+    ["malformed", () => new Response("not-json", { status: 200 })],
+    [
+      "invalid shape",
+      () =>
+        new Response(JSON.stringify({ debug_response_body: "raw secret" }), {
+          status: 200,
+        }),
+    ],
+  ])("rejects an %s session response as invalid", async (_label, response) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response());
+
+    await expect(api.authMe()).rejects.toMatchObject({
+      kind: "invalid",
+      message: "browser session response is invalid",
+    });
+  });
+
+  it.each([
+    [
+      "missing CSRF token",
+      () => {
+        const payload = {
+          ...validAuthSessionPayload(),
+        } as Record<string, unknown>;
+        delete payload.csrf_token;
+        return payload;
+      },
+    ],
+    ["empty CSRF token", () => ({ ...validAuthSessionPayload(), csrf_token: "" })],
+    [
+      "invalid username",
+      () => {
+        const payload = validAuthSessionPayload();
+        return { ...payload, user: { ...payload.user, username: null } };
+      },
+    ],
+    [
+      "invalid optional user field",
+      () => {
+        const payload = validAuthSessionPayload();
+        return { ...payload, user: { ...payload.user, display_name: 42 } };
+      },
+    ],
+    [
+      "inconsistent platform-admin flag",
+      () => {
+        const payload = validAuthSessionPayload();
+        return {
+          ...payload,
+          user: { ...payload.user, is_platform_admin: true },
+        };
+      },
+    ],
+    [
+      "current team outside memberships",
+      () => ({
+        ...validAuthSessionPayload(),
+        current_team: { id: "team-b", name: "Beta", role: "owner" },
+      }),
+    ],
+  ])("rejects a successful response with %s", async (_label, payload) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(payload()), { status: 200 }),
+    );
+
+    await expect(api.authMe()).rejects.toMatchObject({
+      kind: "invalid",
+      message: "browser session response is invalid",
+    });
+  });
+
+  it("classifies a failed session mutation without consuming its body", async () => {
+    setCsrfToken("csrf-before-switch");
+    const response = new Response("raw upstream token=secret", { status: 503 });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    await expect(api.switchTeam("team-b")).rejects.toMatchObject({
+      kind: "http",
+      message: "browser session returned an unsuccessful status",
+    });
+    expect(response.bodyUsed).toBe(false);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/auth/team",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({ team_id: "team-b" }),
+      }),
+    );
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>)["X-Loom-CSRF"]).toBe(
+      "csrf-before-switch",
+    );
+  });
+
+  it.each([
+    [
+      "network failure",
+      () => Promise.reject(new Error("raw network token=secret")),
+      "network",
+    ],
+    [
+      "malformed success",
+      () => Promise.resolve(new Response("not-json", { status: 200 })),
+      "invalid",
+    ],
+  ] as const)("replaces a %s from a session mutation", async (
+    _label,
+    reply,
+    kind,
+  ) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(reply);
+
+    await expect(api.loginPassword("Owner", "secret-password")).rejects.toMatchObject({
+      kind,
+      message: expect.not.stringContaining("secret"),
+    });
+  });
+});
+
 describe("provider connection management endpoints", () => {
   beforeEach(() => {
     setCsrfToken("csrf-xyz");
@@ -134,12 +366,12 @@ describe("provider connection management endpoints", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("getProviderConnection GETs /api/v1/provider-connections/:id", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ id: "abc", name: "x" }), { status: 200 }),
     );
     const { api } = await import("../api/client");
     const result = await api.getProviderConnection("abc");
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc",
       expect.objectContaining({}),
     );
@@ -147,7 +379,7 @@ describe("provider connection management endpoints", () => {
   });
 
   it("createProviderConnection POSTs to /api/v1/provider-connections", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ id: "new" }), { status: 201 }),
     );
     const { api } = await import("../api/client");
@@ -156,7 +388,7 @@ describe("provider connection management endpoints", () => {
       base_url: "https://example", api_key: "k",
     };
     const result = await api.createProviderConnection(payload);
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections",
       expect.objectContaining({ method: "POST", body: JSON.stringify(payload) }),
     );
@@ -164,37 +396,37 @@ describe("provider connection management endpoints", () => {
   });
 
   it("updateProviderConnection PATCHes /api/v1/provider-connections/:id", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ id: "abc" }), { status: 200 }),
     );
     const { api } = await import("../api/client");
     const patch = { allowed_models: ["m1"] };
     await api.updateProviderConnection("abc", patch);
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc",
       expect.objectContaining({ method: "PATCH", body: JSON.stringify(patch) }),
     );
   });
 
   it("deleteProviderConnection DELETEs /api/v1/provider-connections/:id", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 204 }),
     );
     const { api } = await import("../api/client");
     await api.deleteProviderConnection("abc");
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc",
       expect.objectContaining({ method: "DELETE" }),
     );
   });
 
   it("testProviderConnection POSTs /api/v1/provider-connections/:id/test", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ status: "valid" }), { status: 200 }),
     );
     const { api } = await import("../api/client");
     const result = await api.testProviderConnection("abc");
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/test",
       expect.objectContaining({ method: "POST" }),
     );
@@ -202,61 +434,61 @@ describe("provider connection management endpoints", () => {
   });
 
   it("listProviderConnectionModels GETs /api/v1/provider-connections/:id/models", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ items: [] }), { status: 200 }),
     );
     const { api } = await import("../api/client");
     await api.listProviderConnectionModels("abc");
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models",
       expect.objectContaining({}),
     );
   });
 
   it("addProviderConnectionModel POSTs /api/v1/provider-connections/:id/models", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({}), { status: 201 }),
     );
     const { api } = await import("../api/client");
     const model = { model_id: "manual/x" };
     await api.addProviderConnectionModel("abc", model);
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models",
       expect.objectContaining({ method: "POST", body: JSON.stringify(model) }),
     );
   });
 
   it("refreshProviderConnectionModels POSTs .../models/refresh", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ added: 0, removed: 0 }), { status: 200 }),
     );
     const { api } = await import("../api/client");
     await api.refreshProviderConnectionModels("abc");
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models/refresh",
       expect.objectContaining({ method: "POST" }),
     );
   });
 
   it("hideProviderConnectionModel POSTs .../models/:mid/hide (url-encoded mid)", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 204 }),
     );
     const { api } = await import("../api/client");
     await api.hideProviderConnectionModel("abc", "openai/gpt-4");
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models/openai%2Fgpt-4/hide",
       expect.objectContaining({ method: "POST" }),
     );
   });
 
   it("unhideProviderConnectionModel POSTs .../models/:mid/unhide", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 204 }),
     );
     const { api } = await import("../api/client");
     await api.unhideProviderConnectionModel("abc", "openai/gpt-4");
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models/openai%2Fgpt-4/unhide",
       expect.objectContaining({ method: "POST" }),
     );

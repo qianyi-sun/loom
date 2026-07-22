@@ -99,7 +99,11 @@ Family runs are opt-in at two layers:
       // silent).
       "adapter": {
         "name": "skill_patcher_llm",
-        "params": {"model": "anthropic/claude-sonnet-4-6", "max_tokens": 8192}
+        "params": {
+          "model": "anthropic/claude-sonnet-4-6",
+          "max_tokens": 8192,
+          "provider_connection_id": "11111111-1111-4111-8111-111111111111"
+        }
       }
     }
   }
@@ -109,6 +113,25 @@ Family runs are opt-in at two layers:
 The batch runner resolves the two layers into a single
 `ResolvedFamilyRunSpec` at accept time and stores it on the batch row. It is
 immutable once persisted; changing family-run behaviour requires a new batch.
+
+For `skill_patcher_llm`, batch acceptance calls
+`normalize_evolver_provider_connection()` before persisting the resolved spec
+or materializing family state. It recursively rejects secret-like adapter
+parameter names (for example API keys, authorization headers, bearer tokens,
+credentials, passwords, cookies, and secret references), canonicalizes the
+optional `provider_connection_id` as a UUID, and authorizes that connection
+against the represented batch team (`submission_team_id`). The team must own
+the connection or have an explicit provider share; inaccessible connections
+fail closed without revealing whether another team owns them. Credentials stay
+behind the provider connection and never enter `family_run_spec`.
+
+Omitting `provider_connection_id` is the explicit platform-provider path. The
+orchestrator still asks the Control Plane for a `family_evolver` step JWT with
+an explicit null provider; the JWT carries an authoritative null provider
+claim, while the request header and `loom.provider_connection_id` body field
+remain absent. The Gateway then
+uses its platform-credentialed route rather than inheriting the completed
+trial's provider implicitly.
 
 ## Data model
 
@@ -222,7 +245,7 @@ Entry-point groups:
 
 ### Reference-level plugin (in `loom` core; largest single addition)
 
-- **`skill_patcher_llm`** (`adapter`) — port of SkillFlow's `SkillPatchEvolver`. Compacts the trial's trajectory (step budget + observation-length limit), sends a fixed prompt template to the evolver LLM via the standard gateway (billing recorded in `llm_calls` with `dialect="family_evolver"`), receives a JSON patch (`{"add": [{path, content}], "modify": [{path, content}], "delete": [path]}`), applies to a local checkout of the current state, uploads via the state_backend. Model selection precedence: `trial_config.family_run.adapter.params.model` → cluster default `skill_evolver_default_model` (see below) → framework default (`anthropic/claude-sonnet-4-6`).
+- **`skill_patcher_llm`** (`adapter`) — port of SkillFlow's `SkillPatchEvolver`. Compacts the completed trial's trajectory (step budget + observation-length limit), sends a fixed prompt template to the evolver LLM via the standard gateway (billing recorded in `llm_calls` with `dialect="family_evolver"`), receives a JSON patch (`{"add": [{path, content}], "modify": [{path, content}], "delete": [path]}`), applies to a local checkout of the current state, uploads via the state_backend. Model selection precedence: `trial_config.family_run.adapter.params.model` → cluster default `skill_evolver_default_model` (see below) → framework default (`anthropic/claude-sonnet-4-6`). For each call, the orchestrator supplies the real completed trial id and represented batch team, then exchanges its dedicated `family:evolve` credential at Control Plane `/admin/step-tokens` for an `llm:call` step JWT bound to `(trial_id, team_id, provider_connection_id, step_id="family_evolver")`. The dedicated credential cannot call the Gateway directly. The Control Plane repeats the owner/share check against the real trial team before minting the JWT.
 
 ### Cluster config
 

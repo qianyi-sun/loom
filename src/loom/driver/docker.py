@@ -139,6 +139,15 @@ class DockerDriver:
                 run_kwargs["tmpfs"] = _tmpfs_specs_to_docker_map(opts.tmpfs)
             if opts.labels:
                 run_kwargs["labels"] = dict(opts.labels)
+            # #896: per-container hard caps for non-exclusive (packed) workers.
+            # Only applied when configured (>0); unset preserves the current
+            # unbounded behavior for exclusive pools.
+            if opts.container_cpus > 0:
+                run_kwargs["nano_cpus"] = int(opts.container_cpus * 1_000_000_000)
+            if opts.container_memory_mib > 0:
+                run_kwargs["mem_limit"] = opts.container_memory_mib * 1024 * 1024
+            if opts.container_pids > 0:
+                run_kwargs["pids_limit"] = opts.container_pids
             # docker-py's high-level containers.run() creates before it starts,
             # but it does not return the Container if start() raises. Split the
             # steps so the failure cleanup path can remove Created containers.

@@ -96,27 +96,27 @@ def test_manifest_expresses_staging_lease_and_draining_states(tmp_path: Path) ->
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 staging_slots = 1
 
 [[hosts]]
 name = "gb10-2"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "staging_draining"
 staging_slots = 1
 
 [[hosts]]
 name = "gb10-3"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "host_draining"
 
 [[hosts]]
 name = "gb10-4"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "unreachable"
 """,
@@ -142,7 +142,7 @@ def test_observed_cross_environment_drift_redacts_secrets(tmp_path: Path) -> Non
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 """,
@@ -192,7 +192,7 @@ def test_cli_writes_evidence_and_detects_worker_identity_conflict(tmp_path: Path
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 prod_slots = 9
@@ -255,7 +255,7 @@ def test_cli_markdown_failure_path_redacts_secret_bearing_manifest_keys(tmp_path
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 api_token = "sk-do-not-print-this-value"
@@ -277,13 +277,13 @@ def test_lease_staging_previews_before_apply_and_writes_bounded_lease(tmp_path: 
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "gb10-2"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 """,
@@ -362,7 +362,7 @@ def test_lease_staging_rejects_unbounded_ttl_multi_slot_and_non_preemptible(
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 """,
@@ -429,13 +429,13 @@ def test_status_expires_staging_lease_and_reports_running_vs_idle_drain_slots(
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "gb10-2"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 """,
@@ -541,13 +541,13 @@ def test_release_staging_is_idempotent_and_returns_staging_slots_to_zero(tmp_pat
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "gb10-2"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 """,
@@ -623,7 +623,7 @@ def test_drain_staging_redacts_command_and_evidence_output(tmp_path: Path) -> No
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 staging_slots = 1
@@ -687,13 +687,13 @@ def test_status_keeps_active_staging_lease_when_prod_pressure_is_absent(
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "gb10-2"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 """,
@@ -748,13 +748,13 @@ def test_status_auto_drains_staging_capacity_under_prod_pressure(tmp_path: Path)
         """
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "gb10-2"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 """,
@@ -872,7 +872,7 @@ prod_pressure_reason = "prod capacity pressure"
 
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "staging_draining"
 staging_slots = 1
@@ -947,14 +947,14 @@ prod_pressure_reason = "prod capacity pressure"
 
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "staging_draining"
 staging_slots = 1
 
 [[hosts]]
 name = "gb10-2"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 staging_slots = 0
@@ -1011,7 +1011,7 @@ prod_pressure_reason = "prod capacity pressure"
 
 [[hosts]]
 name = "gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "staging_draining"
 staging_slots = 1

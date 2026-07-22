@@ -27,7 +27,7 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
     assert "--provider mz_tn_canada_qianyi" in runbook
     assert "--model glm-5.1-thinking" in runbook
     assert "--agent opencode" in runbook
-    assert "--required-worker-pool gb10-arm64" in runbook
+    assert "--required-worker-pool gb10" in runbook
 
 
 def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:

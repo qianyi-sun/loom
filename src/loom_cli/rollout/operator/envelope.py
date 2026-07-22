@@ -12,6 +12,7 @@ from typing import cast
 
 from loom_cli.cluster_backup_guard import validate_backup_manifest
 
+from .backup_limits import operator_backup_traversal_limits
 from .config import OperatorConfig
 from .model import (
     APPROVED_FETCH_REF,
@@ -299,6 +300,7 @@ def _validate_backup(
         expected_owner_uid=effective_uid,
         require_private_files=True,
         enforce_freshness=not envelope.resume,
+        limits=operator_backup_traversal_limits(config),
     )
     if problems:
         raise EnvelopeValidationError("backup manifest validation failed: " + "; ".join(problems))

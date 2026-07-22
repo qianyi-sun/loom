@@ -12,7 +12,7 @@ function renderNav(
   currentUsername: string | null = null,
 ) {
   return render(
-    <MemoryRouter>
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <NavBar
         isAdmin={isAdmin}
         currentTeamRole={currentTeamRole}
@@ -43,7 +43,7 @@ describe("NavBar", () => {
     );
   });
 
-  it("shows the signed-in user, current team, and role in the global navigation", () => {
+  it("shows the signed-in user, current team, and role in the globalThis navigation", () => {
     renderNav(false, "owner", "EAI", "Qianyi");
 
     const identityContext = screen.getByLabelText("Current user and team");
@@ -52,7 +52,7 @@ describe("NavBar", () => {
     expect(identityContext).toHaveTextContent("owner");
   });
 
-  it("shows a clear non-production environment identity in the global navigation", () => {
+  it("shows a clear non-production environment identity in the globalThis navigation", () => {
     setFrontendConfigForTests({
       environment: "development",
       environmentLabel: "Development / staging",
