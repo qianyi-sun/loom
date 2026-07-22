@@ -23,3 +23,6 @@ def test_service_image_exposes_immutable_build_revision_to_runtime() -> None:
     assert 'ENV LOOM_BUILD_SHA="${LOOM_BUILD_SHA}"' not in text
     assert 'printf \'%s\\n\' "${LOOM_BUILD_SHA}" > /opt/loom/build-sha' in text
     assert "chmod 0444 /opt/loom/build-sha" in text
+    assert text.index("RUN pip install --no-cache-dir -e .") < text.index(
+        "ARG LOOM_BUILD_SHA=unknown"
+    )
