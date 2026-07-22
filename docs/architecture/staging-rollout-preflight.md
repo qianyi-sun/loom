@@ -266,11 +266,11 @@ non-superuser, `NOINHERIT`, `NOCREATEROLE`, `NOCREATEDB`, `NOREPLICATION` and
 `TEMP` grant; revoking it only from the named role cannot override an inherited
 `PUBLIC` grant. The staging database inventory permits only its `loom` owner
 and this readonly login, so the owner retains its implicit authority while the
-probe cannot create session-local tables. A pre-0066 database has no
+probe cannot create session-local tables. A pre-0068 database has no
 mutation-epoch table, so the source
 accepts only its exact four-digit Alembic revision and binds the one-time
-bootstrap epoch `0` to that revision. Revision 0066 and later must provide the
-exact staging epoch row; revision 0067 and later must also provide exact
+bootstrap epoch `0` to that revision. Revision 0068 and later must provide the
+exact staging epoch row; revision 0069 and later must also provide exact
 capacity authority. A missing newer table never falls back to legacy mode.
 The root installer creates or reuses one 256-bit credential in a root-owned
 0600 file, converges the exact role through `psql` stdin, and publishes a
@@ -287,15 +287,15 @@ storage or network evidence. Large valid inventories are read in deterministic
 1024-row pages without relaxing the per-query row bound, and the staging
 admission object limit is also the fail-closed inventory ceiling. Tier 0
 capacity separately shares one fresh,
-single-flight list-only MinIO/filesystem snapshot, so pre-0067 staging remains
+single-flight list-only MinIO/filesystem snapshot, so pre-0069 staging remains
 measurable without weakening database schema authority. Its live inventory may
 use up to 60 seconds inside the overall sub-two-minute Tier 0 budget; a measured
 31-second high-water inventory must return its exact object/byte/disk/inode
 evidence instead of being misclassified as a timeout. The critical checkpoint's
 pinned benchmark/catalog/system inventory is derived from that same snapshot,
-never from a privileged `kubectl exec`. A pre-0066 snapshot binds an explicitly
+never from a privileged `kubectl exec`. A pre-0068 snapshot binds an explicitly
 empty legacy inventory because typed object authority does not exist yet;
-revision 0066 and later must return a sorted, unique, fully classified inventory
+revision 0068 and later must return a sorted, unique, fully classified inventory
 from the lifecycle tables. The exact tunnel and DB
 session are always rolled back and closed after evidence collection.
 Installed preflight treats the readonly application token, readonly kubeconfig,
@@ -380,7 +380,7 @@ timer/transient-unit classifier belong here, not at final acceptance.
 `capacity.high-water` always consumes one fresh, process-local single-flight
 snapshot from the installed list-only MinIO authority and the canonical
 staging MinIO filesystem. The same predicate and policy digest therefore work
-before and after migration `0067`; a database capacity row is not substituted
+before and after migration `0069`; a database capacity row is not substituted
 for live object, byte, disk, or inode observation. The dedicated S3 policy
 allows only bucket location/versioning and list/version-list operations for the
 two execution buckets, while the TokenRequest permits port-forward only to the
@@ -390,7 +390,7 @@ The requestless admission path reads the readonly role, schema revision, and
 mutation epoch through one minimal typed probe before it constructs the DAG.
 The full Tier 2 database baseline reuses that exact probe and then evaluates
 baseline rows, runtime capacity authority, and immutable-object inventory. A
-missing migration-`0067` capacity row therefore remains a blocking Tier 2
+missing migration-`0069` capacity row therefore remains a blocking Tier 2
 failure, but it cannot prevent the DAG from reporting independent Tier 0–2
 blockers or mask the fresh `capacity.high-water` observation.
 The backup admission adapter follows the same rule: if its strict immutable
@@ -836,12 +836,12 @@ epoch owned by that same request and plan, and `drifted` for every concurrent
 or malformed state. A crash after the transaction is therefore recovered by
 readback, never by a second increment.
 
-The one-time pre-0066 transition is explicit rather than silently pretending
+The one-time pre-0068 transition is explicit rather than silently pretending
 that a missing epoch row is current authority. Only a plan attesting epoch
-zero, a baseline schema below 0066, and a rehearsed target at or above 0066 may
+zero, a baseline schema below 0068, and a rehearsed target at or above 0068 may
 bootstrap the staging row. The exact migration component must converge first;
 then one SQL statement inserts the bootstrap row if absent, claims epoch one,
-and appends its event. Missing authority for any already-0066 database is
+and appends its event. Missing authority for any already-0068 database is
 drift, and a generic migration never seeds a staging row into another
 environment's database.
 

@@ -78,21 +78,22 @@ class Query:
         raise AssertionError(sql)
 
 
-def test_legacy_database_uses_schema_bound_bootstrap_epoch() -> None:
-    query = Query(revision="0065")
+@pytest.mark.parametrize("revision", ["0065", "0066", "0067"])
+def test_legacy_database_uses_schema_bound_bootstrap_epoch(revision: str) -> None:
+    query = Query(revision=revision)
 
     evidence = probe_readonly_database(query)
 
-    assert evidence.schema_revision == "0065"
+    assert evidence.schema_revision == revision
     assert evidence.mutation_epoch == 0
-    assert evidence.epoch_authority == "legacy-pre-0066"
+    assert evidence.epoch_authority == "legacy-pre-0068"
     assert evidence.capacity is None
     assert all("staging_mutation_epochs" not in sql for sql in query.calls)
     assert all("staging_lifecycle_capacity" not in sql for sql in query.calls)
 
 
 def test_current_database_requires_exact_epoch_and_capacity() -> None:
-    query = Query(revision="0067")
+    query = Query(revision="0069")
 
     evidence = probe_readonly_database(query)
 
@@ -121,7 +122,7 @@ def test_current_database_binds_sorted_immutable_inventory_in_same_snapshot() ->
         "size_bytes": 42,
         "version_id": "v1",
     }
-    query = Query(revision="0066", inventory=(row,))
+    query = Query(revision="0068", inventory=(row,))
 
     evidence = probe_readonly_database(query)
 
@@ -142,7 +143,7 @@ def test_current_database_binds_unversioned_legacy_pinned_inventory() -> None:
         "size_bytes": 42,
         "version_id": None,
     }
-    query = Query(revision="0066", inventory=(row,))
+    query = Query(revision="0068", inventory=(row,))
 
     evidence = probe_readonly_database(query)
 
@@ -168,7 +169,7 @@ def test_current_database_sorts_after_legacy_version_normalization() -> None:
         }
 
     query = Query(
-        revision="0066",
+        revision="0068",
         inventory=(
             row("b" * 64, "22222222-2222-4222-8222-222222222222"),
             row("a" * 64, "11111111-1111-4111-8111-111111111111"),
@@ -198,7 +199,7 @@ def test_current_database_rejects_unversioned_inventory_without_exact_digest() -
     }
 
     with pytest.raises(ValueError, match="immutable inventory is invalid"):
-        probe_readonly_database(Query(revision="0066", inventory=(row,)))
+        probe_readonly_database(Query(revision="0068", inventory=(row,)))
 
 
 def test_immutable_inventory_query_binds_legacy_authority_identity() -> None:
@@ -219,7 +220,7 @@ def test_current_database_pages_immutable_inventory_in_same_snapshot() -> None:
         }
         for index in range(1_939)
     )
-    query = Query(revision="0066", inventory=inventory)
+    query = Query(revision="0068", inventory=inventory)
 
     evidence = probe_readonly_database(query)
 
@@ -245,7 +246,7 @@ def test_current_database_rejects_inventory_at_admission_limit(
         }
         for index in range(2)
     )
-    query = Query(revision="0066", inventory=inventory)
+    query = Query(revision="0068", inventory=inventory)
     monkeypatch.setattr(readonly_database_authority, "STAGING_ADMISSION_OBJECT_LIMIT", 2)
 
     with pytest.raises(ValueError, match="immutable inventory exceeds policy"):
@@ -254,7 +255,7 @@ def test_current_database_rejects_inventory_at_admission_limit(
 
 def test_current_database_rejects_unclassified_immutable_inventory() -> None:
     query = Query(
-        revision="0066",
+        revision="0068",
         inventory=(
             {
                 "authoritative_source": "",
@@ -274,7 +275,7 @@ def test_current_database_rejects_unclassified_immutable_inventory() -> None:
 
 def test_checkpoint_inventory_drift_does_not_mask_database_baseline() -> None:
     query = Query(
-        revision="0067",
+        revision="0069",
         inventory=(
             {
                 "authoritative_source": "",
@@ -327,7 +328,7 @@ def test_database_role_drift_is_rejected(field: str, value: object) -> None:
 
 
 def test_new_schema_cannot_fall_back_when_epoch_is_missing() -> None:
-    query = Query(revision="0066")
+    query = Query(revision="0068")
     original = query.__call__
 
     def missing(sql: str) -> tuple[Mapping[str, object], ...]:
@@ -340,7 +341,7 @@ def test_new_schema_cannot_fall_back_when_epoch_is_missing() -> None:
 
 
 def test_missing_capacity_remains_explicit_without_masking_database_baseline() -> None:
-    query = Query(revision="0067")
+    query = Query(revision="0069")
     original = query.__call__
 
     def missing(sql: str) -> tuple[Mapping[str, object], ...]:
@@ -350,7 +351,7 @@ def test_missing_capacity_remains_explicit_without_masking_database_baseline() -
 
     evidence = probe_readonly_database(missing)
 
-    assert evidence.schema_revision == "0067"
+    assert evidence.schema_revision == "0069"
     assert evidence.mutation_epoch == 9
     assert evidence.baseline_counts["tasks"] == 5
     assert evidence.capacity is None
@@ -358,7 +359,7 @@ def test_missing_capacity_remains_explicit_without_masking_database_baseline() -
 
 
 def test_duplicate_capacity_authority_is_rejected() -> None:
-    query = Query(revision="0067")
+    query = Query(revision="0069")
     original = query.__call__
 
     def duplicated(sql: str) -> tuple[Mapping[str, object], ...]:
@@ -372,7 +373,7 @@ def test_duplicate_capacity_authority_is_rejected() -> None:
 
 
 def test_epoch_probe_does_not_let_missing_capacity_mask_the_preflight_dag() -> None:
-    query = Query(revision="0067")
+    query = Query(revision="0069")
     original = query.__call__
 
     def missing(sql: str) -> tuple[Mapping[str, object], ...]:
@@ -382,7 +383,7 @@ def test_epoch_probe_does_not_let_missing_capacity_mask_the_preflight_dag() -> N
 
     evidence = probe_readonly_mutation_epoch(missing)
 
-    assert evidence.schema_revision == "0067"
+    assert evidence.schema_revision == "0069"
     assert evidence.mutation_epoch == 9
     assert evidence.epoch_authority == "staging-mutation-epoch-v1"
     assert len(evidence.evidence_sha256) == 64

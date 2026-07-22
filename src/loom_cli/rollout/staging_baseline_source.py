@@ -559,7 +559,7 @@ class CrossVersionStagingBaselineProbeSource:
         blockers: dict[str, str] = {}
         if not object_store.ready:
             blockers["object-store"] = "object-store-readiness-failed"
-        if int(self._database.schema_revision) >= 67 and self._database.capacity is None:
+        if int(self._database.schema_revision) >= 69 and self._database.capacity is None:
             blockers["capacity"] = "dependency-capacity-unready"
         return self._result(
             "staging.storage-db",

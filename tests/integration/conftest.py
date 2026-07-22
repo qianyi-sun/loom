@@ -54,7 +54,7 @@ def isolated_migration_postgres_url(postgres_url: str) -> Iterator[str]:
 
     The integration suite normally shares one head-schema database. Historical
     migration tests must not downgrade that database: current lifecycle rows
-    deliberately make migration 0066 fail closed, and a partial downgrade can
+    deliberately make migration 0068 fail closed, and a partial downgrade can
     poison every later test in the shard. Each caller instead gets a fresh
     database on the session Postgres server, upgraded to head before use.
     """

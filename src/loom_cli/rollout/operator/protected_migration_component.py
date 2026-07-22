@@ -227,7 +227,7 @@ def _verify_job(payload: bytes, plan: FinalGatePlan) -> None:
 def _stable_observed_epoch(plan: FinalGatePlan) -> int:
     current = int(plan.schema_revision[:4])
     target = int(plan.migration_target_revision[:4])
-    if current < 66 <= target and plan.starting_mutation_epoch == 0:
+    if current < 68 <= target and plan.starting_mutation_epoch == 0:
         return 0
     return plan.starting_mutation_epoch + 1
 

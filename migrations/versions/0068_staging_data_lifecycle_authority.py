@@ -1,7 +1,7 @@
 """Add typed staging data-lifecycle authority and mutation epochs.
 
-Revision ID: 0066
-Revises: 0065
+Revision ID: 0068
+Revises: 0067
 Create Date: 2026-07-19
 
 The new tables are additive. Existing execution rows remain deliberately
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0066"
-down_revision = "0065"
+revision = "0068"
+down_revision = "0067"
 branch_labels = None
 depends_on = None
 

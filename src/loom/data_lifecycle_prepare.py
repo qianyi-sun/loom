@@ -30,8 +30,8 @@ from loom.data_lifecycle_gc import GcScope
 _REVISION_RE = re.compile(r"^[0-9]{4}(?:_[a-z0-9_]+)?$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _TREE_RE = _SHA_RE
-_PRE_LIFECYCLE_REVISION = "0065"
-_MIN_LIFECYCLE_REVISION = 66
+_PRE_LIFECYCLE_REVISIONS = frozenset({"0065", "0066", "0067"})
+_MIN_LIFECYCLE_REVISION = 68
 _ADVISORY_LOCK_KEY = 0x4C4F4F4D4C494645  # ``LOOMLIFE`` as one signed-safe bigint.
 _LIFECYCLE_TABLES = (
     "data_lifecycle_authorities",
@@ -248,17 +248,19 @@ class SqlAlchemyLifecyclePreparer:
         if current_number > target_number:
             blockers.append("database schema is ahead of the exact migration source")
         if current_number < _MIN_LIFECYCLE_REVISION:
-            if current != _PRE_LIFECYCLE_REVISION:
-                blockers.append("legacy lifecycle preparation requires exact revision 0065")
+            if current not in _PRE_LIFECYCLE_REVISIONS:
+                blockers.append(
+                    "legacy lifecycle preparation requires exact revision 0065, 0066, or 0067"
+                )
             if tables or linked:
                 blockers.append("pre-lifecycle database contains partial lifecycle schema")
         else:
             bootstrap = SqlAlchemyLifecycleBootstrap(self._engine).inventory(scope=scope)
             blockers.extend(bootstrap.blockers)
             expected_tables = set(_LIFECYCLE_TABLES)
-            if current_number == 66:
+            if current_number == 68:
                 expected_tables.remove("staging_lifecycle_capacity")
-            if current_number < 68:
+            if current_number < 70:
                 expected_tables.remove("data_lifecycle_gc_authorities")
             if set(tables) != expected_tables or set(linked) != set(_EXECUTION_TABLES):
                 blockers.append("lifecycle schema structure is incomplete")

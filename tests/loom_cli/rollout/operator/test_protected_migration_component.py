@@ -10,13 +10,21 @@ from loom_cli.rollout.operator.protected_migration_component import (
     KubernetesProtectedMigrationComponent,
 )
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
-from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan as _base_plan
 from tests.loom_cli.rollout.test_preflight_artifact_store import (
     _images,
     _manifests,
     _migration,
     _production_defaults,
 )
+
+
+def _plan(tmp_path: Path):  # type: ignore[no-untyped-def]
+    return replace(
+        _base_plan(tmp_path),
+        schema_revision="0068",
+        migration_target_revision="0071",
+    )
 
 
 class Runner:
@@ -37,7 +45,7 @@ class Runner:
             assert timeout_seconds == 60.0
         else:
             assert timeout_seconds == 660.0
-            self.revision = "0067"
+            self.revision = "0071"
 
 
 def _published_plan(tmp_path: Path):
@@ -48,6 +56,7 @@ def _published_plan(tmp_path: Path):
         images,
         candidate_tree="b" * 40,
         migration_plan_sha256="4" * 64,
+        migration_target_revision="0071",
     )
     publication = PreflightArtifactStore(state).publish(
         candidate_sha="a" * 40,
@@ -58,7 +67,7 @@ def _published_plan(tmp_path: Path):
         migration=migration,
         production_defaults=_production_defaults(candidate_tree="b" * 40),
         migration_plan_sha256="4" * 64,
-        migration_target_revision="0067",
+        migration_target_revision="0071",
         browser_report_schema_sha256="8" * 64,
     )
     return replace(
@@ -79,7 +88,7 @@ def _published_plan(tmp_path: Path):
 
 def test_migration_component_converges_exact_published_job(tmp_path: Path) -> None:
     plan = _published_plan(tmp_path)
-    runner = Runner("0066")
+    runner = Runner("0068")
     authority = KubernetesProtectedMigrationComponent(
         runner=runner,
         environment={"KUBECONFIG": "/exact"},
@@ -133,7 +142,7 @@ def test_migration_component_rechecks_schema_immediately_before_apply(tmp_path: 
             self.revision = "0065"
             return super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
 
-    runner = RacingRunner("0066")
+    runner = RacingRunner("0068")
     authority = KubernetesProtectedMigrationComponent(
         runner=runner,
         environment={"KUBECONFIG": "/exact"},

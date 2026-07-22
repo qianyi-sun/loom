@@ -62,7 +62,7 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
         scope = GcScope(environment="staging", namespace="loom-staging")
         plan = preparer.inventory(scope=scope)
         assert plan.current_revision == "0065"
-        assert plan.target_revision == "0069"
+        assert plan.target_revision == "0071"
         assert plan.applicable
         assert plan.lifecycle_tables == ()
         assert plan.linked_execution_tables == ()
@@ -70,15 +70,28 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
         with pytest.raises(LifecyclePrepareError, match="digest does not match"):
             preparer.apply(plan=plan, approved_inventory_digest="0" * 64)
 
-        # A crash after one transactional migration revision cannot reuse the
-        # old approval.  A fresh inventory recognizes the exact partial chain.
+        # A crash after either upstream-only migration cannot reuse the old
+        # approval. Fresh inventory recognizes each exact pre-lifecycle state
+        # without inventing lifecycle tables or bootstrap authority.
         command.upgrade(_config(postgres_at_0065), "0066")
         with pytest.raises(LifecyclePrepareError, match="inventory drifted"):
             preparer.apply(plan=plan, approved_inventory_digest=plan.inventory_digest)
         partial = preparer.inventory(scope=scope)
         assert partial.current_revision == "0066"
         assert partial.applicable
-        assert partial.bootstrap is not None and partial.bootstrap.applicable
+        assert partial.bootstrap is None
+        assert partial.lifecycle_tables == ()
+        assert partial.linked_execution_tables == ()
+
+        command.upgrade(_config(postgres_at_0065), "0067")
+        with pytest.raises(LifecyclePrepareError, match="inventory drifted"):
+            preparer.apply(plan=partial, approved_inventory_digest=partial.inventory_digest)
+        partial = preparer.inventory(scope=scope)
+        assert partial.current_revision == "0067"
+        assert partial.applicable
+        assert partial.bootstrap is None
+        assert partial.lifecycle_tables == ()
+        assert partial.linked_execution_tables == ()
 
         # One concurrent preparer owns the fixed advisory lock; there is no
         # waiting race or second migration attempt.
@@ -103,7 +116,7 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
             plan=partial,
             approved_inventory_digest=partial.inventory_digest,
         )
-        assert converged.current_revision == "0069"
+        assert converged.current_revision == "0071"
         assert converged.converged
         assert preparer.apply(
             plan=converged,
@@ -122,7 +135,7 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
             events = connection.execute(
                 text("SELECT count(*) FROM staging_mutation_epoch_events")
             ).scalar_one()
-        assert revision == "0069"
+        assert revision == "0071"
         assert tuple(epoch) == ("staging", "loom-staging", 0, "bootstrap", None, None)
         assert events == 0
     finally:

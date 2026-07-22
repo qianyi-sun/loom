@@ -1,7 +1,7 @@
 """Normalize exact GC resume evidence into journal items.
 
-Revision ID: 0068
-Revises: 0067
+Revision ID: 0070
+Revises: 0069
 Create Date: 2026-07-19
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0068"
-down_revision = "0067"
+revision = "0070"
+down_revision = "0069"
 branch_labels = None
 depends_on = None
 

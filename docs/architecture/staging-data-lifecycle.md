@@ -1,7 +1,7 @@
 # Staging data lifecycle and rollout checkpoints
 
 Shared staging is a bounded validation environment, not an archival data lake.
-Migration `0066` introduces typed lifecycle authority and the monotonic staging
+Migration `0068` introduces typed lifecycle authority and the monotonic staging
 mutation epoch used by garbage collection and rollout backup leases.
 
 The migration is additive and deliberately does not guess which deployed
@@ -80,7 +80,7 @@ free percentage, inode free percentage, the GC trigger decision, and the final
 admission decision together. A missing inventory or policy-digest drift denies
 admission before request publication or backup.
 
-The rollout Tier 0 collector does not depend on migration `0067` already being
+The rollout Tier 0 collector does not depend on migration `0069` already being
 live. Its installed Kubernetes TokenRequest may open localhost transports only
 to the exact `loom-minio-0` and `loom-postgres-0` pods. MinIO independently
 authenticates a fixed list-only user whose one exact policy can read bucket
@@ -89,11 +89,11 @@ and artifacts buckets; it cannot read object payloads or write/delete anything.
 The collector inventories those exact buckets and measures the canonical
 `/data/loom-staging/minio` backing filesystem directly under the rollout
 service account. This fresh snapshot is the single source for
-`capacity.high-water` on both legacy and migrated staging. The `0067` row
+`capacity.high-water` on both legacy and migrated staging. The `0069` row
 remains runtime run-admission authority, but a missing legacy row can no longer
 hide a real byte, object, disk, or inode blocker from rollout preflight.
 
-Migration `0067` persists the same exact capacity authority for runtime run
+Migration `0069` persists the same exact capacity authority for runtime run
 admission. `scripts/ops/staging_data_lifecycle_capacity.py` enumerates every
 explicitly allowlisted execution bucket, measures the configured staging data
 filesystem, and atomically publishes object/byte/free-space counters with the
@@ -145,7 +145,7 @@ prefix becomes deletion authority.
 
 ### Historical classification
 
-Rows created before migration `0066` are never implicitly grandfathered into
+Rows created before migration `0068` are never implicitly grandfathered into
 GC. The supported classifier is
 `scripts/ops/staging_data_lifecycle_classify.py`: `inventory` reads all five
 execution tables in one repeatable-read snapshot, groups event/LLM rows under
@@ -279,7 +279,7 @@ GC is staging-only and journaled:
 Runs are retryable and idempotent. Unknown or cross-environment objects are
 quarantined/reported. DB references without objects and objects without DB
 owners are reconciled in both directions; neither class is silently deleted.
-Migration `0068` normalizes resume evidence for large runs: the run row retains
+Migration `0070` normalizes resume evidence for large runs: the run row retains
 only the scope, epoch, canonical inventory digest and bounded counts, while
 the authority-membership journal retains every exact authority (including
 authorities with no object), and each object item retains its exact authority,

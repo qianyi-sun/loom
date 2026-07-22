@@ -1,7 +1,7 @@
 """Allow exact authorities for legacy LLM calls without a trial.
 
-Revision ID: 0069
-Revises: 0068
+Revision ID: 0071
+Revises: 0070
 Create Date: 2026-07-19
 """
 
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0069"
-down_revision = "0068"
+revision = "0071"
+down_revision = "0070"
 branch_labels = None
 depends_on = None
 

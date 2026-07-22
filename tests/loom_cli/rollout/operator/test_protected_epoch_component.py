@@ -11,7 +11,15 @@ from loom_cli.rollout.operator.protected_apply_journal import ComponentState
 from loom_cli.rollout.operator.protected_epoch_component import (
     KubernetesProtectedEpochComponent,
 )
-from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan as _base_plan
+
+
+def _plan(tmp_path: Path):  # type: ignore[no-untyped-def]
+    return replace(
+        _base_plan(tmp_path),
+        schema_revision="0068",
+        migration_target_revision="0071",
+    )
 
 
 class Runner:
@@ -111,7 +119,7 @@ def test_epoch_component_bootstraps_only_after_legacy_schema_migration(tmp_path:
     plan = replace(
         _plan(tmp_path),
         schema_revision="0065",
-        migration_target_revision="0067",
+        migration_target_revision="0071",
         starting_mutation_epoch=0,
     )
     runner = Runner(None)
@@ -125,6 +133,6 @@ def test_epoch_component_bootstraps_only_after_legacy_schema_migration(tmp_path:
     authority.apply(plan)
     assert authority.classify(plan).state is ComponentState.EXACT
 
-    nonlegacy = replace(plan, schema_revision="0066")
+    nonlegacy = replace(plan, schema_revision="0068")
     runner.record = None
     assert authority.classify(nonlegacy).state is ComponentState.DRIFTED

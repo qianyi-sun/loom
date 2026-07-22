@@ -101,8 +101,8 @@ def build_lifecycle_bootstrap_plan(
 ) -> LifecycleBootstrapPlan:
     blockers = [value for value in additional_blockers if value]
     revision = _REVISION_RE.fullmatch(schema_revision)
-    if revision is None or int(revision.group("number")) < 66:
-        blockers.append("lifecycle bootstrap requires schema revision 0066 or later")
+    if revision is None or int(revision.group("number")) < 68:
+        blockers.append("lifecycle bootstrap requires schema revision 0068 or later")
     if (scope.environment, scope.namespace) != ("staging", "loom-staging"):
         blockers.append("lifecycle bootstrap is fixed to staging/loom-staging")
     if any(value < 0 for value in (epoch_event_count, authority_count, object_count, gc_run_count)):

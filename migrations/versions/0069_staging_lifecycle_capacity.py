@@ -1,7 +1,7 @@
 """Add freshness-bound staging lifecycle capacity authority.
 
-Revision ID: 0067
-Revises: 0066
+Revision ID: 0069
+Revises: 0068
 Create Date: 2026-07-19
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0067"
-down_revision = "0066"
+revision = "0069"
+down_revision = "0068"
 branch_labels = None
 depends_on = None
 

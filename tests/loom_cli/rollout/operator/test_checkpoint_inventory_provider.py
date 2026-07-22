@@ -51,7 +51,7 @@ def test_provider_builds_sorted_exact_inventory_without_object_payloads(
     tmp_path: Path,
 ) -> None:
     evidence = ReadonlyDatabaseEvidence(
-        schema_revision="0066",
+        schema_revision="0068",
         mutation_epoch=11,
         epoch_authority="staging-mutation-epoch-v1",
         baseline_counts={"agents": 1, "provider_models": 1, "tasks": 1, "teams": 1, "users": 1},
@@ -77,7 +77,7 @@ def test_provider_builds_sorted_exact_inventory_without_object_payloads(
     inventory = provider(NOW)
 
     assert inventory.mutation_epoch == 11
-    assert inventory.schema_revision == "0066"
+    assert inventory.schema_revision == "0068"
     assert inventory.objects[0].object_key == "benchmarks/b"
     assert inventory.objects == evidence.immutable_objects
 
@@ -86,7 +86,7 @@ def test_provider_binds_legacy_empty_inventory_to_shared_snapshot(tmp_path: Path
     evidence = ReadonlyDatabaseEvidence(
         schema_revision="0065",
         mutation_epoch=0,
-        epoch_authority="legacy-pre-0066",
+        epoch_authority="legacy-pre-0068",
         baseline_counts={"agents": 1, "provider_models": 1, "tasks": 1, "teams": 1, "users": 1},
         capacity=None,
         evidence_sha256="e" * 64,

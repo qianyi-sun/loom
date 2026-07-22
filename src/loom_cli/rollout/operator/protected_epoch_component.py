@@ -178,8 +178,8 @@ def requires_legacy_epoch_bootstrap(plan: FinalGatePlan) -> bool:
     return bool(
         current is not None
         and target is not None
-        and int(current.group("number")) < 66
-        and int(target.group("number")) >= 66
+        and int(current.group("number")) < 68
+        and int(target.group("number")) >= 68
         and plan.starting_mutation_epoch == 0
     )
 

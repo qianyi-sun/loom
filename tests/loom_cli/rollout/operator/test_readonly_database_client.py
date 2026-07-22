@@ -192,7 +192,7 @@ def test_installed_evidence_source_is_single_flight_under_concurrent_dag() -> No
     evidence = ReadonlyDatabaseEvidence(
         schema_revision="0065",
         mutation_epoch=0,
-        epoch_authority="legacy-pre-0066",
+        epoch_authority="legacy-pre-0068",
         baseline_counts={
             "agents": 0,
             "provider_models": 0,
@@ -232,7 +232,7 @@ def test_installed_evidence_source_is_single_flight_under_concurrent_dag() -> No
 
 def test_installed_epoch_source_is_single_flight_before_concurrent_dag() -> None:
     evidence = ReadonlyMutationEpochEvidence(
-        schema_revision="0067",
+        schema_revision="0069",
         mutation_epoch=12,
         epoch_authority="staging-mutation-epoch-v1",
         evidence_sha256="b" * 64,
