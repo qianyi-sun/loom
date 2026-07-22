@@ -203,6 +203,7 @@ function mockFilteredMonitorEndpoints(): FetchMock {
             JSON.stringify({
               user: {
                 id: "admin",
+                username: "Admin",
                 email: "admin@example.com",
                 display_name: "Admin",
                 is_platform_admin: true,
@@ -290,6 +291,7 @@ function mockFailureMonitorEndpoints(): FetchMock {
             JSON.stringify({
               user: {
                 id: "admin",
+                username: "Admin",
                 email: "admin@example.com",
                 display_name: "Admin",
                 is_platform_admin: true,

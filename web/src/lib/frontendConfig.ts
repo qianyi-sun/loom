@@ -12,6 +12,30 @@ export interface FrontendConfig {
   apiRouteBase: string;
 }
 
+export type FrontendConfigFailureKind = "network" | "http" | "invalid";
+
+/**
+ * A deliberately detail-free startup failure. Runtime response bodies and
+ * parser errors must never become browser-visible diagnostics.
+ */
+export class FrontendConfigLoadError extends Error {
+  readonly kind: FrontendConfigFailureKind;
+  readonly status: number | null;
+
+  constructor(kind: FrontendConfigFailureKind, status: number | null = null) {
+    const message =
+      kind === "network"
+        ? "frontend runtime config request failed"
+        : kind === "http"
+          ? "frontend runtime config returned an unsuccessful status"
+          : "frontend runtime config is invalid";
+    super(message);
+    this.name = "FrontendConfigLoadError";
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
 interface RawFrontendConfig {
   environment?: unknown;
   environmentLabel?: unknown;
@@ -181,36 +205,66 @@ function defaultConfig(): FrontendConfig {
 }
 
 let currentConfig: FrontendConfig = defaultConfig();
+let currentLoad: Promise<FrontendConfig> | null = null;
 
 function configUrlForLocation(location: Location): string {
   const routePath = detectRoutePath(location);
   return `${routePath}/loom-frontend-config.json`;
 }
 
-export async function loadFrontendConfig(): Promise<FrontendConfig> {
+function allowLocalBuildFallback(routePath: string): boolean {
+  const env = (import.meta as unknown as { env?: { DEV?: boolean } }).env;
+  return routePath === "" && env?.DEV === true;
+}
+
+async function performFrontendConfigLoad(): Promise<FrontendConfig> {
   const url = configUrlForLocation(window.location);
   const routePath = detectRoutePath(window.location);
+  let resp: Response;
   try {
-    const resp = await fetch(url, {
+    resp = await fetch(url, {
       cache: "no-store",
       credentials: "same-origin",
       headers: { Accept: "application/json" },
     });
-    if (!resp.ok) {
-      if (routePath) {
-        throw new Error(`frontend runtime config returned HTTP ${resp.status}`);
-      }
+  } catch {
+    if (allowLocalBuildFallback(routePath)) {
       currentConfig = defaultConfig();
       return currentConfig;
     }
+    throw new FrontendConfigLoadError("network");
+  }
+
+  if (!resp.ok) {
+    if (allowLocalBuildFallback(routePath)) {
+      currentConfig = defaultConfig();
+      return currentConfig;
+    }
+    // Do not read the body of an unsuccessful response. It may contain an
+    // upstream error page, request details, or secret-shaped diagnostics.
+    throw new FrontendConfigLoadError("http", resp.status);
+  }
+
+  try {
     const raw = (await resp.json()) as RawFrontendConfig;
     currentConfig = resolveFrontendConfig(raw, window.location);
     return currentConfig;
-  } catch (err) {
-    if (routePath) throw err;
-    currentConfig = defaultConfig();
-    return currentConfig;
+  } catch {
+    throw new FrontendConfigLoadError("invalid");
   }
+}
+
+/**
+ * Return one shared promise per startup attempt. React StrictMode may mount
+ * effects twice, but a single attempt must issue exactly one config request.
+ */
+export function loadFrontendConfig(): Promise<FrontendConfig> {
+  currentLoad ??= performFrontendConfigLoad();
+  return currentLoad;
+}
+
+export function resetFrontendConfigLoad(): void {
+  currentLoad = null;
 }
 
 export function getFrontendConfig(): FrontendConfig {
@@ -222,5 +276,15 @@ export function getApiBase(): string {
 }
 
 export function setFrontendConfigForTests(config: FrontendConfig | null): void {
+  currentLoad = null;
   currentConfig = config ?? defaultConfig();
+}
+
+export function frontendHomePath(
+  locationLike: Pick<Location, "pathname"> = window.location,
+): string {
+  const pathname = locationLike.pathname.replace(/\/+$/u, "") || "/";
+  if (pathname === "/prod" || pathname.startsWith("/prod/")) return "/prod/";
+  if (pathname === "/dev" || pathname.startsWith("/dev/")) return "/dev/";
+  return "/";
 }

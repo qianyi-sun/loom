@@ -4627,6 +4627,36 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    command's fresh logged-out context; retain it as rollout evidence and do not
    substitute a signed-in profile.
 
+   A Loom recovery panel during this check is failure evidence, not a blank
+   page and not anonymous success. `Loom could not start` identifies runtime
+   config loading, `Loom could not verify your session` identifies auth-session
+   loading, `Loom could not display this page` identifies the root render
+   boundary, and `Loom could not display this section` identifies a contained
+   routed-page failure. Record the fixed title, `WEB-*` support reference,
+   redacted route pathname, candidate SHA, timestamp, and reproduction steps.
+   Do not copy the complete browser URL, query string, response body, token,
+   raw error, or stack into rollout evidence.
+
+   The support reference is emitted through a bounded in-browser reporter with
+   `kind`, redacted `pathname`, and optional same-origin source position. That
+   reporter is currently only a local hook: Loom does not provide a default
+   server, metrics, tracing, or third-party telemetry transport for looking up
+   a `WEB-*` value. Do not claim remote correlation unless the deployment has
+   separately installed and validated such an adapter. Use Retry for a fresh
+   config/session, root-render, or transient route attempt; use Reload Loom to
+   rebuild document and module state; use Go to Loom home to return to `/dev/`,
+   `/prod/`, or `/`. A cached `React.lazy` rejection intentionally omits Retry
+   because only reload can replace the cached rejected module promise.
+
+   Session checks have four states: `loading`, `authenticated`, `signed-out`,
+   and `unavailable`. Only an exact `/api/v1/auth/me` `401` proves
+   `signed-out`. Network failures, non-401 HTTP failures, `204`, malformed JSON,
+   and invalid session shapes are `unavailable` (`network`, `http`, or
+   `invalid`) and must keep the smoke in the `error` state until Retry or
+   Reload succeeds. See
+   [`frontend-error-recovery.md`](../architecture/frontend-error-recovery.md)
+   for the complete boundary and redaction contract.
+
    The repository `web-checks` job is a prerequisite for this candidate-bound
    evidence, not a substitute for it. The frontend gate must already be green
    on the exact merged `dev` SHA before a future candidate is fixed and sent to

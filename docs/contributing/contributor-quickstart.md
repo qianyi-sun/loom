@@ -80,6 +80,60 @@ loom service up            # docker compose + migrations + token
 cd web && npm install && npm run dev
 ```
 
+## Frontend recovery contract
+
+The SPA must remain visible and recoverable when runtime config, browser
+session loading, the root render tree, or one routed page fails. Read
+[`frontend-error-recovery.md`](../architecture/frontend-error-recovery.md)
+before changing `web/src/main.tsx`, `web/src/bootstrap/FrontendBootstrap.tsx`,
+`web/src/auth/AuthContext.tsx`, the root/route boundaries, or their reporter.
+
+Keep these invariants when adding a new failure path:
+
+- Render fixed, kind-specific safe copy plus a generated `WEB-*` reference;
+  never render an API/browser error message or response body.
+- Keep raw URLs, query strings, tokens, cookies, CSRF values, stacks, component
+  stacks, and raw throwables out of both UI state and reporter payloads.
+- Treat only the exact `/api/v1/auth/me` `401` as `signed-out`. Network,
+  non-401 HTTP, `204`, malformed, and invalid-schema responses are
+  `unavailable`, not a reason to show a login form. A successful response must
+  include the declared identity, authorization, membership, and non-empty CSRF
+  fields; do not silently default a malformed session into authenticated state.
+- Treat an ambiguous response from login completion, password login, invite
+  acceptance, or team switching as `unavailable`: clear old authorization,
+  CSRF, and query trust, then reconcile through `/api/v1/auth/me`. The server
+  may have committed the session mutation before the response was lost.
+- Keep auth reads, session-producing mutations, and logout on the shared query
+  client's session-operation queue. Root recovery remounts must wait for an old
+  operation to settle and then read authoritative `/auth/me`; an older response
+  must never reinstall CSRF after an exact unauthorized event.
+- Offer Retry only when a fresh in-document attempt can work. A cached
+  `React.lazy` rejection must use `retryPolicy="reload-required"` and omit the
+  misleading Retry action.
+- Preserve route-aware Home (`/dev/`, `/prod/`, or `/`), keyboard focus, a
+  single `main#main-content`, and distinct reference/report correlation.
+- Keep `BrowserFailureReport` bounded to reference, allowlisted kind, redacted
+  pathname, and optional safe same-origin source position. The current reporter
+  is an in-memory hook, not a telemetry transport; do not attach the original
+  throwable when adding a transport later.
+
+Run the focused recovery tests before the full web suite:
+
+```bash
+cd web
+npm test -- \
+  src/__tests__/AuthContext.test.tsx \
+  src/__tests__/bootstrap/FrontendBootstrap.test.tsx \
+  src/__tests__/components/BrowserErrorBoundary.test.tsx \
+  src/__tests__/components/Layout.test.tsx \
+  src/__tests__/components/RecoveryPanel.test.tsx \
+  src/__tests__/components/RootErrorBoundary.test.tsx \
+  src/__tests__/components/RouteRecoveryBoundary.test.tsx
+npm test
+npm run lint
+npm run build
+```
+
 ## Tests
 
 Every PR and merge-group candidate reports four stable validation contexts:

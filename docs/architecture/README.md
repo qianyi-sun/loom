@@ -117,6 +117,9 @@ there.
 
 ## Human-readable SPA
 
+- **[frontend-error-recovery.md](frontend-error-recovery.md)** — startup,
+  auth-session, root, and route recovery boundaries; safe `WEB-*` reports;
+  retry policy and redaction invariants.
 - **[frontend-quality-gate.md](frontend-quality-gate.md)** — required strict
   TypeScript, Vitest coverage, production build, prefix-route Playwright, axe,
   failure-ledger, ownership, and repository aggregation contracts.

@@ -1173,7 +1173,10 @@ def test_staging_browser_route_smoke_waits_for_explicit_settled_state() -> None:
 
     assert 'data-loom-mounted", "true"' in main
     assert 'data-loom-auth-settled", "true"' in main
-    assert 'isAuthenticated ? "authenticated" : "anonymous"' in main
+    assert 'sessionStatus === "authenticated"' in main
+    assert 'sessionStatus === "unavailable"' in main
+    assert '? "error"' in main
+    assert ': "anonymous"' in main
     assert 'waitUntil: "domcontentloaded"' in smoke
     assert "BLOCKING_ACTIVITY_QUIET_WINDOW_MS" in smoke
     assert "requestBlocksQuiescence" in smoke

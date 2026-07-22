@@ -11,6 +11,31 @@ import type { paths } from "./schema";
 
 export type ApiError = { status: number; detail: string };
 
+export type AuthSessionLoadFailureKind =
+  | "unauthorized"
+  | "network"
+  | "http"
+  | "invalid";
+
+/** Detail-free failure used only by the browser-session bootstrap path. */
+export class AuthSessionLoadError extends Error {
+  readonly kind: AuthSessionLoadFailureKind;
+
+  constructor(kind: AuthSessionLoadFailureKind) {
+    const message =
+      kind === "unauthorized"
+        ? "browser session is signed out"
+        : kind === "network"
+          ? "browser session request failed"
+          : kind === "http"
+            ? "browser session returned an unsuccessful status"
+            : "browser session response is invalid";
+    super(message);
+    this.name = "AuthSessionLoadError";
+    this.kind = kind;
+  }
+}
+
 let _onUnauthorized: () => void = () => {};
 export function setUnauthorizedHandler(cb: () => void): void {
   _onUnauthorized = cb;
@@ -43,9 +68,12 @@ function authHeaders(
   return headers;
 }
 
-async function throwIfApiError(resp: Response): Promise<void> {
+async function throwIfApiError(
+  resp: Response,
+  onUnauthorized: () => void,
+): Promise<void> {
   if (resp.status === 401) {
-    _onUnauthorized();
+    onUnauthorized();
     throw { status: 401, detail: "unauthorized" } satisfies ApiError;
   }
   if (!resp.ok) {
@@ -72,6 +100,7 @@ export async function apiFetch<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  const onUnauthorized = _onUnauthorized;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...authHeaders(init.headers, init.method),
@@ -83,7 +112,7 @@ export async function apiFetch<T>(
     credentials: "include",
   });
 
-  await throwIfApiError(resp);
+  await throwIfApiError(resp, onUnauthorized);
   if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
 }
@@ -92,6 +121,7 @@ export async function apiUpload<T>(
   path: string,
   formData: FormData,
 ): Promise<T> {
+  const onUnauthorized = _onUnauthorized;
   const headers: Record<string, string> = authHeaders(undefined, "POST");
 
   const resp = await fetch(`${apiBase()}${path}`, {
@@ -101,7 +131,7 @@ export async function apiUpload<T>(
     credentials: "include",
   });
 
-  await throwIfApiError(resp);
+  await throwIfApiError(resp, onUnauthorized);
   if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
 }
@@ -110,12 +140,13 @@ export async function apiDownload(
   path: string,
   filename: string,
 ): Promise<void> {
+  const onUnauthorized = _onUnauthorized;
   const resp = await fetch(`${apiBase()}${path}`, {
     headers: authHeaders(),
     credentials: "include",
   });
 
-  await throwIfApiError(resp);
+  await throwIfApiError(resp, onUnauthorized);
 
   const blob = await resp.blob();
   const objectUrl = URL.createObjectURL(blob);
@@ -354,7 +385,145 @@ export interface AuthMe {
   role: string | null;
   scopes: string[];
   is_platform_admin: boolean;
-  csrf_token?: string;
+  csrf_token: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function parseAuthTeam(value: unknown): AuthTeam | null {
+  if (!isRecord(value)) return null;
+  if (
+    !isNonEmptyString(value.id) ||
+    !isNonEmptyString(value.name) ||
+    !isNonEmptyString(value.role)
+  ) {
+    return null;
+  }
+  return { id: value.id, name: value.name, role: value.role };
+}
+
+/** Whitelist the browser-session response so debug fields are never retained. */
+export function parseAuthMe(value: unknown): AuthMe {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.user) ||
+    !Array.isArray(value.teams) ||
+    !Array.isArray(value.scopes)
+  ) {
+    throw new AuthSessionLoadError("invalid");
+  }
+  const user = value.user;
+  const teams = value.teams.map(parseAuthTeam);
+  const currentTeam =
+    value.current_team === null ? null : parseAuthTeam(value.current_team);
+  if (
+    !isNonEmptyString(user.id) ||
+    !isNonEmptyString(user.username) ||
+    !(typeof user.email === "string" || user.email === null) ||
+    !(typeof user.display_name === "string" || user.display_name === null) ||
+    typeof user.is_platform_admin !== "boolean" ||
+    teams.some((team) => team === null) ||
+    (value.current_team !== null && currentTeam === null) ||
+    value.scopes.some((scope) => !isNonEmptyString(scope)) ||
+    typeof value.is_platform_admin !== "boolean" ||
+    value.is_platform_admin !== user.is_platform_admin ||
+    (value.role !== null && !isNonEmptyString(value.role)) ||
+    !isNonEmptyString(value.csrf_token)
+  ) {
+    throw new AuthSessionLoadError("invalid");
+  }
+  const parsedTeams = teams as AuthTeam[];
+  if (
+    currentTeam !== null &&
+    !parsedTeams.some(
+      (team) =>
+        team.id === currentTeam.id &&
+        team.name === currentTeam.name &&
+        team.role === currentTeam.role,
+    )
+  ) {
+    throw new AuthSessionLoadError("invalid");
+  }
+
+  return {
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      display_name: user.display_name,
+      is_platform_admin: user.is_platform_admin,
+    },
+    teams: parsedTeams,
+    current_team: currentTeam,
+    role: value.role as string | null,
+    scopes: value.scopes as string[],
+    is_platform_admin: value.is_platform_admin,
+    csrf_token: value.csrf_token,
+  };
+}
+
+async function parseAuthSessionResponse(response: Response): Promise<AuthMe> {
+  if (response.status === 401) {
+    throw new AuthSessionLoadError("unauthorized");
+  }
+  if (!response.ok) {
+    // Session-producing responses can contain proxy diagnostics or echoed
+    // request data. Classification never requires consuming their body.
+    throw new AuthSessionLoadError("http");
+  }
+  if (response.status === 204) {
+    throw new AuthSessionLoadError("invalid");
+  }
+
+  try {
+    return parseAuthMe(await response.json());
+  } catch (error) {
+    if (error instanceof AuthSessionLoadError) throw error;
+    throw new AuthSessionLoadError("invalid");
+  }
+}
+
+export async function loadAuthSession(): Promise<AuthMe> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase()}/api/v1/auth/me`, {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    throw new AuthSessionLoadError("network");
+  }
+
+  return parseAuthSessionResponse(response);
+}
+
+async function mutateAuthSession(
+  path: string,
+  body: unknown,
+): Promise<AuthMe> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase()}${path}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...authHeaders(undefined, "POST"),
+      },
+    });
+  } catch {
+    throw new AuthSessionLoadError("network");
+  }
+
+  return parseAuthSessionResponse(response);
 }
 
 export interface PublicTeam {
@@ -792,13 +961,10 @@ export const api = {
   getMonitorSummary: (
     q: Record<string, string | undefined> = {},
   ) => apiFetch<MonitorSummary>(`/api/v1/monitor/summary${qs(q)}`),
-  authMe: () => apiFetch<AuthMe>("/api/v1/auth/me"),
+  authMe: loadAuthSession,
   publicTeams: () => apiFetch<{ items: PublicTeam[] }>("/api/v1/auth/public-teams"),
   loginPassword: (username: string, password: string) =>
-    apiFetch<AuthMe>("/api/v1/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password }),
-    }),
+    mutateAuthSession("/api/v1/auth/login", { username, password }),
   requestRegistration: (body: { username: string; team_id: string }) =>
     apiFetch<UserRegistrationEntry>("/api/v1/auth/registration-requests", {
       method: "POST",
@@ -833,24 +999,15 @@ export const api = {
       { method: "POST", body: JSON.stringify({ email }) },
     ),
   loginComplete: (token: string) =>
-    apiFetch<AuthMe>("/api/v1/auth/login/complete", {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    }),
+    mutateAuthSession("/api/v1/auth/login/complete", { token }),
   lookupInvite: (code: string) =>
     apiFetch<InviteLookup>(
       `/api/v1/invites/lookup${qs({ code })}`,
     ),
   acceptInvite: (body: { code: string; email?: string | null }) =>
-    apiFetch<AuthMe>("/api/v1/invites/accept", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+    mutateAuthSession("/api/v1/invites/accept", body),
   switchTeam: (teamId: string) =>
-    apiFetch<AuthMe>("/api/v1/auth/team", {
-      method: "POST",
-      body: JSON.stringify({ team_id: teamId }),
-    }),
+    mutateAuthSession("/api/v1/auth/team", { team_id: teamId }),
   logout: () => apiFetch<void>("/api/v1/auth/logout", { method: "POST" }),
   listTrials: (q: Record<string, string | undefined> = {}) =>
     apiFetch<TrialList>(`/api/v1/trials${qs(q)}`),
