@@ -260,6 +260,44 @@ orchestrator reads from the CP settings):
 | `family_adapter_call_timeout_sec` | `float` | `300.0` | Per-call timeout wrapping the adapter's `evolve()`. Trip → `failure_policy`. |
 | `family_state_download_timeout_sec` | `float` | `120.0` | Bounds worker-side state materialisation before trial start. |
 
+### Local orchestrator secret source
+
+The family orchestrator constructs `ControlPlaneSettings`, so a host-local
+process requires `LOOM_CP_STEP_JWT_SIGNING_KEY` even though the orchestrator
+does not mint step JWTs itself. Copy `.env.example` to the ignored repo-root
+`.env` and keep that one variable as the local source for all three consumers:
+dev compose maps it to both the Control Plane and LLM Gateway, while a manual
+orchestrator process reads the `LOOM_CP_*` name directly.
+
+```bash
+set -a
+. ./.env
+set +a
+uv run python -m loom_family_orchestrator
+```
+
+Do not print the value or pass it on the command line. The checked-in fallback
+is development-only; staging and production continue to obtain the key from
+their existing protected secret authority.
+
+### Deterministic local seed
+
+`loom service up` runs the dev seeder after migrations. It idempotently upserts
+25 `anthropic-poster-design` smoke tasks across the five canonical
+SkillLearnBench baseline rows, plus three same-family `skillflow-iterative`
+tasks. All 28 rows use the checked-in `fixture://family-runs-dev/smoke` bundle,
+so local startup does not depend on a catalog download or network access. The
+SkillFlow ranking fixture is snapshotted into task tags at seed time, allowing
+service-side sequencing to consume the intended non-alphabetical order before
+a worker has materialised the bundle.
+
+The default compose file uses mutable local `loom-*:dev` images. For that file,
+`loom service up` executes `docker compose up -d --build` before waiting for
+Postgres, running migrations, or seeding. Compose/BuildKit reuses a fresh cache
+and rebuilds changed inputs, preventing a stale service image from starting
+against a newer host migration tree. Custom compose files containing only
+immutable image tags retain the existing no-build behaviour.
+
 ## Trial lifecycle changes
 
 1. **Batch submission** (`loom_service.routes.batches.submit`)

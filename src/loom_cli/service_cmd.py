@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -43,6 +44,7 @@ _DEFAULT_ADMIN_SECRET_FILE = Path.home() / ".config" / "loom" / "secrets.toml"
 _HEALTHCHECK_RETRIES = 30
 _HEALTHCHECK_INTERVAL_SEC = 2.0
 _DEFAULT_CP_URL = "http://localhost:8080"
+_MUTABLE_DEV_IMAGE_RE = re.compile(r"^loom-[a-z0-9-]+:dev$")
 
 # Endpoint map (matches compose YAML port bindings + k8s ingress).
 # Order = order printed by `loom service up`. User panel goes first
@@ -66,6 +68,31 @@ def _compose_args(compose_file: Path, env_file: Path | None) -> list[str]:
         args += ["--env-file", str(env_file)]
     args += ["-f", str(compose_file)]
     return args
+
+
+def _mutable_dev_images(compose_file: Path) -> tuple[str, ...]:
+    """Return repo-built mutable ``loom-*:dev`` images in a compose file.
+
+    Local ``:dev`` tags are intentionally mutable.  They therefore cannot be
+    trusted as source-fresh merely because Docker has an image with that tag.
+    ``loom service up`` sends compose files containing these images through
+    ``docker compose up --build`` before any container starts.  Compose/
+    BuildKit then reuses fresh layers and rebuilds stale build inputs.
+
+    This parser deliberately reads only literal ``image:`` scalars.  Custom
+    compose files with immutable or parameterised image references keep their
+    existing no-build behaviour instead of being guessed at.
+    """
+    images: set[str] = set()
+    image_line = re.compile(r"^\s+image:\s*['\"]?([^'\"\s#]+)")
+    for line in compose_file.read_text(encoding="utf-8").splitlines():
+        match = image_line.match(line)
+        if match is None:
+            continue
+        image = match.group(1)
+        if _MUTABLE_DEV_IMAGE_RE.fullmatch(image):
+            images.add(image)
+    return tuple(sorted(images))
 
 
 def _run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -391,8 +418,20 @@ def _up(args: argparse.Namespace) -> int:
             "(DO NOT lose this — rotating it loses all stored provider secrets)"
         )
 
+    mutable_images = _mutable_dev_images(compose_file)
+    up_argv = [*_compose_args(compose_file, env_file), "up", "-d"]
+    if mutable_images:
+        # Fail closed for mutable local images: asking Compose to build before
+        # start is what prevents a new host migration tree from being paired
+        # with stale image code.  Fresh images remain cheap because BuildKit
+        # reuses their cached layers.
+        up_argv.append("--build")
+        print(
+            "→ mutable local dev images detected; checking build cache "
+            "before container start"
+        )
     print(f"→ docker compose up -d ({compose_file})")
-    r = _run([*_compose_args(compose_file, env_file), "up", "-d"], check=False)
+    r = _run(up_argv, check=False)
     if r.returncode != 0:
         return r.returncode
 
