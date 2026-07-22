@@ -7,7 +7,7 @@ import {
 
 describe("browser harness configuration", () => {
   it.each([
-    ["/dev", "local"],
+    ["/dev", "development"],
     ["/prod", "production"],
   ])("validates and derives %s routes", (routePrefix, runtimeEnvironment) => {
     expect(

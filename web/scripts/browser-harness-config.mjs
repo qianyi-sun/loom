@@ -41,7 +41,7 @@ export function readBrowserHarnessConfig(environment = process.env) {
     baseURL: `${origin}${routePrefix}`,
     apiBaseURL: `${origin}${routePrefix}/api`,
     configURL: `${origin}${routePrefix}/loom-frontend-config.json`,
-    runtimeEnvironment: routePrefix === "/prod" ? "production" : "local",
+    runtimeEnvironment: routePrefix === "/prod" ? "production" : "development",
   });
 }
 

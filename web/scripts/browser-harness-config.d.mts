@@ -6,7 +6,7 @@ export type BrowserHarnessConfig = Readonly<{
   baseURL: string;
   apiBaseURL: string;
   configURL: string;
-  runtimeEnvironment: "local" | "production";
+  runtimeEnvironment: "development" | "production";
 }>;
 
 export type BrowserWebServerConfig = Readonly<{
