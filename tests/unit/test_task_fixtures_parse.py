@@ -22,13 +22,16 @@ _FIXTURES_DIR = _REPO_ROOT / "tests" / "fixtures" / "tasks"
 
 
 def _all_fixture_dirs() -> list[Path]:
-    return sorted(p for p in _FIXTURES_DIR.iterdir() if p.is_dir())
+    # Collect every directory that actually holds a task.toml, recursively, so
+    # container fixtures (e.g. family-runs-dev/, which nests its task under
+    # smoke/ alongside a ranking manifest) are covered too.
+    return sorted({p.parent for p in _FIXTURES_DIR.rglob("task.toml")})
 
 
 @pytest.mark.parametrize(
     "fixture_dir",
     _all_fixture_dirs(),
-    ids=lambda p: p.name,
+    ids=lambda p: str(p.relative_to(_FIXTURES_DIR)),
 )
 def test_fixture_task_toml_parses(fixture_dir: Path) -> None:
     config = tomllib.loads((fixture_dir / "task.toml").read_text())
