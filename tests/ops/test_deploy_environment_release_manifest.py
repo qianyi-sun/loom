@@ -47,7 +47,7 @@ def test_deploy_script_runs_release_gate_after_cluster_up() -> None:
     )
 
     assert "release-gate" in script
-    assert script.index('uv run loom "${cluster_up_args[@]}"') < script.index(
+    assert script.index('uv run --no-sync loom "${cluster_up_args[@]}"') < script.index(
         "release_gate_common_args=(",
     )
     assert "--rendered-manifest \"${evidence_dir}/rendered.yaml\"" in script

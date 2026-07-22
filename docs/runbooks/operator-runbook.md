@@ -144,7 +144,7 @@ Normal flow:
    The worker-isolation evidence must include the prod-first shared-capacity
    report generated from `deploy/worker-capacity/prod-first.toml`. Validate the
    redacted normal-user evidence package with
-   `uv run python scripts/ops/operator_free_user_e2e_gate.py validate --evidence
+   `uv run --no-sync python scripts/ops/operator_free_user_e2e_gate.py validate --evidence
    <operator-free-user-e2e.json> --output-json <operator-free-user-e2e-report.json>`.
    The validator is offline-only; the live #493 journey still requires explicit
    production authority and #493 remains open until that live evidence exists.
@@ -351,15 +351,16 @@ This bootstrap example is for a new local/custom cluster. It is not the shared
 
 The fastest path uses the `loom cluster` CLI (shipped via #76). Install
 the optional `cluster` extra and point at your kubeconfig context. For
-staging/production rollout runners, use `uv sync --extra cluster --extra
-rollout`; the `rollout` extra installs the in-repo benchmark sibling packages
+staging/production rollout runners, use `uv sync --locked --all-packages
+--extra cluster --extra rollout --python 3.11`; the `rollout` extra installs the in-repo benchmark sibling packages
 (`packages/loom-benchmarks` and `packages/loom-benchmark-terminal-bench-2`)
 needed by catalog provisioning:
 
 ```bash
 pip install "loom[cluster]"   # local/manual cluster tooling only
 # rollout runner:
-uv sync --extra cluster --extra rollout
+uv sync --locked --all-packages --extra cluster --extra rollout --python 3.11
+source .venv/bin/activate
 export KUBECONFIG=~/.kube/config   # standard kubectl config
 
 # 1. Configure
@@ -773,7 +774,7 @@ knob you need.
    deployment, slot-count, or worker-identity drift:
 
    ```bash
-   uv run python scripts/ops/worker_capacity_manifest.py \
+   uv run --no-sync python scripts/ops/worker_capacity_manifest.py \
      --manifest deploy/worker-capacity/prod-first.toml \
      --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
      --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
@@ -5638,7 +5639,7 @@ loom auth whoami | tee "$COMPAT_GATE_DIR/api/whoami.txt"
 targeted tests that pin the gate's non-network behavior:
 
 ```bash
-uv run pytest \
+uv run --no-sync pytest \
   tests/unit/test_task_bundle_compat.py \
   tests/unit/test_loom_benchmark_tool_safety.py \
   tests/integration/test_taskset_materialization.py \
@@ -5982,8 +5983,9 @@ Prerequisites:
 
 - `kubectl` configured against the target cluster (use the env-scoped
   kubeconfig from `LOOM_KUBECONFIG_B64`, not your personal one).
-- `loom` CLI on PATH (`uv pip install -e .` from the repo root, or the
-  release tarball).
+- `loom` CLI on PATH (from the repo root, run
+  `uv sync --locked --all-packages --extra cluster --extra rollout --python 3.11`
+  and then invoke `uv run --no-sync loom`, or use the release tarball).
 - A team API token with permission to launch batches.
 - The MinIO endpoint, access key, and secret key for the target environment.
 - Object-store credentials authorized to publish the immutable bundle prefix.

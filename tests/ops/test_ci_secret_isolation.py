@@ -184,8 +184,13 @@ def test_untrusted_workflows_disable_setup_uv_cache_writes(workflow_path: str) -
         if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
     ]
 
-    assert setup_steps
-    assert all(step.get("with", {}).get("enable-cache") is False for step in setup_steps)
+    for step in setup_steps:
+        inputs = step.get("with", {})
+        assert inputs.get("enable-cache") is True
+        assert inputs.get("save-cache") == (
+            "${{ github.event_name != 'pull_request' && "
+            "github.event_name != 'merge_group' }}"
+        )
     for job in workflow["jobs"].values():
         assert job.get("continue-on-error") is not True
         for step in job.get("steps", []):

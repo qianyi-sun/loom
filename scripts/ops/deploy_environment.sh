@@ -32,16 +32,17 @@ printf '%s' "${LOOM_CLUSTER_CONFIG_B64}" | base64 --decode > "${cluster_config}"
 export KUBECONFIG="${kubeconfig}"
 
 uv python install 3.11
-uv sync --extra cluster --python 3.11
+uv sync --locked --extra cluster --python 3.11
+uv pip check --python .venv/bin/python
 
-uv run python scripts/validate_environment_isolation.py \
+uv run --no-sync python scripts/validate_environment_isolation.py \
   --profiles-dir deploy/environments \
   --workflow .github/workflows/deploy-environment.yml
 
 evidence_dir="${LOOM_ROLLOUT_EVIDENCE_DIR:-rollout-evidence}"
 mkdir -p "${evidence_dir}"
 
-uv run python - "${cluster_config}" "${LOOM_IMAGE_TAG}" <<'PY'
+uv run --no-sync python - "${cluster_config}" "${LOOM_IMAGE_TAG}" <<'PY'
 from __future__ import annotations
 
 import re
@@ -59,8 +60,8 @@ else:
 path.write_text(text, encoding="utf-8")
 PY
 
-uv run loom cluster audit --config "${cluster_config}"
-uv run loom cluster render --config "${cluster_config}" > "${tmpdir}/rendered.yaml"
+uv run --no-sync loom cluster audit --config "${cluster_config}"
+uv run --no-sync loom cluster render --config "${cluster_config}" > "${tmpdir}/rendered.yaml"
 cp "${tmpdir}/rendered.yaml" "${evidence_dir}/rendered.yaml"
 
 manifest_args=(
@@ -84,7 +85,7 @@ if [[ -n "${LOOM_EXPECTED_IMAGE_IDENTITIES_JSON:-}" ]]; then
     --expected-image-identities-json "${LOOM_EXPECTED_IMAGE_IDENTITIES_JSON}"
   )
 fi
-uv run loom "${manifest_args[@]}"
+uv run --no-sync loom "${manifest_args[@]}"
 
 if [[ "${LOOM_DRY_RUN:-false}" == "true" ]]; then
   echo "Dry run complete for ${LOOM_DEPLOY_ENVIRONMENT}; rendered manifests were not applied."
@@ -112,8 +113,8 @@ fi
 if [[ "${LOOM_FORCE_ROLLOUT_LOCK:-false}" == "true" ]]; then
   cluster_up_args+=(--force-rollout-lock)
 fi
-uv run loom "${cluster_up_args[@]}"
-namespace="$(uv run python - "${cluster_config}" <<'PY'
+uv run --no-sync loom "${cluster_up_args[@]}"
+namespace="$(uv run --no-sync python - "${cluster_config}" <<'PY'
 import sys
 import tomllib
 from pathlib import Path
@@ -123,14 +124,14 @@ PY
 )"
 
 if [[ "${LOOM_RELEASE_GATE_HARD_CHECKS:-false}" == "true" ]]; then
-  uv run loom admin gb10-workers status \
+  uv run --no-sync loom admin gb10-workers status \
     --environment "${LOOM_DEPLOY_ENVIRONMENT}" \
     --release-image-tag "${LOOM_IMAGE_TAG}" \
     --release-env-config-version "${LOOM_ENV_CONFIG_VERSION:-${LOOM_IMAGE_TAG}}" \
     --format json \
     > "${evidence_dir}/gb10-workers-status-${LOOM_IMAGE_TAG}.json"
 
-  uv run loom cluster minio-storage-preflight \
+  uv run --no-sync loom cluster minio-storage-preflight \
     --namespace "${namespace}" \
     --output "${evidence_dir}/minio-storage-preflight-${LOOM_IMAGE_TAG}.json" \
     --format json
@@ -151,10 +152,10 @@ if [[ "${LOOM_RELEASE_GATE_HARD_CHECKS:-false}" == "true" ]]; then
       --environment-state-check "${LOOM_ENVIRONMENT_STATE_CHECK_JSON}"
     )
   fi
-  uv run loom "${release_gate_common_args[@]}" --format json \
+  uv run --no-sync loom "${release_gate_common_args[@]}" --format json \
     > "${evidence_dir}/release-gate-${LOOM_IMAGE_TAG}.json"
-  uv run loom "${release_gate_common_args[@]}" --format markdown \
+  uv run --no-sync loom "${release_gate_common_args[@]}" --format markdown \
     > "${evidence_dir}/release-gate-${LOOM_IMAGE_TAG}.md"
 fi
 
-uv run loom cluster status --namespace "${namespace}" --format table
+uv run --no-sync loom cluster status --namespace "${namespace}" --format table

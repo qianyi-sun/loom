@@ -69,9 +69,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-
       - name: Plan required validations
         id: plan
         shell: bash
@@ -127,7 +124,7 @@ jobs:
           if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
             PR_LABELS_JSON='[]'
           fi
-          uv run python scripts/plan_ci_validations.py \
+          python3 scripts/plan_ci_validations.py \
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
@@ -140,6 +137,63 @@ jobs:
       - name: Docs-only fast path
         if: steps.plan.outputs.docs_only == 'true'
         run: echo "Only docs/repo metadata changed; heavy checks skipped."
+
+  locked-environments:
+    name: locked-environment (${{ matrix.target }})
+    needs: workflow-plan
+    if: needs.workflow-plan.outputs.docs_only != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+            expected_system: Linux
+            expected_machine: x86_64
+            uv_checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            expected_system: Linux
+            expected_machine: aarch64
+            uv_checksum: befa1a59c91e96eb601b0fd9a97c03dd666f17baba644b2b4db9c59a767e387e
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install exact uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: ${{ matrix.uv_checksum }}
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python 3.11
+        run: uv python install 3.11
+
+      - name: Verify target and install locked workspace
+        env:
+          EXPECTED_SYSTEM: ${{ matrix.expected_system }}
+          EXPECTED_MACHINE: ${{ matrix.expected_machine }}
+        run: |
+          uv sync --locked --all-packages --extra dev --python 3.11
+          uv pip check --python .venv/bin/python
+          uv run --no-sync python - <<'PY'
+          import os
+          import platform
+
+          actual = (platform.system(), platform.machine())
+          expected = (os.environ["EXPECTED_SYSTEM"], os.environ["EXPECTED_MACHINE"])
+          if actual != expected:
+              raise SystemExit(f"runner target mismatch: expected {expected}, got {actual}")
+
+          import loom  # noqa: F401
+          import loom_benchmark_terminal_bench_2  # noqa: F401
+          import loom_benchmarks  # noqa: F401
+          import loom_launcher  # noqa: F401
+          PY
 
   lint-and-static:
     name: lint-and-static
@@ -155,55 +209,34 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            packages/*/pyproject.toml
-            uv.lock
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Cache .venv
-        id: cache-venv
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
-
-      - name: Install project + dev deps + sibling packages
+      - name: Sync locked workspace
         run: |
-          if [[ ! -d .venv ]]; then
-            uv venv --python 3.11
-          fi
-          uv pip install -e ".[dev]"
-          uv pip install -e packages/loom-launcher
-          uv pip install -e packages/loom-benchmarks
-          uv pip install -e packages/loom-benchmark-terminal-bench-2
+          uv sync --locked --all-packages --extra dev --python 3.11
+          uv pip check --python .venv/bin/python
 
       - name: Ruff
-        run: uv run ruff check src tests packages migrations
-
-      - name: Cache mypy
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .mypy_cache
-          key: mypy-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'uv.lock', 'src/**/*.py', 'tests/**/*.py', 'packages/**/*.py') }}
-          restore-keys: |
-            mypy-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'uv.lock') }}-
-            mypy-${{ runner.os }}-py3.11-
+        run: uv run --no-sync ruff check src tests packages migrations
 
       - name: Mypy (strict)
-        run: uv run mypy
+        run: uv run --no-sync mypy
 
       - name: Verify codegen up-to-date
-        run: uv run loom config codegen --check
+        run: uv run --no-sync loom config codegen --check
 
       - name: Verify agent install_scripts are pinned (#317)
-        run: uv run python scripts/check_install_scripts_pinned.py
+        run: uv run --no-sync python scripts/check_install_scripts_pinned.py
 
       - name: Verify GitHub Action SHA lock
-        run: uv run python scripts/check_ci_action_pins.py
+        run: uv run --no-sync python scripts/check_ci_action_pins.py
 
   tests-root:
     name: tests-root (${{ matrix.shard }})
@@ -231,31 +264,19 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            packages/*/pyproject.toml
-            uv.lock
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Cache .venv
-        id: cache-venv
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
-
-      - name: Install project + dev deps + sibling packages
+      - name: Sync locked workspace
         run: |
-          if [[ ! -d .venv ]]; then
-            uv venv --python 3.11
-          fi
-          uv pip install -e ".[dev]"
-          uv pip install -e packages/loom-launcher
-          uv pip install -e packages/loom-benchmarks
-          uv pip install -e packages/loom-benchmark-terminal-bench-2
+          uv sync --locked --all-packages --extra dev --python 3.11
+          uv pip check --python .venv/bin/python
 
       - name: Pytest — manifest-owned root shard
         shell: bash
@@ -265,12 +286,12 @@ jobs:
         run: |
           set -euo pipefail
           manifest_paths_file="${RUNNER_TEMP}/tests-root-manifest.txt"
-          uv run python scripts/component_ownership.py test-paths --lane tests-root \
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root \
             --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
             > "${manifest_paths_file}"
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run pytest "${test_paths[@]}" \
+          uv run --no-sync pytest "${test_paths[@]}" \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
@@ -374,41 +395,29 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            packages/*/pyproject.toml
-            uv.lock
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Cache .venv
-        id: cache-venv
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
-
-      - name: Install project + dev deps + sibling packages
+      - name: Sync locked workspace
         run: |
-          if [[ ! -d .venv ]]; then
-            uv venv --python 3.11
-          fi
-          uv pip install -e ".[dev]"
-          uv pip install -e packages/loom-launcher
-          uv pip install -e packages/loom-benchmarks
-          uv pip install -e packages/loom-benchmark-terminal-bench-2
+          uv sync --locked --all-packages --extra dev --python 3.11
+          uv pip check --python .venv/bin/python
 
       - name: Pytest — manifest-owned package lane
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t test_paths < <(
-            uv run python scripts/component_ownership.py test-paths --lane tests-packages
+            uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run pytest "${test_paths[@]}" \
+          uv run --no-sync pytest "${test_paths[@]}" \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
@@ -443,6 +452,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - workflow-plan
+      - locked-environments
       - lint-and-static
       - runtime-payload
       - tests-root
@@ -465,6 +475,7 @@ jobs:
           fi
           for result in \
             "${{ needs.workflow-plan.result }}" \
+            "${{ needs.locked-environments.result }}" \
             "${{ needs.lint-and-static.result }}" \
             "${{ needs.runtime-payload.result }}" \
             "${{ needs.tests-root.result }}" \
@@ -476,11 +487,19 @@ jobs:
             fi
           done
 
-      - name: Install coverage
-        if: >-
-          needs.workflow-plan.outputs.docs_only != 'true' &&
-          needs.workflow-plan.outputs.gate_mode == 'full'
-        run: python3 -m pip install --user 'coverage>=7'
+      - name: Install exact uv
+        if: needs.workflow-plan.outputs.docs_only != 'true'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked coverage tool
+        if: needs.workflow-plan.outputs.docs_only != 'true'
+        run: uv sync --locked --only-group ci-coverage --python 3.11
 
       - name: Download root coverage shards
         if: >-
@@ -508,8 +527,8 @@ jobs:
         run: |
           cp cov-packages/.coverage .coverage.packages
           cp .coverage.packages cov-root/.coverage.packages
-          python3 -m coverage combine cov-root
-          python3 -m coverage xml
+          uv run --no-sync coverage combine cov-root
+          uv run --no-sync coverage xml
 
       - name: Upload coverage.xml
         if: >-
@@ -545,10 +564,10 @@ jobs:
           needs.workflow-plan.outputs.gate_mode == 'full'
         run: |
           set +e
-          python3 -m coverage report --fail-under=70 | tee coverage-report.txt
+          uv run --no-sync coverage report --fail-under=70 | tee coverage-report.txt
           status=${PIPESTATUS[0]}
           set -e
-          fast_pct=$(python3 -m coverage report --format=total)
+          fast_pct=$(uv run --no-sync coverage report --format=total)
           fast_summary=$(tail -1 coverage-report.txt)
           {
             echo "## Coverage report"
@@ -577,7 +596,7 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.23'
-          cache-dependency-path: go.sum
+          cache: false
       - name: gofmt
         run: |
           out=$(gofmt -l ./cmd/)
@@ -690,31 +709,19 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            packages/*/pyproject.toml
-            uv.lock
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Cache .venv
-        id: cache-venv
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
-
-      - name: Install project + dev deps + sibling packages
+      - name: Sync locked workspace
         run: |
-          if [[ ! -d .venv ]]; then
-            uv venv --python 3.11
-          fi
-          uv pip install -e ".[dev]"
-          uv pip install -e packages/loom-launcher
-          uv pip install -e packages/loom-benchmarks
-          uv pip install -e packages/loom-benchmark-terminal-bench-2
+          uv sync --locked --all-packages --extra dev --python 3.11
+          uv pip check --python .venv/bin/python
 
       - name: Pytest — integration (fast tier, no docker)
         shell: bash
@@ -724,13 +731,13 @@ jobs:
         run: |
           set -euo pipefail
           manifest_paths_file="${RUNNER_TEMP}/integration-manifest.txt"
-          uv run python scripts/component_ownership.py test-paths --lane integration \
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane integration \
             --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
             --shard-strategy contiguous \
             > "${manifest_paths_file}"
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run pytest "${test_paths[@]}" \
+          uv run --no-sync pytest "${test_paths[@]}" \
             -m "not docker" \
             --durations=15 \
             --cov=src --cov=packages --cov-report=term
@@ -765,41 +772,29 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            packages/*/pyproject.toml
-            uv.lock
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Cache .venv
-        id: cache-venv
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
-
-      - name: Install project + dev deps + sibling packages
+      - name: Sync locked workspace
         run: |
-          if [[ ! -d .venv ]]; then
-            uv venv --python 3.11
-          fi
-          uv pip install -e ".[dev]"
-          uv pip install -e packages/loom-launcher
-          uv pip install -e packages/loom-benchmarks
-          uv pip install -e packages/loom-benchmark-terminal-bench-2
+          uv sync --locked --all-packages --extra dev --python 3.11
+          uv pip check --python .venv/bin/python
 
       - name: Pytest — integration (docker tier)
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t test_paths < <(
-            uv run python scripts/component_ownership.py test-paths --lane integration-docker
+            uv run --no-sync python scripts/component_ownership.py test-paths --lane integration-docker
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run pytest "${test_paths[@]}" \
+          uv run --no-sync pytest "${test_paths[@]}" \
             --durations=15
 
   # Optional PR-only combined coverage summary. The default fast-tier
@@ -826,15 +821,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Install coverage
-        run: |
-          uv venv --python 3.11
-          uv pip install 'coverage>=7'
+      - name: Sync locked coverage tool
+        run: uv sync --locked --only-group ci-coverage --python 3.11
 
       - name: Download fast-tier coverage
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -860,15 +857,15 @@ jobs:
         env:
           INTEGRATION_RESULT: ${{ needs.integration.result }}
         run: |
-          fast_pct=$(uv run coverage report --data-file=cov-fast/.coverage --format=total)
-          fast_summary=$(uv run coverage report --data-file=cov-fast/.coverage | tail -1)
+          fast_pct=$(uv run --no-sync coverage report --data-file=cov-fast/.coverage --format=total)
+          fast_summary=$(uv run --no-sync coverage report --data-file=cov-fast/.coverage | tail -1)
 
           combined_block=""
           if [ "$INTEGRATION_RESULT" = "success" ] && compgen -G 'cov-integration/.coverage.integration-*' >/dev/null; then
             cp cov-fast/.coverage .coverage.fast
             cp cov-integration/.coverage.integration-* .
-            uv run coverage combine
-            combined_pct=$(uv run coverage report --format=total)
+            uv run --no-sync coverage combine
+            combined_pct=$(uv run --no-sync coverage report --format=total)
             combined_block="**Combined (fast + integration): ${combined_pct} %** (no gate yet — Phase 3 baseline)."
           elif [ "$INTEGRATION_RESULT" = "skipped" ]; then
             combined_block="_Combined coverage **not measured** this PR — apply the \`ci:integration\` label (or merge to dev) to run the integration tier._"

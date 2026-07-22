@@ -103,10 +103,10 @@ docker build -f deploy/Dockerfile.gateway             -t loom-llm-gateway:0.7 .
 docker build -f deploy/Dockerfile.egress-xds          -t loom-egress-xds:0.7 .
 docker build -f deploy/Dockerfile.family-orchestrator -t loom-family-orchestrator:0.7 .
 
-uv run python -m loom_cli cluster render \
+uv run --no-sync python -m loom_cli cluster render \
   --config deploy/local/local.cluster.toml > /tmp/loom-local-rendered.yaml
 
-uv run python -m loom_cli cluster load-images \
+uv run --no-sync python -m loom_cli cluster load-images \
   --cluster-name loom-local --from-manifest /tmp/loom-local-rendered.yaml
 ```
 
@@ -121,12 +121,12 @@ kubectl create namespace loom-local
 
 # --smoke-defaults = throwaway local secret values (never real prod refs).
 # eval runs the printed `kubectl create secret` commands:
-eval "$(uv run python -m loom_cli cluster bootstrap-secrets \
+eval "$(uv run --no-sync python -m loom_cli cluster bootstrap-secrets \
   --namespace loom-local --smoke-defaults --no-pgbouncer)"
 
 # up re-renders identically, applies, and waits for readiness by default
 # (--no-wait to skip). Namespace is inferred from the config.
-uv run python -m loom_cli cluster up \
+uv run --no-sync python -m loom_cli cluster up \
   --config deploy/local/local.cluster.toml
 ```
 

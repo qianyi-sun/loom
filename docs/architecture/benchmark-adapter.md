@@ -462,8 +462,9 @@ get cleaned up via `rmtree` on the next call.
    ```toml
    my-bench = "loom_benchmarks.adapters.my_bench:MyBenchAdapter"
    ```
-4. Run `uv pip install -e packages/loom-benchmarks --no-deps` so the
-   entry-point dist-info regenerates.
+4. Run `uv lock`, commit the resulting universal workspace lock, then run
+   `uv sync --locked --all-packages --extra dev --python 3.11` so the
+   entry-point dist-info regenerates from the reviewed lock.
 5. Verify: `loom datasets list --installed` shows the new slug;
    `python -m pytest packages/loom-benchmarks/tests/test_catalog.py`
    passes (catalog ↔ adapter consistency).

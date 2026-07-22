@@ -17,14 +17,8 @@ def test_rollout_extra_installs_benchmark_sibling_packages() -> None:
     assert "loom-benchmark-terminal-bench-2" in rollout
 
     sources = pyproject["tool"]["uv"]["sources"]
-    assert sources["loom-benchmarks"] == {
-        "path": "packages/loom-benchmarks",
-        "editable": True,
-    }
-    assert sources["loom-benchmark-terminal-bench-2"] == {
-        "path": "packages/loom-benchmark-terminal-bench-2",
-        "editable": True,
-    }
+    assert sources["loom-benchmarks"] == {"workspace": True}
+    assert sources["loom-benchmark-terminal-bench-2"] == {"workspace": True}
 
 
 def test_cluster_rollout_workflows_sync_rollout_extra() -> None:
@@ -47,16 +41,19 @@ def test_integration_jobs_install_terminal_bench_sibling_independent_of_cache() 
         install_step = next(
             step
             for step in workflow["jobs"][job_name]["steps"]
-            if step.get("name") == "Install project + dev deps + sibling packages"
+            if step.get("name") == "Sync locked workspace"
         )
         assert "if" not in install_step
-        assert "uv pip install -e packages/loom-benchmark-terminal-bench-2" in install_step["run"]
+        # workspace:True uv sources mean a locked all-packages sync installs the
+        # terminal-bench sibling from source on every run, unconditionally and
+        # independent of any restored cache.
+        assert "uv sync --locked --all-packages" in install_step["run"]
 
 
 def test_operator_runbook_bootstraps_rollout_extra() -> None:
     runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text(encoding="utf-8")
 
-    assert "uv sync --extra cluster --extra rollout" in runbook
+    assert "uv sync --locked --all-packages --extra cluster --extra rollout" in runbook
     assert "packages/loom-benchmarks" in runbook
     assert "packages/loom-benchmark-terminal-bench-2" in runbook
 

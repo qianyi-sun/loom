@@ -170,6 +170,12 @@ def _matches(path: str, *, exact: set[str], prefixes: tuple[str, ...]) -> bool:
     return path in exact or path.startswith(prefixes)
 
 
+def _is_dependency_authority_path(path: str) -> bool:
+    return path in {"config/uv-toolchain.toml", "pyproject.toml", "uv.lock"} or (
+        path.startswith("packages/") and path.endswith("/pyproject.toml")
+    )
+
+
 def _is_protected_staging_rollout_path(path: str) -> bool:
     return _matches(
         path,
@@ -361,6 +367,10 @@ def plan_validations(
             or path in OWNERSHIP_AUTHORITY_PATHS
             or _is_protected_staging_rollout_path(path)
         )
+        if _is_dependency_authority_path(path):
+            for name in HEAVY_CHECKS:
+                select(name, f"dependency-authority:{path}")
+            matched_owner = True
         if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
             select("integration", f"path:{path}")
             matched_owner = True

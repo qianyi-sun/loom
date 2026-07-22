@@ -1,0 +1,69 @@
+name: macos-locked-environment
+
+# Loom deploys only to Linux, so the per-PR `locked-environments` matrix in
+# ci.yml gates x86_64 + aarch64 there. macOS is a contributor-laptop target:
+# `uv sync --locked` must still resolve against the shared uv.lock, but that is
+# worth a nightly check rather than ~10x-billed macOS minutes on every PR.
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: macos-locked-environment-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  locked-environment:
+    name: locked-environment (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            runner: macos-15
+            expected_system: Darwin
+            expected_machine: arm64
+            uv_checksum: 8f7fbf1708399b921857bce71e1d60f0d3ccf52a30caebc1c1a2f175dce13ab6
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install exact uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: ${{ matrix.uv_checksum }}
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python 3.11
+        run: uv python install 3.11
+
+      - name: Verify target and install locked workspace
+        env:
+          EXPECTED_SYSTEM: ${{ matrix.expected_system }}
+          EXPECTED_MACHINE: ${{ matrix.expected_machine }}
+        run: |
+          uv sync --locked --all-packages --extra dev --python 3.11
+          uv pip check --python .venv/bin/python
+          uv run --no-sync python - <<'PY'
+          import os
+          import platform
+
+          actual = (platform.system(), platform.machine())
+          expected = (os.environ["EXPECTED_SYSTEM"], os.environ["EXPECTED_MACHINE"])
+          if actual != expected:
+              raise SystemExit(f"runner target mismatch: expected {expected}, got {actual}")
+
+          import loom  # noqa: F401
+          import loom_benchmark_terminal_bench_2  # noqa: F401
+          import loom_benchmarks  # noqa: F401
+          import loom_launcher  # noqa: F401
+          PY

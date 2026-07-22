@@ -214,7 +214,7 @@ Attach these to the release issue or release PR:
   Loom worker id, configured concurrency, and claimed trial count.
 - For first prod, `worker_capacity_smoke` / prod-staging isolation evidence must
   also attach the secret-safe output from
-  `uv run python scripts/ops/worker_capacity_manifest.py --manifest
+  `uv run --no-sync python scripts/ops/worker_capacity_manifest.py --manifest
   deploy/worker-capacity/prod-first.toml`. The report must show production as
   the default owner of all eligible GB10/OLDLAB slots, staging/dev at zero slots
   unless an explicit bounded borrow is active, and no worker identity, API URL,

@@ -18,6 +18,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
 
+[tool.uv.sources]
+loom = { workspace = true }
+loom-benchmarks = { workspace = true }
+
 [project.entry-points."loom.benchmarks"]
 # Point at the CLASS, not the module-level instance — the Plan 24
 # loader instantiates via `ep.load()()` and a pre-created instance

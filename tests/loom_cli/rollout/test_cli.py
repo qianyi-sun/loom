@@ -318,7 +318,7 @@ class TestRolloutCLIDryRun:
             "loom_cli.rollout.cli._rollout_runner_dependency_error",
             lambda: (
                 "rollout runner missing benchmark tooling; run "
-                "`uv sync --extra cluster --extra rollout`"
+                "`uv sync --locked --all-packages --extra cluster --extra rollout`"
             ),
             raising=False,
         )
@@ -356,7 +356,7 @@ class TestRolloutCLIDryRun:
         assert rc == 2
         err = capsys.readouterr().err
         assert "rollout runner missing benchmark tooling" in err
-        assert "uv sync --extra cluster --extra rollout" in err
+        assert "uv sync --locked --all-packages --extra cluster --extra rollout" in err
 
     def test_staging_refuses_non_staging_physical_targets(
         self,

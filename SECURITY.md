@@ -40,9 +40,12 @@ For public repository operation:
   Keep the approved SHA and human-readable upstream version in
   [`config/ci-actions-lock.json`](config/ci-actions-lock.json), retain the
   version comment beside each `uses:` reference, and run
-  `uv run python scripts/check_ci_action_pins.py` when changing the lock.
+  `uv run --no-sync python scripts/check_ci_action_pins.py` when changing the lock.
   New, mismatched, tag-based, expression-based, or stale Action references fail
   the repository CI gate.
+- Verify the exact uv installer archive against the official per-platform
+  SHA256 authority in [`config/uv-toolchain.toml`](config/uv-toolchain.toml);
+  a version string without a matching checksum is not an immutable tool input.
 - Scope environment secrets such as `HF_TOKEN` to protected environments, not
   broad repository secrets.
 - Keep external pull request workflows untrusted: no deployment, publishing,
