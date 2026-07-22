@@ -8,9 +8,9 @@ ConditionPathExists=/etc/loom/prod-pressure-worker-control.env
 Type=oneshot
 User=loom-rollout
 Group=loom-rollout
-WorkingDirectory=/opt/loom-staging-runner/repo
+WorkingDirectory=/opt/loom-staging-runner/candidates/${GIT_SHA}/repo
 EnvironmentFile=/etc/loom/prod-pressure-worker-control.env
-Environment=PATH=/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/opt/loom-staging-runner/candidates/${GIT_SHA}/venv/bin:/usr/local/bin:/usr/bin:/bin
 StateDirectory=loom-prod-pressure-worker-control
 UMask=0077
 NoNewPrivileges=true
@@ -18,5 +18,5 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/loom-prod-pressure-worker-control
-ExecStart=/opt/loom-staging-runner/venv/bin/python -I -B scripts/ops/prod_pressure_worker_control.py --prod-cp-url ${LOOM_PROD_PRESSURE_PROD_CP_URL} --prod-admin-token ${LOOM_PROD_PRESSURE_PROD_TOKEN_SOURCE} --staging-cp-url ${LOOM_PROD_PRESSURE_STAGING_CP_URL} --staging-admin-token ${LOOM_PROD_PRESSURE_STAGING_TOKEN_SOURCE} --staging-environment ${LOOM_PROD_PRESSURE_STAGING_ENVIRONMENT} --pool-name ${LOOM_PROD_PRESSURE_POOL_NAME} --preemptible --grace-period-seconds ${LOOM_PROD_PRESSURE_GRACE_SECONDS} --freshness-seconds ${LOOM_PROD_PRESSURE_FRESHNESS_SECONDS} --evidence-out /var/lib/loom-prod-pressure-worker-control/latest.json
+ExecStart=/opt/loom-staging-runner/candidates/${GIT_SHA}/venv/bin/python -I -B /opt/loom-staging-runner/candidates/${GIT_SHA}/repo/scripts/ops/prod_pressure_worker_control.py --prod-cp-url ${LOOM_PROD_PRESSURE_PROD_CP_URL} --prod-admin-token ${LOOM_PROD_PRESSURE_PROD_TOKEN_SOURCE} --staging-cp-url ${LOOM_PROD_PRESSURE_STAGING_CP_URL} --staging-admin-token ${LOOM_PROD_PRESSURE_STAGING_TOKEN_SOURCE} --staging-environment ${LOOM_PROD_PRESSURE_STAGING_ENVIRONMENT} --pool-name ${LOOM_PROD_PRESSURE_POOL_NAME} --preemptible --grace-period-seconds ${LOOM_PROD_PRESSURE_GRACE_SECONDS} --freshness-seconds ${LOOM_PROD_PRESSURE_FRESHNESS_SECONDS} --evidence-out /var/lib/loom-prod-pressure-worker-control/latest.json
 TimeoutStartSec=60

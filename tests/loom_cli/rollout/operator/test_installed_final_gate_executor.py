@@ -185,7 +185,7 @@ def test_staging_smoke_authority_is_shared_and_fixed(tmp_path: Path) -> None:
         "admin_actor": "codex-v1-release-gate",
         "agent": "oracle",
         "represented_username": "devansh",
-        "required_worker_pool": "gb10-arm64",
+        "required_worker_pool": "gb10",
         "task_id": "loom-smoke/gb10-oracle-hello-world",
         "team_id": "11111111-1111-4111-8111-111111111111",
     }

@@ -42,7 +42,7 @@ def _args(*, port: int = 15451, environment: str = "staging") -> list[str]:
         "--environment",
         environment,
         "--pool-name",
-        "gb10-arm64",
+        "gb10",
         "--namespace",
         "loom-staging",
         "--kubeconfig",
@@ -72,7 +72,7 @@ def _toml_string(value: str) -> str:
 
 def _supervisor(
     *,
-    name: str = "gb10-arm64-staging",
+    name: str = "gb10-staging",
     service_name: str = "loom-autoscaler-gb10-staging.service",
     timer_name: str = "loom-autoscaler-gb10-staging.timer",
     port: int = 15451,
@@ -87,7 +87,7 @@ def _supervisor(
     return f"""
 [[external_slurm_autoscaler_supervisors]]
 name = {_toml_string(name)}
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 service_name = {_toml_string(service_name)}
 timer_name = {_toml_string(timer_name)}
 working_directory = {_toml_string(working_directory)}
@@ -207,7 +207,7 @@ def test_artifact_omits_only_fully_disabled_supervisors(tmp_path: Path) -> None:
 
     artifact = _build(root)
 
-    assert [item.name for item in artifact.supervisors] == ["gb10-arm64-staging"]
+    assert [item.name for item in artifact.supervisors] == ["gb10-staging"]
 
 
 @pytest.mark.parametrize(("enabled", "active"), [(True, False), (False, True)])

@@ -305,7 +305,7 @@ class ReleaseGateStep(SubcommandStep):
         canary_ctx = replace(
             ctx,
             smoke_task_id=_HF_BOUNDARY_CANARY_TASK_ID,
-            smoke_required_worker_pool="gb10-arm64",
+            smoke_required_worker_pool="gb10",
             smoke_agent="oracle",
         )
         return run_admin_on_behalf_smoke(

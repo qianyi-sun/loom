@@ -89,6 +89,33 @@ def test_default_manifest_is_prod_first_and_secret_safe() -> None:
     assert "loom_api_" not in completed.stdout
 
 
+def test_manifest_rejects_cross_environment_target_identity(tmp_path: Path) -> None:
+    manifest = tmp_path / "cross-environment.toml"
+    _write_manifest(
+        manifest,
+        """
+[[hosts]]
+name = "gb10-1"
+pool = "gb10"
+total_slots = 10
+state = "eligible"
+""",
+    )
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'name = "staging"',
+            'name = "development"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    completed = _run_capacity("--manifest", manifest)
+
+    assert completed.returncode == 1
+    assert "environments.staging.name must be 'staging'" in completed.stdout
+
+
 def test_manifest_expresses_staging_lease_and_draining_states(tmp_path: Path) -> None:
     manifest = tmp_path / "lease.toml"
     _write_manifest(

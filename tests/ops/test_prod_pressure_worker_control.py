@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from scripts.ops import prod_pressure_worker_control as control
+from scripts.ops import render_prod_pressure_worker_control_service as service_renderer
 
 from loom_control_plane.prod_pressure_control import ProdPressureSignal, _grace_evidence
 
@@ -370,12 +371,57 @@ def test_systemd_timer_is_a_continuous_secret_reference_only_runtime_path() -> N
     env_example = (
         _ROOT / "deploy/worker-capacity/prod-pressure-worker-control.env.example"
     ).read_text(encoding="utf-8")
+    install_docs = (_ROOT / "deploy/worker-capacity/README.md").read_text(encoding="utf-8")
 
     assert "User=loom-rollout" in service
-    assert "scripts/ops/prod_pressure_worker_control.py" in service
+    assert service.count("${GIT_SHA}") == 4
+    assert "/opt/loom-staging-runner/repo" not in service
+    assert "/opt/loom-staging-runner/venv" not in service
     assert "--prod-admin-token ${LOOM_PROD_PRESSURE_PROD_TOKEN_SOURCE}" in service
     assert "--staging-admin-token ${LOOM_PROD_PRESSURE_STAGING_TOKEN_SOURCE}" in service
     assert "OnUnitActiveSec=30s" in timer
     assert "Persistent=true" in timer
     assert "TOKEN_SOURCE=file:" in env_example
+    assert "render_prod_pressure_worker_control_service.py" in install_docs
+    assert 'CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$GIT_SHA"' in install_docs
     assert "loom_admin_" not in service + env_example
+
+
+def test_worker_control_service_renderer_binds_one_exact_candidate() -> None:
+    template = (
+        _ROOT / "deploy/worker-capacity/loom-prod-pressure-worker-control.service"
+    ).read_text(encoding="utf-8")
+    git_sha = "a" * 40
+
+    rendered = service_renderer.render_service_unit(template, git_sha=git_sha)
+
+    candidate_root = f"/opt/loom-staging-runner/candidates/{git_sha}"
+    assert "${GIT_SHA}" not in rendered
+    assert f"WorkingDirectory={candidate_root}/repo" in rendered
+    assert f"Environment=PATH={candidate_root}/venv/bin:" in rendered
+    assert f"ExecStart={candidate_root}/venv/bin/python -I -B" in rendered
+    assert f"{candidate_root}/repo/scripts/ops/prod_pressure_worker_control.py" in rendered
+
+
+@pytest.mark.parametrize("git_sha", ["a" * 39, "A" * 40, "../" + "a" * 37])
+def test_worker_control_service_renderer_rejects_noncanonical_sha(git_sha: str) -> None:
+    template = (
+        _ROOT / "deploy/worker-capacity/loom-prod-pressure-worker-control.service"
+    ).read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="40-character lowercase hexadecimal"):
+        service_renderer.render_service_unit(template, git_sha=git_sha)
+
+
+def test_worker_control_service_renderer_rejects_mutable_runtime_path() -> None:
+    template = (
+        _ROOT / "deploy/worker-capacity/loom-prod-pressure-worker-control.service"
+    ).read_text(encoding="utf-8")
+    template = template.replace(
+        "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo",
+        "/opt/loom-staging-runner/repo",
+        1,
+    )
+
+    with pytest.raises(ValueError, match="mutable legacy runtime path"):
+        service_renderer.render_service_unit(template, git_sha="a" * 40)

@@ -170,7 +170,7 @@ def _smoke_authority() -> RehearsalSmokeAuthority:
         team_id="11111111-1111-4111-8111-111111111111",
         admin_actor="loom-staging-rollout",
         task_id="loom-smoke/gb10-oracle-hello-world",
-        required_worker_pool="gb10-arm64",
+        required_worker_pool="gb10",
         agent="oracle",
     )
 

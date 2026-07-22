@@ -40,7 +40,7 @@ def _args(module: Any, *extra: str):
             "--environment",
             "staging",
             "--pool-name",
-            "gb10-arm64",
+            "gb10",
             "--namespace",
             "loom-staging",
             "--kubeconfig",
@@ -70,7 +70,7 @@ class _EnvironmentFilteringSession:
 
 def test_parser_requires_exact_environment_authority(module: Any) -> None:
     with pytest.raises(SystemExit):
-        module._parser().parse_args(["--pool-name", "gb10-arm64"])
+        module._parser().parse_args(["--pool-name", "gb10"])
 
     with pytest.raises(
         module.ExternalAutoscalerConfigurationError,
@@ -441,7 +441,7 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
         def all(self) -> list[Any]:
             return [
                 SimpleNamespace(
-                    pool_name="gb10-arm64",
+                    pool_name="gb10",
                     actuator_config={"external_runner": True},
                 )
             ]
@@ -491,7 +491,7 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
             "freshness_sec": 120,
             "include_external_policies": True,
             "external_only": True,
-            "pool_names": ("gb10-arm64",),
+            "pool_names": ("gb10",),
         }
         events.append("reconcile")
         return [SimpleNamespace(action="noop")]
@@ -539,7 +539,7 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
         def all(self) -> list[Any]:
             return [
                 SimpleNamespace(
-                    pool_name="gb10-arm64",
+                    pool_name="gb10",
                     actuator_config={"external_runner": True},
                 )
             ]
@@ -622,7 +622,7 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
             {
                 "enabled_external_policy_count": 1,
                 "environment": "staging",
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
             }
         ],
     }
@@ -652,12 +652,12 @@ def test_validate_only_fails_closed_when_policy_is_missing(module: Any) -> None:
         async def execute(self, _statement: object) -> _Result:
             return _Result()
 
-    with pytest.raises(module.ExternalPolicyValidationError, match="gb10-arm64"):
+    with pytest.raises(module.ExternalPolicyValidationError, match="gb10"):
         asyncio.run(
             module._validate_requested_external_policies(
                 _Session(),
                 environment="staging",
-                pool_names=("gb10-arm64",),
+                pool_names=("gb10",),
             )
         )
 
@@ -667,7 +667,7 @@ def test_validate_only_foreign_same_pool_is_missing_without_authority_leak(modul
         [
             SimpleNamespace(
                 environment="production",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 actuator_config={"external_runner": True},
             )
         ]
@@ -678,12 +678,12 @@ def test_validate_only_foreign_same_pool_is_missing_without_authority_leak(modul
             module._validate_requested_external_policies(
                 session,
                 environment="staging",
-                pool_names=("gb10-arm64",),
+                pool_names=("gb10",),
             )
         )
 
     assert session.executed_environment == "staging"
-    assert "gb10-arm64" in str(caught.value)
+    assert "gb10" in str(caught.value)
     assert "production" not in str(caught.value)
 
 
@@ -692,7 +692,7 @@ def test_validate_only_mixed_same_pool_counts_only_exact_environment(module: Any
         [
             SimpleNamespace(
                 environment=environment,
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 actuator_config={"external_runner": True},
             )
             for environment in ("production", "staging")
@@ -703,7 +703,7 @@ def test_validate_only_mixed_same_pool_counts_only_exact_environment(module: Any
         module._validate_requested_external_policies(
             session,
             environment="staging",
-            pool_names=("gb10-arm64",),
+            pool_names=("gb10",),
         )
     )
 
@@ -712,7 +712,7 @@ def test_validate_only_mixed_same_pool_counts_only_exact_environment(module: Any
         {
             "enabled_external_policy_count": 1,
             "environment": "staging",
-            "pool_name": "gb10-arm64",
+            "pool_name": "gb10",
         }
     ]
 

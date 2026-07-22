@@ -18,7 +18,7 @@ def _authority() -> AdminSmokeAuthority:
         team_id="11111111-1111-4111-8111-111111111111",
         admin_actor="loom-staging-rollout",
         task_id="loom-smoke/gb10-oracle-hello-world",
-        required_worker_pool="gb10-arm64",
+        required_worker_pool="gb10",
         agent="oracle",
     )
 
@@ -35,7 +35,7 @@ def test_authority_round_trips_and_builds_exact_payload() -> None:
         "task_filter": {"task_ids": ["loom-smoke/gb10-oracle-hello-world"]},
         "trial_config": {"agent_name": "oracle", "agent_model": None},
         "n_per_task": 1,
-        "required_worker_pools": ["gb10-arm64"],
+        "required_worker_pools": ["gb10"],
     }
 
     unpooled = AdminSmokeContract(replace(authority, required_worker_pool=None))
@@ -132,7 +132,7 @@ def test_contract_validates_exact_admitted_batch_without_terminal_claim() -> Non
             "team_id": authority.team_id,
         },
         "task_filter": {"task_ids": [authority.task_id]},
-        "required_worker_pools": ["gb10-arm64"],
+        "required_worker_pools": ["gb10"],
         "state": "pending",
         "result_status": None,
         "failure_reason": None,

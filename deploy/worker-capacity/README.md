@@ -2,22 +2,43 @@
 
 The systemd timer in this directory is the durable runtime bridge between the
 private production and staging Control Planes. It runs every 30 seconds from
-the fixed, root-installed staging runner checkout. A missed boot interval is
+one exact, root-installed staging runner candidate. A missed boot interval is
 reconciled by `Persistent=true`; loss of the production pressure source posts
 a fail-closed synthetic shortfall to staging.
 
-Install on the authorized runner host after the candidate is merged and the
-fixed `/opt/loom-staging-runner` checkout/venv is refreshed:
+Install on the authorized runner host only after the exact candidate has been
+published under `/opt/loom-staging-runner/candidates/<full-sha>`. The checked-in
+service is a template and must never be installed with an unresolved
+`${GIT_SHA}` token or from an ambient checkout:
 
 ```bash
+GIT_SHA=<approved-40-character-lowercase-candidate-sha>
+if [ "${#GIT_SHA}" -ne 40 ]; then
+  echo "GIT_SHA must contain exactly 40 characters" >&2
+  exit 2
+fi
+case "$GIT_SHA" in
+  (*[!0-9a-f]*) echo "GIT_SHA must be lowercase hexadecimal" >&2; exit 2 ;;
+esac
+CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$GIT_SHA"
+sudo test -x "$CANDIDATE_ROOT/venv/bin/python"
+sudo test -f \
+  "$CANDIDATE_ROOT/repo/scripts/ops/prod_pressure_worker_control.py"
+
+rendered_service="$(mktemp)"
+trap 'rm -f "$rendered_service"' EXIT
+sudo -u loom-rollout -- \
+  "$CANDIDATE_ROOT/venv/bin/python" -I -B \
+  "$CANDIDATE_ROOT/repo/scripts/ops/render_prod_pressure_worker_control_service.py" \
+  --git-sha "$GIT_SHA" >"$rendered_service"
 sudo install -o root -g root -m 0644 \
-  deploy/worker-capacity/loom-prod-pressure-worker-control.service \
+  "$rendered_service" \
   /etc/systemd/system/loom-prod-pressure-worker-control.service
 sudo install -o root -g root -m 0644 \
-  deploy/worker-capacity/loom-prod-pressure-worker-control.timer \
+  "$CANDIDATE_ROOT/repo/deploy/worker-capacity/loom-prod-pressure-worker-control.timer" \
   /etc/systemd/system/loom-prod-pressure-worker-control.timer
 sudo install -o root -g loom-rollout -m 0640 \
-  deploy/worker-capacity/prod-pressure-worker-control.env.example \
+  "$CANDIDATE_ROOT/repo/deploy/worker-capacity/prod-pressure-worker-control.env.example" \
   /etc/loom/prod-pressure-worker-control.env
 ```
 

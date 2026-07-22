@@ -127,7 +127,7 @@ def _plan() -> RehearsalPlan:
             team_id="11111111-1111-4111-8111-111111111111",
             admin_actor="loom-staging-rollout",
             task_id="loom-smoke/gb10-oracle-hello-world",
-            required_worker_pool="gb10-arm64",
+            required_worker_pool="gb10",
             agent="oracle",
         ),
         gb10_authority=gb10_rehearsal_authority(),
@@ -167,7 +167,7 @@ def _api_smoke_seed_value(command: tuple[str, ...], plan: RehearsalPlan) -> dict
         "backend": "docker",
         "fresh": True,
         "hostname": "rehearsal-" + "5" * 24,
-        "pool_name": "gb10-arm64",
+        "pool_name": "gb10",
         "status": "ready",
         "worker_id": str(uuid.UUID(hex=plan.plan_digest[:32], version=4)),
     }
@@ -1158,7 +1158,7 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
     seed = next(command for command in calls if "psql" in command)
     seed_sql = next(item for item in seed if item.startswith("--command="))
     assert "ON CONFLICT (id) DO UPDATE" in seed_sql
-    assert "gb10-arm64" in seed_sql
+    assert "'gb10'" in seed_sql
     capacity_queries = [
         next(item for item in command if item.startswith("--command="))
         for command in calls

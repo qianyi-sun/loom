@@ -21,7 +21,7 @@ def _authority() -> AdminSmokeAuthority:
         team_id="11111111-1111-4111-8111-111111111111",
         admin_actor="loom-staging-rollout",
         task_id="loom-smoke/gb10-oracle-hello-world",
-        required_worker_pool="gb10-arm64",
+        required_worker_pool="gb10",
         agent="oracle",
     )
 
@@ -45,7 +45,7 @@ def test_probe_validates_admission_and_returns_only_hashed_evidence(
         "team_id": authority.team_id,
         "submitted_by_user": {"username": "Devansh", "team_id": authority.team_id},
         "task_filter": {"task_ids": [authority.task_id]},
-        "required_worker_pools": ["gb10-arm64"],
+        "required_worker_pools": ["gb10"],
         "state": "pending",
         "result_status": None,
         "failure_reason": None,
@@ -73,7 +73,7 @@ def test_probe_validates_admission_and_returns_only_hashed_evidence(
                 "task_filter": {"task_ids": [authority.task_id]},
                 "trial_config": {"agent_name": "oracle", "agent_model": None},
                 "n_per_task": 1,
-                "required_worker_pools": ["gb10-arm64"],
+                "required_worker_pools": ["gb10"],
             }
             assert headers == {"X-Loom-Admin-Actor": "loom-staging-rollout"}
             return 201, b'{"batch_id":"batch-1"}'

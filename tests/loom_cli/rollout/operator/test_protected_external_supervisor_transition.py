@@ -55,8 +55,8 @@ def _artifact(
         profile_text += f"""
 
 [[external_slurm_autoscaler_supervisors]]
-name = "gb10-arm64-staging-secondary"
-pool_name = "gb10-arm64"
+name = "gb10-staging-secondary"
+pool_name = "gb10"
 service_name = "loom-autoscaler-gb10-staging-secondary.service"
 timer_name = "loom-autoscaler-gb10-staging-secondary.timer"
 working_directory = "/opt/loom-staging-runner/candidates/${{GIT_SHA}}/repo"
@@ -64,7 +64,7 @@ python_path = "/opt/loom-staging-runner/candidates/${{GIT_SHA}}/venv/bin/python"
 script_path = "/opt/loom-staging-runner/candidates/${{GIT_SHA}}/repo/scripts/ops/worker_pool_autoscaler_external_once.py"
 args = [
   "--environment", "staging",
-  "--pool-name", "gb10-arm64",
+  "--pool-name", "gb10",
   "--namespace", "loom-staging",
   "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--db-local-host", "127.0.0.1",

@@ -3762,7 +3762,7 @@ def test_current_candidate_worker_binding_is_stable_across_heartbeat_timestamps(
                     "desired_states": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "image_tag": "staging-abc123",
                             "source_git_commit": "a" * 40,
                             "updated_at": timestamp,
@@ -3775,7 +3775,7 @@ def test_current_candidate_worker_binding_is_stable_across_heartbeat_timestamps(
                     "nodes": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "hostname": "trt-gb10-1",
                             "worker_id": "worker-current",
                             "worker_status": "active",
@@ -3812,7 +3812,7 @@ def test_current_candidate_worker_binding_rejects_stale_registration(
                 "desired_states": [
                     {
                         "environment": "staging",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "staging-abc123",
                         "source_git_commit": "a" * 40,
                         "host_intents": {"trt-gb10-1": "active"},
@@ -3821,7 +3821,7 @@ def test_current_candidate_worker_binding_rejects_stale_registration(
                 "nodes": [
                     {
                         "environment": "staging",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "hostname": "trt-gb10-1",
                         "worker_id": "worker-stale",
                         "worker_status": "active",
@@ -3849,7 +3849,7 @@ def test_release_gate_runs_exact_candidate_bound_canary_before_evidence(
             resolved_sha="a" * 40,
         ),
         smoke_task_id="loom-smoke/gb10-oracle-hello-world",
-        smoke_required_worker_pool="gb10-arm64",
+        smoke_required_worker_pool="gb10",
         smoke_agent="oracle",
         smoke_on_behalf_username="devansh",
         smoke_on_behalf_team_id="11111111-1111-4111-8111-111111111111",
@@ -3865,7 +3865,7 @@ def test_release_gate_runs_exact_candidate_bound_canary_before_evidence(
                 "desired_states": [
                     {
                         "environment": "staging",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "staging-abc123",
                         "source_git_commit": "a" * 40,
                         "host_intents": {"trt-gb10-1": "active"},
@@ -3874,7 +3874,7 @@ def test_release_gate_runs_exact_candidate_bound_canary_before_evidence(
                 "nodes": [
                     {
                         "environment": "staging",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "hostname": "trt-gb10-1",
                         "worker_id": "worker-current",
                         "worker_status": "active",

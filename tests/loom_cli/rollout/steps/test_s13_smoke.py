@@ -758,7 +758,7 @@ def test_admin_on_behalf_smoke_accepts_candidate_bound_canary_overrides(
         scope="current-gb10",
         smoke_submit_mode="admin-on-behalf",
         smoke_task_id="skilllearnbench/fix-security-bug/fix-security-bug-1",
-        smoke_required_worker_pool="gb10-arm64",
+        smoke_required_worker_pool="gb10",
         smoke_agent="oracle",
         smoke_on_behalf_username="devansh",
         smoke_on_behalf_team_id="11111111-1111-4111-8111-111111111111",
@@ -826,7 +826,7 @@ def test_admin_on_behalf_smoke_accepts_candidate_bound_canary_overrides(
     assert captured[0]["task_filter"] == {
         "task_ids": ["skilllearnbench/fix-security-bug/fix-security-bug-1"]
     }
-    assert captured[0]["required_worker_pools"] == ["gb10-arm64"]
+    assert captured[0]["required_worker_pools"] == ["gb10"]
     assert step_dir.artifact_path("hf-canary-05-submit.json").is_file()
 
 
