@@ -1,0 +1,168 @@
+# Production DB-backed environment desired state (#484 prod bootstrap).
+#
+# Prod is state/frontend/release/worker-identity isolated from staging+dev
+# (separate DB, MinIO, tokens, provider refs, frontend base). Physical GB10 /
+# OLDLAB Slurm hosts are shared, but prod workers connect only to the prod
+# control plane (env_file below points at the prod CP + prod token). Prod owns
+# capacity by default; staging borrows short-lived slots via lease and drains
+# under prod pressure (prod-pressure reclaim, #892/#489).
+#
+# SHIPS DISABLED (fail-closed). Applying this profile does NOT activate any
+# prod worker: the GB10 row is enabled=false until the first prod go-live
+# decision. exclusive=true (one worker per node) is safe without #896; the
+# exclusive=false packing target stays gated on #896 container-isolation
+# evidence, same as dev/staging.
+#
+# Apply after image rollout with:
+#   loom admin environment-state apply \
+#     --environment production \
+#     --file deploy/environment-state/production.toml \
+#     --var IMAGE_TAG="$IMAGE_TAG" \
+#     --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION"
+
+environment = "production"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "gb10"
+actuator = "slurm"
+enabled = false
+disabled_reason = "prod not yet live; enable=true at the first prod go-live decision. Prod-first warm floor (min_slots) is tuned at activation; exclusive=false packing stays gated on #896."
+# Prod-first: at activation, set min_slots to a warm floor (>0) so prod always
+# holds a baseline of capacity, and prod-pressure reclaim drains staging's
+# borrowed slots when prod queues work. max_slots is the full pool; prod wins
+# contention via the prod-pressure policy, not by reserving nodes.
+min_slots = 0
+max_slots = 140
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "arm64"
+partition = "gb10"
+allowed_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+# Prod rollout paths — isolated from the staging rollout tree so prod and
+# staging worker checkouts/env-files never collide on a shared host.
+env_file = "/var/lib/loom-prod-rollout/generated/prod-gb10-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/loom-prod-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
+requested_cpus = 20
+requested_memory_mib = 115000
+requested_concurrency = 10
+max_jobs = 14
+pending_job_cap = 2
+time_limit = "2-00:00:00"
+exclusive = true
+external_runner = true
+
+[[gb10_worker_pool_desired_states]]
+pool_name = "gb10"
+image_tag = "${IMAGE_TAG}"
+max_concurrent = 10
+env_config_version = "${ENV_CONFIG_VERSION}"
+source_git_commit = "${GIT_SHA}"
+# Ships at 0 (fail-closed); the go-live step raises target_slots with enabled=true.
+target_slots = 0
+
+[gb10_worker_pool_desired_states.host_intents]
+trt-gb10-1 = "stopped"
+trt-gb10-2 = "stopped"
+trt-gb10-3 = "stopped"
+trt-gb10-4 = "stopped"
+trt-gb10-5 = "stopped"
+trt-gb10-6 = "stopped"
+trt-gb10-7 = "stopped"
+trt-gb10-8 = "stopped"
+trt-gb10-9 = "stopped"
+trt-gb10-10 = "stopped"
+trt-gb10-11 = "stopped"
+trt-gb10-12 = "stopped"
+trt-gb10-13 = "stopped"
+trt-gb10-14 = "stopped"
+trt-gb10-15 = "stopped"
+
+[gb10_worker_pool_desired_states.rollout_policy]
+mode = "all"
+
+[gb10_worker_pool_desired_states.env]
+LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS = "7200"
+
+[catalog_provisioning]
+required = true
+command = "loom datasets register skilllearnbench --hf-org PRHW --revision \"$PUBLISHED_SHA\" --mirror-to-object-store --bucket loom-benchmarks --registered-by catalog-provision && loom datasets publish-local deploy/catalog/gb10-smoke --bucket loom-benchmarks --imported-by catalog-provision && loom datasets audit --all --verify-bundles"
+env_file = "/shared_work/loom-prod-worker-capacity/prod-catalog-provisioning.env"
+required_env = [
+  "PUBLISHED_SHA",
+  "HF_TOKEN",
+  "LOOM_SVC_DB_URL",
+  "LOOM_SVC_MINIO_ENDPOINT",
+  "LOOM_SVC_MINIO_ACCESS_KEY",
+  "LOOM_SVC_MINIO_SECRET_KEY",
+]
+
+[catalog_provisioning.env]
+PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"
+
+[catalog_provisioning.kubernetes_port_forward]
+enabled = true
+postgres_service = "service/loom-postgres"
+postgres_remote_port = 5432
+minio_service = "service/loom-minio"
+minio_remote_port = 9000
+
+[rate_card_sync.yibuapi]
+enabled = true
+group = "default"
+
+[[hosted_provider_pricing_defaults]]
+name = "mz_tn_canada_qianyi"
+pricing_source = "rate-card"
+rate_card_provider = "yibuapi"
+required = true
+
+[external_slurm_runner_prerequisites]
+pools = ["gb10"]
+expected_repo_ref = "${IMAGE_TAG}"
+require_clean_repo = true
+require_worker_token_parity = true
+materialize = true
+env_template_glob = "/var/lib/loom-prod-rollout/generated/prod-gb10-worker-prod-*.env"
+
+# --- External autoscaler supervisor (systemd --user timer) -------------------
+# Renders a `systemctl --user` service+timer that runs the external autoscaler
+# actuator for the prod GB10 pool. Reserved --db-local-port scheme (no collision
+# with dev/staging supervisors on a shared submit host):
+#   oldlab  dev/staging/prod = 15447 / 15448 / 15449
+#   gb10    dev/staging/prod = 15450 / 15451 / 15452
+# SHIPS enabled=false + active=false (fail-closed): applying writes the unit but
+# does not enable or start the timer, mirroring the pool's enabled=false gate.
+# Flip both to true at the prod go-live step.
+[[external_slurm_autoscaler_supervisors]]
+name = "gb10-production"
+pool_name = "gb10"
+service_name = "loom-autoscaler-gb10-prod.service"
+timer_name = "loom-autoscaler-gb10-prod.timer"
+working_directory = "/opt/loom-prod-runner/repo"
+python_path = "/opt/loom-prod-runner/venv/bin/python"
+script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
+args = ["--pool-name", "gb10", "--namespace", "loom-prod", "--kubeconfig", "/etc/loom/kubeconfig/production.yaml", "--db-local-port", "15452", "--freshness-sec", "120"]
+enabled = false
+active = false
