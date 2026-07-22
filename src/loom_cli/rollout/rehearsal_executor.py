@@ -1862,8 +1862,6 @@ class IsolatedRehearsalExecutor:
         reference: str,
         image_tag: str,
     ) -> tuple[str, ...] | None:
-        if len(repo_digests) > 1:
-            return None
         validated: list[str] = []
         for repo_digest in repo_digests:
             if not isinstance(repo_digest, str) or repo_digest.count("@") != 1:
@@ -1898,7 +1896,13 @@ class IsolatedRehearsalExecutor:
             if len(matches) != 1:
                 return None
             validated.append(digest)
-        return tuple(validated)
+        # A rehearsal image re-imported on more than one calendar day carries one
+        # ``import-YYYY-MM-DD`` repoDigest per import, each pinning the SAME content
+        # digest. Tolerate those duplicate aliases, but still require a single
+        # unambiguous content identity so a genuinely divergent import is rejected.
+        if len(set(validated)) > 1:
+            return None
+        return tuple(dict.fromkeys(validated))
 
     def _containerd_content(self, node: str, digest: str) -> dict[str, object] | None:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
