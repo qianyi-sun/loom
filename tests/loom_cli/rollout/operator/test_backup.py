@@ -4,6 +4,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -25,7 +26,6 @@ from loom_cli.rollout.operator import backup as backup_module
 from loom_cli.rollout.operator.backup import (
     BackupCreator,
     BackupError,
-    BackupPolicyLimitError,
     Boto3MinioMirror,
     SubprocessBackupCommandRunner,
     VerifiedBackup,
@@ -3318,7 +3318,10 @@ def test_boto_mirror_rejects_declared_bytes_over_disk_aware_budget(
     assert events == ["client_close"]
 
 
-def test_boto_mirror_has_total_object_bound(tmp_path: Path) -> None:
+def test_boto_mirror_object_count_warns_and_continues(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     events: list[str] = []
 
     class TooManyObjectsS3(LifecycleS3):
@@ -3342,7 +3345,7 @@ def test_boto_mirror_has_total_object_bound(tmp_path: Path) -> None:
         available_bytes=lambda _path: 100_000,
     )
 
-    with pytest.raises(BackupPolicyLimitError, match="object limit") as captured:
+    with caplog.at_level(logging.WARNING, logger="loom_cli.rollout.operator.backup"):
         mirror.mirror(
             endpoint_url="http://127.0.0.1:19000",
             access_key=MINIO_ACCESS_KEY,
@@ -3351,10 +3354,14 @@ def test_boto_mirror_has_total_object_bound(tmp_path: Path) -> None:
             destination=destination,
         )
 
-    assert captured.value.code == "minio_object_limit_exceeded"
-    assert captured.value.public_reason == "backup_object_limit_exceeded"
+    # Object count is a caution signal, not a hard bound: crossing the threshold
+    # does not abort the backup, so every object is still mirrored in full.
     assert (destination / "loom-staging-trajectories" / "first.bin").read_bytes() == b"x"
-    assert not (destination / "loom-staging-trajectories" / "second.bin").exists()
+    assert (destination / "loom-staging-trajectories" / "second.bin").read_bytes() == b"x"
+    # The caution surfaces exactly once as a warning.
+    cautions = [record for record in caplog.records if "caution threshold" in record.getMessage()]
+    assert len(cautions) == 1
+    assert cautions[0].levelno == logging.WARNING
     assert events == ["client_close"]
 
 
