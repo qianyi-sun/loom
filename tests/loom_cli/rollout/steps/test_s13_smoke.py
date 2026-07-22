@@ -507,7 +507,7 @@ def test_current_gb10_smoke_defaults_to_gb10_compatible_task_and_pool(
             + hashlib.sha256(
                 f"{ctx.image_tag}|{ctx.resolved_sha}".encode(),
             ).hexdigest()[:16],
-            "required_worker_pool": "gb10-arm64",
+            "required_worker_pool": "gb10",
         }
     ]
 
@@ -737,7 +737,7 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
             "task_filter": {"task_ids": ["loom-smoke/gb10-oracle-hello-world"]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "n_per_task": 1,
-            "required_worker_pools": ["gb10-arm64"],
+            "required_worker_pools": ["gb10"],
         }
     ]
     assert "admin-token-from-env" not in step_dir.stdout_path().read_text()
@@ -820,9 +820,9 @@ def test_admin_on_behalf_smoke_fails_fast_on_fanout_submit_failure(
                 b'{"id":"batch-1","state":"running",'
                 b'"result_status":"partial_failed",'
                 b'"failure_reason":"fanout_submit_failed",'
-                b'"failure_message":"required_worker_pool gb10-arm64 is incompatible",'
+                b'"failure_message":"required_worker_pool gb10 is incompatible",'
                 b'"fanout_errors":[{"reason":"required_worker_pool_incompatible",'
-                b'"required_worker_pool":"gb10-arm64",'
+                b'"required_worker_pool":"gb10",'
                 b'"detail":"Authorization: Bearer loom_admin_fake_secret",'
                 b'"pool_cpu_arches":["arm64"],'
                 b'"task_cpu_arches":{"x86_64":["loom-smoke/gb10-oracle-hello-world"]}}]}',
@@ -851,7 +851,7 @@ def test_admin_on_behalf_smoke_fails_fast_on_fanout_submit_failure(
     assert result.exit_code == 1
     assert "fanout_submit_failed" in str(result.error)
     assert "required_worker_pool_incompatible" in str(result.error)
-    assert "gb10-arm64" in str(result.error)
+    assert "gb10" in str(result.error)
     assert "admin-token-from-env" not in str(result.error)
     assert "loom_admin_fake_secret" not in str(result.error)
     assert "Bearer [REDACTED:bearer]" in str(result.error)

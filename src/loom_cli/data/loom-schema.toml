@@ -119,7 +119,7 @@ python_type = "HttpUrl"
 default     = "http://loom-llm-gateway:9100"
 
 [service_config.control_plane_url]
-used_by     = ["loom-service", "worker"]
+used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "HttpUrl"
 default     = "http://loom-control-plane:8080"
 
@@ -743,7 +743,7 @@ description = "Optional worker hostname override used for registration and fleet
 used_by     = ["worker"]
 python_type = "str"
 default     = "default"
-description = "Resource-pool label advertised at worker registration for slot capacity summaries. Set to values like k8s-worker, gb10-arm64, or oldlab."
+description = "Resource-pool label advertised at worker registration for slot capacity summaries. Set to values like k8s-worker, gb10, or oldlab."
 
 [service_config.blocking_io_max_workers]
 used_by     = ["worker"]
@@ -837,6 +837,24 @@ used_by     = ["worker"]
 python_type = "int"
 default     = 1800
 description = "Docker SDK API timeout in seconds for worker-created clients. Keeps large pulls/builds/sidecars from failing at docker-py's shorter default during benchmark sweeps."
+
+[service_config.container_cpus]
+used_by     = ["worker"]
+python_type = "float"
+default     = 0.0
+description = "#896 per-container hard CPU cap (in cores) for the trial and setup-sidecar containers this worker creates. Maps to Docker nano_cpus. 0 = unbounded (default), which keeps exclusive GB10 pools unchanged; non-exclusive (packed) double-duty nodes set a positive ceiling so an escaped container cannot starve co-tenants (k3s/MinIO/Longhorn)."
+
+[service_config.container_memory_mib]
+used_by     = ["worker"]
+python_type = "int"
+default     = 0
+description = "#896 per-container hard memory cap in MiB for the trial and setup-sidecar containers this worker creates. Maps to Docker mem_limit. 0 = unbounded (default); non-exclusive (packed) nodes set a positive ceiling so an escaped container cannot exhaust RAM on a shared double-duty node."
+
+[service_config.container_pids]
+used_by     = ["worker"]
+python_type = "int"
+default     = 0
+description = "#896 per-container hard PID cap for the trial and setup-sidecar containers this worker creates. Maps to Docker pids_limit. 0 = unbounded (default); non-exclusive (packed) nodes set a positive ceiling to bound fork-bomb blast radius on a shared double-duty node."
 
 [service_config.fixtures_root]
 used_by     = ["worker"]
@@ -1003,12 +1021,8 @@ generate    = "openssl rand -hex 16"
 description = "Base64 AES-256 key for LocalEncryptedSecretStore (LOOM_SECRET_STORE_MASTER_KEY)."
 generate    = "python -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip(\"=\"))'"
 
-[infra_secrets.family-orchestrator-team-id]
-description = "Optional family-run orchestrator gateway team id (LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TEAM_ID). Rendered as an optional secretKeyRef and owned by schema-doctor; omitted from bootstrap-secrets so new clusters do not install placeholder gateway credentials."
-bootstrap   = false
-
 [infra_secrets.family-orchestrator-token]
-description = "Optional family-run orchestrator gateway token (LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN). Rendered as an optional secretKeyRef and owned by schema-doctor; omitted from bootstrap-secrets so new clusters do not install placeholder gateway credentials."
+description = "Optional dedicated family-run orchestrator token (LOOM_FAMILY_ORCHESTRATOR_GATEWAY_TOKEN). It carries only family:evolve and is exchanged at the Control Plane for trial/team/provider-bound step JWTs; omitted from bootstrap-secrets so new clusters do not install placeholder credentials."
 bootstrap   = false
 
 # ─── render_config ───

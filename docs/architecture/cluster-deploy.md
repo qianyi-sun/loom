@@ -791,8 +791,13 @@ beside the rendered YAML. For protected release acceptance, pass
 digests or image IDs, not just mutable tags. The one-command rollout driver
 uses `--backup-manifest-min-remaining-hours 2` by default so a near-expiry
 manifest fails before long host prep instead of at protected mutation time. It
-generates that identity JSON from the rendered Deployment images and local
-Docker image IDs for rollout-managed images only; external images are left out.
+also binds the reviewed operator traversal ceilings into immutable inputs and
+passes `--backup-max-files`, `--backup-max-entries`, and
+`--backup-max-total-bytes` to candidate-source backup validation. Standalone
+CLI calls that omit those flags retain the conservative generic limits. The
+driver generates that identity JSON from the rendered Deployment images and
+local Docker image IDs for rollout-managed images only; external images are
+left out.
 The artifact records the expected
 git SHA, image tag, CLI version, rendered Deployment images,
 cluster-config/rendered-manifest hashes, Alembic heads, and external-worker

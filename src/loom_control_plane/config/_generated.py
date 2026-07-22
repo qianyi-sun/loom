@@ -24,6 +24,7 @@ class ControlPlaneSettings(BaseSettings):
     bind_host: str = "0.0.0.0"
     bind_port: int = 8080
     claimed_without_start_expiry_sec: int = 3600
+    control_plane_url: HttpUrl = cast(HttpUrl, "http://loom-control-plane:8080")
     db_max_overflow: int = 40
     db_pool_size: int = 20
     db_pool_timeout_sec: float = 30.0

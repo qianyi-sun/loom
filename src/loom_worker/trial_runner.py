@@ -149,6 +149,13 @@ class LocalTrialRunner:
     # it here; the runner forwards it onto TrialContext for
     # Trial.run → TrajectoryWriter to mirror events through.
     cp_event_sink: CpEventSink | None = None
+    # #896: per-container hard resource caps for the trial + setup-sidecar
+    # containers this runner creates. 0 = unbounded (default), which keeps
+    # exclusive GB10 pools unchanged. main_loop populates these from
+    # WorkerSettings.container_* (env LOOM_WORKER_CONTAINER_*).
+    container_cpus: float = 0.0
+    container_memory_mib: int = 0
+    container_pids: int = 0
 
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
@@ -197,6 +204,9 @@ class LocalTrialRunner:
                     task_dir=self.task_dir,
                     task_checksum=self.task_checksum,
                     trial_id=self.trial_id,
+                    container_cpus=self.container_cpus,
+                    container_memory_mib=self.container_memory_mib,
+                    container_pids=self.container_pids,
                 )
             )
 
@@ -283,6 +293,10 @@ class LocalTrialRunner:
                 self.driver_factory if self.workspace_staging_policy is not None else None
             ),
             cp_event_sink=self.cp_event_sink,
+            # #896: forward per-container caps into the trial container.
+            container_cpus=self.container_cpus,
+            container_memory_mib=self.container_memory_mib,
+            container_pids=self.container_pids,
         )
 
         deferred_success_patch: tuple[str, str | None, str | None] | None = None

@@ -743,7 +743,7 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     [
         ("production.cluster.toml", "/prod"),
         ("development.cluster.toml", "/dev"),
-        ("staging.cluster.toml", "/dev"),
+        ("staging.cluster.toml", "/staging"),
     ],
 )
 def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
@@ -1409,7 +1409,11 @@ def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:
     of the schema default. See #383 rationale."""
     envs_dir = _REPO_ROOT / "deploy" / "environments"
     expected = {
-        "development.cluster.toml": True,
+        # Shared dev runs trial execution on external Slurm (#857/#873), same
+        # as staging/prod, so its in-cluster loom-worker Deployment is disabled.
+        # Per-developer LOCAL dev uses deploy/local/local.example.cluster.toml,
+        # which can opt into k8s_worker for offline / no-Slurm use.
+        "development.cluster.toml": False,
         "staging.cluster.toml": False,
         "production.cluster.toml": False,
     }
@@ -1679,3 +1683,127 @@ def test_container_registry_load_from_toml(tmp_path: Path) -> None:
     cfg_path.write_text('container_registry = "192.168.50.13:5000"\n')
     cfg = load_cluster_config(cfg_path)
     assert cfg.container_registry == "192.168.50.13:5000"
+
+
+def test_local_example_template_renders() -> None:
+    """The shipped local dev template must actually RENDER, not just load: e.g.
+    frontend_api_base_path must be a renderer-valid root/prefix form ("/"), not
+    "/api" which `cluster render` rejects. Guards the #882 template against a
+    render-invalid value that load_cluster_config alone would not catch."""
+    cfg = load_cluster_config(_REPO_ROOT / "deploy/local/local.example.cluster.toml")
+    docs = _load_docs(render_manifests(cfg))
+    assert docs  # rendered manifests without raising
+    assert cfg.k8s_worker.enabled is True  # default local worker path
+
+
+def _multi_node_cfg(**kwargs: object) -> ClusterConfig:
+    """Build a 4-pod distributed-MinIO render config (#893).
+
+    Mirrors the [topology] values qianyi's k3s-cutover PR will flip
+    `deploy/environments/staging.cluster.toml` to. The topology
+    sub-dataclass is materialized from the schema at import time, so we
+    reach it the same way the single-node tests reach `k8s_worker`
+    (`type(ClusterConfig().<field>)`) rather than hand-rolling a config
+    mechanism. `persistent_storage_backend="dynamic"` keeps the static
+    host-path PV path from colliding with the StatefulSet's PVC.
+    """
+    topology_cls = type(ClusterConfig().topology)
+    return ClusterConfig(
+        namespace="loom-staging",
+        persistent_storage_backend="dynamic",
+        topology=topology_cls(
+            multi_node=True,
+            minio_replicas=4,
+            anti_affinity="required",
+            storage_backend="longhorn",
+        ),
+        **kwargs,
+    )
+
+
+def test_render_distributed_minio_statefulset_shape() -> None:
+    """Distributed (multi-node) MinIO renders as a 4-pod HA StatefulSet.
+
+    Covers the manifest shape that qianyi's k3s-cutover PR activates by
+    flipping `staging.cluster.toml [topology]` to multi_node=true /
+    minio_replicas=4 / anti_affinity="required" / storage_backend="longhorn".
+    Nothing here touches the live profile — the config is synthetic so the
+    distributed render path (`minio-distributed.yaml.j2`) has regression
+    coverage independent of that cutover flip (#893).
+    """
+    docs = _load_docs(render_manifests(_multi_node_cfg()))
+
+    minio_statefulsets = [
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-minio"
+    ]
+    # Exactly one loom-minio StatefulSet — the single-node minio.yaml.j2 is
+    # gated on `not topology.multi_node` and must emit nothing here.
+    assert len(minio_statefulsets) == 1
+    minio = minio_statefulsets[0]
+
+    # 1. distributed StatefulSet with replicas: 4.
+    assert minio["spec"]["replicas"] == 4
+    # The distributed StatefulSet fronts the headless peer-discovery
+    # Service; the single-node one uses serviceName == loom-minio.
+    assert minio["spec"]["serviceName"] == "loom-minio-headless"
+
+    # 2. required cross-node anti-affinity keyed on hostname.
+    anti_affinity = minio["spec"]["template"]["spec"]["affinity"]["podAntiAffinity"]
+    assert "requiredDuringSchedulingIgnoredDuringExecution" in anti_affinity
+    assert "preferredDuringSchedulingIgnoredDuringExecution" not in anti_affinity
+    required_terms = anti_affinity["requiredDuringSchedulingIgnoredDuringExecution"]
+    assert required_terms[0]["topologyKey"] == "kubernetes.io/hostname"
+    assert required_terms[0]["labelSelector"]["matchLabels"] == {"app": "loom-minio"}
+
+    # 3. peer-discovery arg spans the {0...3} ordinal set for 4 pods.
+    args = minio["spec"]["template"]["spec"]["containers"][0]["args"]
+    peer_arg = next(a for a in args if a.startswith("http://"))
+    assert "loom-minio-{0...3}" in peer_arg
+    assert "loom-minio-headless.loom-staging.svc.cluster.local:9000/data" in peer_arg
+
+    # 4. the data volumeClaimTemplate binds the Longhorn storage class.
+    vct = minio["spec"]["volumeClaimTemplates"][0]
+    assert vct["metadata"]["name"] == "data"
+    assert vct["spec"]["storageClassName"] == "longhorn"
+
+    # 5. PodDisruptionBudget preserves erasure quorum (minAvailable: 3).
+    pdb = next(
+        d
+        for d in docs
+        if d["kind"] == "PodDisruptionBudget" and d["metadata"]["name"] == "loom-minio"
+    )
+    assert pdb["spec"]["minAvailable"] == 3
+    assert pdb["spec"]["selector"]["matchLabels"] == {"app": "loom-minio"}
+
+    # Headless peer-discovery Service is present alongside the client Service.
+    kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+    assert ("Service", "loom-minio-headless") in kinds_names
+    assert ("Service", "loom-minio") in kinds_names
+
+
+def test_render_distributed_minio_omits_single_node_shape() -> None:
+    """Multi-node mode must not co-render the single-node MinIO StatefulSet
+    or a static host-path PV (#893).
+
+    The single-node `minio.yaml.j2` is gated on `not topology.multi_node`;
+    with `persistent_storage_backend="dynamic"` no `*-minio-data` host-path
+    PersistentVolume is emitted to collide with the StatefulSet's dynamic PVC.
+    """
+    docs = _load_docs(render_manifests(_multi_node_cfg()))
+
+    # The single-node StatefulSet serves args ["server", "/data", ...]; the
+    # distributed one uses a peer-discovery URL. No StatefulSet may carry the
+    # single-node arg shape.
+    minio_statefulsets = [
+        d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-minio"
+    ]
+    assert len(minio_statefulsets) == 1
+    assert minio_statefulsets[0]["spec"]["template"]["spec"]["containers"][0]["args"][:2] != [
+        "server",
+        "/data",
+    ]
+
+    # No static host-path PV under the dynamic backend.
+    pv_names = {d["metadata"]["name"] for d in docs if d["kind"] == "PersistentVolume"}
+    assert "loom-minio-data" not in pv_names
+    assert "loom-staging-minio-data" not in pv_names

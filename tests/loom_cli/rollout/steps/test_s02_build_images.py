@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from loom_cli.rollout.steps.s02_build_images import ROLLOUT_IMAGES
+from loom_cli.rollout.base_context_fixture import make_ctx
+from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.steps.s02_build_images import (
+    ROLLOUT_IMAGES,
+    BuildImagesStep,
+)
+from loom_cli.rollout.steps.subprocess_util import SubprocessResult
 
 
 def _repo_root() -> Path:
@@ -98,3 +104,141 @@ class TestBuildImagesCoverage:
             f"ROLLOUT_IMAGES entry {image!r} points at {dockerfile!r} "
             f"which does not exist"
         )
+
+
+def test_service_image_build_is_bound_to_resolved_candidate_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved_sha = "c" * 40
+    ctx = make_ctx(tmp_path, resolved_sha=resolved_sha)
+    rollout_dir = tmp_path / "rollout"
+    (rollout_dir / "01-worktree" / "src").mkdir(parents=True)
+    step_path = rollout_dir / "02-build-images"
+    step_path.mkdir()
+    step_dir = StepDir(number=2, name="build-images", path=step_path)
+    commands: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> SubprocessResult:
+        command = list(argv)
+        commands.append(command)
+        return SubprocessResult(
+            argv=command,
+            returncode=1 if command[1] == "inspect" else 0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
+        (("loom-service", "deploy/Dockerfile.service"),),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.run_captured",
+        fake_run,
+    )
+
+    result = BuildImagesStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    build = next(command for command in commands if command[1] == "build")
+    assert build == [
+        "docker",
+        "build",
+        "-f",
+        "deploy/Dockerfile.service",
+        "-t",
+        f"loom-service:{ctx.image_tag}",
+        "--build-arg",
+        f"LOOM_BUILD_SHA={resolved_sha}",
+        ".",
+    ]
+
+
+def test_verify_rejects_service_image_with_stale_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, resolved_sha="c" * 40)
+    step_dir = StepDir(number=2, name="build-images", path=tmp_path)
+    commands: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> SubprocessResult:
+        command = list(argv)
+        commands.append(command)
+        return SubprocessResult(
+            argv=command,
+            returncode=0,
+            stdout="d" * 40,
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
+        (("loom-service", "deploy/Dockerfile.service"),),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.run_captured",
+        fake_run,
+    )
+
+    outcome = BuildImagesStep().verify(ctx, step_dir)
+
+    assert outcome.name == "MISMATCH"
+    assert commands == [
+        [
+            "docker",
+            "inspect",
+            "--type=image",
+            "--format",
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}',
+            f"loom-service:{ctx.image_tag}",
+        ],
+    ]
+
+
+def test_run_rebuilds_service_image_with_stale_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, resolved_sha="c" * 40)
+    rollout_dir = tmp_path / "rollout"
+    (rollout_dir / "01-worktree" / "src").mkdir(parents=True)
+    step_path = rollout_dir / "02-build-images"
+    step_path.mkdir()
+    step_dir = StepDir(number=2, name="build-images", path=step_path)
+    commands: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> SubprocessResult:
+        command = list(argv)
+        commands.append(command)
+        return SubprocessResult(
+            argv=command,
+            returncode=0,
+            stdout="d" * 40 if command[1] == "inspect" else "built",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
+        (("loom-service", "deploy/Dockerfile.service"),),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.run_captured",
+        fake_run,
+    )
+
+    result = BuildImagesStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert any(command[1] == "build" for command in commands)
+    assert "stale image revision; rebuilding" in step_dir.stdout_path().read_text()

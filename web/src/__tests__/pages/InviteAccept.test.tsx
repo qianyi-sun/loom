@@ -15,6 +15,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 const authMe = {
   user: {
     id: "user-1",
+    username: "Beta",
     email: "beta@example.com",
     display_name: null,
     is_platform_admin: false,
@@ -29,7 +30,7 @@ const authMe = {
 
 describe("InviteAccept", () => {
   it("explains the invite and accepts it with the intended email", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
@@ -88,7 +89,7 @@ describe("InviteAccept", () => {
     ["revoked", "Invite revoked"],
     ["accepted", "Invite already used"],
   ])("handles %s invites without accepting", async (status, label) => {
-    vi.spyOn(global, "fetch").mockImplementation(
+    vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {

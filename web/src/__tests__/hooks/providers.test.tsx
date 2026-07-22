@@ -49,7 +49,7 @@ describe("providers hooks", () => {
     await act(async () => {
       await result.current.mutateAsync("new-key");
     });
-    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc",
       expect.objectContaining({
@@ -62,7 +62,7 @@ describe("providers hooks", () => {
   it("useDeleteConnection DELETEs + removes detail from cache", async () => {
     qc.setQueryData(["providers", "abc"], { id: "abc" });
     qc.setQueryData(["providers"], [{ id: "abc" }]);
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       new Response(null, { status: 204 }),
     );
     const { result } = renderHook(() => useDeleteConnection(), {
@@ -78,7 +78,7 @@ describe("providers hooks", () => {
   it("useTestConnection POSTs + invalidates list and detail (status pill on both)", async () => {
     qc.setQueryData(["providers"], [{ id: "abc", status: "untested" }]);
     qc.setQueryData(["providers", "abc"], { id: "abc", status: "untested" });
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       new Response(JSON.stringify({ status: "valid" }), { status: 200 }),
     );
     const { result } = renderHook(() => useTestConnection("abc"), {

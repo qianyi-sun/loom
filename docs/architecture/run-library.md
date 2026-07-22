@@ -65,7 +65,24 @@ legacy artifact JSON still says `share_status = "shared"`.
   list artifact summary is capped per batch and includes
   `artifact_summary_truncated=true` when more typed artifacts exist; it does
   not materialize every trial trajectory or count the full artifact inventory
-  for large historical batches.
+  for large historical batches. Summary attribution prefers `Artifact.batch_id`
+  and otherwise follows `Artifact.trial_id -> Trial.batch_id`. The same
+  owner/admin or org-shared parent-priority metadata policy is applied before
+  both counting and truncation, so private cross-team artifacts affect neither.
+  A single bounded lateral query loads at most the cap plus one visible artifact
+  per page batch. Pages are ordered by
+  `created_at DESC, id DESC` and return an opaque timestamp/id `next_cursor`.
+  The cursor predicate uses the same two-field tie-breaker, so tied timestamps
+  cannot create gaps, duplicates, or unstable traversal. Decoded timestamps
+  must include a timezone offset, are normalized to UTC, and otherwise return
+  HTTP 400 even when the base64 payload and UUID are valid. Artifact-filtered
+  requests apply correlated SQL `EXISTS` predicates before `limit + 1`, covering
+  both trial-level and batch-level typed artifacts plus legacy trial artifacts.
+  The predicate uses the same owner/admin or org-shared metadata visibility
+  rules as the artifact library, so an inaccessible cross-team artifact cannot
+  influence filter results. Filtering therefore takes one candidate query
+  rather than per-batch history probes. A terminal page returns
+  `next_cursor = null`.
 - `GET /api/v1/run-library/batches/{batch_id}`: detail view with owner-team
   label, task/config summary data, provenance, trial rollup, and a grouped typed
   artifact inventory preview. The default detail path reads bounded trial
@@ -111,6 +128,17 @@ The top-level Run Library page provides:
 - Owner-team labels.
 - Human-readable task, agent/model, status, score, cost, trial, artifact, and
   share-state columns.
+- Previous/Next traversal backed by session-local opaque cursor history. Cursor
+  values never enter the URL or browser storage, while scope and filters remain
+  URL-backed and shareable. Any scope or filter change synchronously returns to
+  page one before the new request is constructed, so a stale cursor cannot be
+  reused with a new selection.
+- Visible, polite loading, error, retry, and terminal-page status. In-flight and
+  unavailable controls use guarded `aria-disabled` buttons instead of native
+  `disabled`, so keyboard focus remains on the activated control through loading
+  and terminal states. A failed later page keeps Previous and Retry available
+  while blocking Next, and changing a filter does not move focus away from that
+  filter.
 
 For platform-admin sessions, the team filter is populated from the fixed
 internal-team registry so admins can filter by any team name. Non-admin users
@@ -161,6 +189,12 @@ Run Library changes should cover these cases:
   default path.
 - Run Library batch list keeps typed-artifact summaries bounded per batch and
   marks truncated summaries instead of issuing unbounded artifact count scans.
+- A 53-row tied/non-tied fixture traverses ordinary and artifact-filtered pages
+  in `[17, 17, 17, 2]` rows with stable order, no duplicates or gaps, no
+  unauthorized private row, and a null terminal cursor.
+- Artifact-filter tests include batch-level rows, reject non-shared cross-team
+  metadata as a filter signal, admit org-shared metadata, and pin the missing
+  type path to one database candidate query with no per-batch probes.
 - Artifact list/export filters cover type, owner team, source batch/trial,
   safety state, and provenance relation.
 - Blocked artifacts return a safe denial and cannot be reused.

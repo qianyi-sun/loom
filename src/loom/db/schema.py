@@ -1139,6 +1139,15 @@ class WorkerPoolAutoscalerPolicy(Base):
         server_default=text("'{}'::jsonb"),
         default=dict,
     )
+    # Prod-pressure drain intent for this (environment, pool). The CP request
+    # handler is the sole writer of this field; for actuator="slurm" the
+    # external autoscaler actor reads it to scancel/release SlurmWorkerJobs, and
+    # the scheduler claim path reads it to fence new claims. NULL = no active
+    # prod-pressure drain. See #892.
+    prod_pressure_state: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
     idle_since_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=True,

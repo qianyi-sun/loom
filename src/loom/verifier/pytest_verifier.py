@@ -5,6 +5,10 @@ Spec §2.4 (Verifier framework), §6.1 (testing tiers).
 Output pattern: pytest writes junit XML to /loom/verifier/junit.xml; the
 verifier downloads the file and parses it locally. We do NOT parse stdout
 — the 10 MB cap could truncate large reports mid-document.
+
+#865 / #867: On every pytest (and failed install) exec, also persist a
+capped stdout/stderr audit log under ``{workdir}/.loom/verifier/`` and
+attach a bounded ``loom_verifier_audit`` summary to structured.
 """
 
 from __future__ import annotations
@@ -18,12 +22,23 @@ from xml.etree import ElementTree
 from loom.driver.base import Driver
 from loom.models.exec import ExecResult
 from loom.models.verifier import CheckResult, VerifierError, VerifierResult
+from loom.verifier.audit import (
+    MAX_VERIFIER_JUNIT_BYTES,
+    add_canonical_artifact,
+    merge_loom_verifier_audit,
+    persist_verifier_audit_log,
+    persist_verifier_file,
+    workspace_from_task,
+)
 
 if TYPE_CHECKING:
     from loom.models.task import TaskConfig
     from loom.trajectory.reader import TrajectoryReader
 
 _JUNIT_PATH = PurePosixPath("/loom/verifier/junit.xml")
+_PYTEST_LOG_NAME = "pytest.log"
+_INSTALL_LOG_NAME = "pytest-install.log"
+_JUNIT_NAME = "junit.xml"
 
 
 def build_pytest_install_command() -> str:
@@ -74,7 +89,25 @@ class PytestVerifier:
         artifacts_dir: PurePosixPath,
         trajectory: TrajectoryReader,
     ) -> VerifierResult:
-        await env.exec("mkdir -p /loom/verifier", user="root")
+        # A driver/workspace may be reused. Remove the prior JUnit file before
+        # this attempt so pytest must produce a current report.
+        prepare_result = await env.exec(
+            "mkdir -p /loom/verifier && rm -f -- /loom/verifier/junit.xml",
+            user="root",
+        )
+        if prepare_result.return_code != 0:
+            return VerifierResult(
+                rewards={},
+                error=VerifierError(
+                    kind="exec_failure",
+                    message="failed to prepare a clean pytest JUnit path",
+                    detail={
+                        "junit_xml_path": _JUNIT_PATH.as_posix(),
+                        "return_code": prepare_result.return_code,
+                    },
+                ),
+            )
+        workspace = workspace_from_task(task, artifacts_dir=artifacts_dir)
         # #186: bare `python:3.11-slim` (HumanEval's default image)
         # doesn't ship pytest. Install on demand if missing — pip is
         # fast-path (~1s) when already installed. Task authors who care
@@ -103,8 +136,7 @@ class PytestVerifier:
                 error=VerifierError(
                     kind="timeout",
                     message=(
-                        "pytest dependency setup exceeded "
-                        f"{self.install_timeout_sec:g}s"
+                        f"pytest dependency setup exceeded {self.install_timeout_sec:g}s"
                         if self.install_timeout_sec is not None
                         else "pytest dependency setup timed out"
                     ),
@@ -112,6 +144,13 @@ class PytestVerifier:
                 ),
             )
         if install_result.return_code != 0:
+            audit = await persist_verifier_audit_log(
+                env,
+                workspace=workspace,
+                exec_result=install_result,
+                log_name=_INSTALL_LOG_NAME,
+                script_path="pytest-install",
+            )
             detail = _exec_detail(
                 phase="install",
                 command=install_cmd,
@@ -120,7 +159,10 @@ class PytestVerifier:
             )
             return VerifierResult(
                 rewards={},
-                structured={"install_exec": detail},
+                structured=merge_loom_verifier_audit(
+                    {"install_exec": detail},
+                    audit,
+                ),
                 error=VerifierError(
                     kind="exec_failure",
                     message=(
@@ -133,8 +175,7 @@ class PytestVerifier:
 
         cmd = (
             f"cd {self.tests_dir.as_posix()} && "
-            f"pytest --junitxml={_JUNIT_PATH.as_posix()} "
-            + " ".join(self.pytest_args)
+            f"pytest --junitxml={_JUNIT_PATH.as_posix()} " + " ".join(self.pytest_args)
         )
         try:
             pytest_result = await env.exec(
@@ -165,6 +206,14 @@ class PytestVerifier:
                     detail=detail,
                 ),
             )
+
+        audit = await persist_verifier_audit_log(
+            env,
+            workspace=workspace,
+            exec_result=pytest_result,
+            log_name=_PYTEST_LOG_NAME,
+            script_path=cmd,
+        )
         pytest_detail = _exec_detail(
             phase="pytest",
             command=cmd,
@@ -179,12 +228,27 @@ class PytestVerifier:
             except FileNotFoundError:
                 return VerifierResult(
                     rewards={},
-                    structured={"pytest_exec": pytest_detail},
+                    structured=merge_loom_verifier_audit(
+                        {"pytest_exec": pytest_detail},
+                        audit,
+                    ),
                     error=VerifierError(
                         kind="missing_tests",
                         message=f"pytest did not produce {_JUNIT_PATH}",
                         detail=pytest_detail,
                     ),
+                )
+            if await persist_verifier_file(
+                env,
+                workspace=workspace,
+                local_file=local,
+                name=_JUNIT_NAME,
+                max_bytes=MAX_VERIFIER_JUNIT_BYTES,
+            ):
+                audit = add_canonical_artifact(
+                    audit,
+                    relpath=f".loom/verifier/{_JUNIT_NAME}",
+                    kind="junit_xml",
                 )
             try:
                 parsed = parse_junit_xml(local.read_text(encoding="utf-8"))
@@ -195,7 +259,10 @@ class PytestVerifier:
                 }
                 return VerifierResult(
                     rewards={},
-                    structured={"pytest_exec": pytest_detail},
+                    structured=merge_loom_verifier_audit(
+                        {"pytest_exec": pytest_detail},
+                        audit,
+                    ),
                     error=VerifierError(
                         kind="parse_failure",
                         message=f"junit XML parse failed: {exc}",
@@ -205,17 +272,18 @@ class PytestVerifier:
 
         return VerifierResult(
             rewards={
-                "passed": float(
-                    parsed["passed"] > 0 and parsed["passed"] == parsed["total"]
-                ),
+                "passed": float(parsed["passed"] > 0 and parsed["passed"] == parsed["total"]),
                 "pytest_pass_rate": parsed["pass_rate"],
             },
             checks=parsed["checks"],
-            structured={
-                "total": parsed["total"],
-                "passed": parsed["passed"],
-                "failed": parsed["total"] - parsed["passed"],
-            },
+            structured=merge_loom_verifier_audit(
+                {
+                    "total": parsed["total"],
+                    "passed": parsed["passed"],
+                    "failed": parsed["total"] - parsed["passed"],
+                },
+                audit,
+            ),
         )
 
 
@@ -238,13 +306,15 @@ def parse_junit_xml(xml_text: str) -> dict[str, Any]:
                 message = failure.get("message")
             elif error is not None:
                 message = error.get("message")
-            checks.append(CheckResult(
-                name=case.get("name", "<unnamed>"),
-                passed=ok,
-                score=1.0 if ok else 0.0,
-                message=message,
-                duration_sec=float(case.get("time", 0.0)),
-            ))
+            checks.append(
+                CheckResult(
+                    name=case.get("name", "<unnamed>"),
+                    passed=ok,
+                    score=1.0 if ok else 0.0,
+                    message=message,
+                    duration_sec=float(case.get("time", 0.0)),
+                )
+            )
     pass_rate = (passed / total) if total else 0.0
     return {
         "total": total,

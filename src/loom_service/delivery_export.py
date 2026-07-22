@@ -24,6 +24,7 @@ from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial
 from loom_service.delivery_export_tb2_v2 import (
     build_per_trial_v2_bundle,
     parse_trajectory_events,
+    resolve_verifier_artifacts,
 )
 
 SELECTION_RULE = "highest_priority_succeeded_by_task_sample_combination"
@@ -1090,6 +1091,8 @@ def _messages_from_raw_log(
             msg["content"] = (
                 _normalize_tb2_assistant_content(content) if normalize_tb2 else content
             )
+        if isinstance(assistant.get("reasoning_content"), str):
+            msg["reasoning_content"] = assistant["reasoning_content"]
         messages.append(msg)
     return messages
 
@@ -1553,6 +1556,33 @@ def _add_raw_harbor_entries(
             ]
 
         add_ref(tar, _raw_agent_run_path(item, "atif.json"), item.atif)
+
+        verifier_artifacts = resolve_verifier_artifacts(
+            item.trial,
+            client=client,
+            artifacts_bucket=artifacts_bucket,
+        )
+        verifier_manifest_entries: list[dict[str, Any]] = []
+        for artifact in verifier_artifacts:
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, artifact.archive_path),
+                artifact.data,
+            )
+            verifier_manifest_entries.append(
+                {
+                    "kind": "verifier_artifact",
+                    "path": artifact.archive_path,
+                    "content_hash": artifact.content_hash,
+                    "size_bytes": artifact.size_bytes,
+                    "truncated": artifact.truncated,
+                    "share_status": artifact.share_status,
+                    "blocked_reason": artifact.blocked_reason,
+                    "step_name": artifact.step_name,
+                    "source_key": artifact.source_key,
+                }
+            )
+
         artifact_manifest = {
             "schema_version": "1",
             "trial_id": str(item.trial.id),
@@ -1564,6 +1594,7 @@ def _add_raw_harbor_entries(
                 *trajectory_artifacts,
                 {"kind": "atif", "path": "atif.json"},
                 {"kind": "provider_logs_manifest", "path": "provider_logs_manifest.json"},
+                *verifier_manifest_entries,
             ],
         }
         add_bytes(

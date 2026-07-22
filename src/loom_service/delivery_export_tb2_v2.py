@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO
 
@@ -57,11 +58,25 @@ class Tb2V2TrialBundle:
     artifact_manifest_entries: list[dict[str, str]] = field(default_factory=list)
 
 
+def _iter_jsonl_raw_lines(stream: BinaryIO) -> Iterator[bytes]:
+    """Yield JSONL records as raw bytes.
+
+    boto3 ``StreamingBody.__iter__`` yields fixed-size *chunks* (typically
+    1 KiB), not newline-delimited records. Prefer ``iter_lines()`` when
+    present so MinIO GetObject streams parse as true JSONL.
+    """
+    iter_lines = getattr(stream, "iter_lines", None)
+    if callable(iter_lines):
+        yield from iter_lines()
+        return
+    yield from stream
+
+
 def parse_trajectory_events(stream: BinaryIO) -> list[TrajectoryEvent]:
     """Parse trajectory JSONL with bounded size/line caps."""
     events: list[TrajectoryEvent] = []
     total_bytes = 0
-    for line_no, raw in enumerate(stream, start=1):
+    for line_no, raw in enumerate(_iter_jsonl_raw_lines(stream), start=1):
         if line_no > MAX_JSONL_LINES:
             raise Tb2V2ExportError(
                 "trajectory_parse_limit_exceeded",
@@ -295,6 +310,50 @@ def build_execution_trajectory(
     )
 
 
+def reasoning_by_gateway_from_calls(
+    calls: list[LlmCall],
+    *,
+    messages_from_raw_log: Any,
+) -> dict[str, str]:
+    """Map gateway/llm call id → reasoning_content from provider logs."""
+    out: dict[str, str] = {}
+    for call in calls:
+        extras = call.provider_extras if isinstance(call.provider_extras, dict) else {}
+        raw_log = extras.get("_loom_raw_provider_log")
+        if not isinstance(raw_log, dict):
+            continue
+        messages = messages_from_raw_log(raw_log, normalize_tb2=False)
+        for message in reversed(messages or []):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                out[str(call.id)] = reasoning
+            break
+    return out
+
+
+def enrich_execution_trajectory(
+    trajectory: dict[str, Any],
+    *,
+    native_bytes: bytes | None,
+    reasoning_by_gateway: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    native: dict[str, Any] | None = None
+    if native_bytes:
+        try:
+            parsed = json.loads(native_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            native = parsed
+    return Terminus2TrajectoryMapper.enrich_from_native(
+        trajectory,
+        native,
+        reasoning_by_gateway=reasoning_by_gateway,
+    )
+
+
 def build_export_provenance(
     events: list[TrajectoryEvent],
     *,
@@ -340,15 +399,17 @@ def _fetch_artifact_bytes(
     *,
     bucket: str,
     key: str,
+    missing_code: str = "missing_native_artifact",
+    missing_message: str = "native Harbor artifact is missing from object storage",
 ) -> bytes:
     try:
         obj = client.get_object(Bucket=bucket, Key=key)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         raise Tb2V2ExportError(
-            "missing_native_artifact",
+            missing_code,
             {
-                "message": "native Harbor artifact is missing from object storage",
+                "message": missing_message,
                 "bucket": bucket,
                 "key": key,
                 "error_code": code,
@@ -440,6 +501,476 @@ def resolve_native_artifacts(
     return resolved
 
 
+@dataclass(frozen=True)
+class VerifierDeliveryArtifact:
+    """One workspace verifier file packed into a raw-harbor delivery bundle (#865)."""
+
+    archive_path: str
+    data: bytes
+    content_hash: str
+    size_bytes: int
+    truncated: bool | None
+    share_status: str | None
+    blocked_reason: str | None
+    step_name: str | None
+    source_key: str
+
+
+_VERIFIER_KEY_MARKER = "/.loom/verifier/"
+MAX_VERIFIER_LOG_BYTES = 1_048_576
+MAX_VERIFIER_META_BYTES = 65_536
+MAX_VERIFIER_OUTPUT_BYTES = 1_048_576
+MAX_VERIFIER_JUNIT_BYTES = 4_194_304
+MAX_VERIFIER_ARTIFACT_FILES = 16
+_SHA256_RE = re.compile(r"sha256:([0-9a-f]{64})")
+_VERIFIER_LOG_NAMES = frozenset(
+    {"script.log", "pytest.log", "pytest-install.log"}
+)
+_VERIFIER_CANONICAL_LIMITS = {
+    "output.json": MAX_VERIFIER_OUTPUT_BYTES,
+    "junit.xml": MAX_VERIFIER_JUNIT_BYTES,
+}
+
+
+def _verifier_index_fields(
+    trial: Trial,
+    item: dict[str, Any],
+    *,
+    artifacts_bucket: str,
+) -> tuple[str, str, int, str]:
+    key = item.get("key")
+    step_name = item.get("step_name")
+    if (
+        not isinstance(key, str)
+        or not isinstance(step_name, str)
+        or not step_name
+        or step_name in {".", ".."}
+        or "/" in step_name
+    ):
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_index",
+            {"message": "verifier artifact key and step_name are required"},
+        )
+    expected_prefix = f"{trial.team_id}/{trial.id}/{step_name}/.loom/verifier/"
+    if not key.startswith(expected_prefix):
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_index",
+            {
+                "message": "verifier artifact key is not canonical for the trial",
+                "key": key,
+                "expected_prefix": expected_prefix,
+            },
+        )
+    if item.get("bucket") != artifacts_bucket:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_index",
+            {
+                "message": "verifier artifact bucket does not match export bucket",
+                "key": key,
+            },
+        )
+    if item.get("share_status") != "shared":
+        raise Tb2V2ExportError(
+            "verifier_artifact_blocked",
+            {
+                "message": "verifier audit artifact is not approved for sharing",
+                "key": key,
+                "share_status": item.get("share_status"),
+                "blocked_reason": item.get("blocked_reason"),
+            },
+        )
+    size = item.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_index",
+            {
+                "message": "verifier artifact size must be a non-negative integer",
+                "key": key,
+            },
+        )
+    content_hash = item.get("content_hash")
+    if not isinstance(content_hash, str):
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_index",
+            {"message": "verifier artifact content_hash is required", "key": key},
+        )
+    match = _SHA256_RE.fullmatch(content_hash.strip().lower())
+    if match is None:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_index",
+            {
+                "message": "verifier artifact content_hash must be sha256:<64 hex>",
+                "key": key,
+            },
+        )
+    rel = key.removeprefix(expected_prefix)
+    if not rel or rel.startswith("/") or ".." in rel.split("/"):
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_index",
+            {"message": "verifier artifact relative path is unsafe", "key": key},
+        )
+    return key, rel, size, match.group(1)
+
+
+def _fetch_bounded_verifier_artifact(
+    client: Any,
+    *,
+    bucket: str,
+    key: str,
+    indexed_size: int,
+    max_bytes: int,
+) -> bytes:
+    if indexed_size > max_bytes:
+        raise Tb2V2ExportError(
+            "verifier_artifact_too_large",
+            {
+                "message": "indexed verifier artifact exceeds its size limit",
+                "key": key,
+                "max_bytes": max_bytes,
+            },
+        )
+    try:
+        obj = client.get_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        raise Tb2V2ExportError(
+            "missing_verifier_artifact",
+            {
+                "message": "verifier audit artifact is missing from object storage",
+                "bucket": bucket,
+                "key": key,
+                "error_code": code,
+            },
+        ) from exc
+    body = obj["Body"]
+    try:
+        content_length = obj.get("ContentLength")
+        if content_length is not None and content_length != indexed_size:
+            raise Tb2V2ExportError(
+                "verifier_artifact_size_mismatch",
+                {
+                    "message": "object ContentLength does not match indexed size",
+                    "key": key,
+                    "indexed_size": indexed_size,
+                    "content_length": content_length,
+                },
+            )
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = bytes(body.read(remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > max_bytes:
+            raise Tb2V2ExportError(
+                "verifier_artifact_too_large",
+                {
+                    "message": "verifier artifact exceeds its runtime size limit",
+                    "key": key,
+                    "max_bytes": max_bytes,
+                },
+            )
+        if len(data) != indexed_size:
+            raise Tb2V2ExportError(
+                "verifier_artifact_size_mismatch",
+                {
+                    "message": "verifier artifact body does not match indexed size",
+                    "key": key,
+                    "indexed_size": indexed_size,
+                    "actual_size": len(data),
+                },
+            )
+        return data
+    finally:
+        close = getattr(body, "close", None)
+        if callable(close):
+            close()
+
+
+def _validate_verifier_meta(
+    *,
+    data: bytes,
+    log_rel: str,
+    log_size: int,
+) -> dict[str, Any]:
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {"message": "verifier metadata must be valid UTF-8 JSON", "path": log_rel},
+        ) from exc
+    if not isinstance(parsed, dict) or parsed.get("schema_version") != "1":
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {
+                "message": "verifier metadata must be a schema_version 1 object",
+                "path": log_rel,
+            },
+        )
+    truncated = parsed.get("truncated")
+    original_bytes = parsed.get("original_bytes")
+    kept_bytes = parsed.get("kept_bytes")
+    if not isinstance(truncated, bool):
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {"message": "verifier metadata truncated must be boolean", "path": log_rel},
+        )
+    for name, value in (("original_bytes", original_bytes), ("kept_bytes", kept_bytes)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise Tb2V2ExportError(
+                "invalid_verifier_artifact_metadata",
+                {
+                    "message": f"verifier metadata {name} must be a non-negative integer",
+                    "path": log_rel,
+                },
+            )
+    return_code = parsed.get("return_code")
+    if isinstance(return_code, bool) or not isinstance(return_code, int):
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {"message": "verifier metadata return_code must be an integer", "path": log_rel},
+        )
+    script_path = parsed.get("script_path")
+    if not isinstance(script_path, str) or not script_path:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {
+                "message": "verifier metadata script_path must be a non-empty string",
+                "path": log_rel,
+            },
+        )
+    assert isinstance(original_bytes, int) and isinstance(kept_bytes, int)
+    if kept_bytes != log_size:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {
+                "message": "metadata kept_bytes does not match the paired log",
+                "path": log_rel,
+            },
+        )
+    raw_driver_truncated = parsed.get("driver_truncated", False)
+    if not isinstance(raw_driver_truncated, bool):
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {
+                "message": "verifier metadata driver_truncated must be boolean",
+                "path": log_rel,
+            },
+        )
+    driver_truncated = raw_driver_truncated
+    valid_lengths = (
+        (not truncated and original_bytes == kept_bytes)
+        or (truncated and original_bytes > kept_bytes)
+        or (truncated and driver_truncated and original_bytes >= kept_bytes)
+    )
+    if not valid_lengths:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {
+                "message": "metadata truncation flags and byte counts are inconsistent",
+                "path": log_rel,
+            },
+        )
+    expected_log_path = f".loom/verifier/{log_rel}"
+    if parsed.get("log_path") != expected_log_path:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_metadata",
+            {
+                "message": "metadata log_path does not match the paired log",
+                "path": log_rel,
+                "expected_log_path": expected_log_path,
+            },
+        )
+    return parsed
+
+
+def resolve_verifier_artifacts(
+    trial: Trial,
+    *,
+    client: Any,
+    artifacts_bucket: str,
+) -> list[VerifierDeliveryArtifact]:
+    """Fetch indexed ``.loom/verifier/**`` artifacts for delivery packing (#865).
+
+    Fail-closed when indexed verifier artifacts are missing, unreadable,
+    hash-mismatched, share-blocked, or contain secret-like content.
+    """
+    indexed = _index_artifacts(trial)
+    candidates = [
+        item
+        for item in indexed
+        if isinstance(item.get("key"), str) and _VERIFIER_KEY_MARKER in str(item["key"])
+    ]
+    if not candidates:
+        if _agent_name_for_trial(trial) != "terminus-2":
+            return []
+        raise Tb2V2ExportError(
+            "missing_verifier_artifact",
+            {
+                "message": "eligible trial has no indexed verifier audit artifacts",
+                "trial_id": str(trial.id),
+            },
+        )
+    if len(candidates) > MAX_VERIFIER_ARTIFACT_FILES:
+        raise Tb2V2ExportError(
+            "verifier_artifact_too_large",
+            {"message": "too many indexed verifier audit files", "trial_id": str(trial.id)},
+        )
+
+    fetched: dict[tuple[str, str], tuple[dict[str, Any], bytes, str]] = {}
+    for item in sorted(candidates, key=lambda row: str(row.get("key"))):
+        key, rel, size, expected_hash = _verifier_index_fields(
+            trial,
+            item,
+            artifacts_bucket=artifacts_bucket,
+        )
+        step_name = str(item["step_name"])
+        identity = (step_name, rel)
+        if identity in fetched:
+            raise Tb2V2ExportError(
+                "duplicate_verifier_artifact",
+                {
+                    "message": "multiple source keys map to the same verifier archive path",
+                    "path": rel,
+                    "step_name": step_name,
+                },
+            )
+        if "/" in rel:
+            raise Tb2V2ExportError(
+                "invalid_verifier_artifact_pair",
+                {"message": "verifier artifact names must be canonical leaves", "path": rel},
+            )
+        if rel in _VERIFIER_LOG_NAMES:
+            max_bytes = MAX_VERIFIER_LOG_BYTES
+        elif rel.endswith(".meta.json") and rel.removesuffix(
+            ".meta.json"
+        ) in _VERIFIER_LOG_NAMES:
+            max_bytes = MAX_VERIFIER_META_BYTES
+        elif rel in _VERIFIER_CANONICAL_LIMITS:
+            max_bytes = _VERIFIER_CANONICAL_LIMITS[rel]
+        else:
+            raise Tb2V2ExportError(
+                "invalid_verifier_artifact_pair",
+                {
+                    "message": "verifier artifact name is not in the canonical allowlist",
+                    "path": rel,
+                },
+            )
+        data = _fetch_bounded_verifier_artifact(
+            client,
+            bucket=artifacts_bucket,
+            key=key,
+            indexed_size=size,
+            max_bytes=max_bytes,
+        )
+        actual_hash = hashlib.sha256(data).hexdigest()
+        if actual_hash != expected_hash:
+            raise Tb2V2ExportError(
+                "verifier_artifact_hash_mismatch",
+                {
+                    "message": "verifier audit artifact hash does not match index",
+                    "trial_id": str(trial.id),
+                    "key": key,
+                    "expected_hash": expected_hash,
+                    "actual_hash": actual_hash,
+                },
+            )
+        fetched[identity] = (item, data, actual_hash)
+
+    step_names = {step_name for step_name, _rel in fetched}
+    multiple_steps = len(step_names) > 1
+    log_keys = {key for key in fetched if key[1] in _VERIFIER_LOG_NAMES}
+    meta_keys = {
+        key
+        for key in fetched
+        if key[1].endswith(".meta.json")
+        and key[1].removesuffix(".meta.json") in _VERIFIER_LOG_NAMES
+    }
+    expected_meta_keys = {
+        (step_name, f"{rel}.meta.json") for step_name, rel in log_keys
+    }
+    if meta_keys != expected_meta_keys:
+        raise Tb2V2ExportError(
+            "invalid_verifier_artifact_pair",
+            {
+                "message": "verifier audit logs and metadata must be complete pairs",
+                "logs": sorted(f"{step}/{rel}" for step, rel in log_keys),
+                "metadata": sorted(f"{step}/{rel}" for step, rel in meta_keys),
+            },
+        )
+    if _agent_name_for_trial(trial) == "terminus-2" and not log_keys:
+        raise Tb2V2ExportError(
+            "missing_verifier_artifact",
+            {
+                "message": "eligible trial has no complete verifier audit log pair",
+                "trial_id": str(trial.id),
+            },
+        )
+
+    resolved: list[VerifierDeliveryArtifact] = []
+    bodies_for_scan: dict[str, bytes] = {}
+    for step_name, log_rel in sorted(log_keys):
+        log_item, log_data, log_hash = fetched[(step_name, log_rel)]
+        meta_rel = f"{log_rel}.meta.json"
+        meta_item, meta_data, meta_hash = fetched[(step_name, meta_rel)]
+        meta = _validate_verifier_meta(
+            data=meta_data,
+            log_rel=log_rel,
+            log_size=len(log_data),
+        )
+        for rel, item, data, digest in (
+            (log_rel, log_item, log_data, log_hash),
+            (meta_rel, meta_item, meta_data, meta_hash),
+        ):
+            archive_path = (
+                f"verifier/{step_name}/{rel}" if multiple_steps else f"verifier/{rel}"
+            )
+            bodies_for_scan[archive_path] = data
+            resolved.append(
+                VerifierDeliveryArtifact(
+                    archive_path=archive_path,
+                    data=data,
+                    content_hash=f"sha256:{digest}",
+                    size_bytes=len(data),
+                    truncated=bool(meta["truncated"]),
+                    share_status="shared",
+                    blocked_reason=None,
+                    step_name=str(item["step_name"]),
+                    source_key=str(item["key"]),
+                )
+            )
+
+    canonical_keys = {
+        key for key in fetched if key[1] in _VERIFIER_CANONICAL_LIMITS
+    }
+    for step_name, rel in sorted(canonical_keys):
+        item, data, digest = fetched[(step_name, rel)]
+        archive_path = (
+            f"verifier/{step_name}/{rel}" if multiple_steps else f"verifier/{rel}"
+        )
+        bodies_for_scan[archive_path] = data
+        resolved.append(
+            VerifierDeliveryArtifact(
+                archive_path=archive_path,
+                data=data,
+                content_hash=f"sha256:{digest}",
+                size_bytes=len(data),
+                truncated=None,
+                share_status="shared",
+                blocked_reason=None,
+                step_name=step_name,
+                source_key=str(item["key"]),
+            )
+        )
+
+    scan_members_for_secrets(bodies_for_scan)
+    return resolved
+
+
 def scan_members_for_secrets(members: dict[str, bytes]) -> None:
     for path, data in members.items():
         text = data.decode("utf-8", errors="replace")
@@ -501,6 +1032,14 @@ def build_per_trial_v2_bundle(
         client=client,
         artifacts_bucket=artifacts_bucket,
     )
+    execution_trajectory = enrich_execution_trajectory(
+        execution_trajectory,
+        native_bytes=native_artifacts.get(NATIVE_HARBOR_TRAJECTORY),
+        reasoning_by_gateway=reasoning_by_gateway_from_calls(
+            calls,
+            messages_from_raw_log=messages_from_raw_log,
+        ),
+    )
 
     artifact_manifest_entries = [
         {"kind": "execution_trajectory", "path": "trajectory.json"},
@@ -538,4 +1077,3 @@ def build_per_trial_v2_bundle(
         native_artifacts=native_artifacts,
         artifact_manifest_entries=artifact_manifest_entries,
     )
-

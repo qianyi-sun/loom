@@ -93,7 +93,7 @@ def test_register_persists_worker_capacity_and_pool(
                 "version": "0.1",
                 "capabilities": [_VALID_CAP],
                 "max_concurrent": 10,
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
             },
         )
         assert r.status_code == 200, r.text
@@ -113,7 +113,7 @@ def test_register_persists_worker_capacity_and_pool(
         engine.dispose()
 
     assert row[0] == 10
-    assert row[1] == "gb10-arm64"
+    assert row[1] == "gb10"
 
 
 def test_register_rejects_missing_capabilities(app, worker_token):  # type: ignore[no-untyped-def]

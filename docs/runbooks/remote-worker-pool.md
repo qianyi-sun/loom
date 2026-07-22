@@ -65,7 +65,7 @@ with the runtime hostname, which may be only a container ID in Docker Compose.
 Using the host name keeps Monitor, worker inventory, and capacity evidence
 readable when many remote workers attach through the same control plane.
 Set `LOOM_WORKER_POOL_NAME` to the stable pool identity shared by similar
-workers, for example `gb10-arm64`, `oldlab`, or `remote-worker`. Monitor,
+workers, for example `gb10`, `oldlab`, or `remote-worker`. Monitor,
 `loom resources status`, and Prometheus slot metrics group capacity by this
 pool name plus backend and CPU architecture.
 
@@ -313,7 +313,7 @@ resources instead of this fixed manual slice.
 The staged GB10 staging plan is recorded under
 `deploy/worker-pools/gb10/`. GB10 workers execute Docker sandboxes on ARM64
 hosts, but normal capacity management should still use the same Slurm
-autoscaler policy shape as OLDLAB: `actuator=slurm`, `pool_name=gb10-arm64`,
+autoscaler policy shape as OLDLAB: `actuator=slurm`, `pool_name=gb10`,
 `actuator_config.partition=gb10`, `actuator_config.cpu_arch=arm64`, and one
 allowed node per `trt-gb10-N` host. GB10's Docker data-root plus worker scratch
 must stay on each node's local ext4 disk. Do not use `/shared_work` for GB10
@@ -382,6 +382,28 @@ control-node-local `/home/.../loom` checkout is not sufficient unless a Slurm
 job has verified it on each target node. This script is for manual or staged
 launches. For elastic pools, prefer the Control Plane controller below so batch
 submission stays independent of Slurm latency.
+
+## Candidate Publication Contract (service-owned root)
+
+Per-environment worker candidates published under
+`/shared_work/loom/candidates/<environment>/<sha>/` follow an all-or-nothing,
+service-owned contract (#874):
+
+- The rollout **service** (`loom-rollout`) owns the root and every level below
+  it (mode `2750`); workers read via the `sharedwork` group but never write —
+  that is the immutability guarantee for a published candidate.
+- Privileged setup (`staging_rollout_shared_repo.py service-ensure
+  --environment <env> --candidate-sha <sha>`) validates the environment
+  (development/staging/production) and a full 40-hex SHA, hardcodes
+  `/shared_work/loom`, and ensures **only** `candidates/<environment>`. It never
+  pre-creates the final `<sha>` directory and accepts no arbitrary root/path.
+- The publisher/materializer builds the complete candidate in a private
+  temporary tree, then **atomically** rename-no-replaces it into
+  `candidates/<environment>/<sha>`. An already-present target fails closed (no
+  overwrite, no partial content becomes visible).
+- **Rollback** is merge-revert + a fresh candidate: revert on the authoritative
+  branch and publish a new SHA. The broker never re-points at or reuses a
+  retained historical `<sha>`; retained directories are forensic only.
 
 ## Elastic Slurm Controller
 
@@ -681,7 +703,7 @@ Desired state is stored per `(environment, pool_name)` and includes:
 For staging and staging release rollouts, apply the repository
 environment-state profile so the Slurm autoscaler policy and GB10 compatibility
 desired state converge together. The staging profile must write the
-`staging/gb10-arm64` CP key; `production/gb10-arm64` belongs to production and
+`staging/gb10` CP key; `production/gb10` belongs to production and
 is drift in current-path staging evidence. Run this from the Slurm submit host when the
 profile declares an external Slurm autoscaler supervisor; staging uses that
 path to install and check the OLDLAB user timer, and the rendered service must
@@ -723,7 +745,7 @@ admin API:
 curl -sS -X PUT \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  http://control-node.lan:18081/admin/gb10-worker-pools/staging/gb10-arm64/desired-state \
+  http://control-node.lan:18081/admin/gb10-worker-pools/staging/gb10/desired-state \
   -d '{
     "image_tag": "staging-<commit>",
     "source_git_commit": "<full-release-commit>",
@@ -764,7 +786,7 @@ loom admin gb10-workers status \
   --cp-url http://control-node.lan:18081 \
   --admin-token env:LOOM_ADMIN_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --release-image-tag "$IMAGE_TAG" \
   --release-env-config-version "$ENV_CONFIG_VERSION"
 ```
@@ -787,7 +809,7 @@ loom worker gb10-agent plan \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --env-file /home/qianyi/loom-worker-build-staging/.env \
   --source-dir /home/qianyi/loom-worker-build-staging
 
@@ -795,7 +817,7 @@ loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --env-file /home/qianyi/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
   --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
@@ -813,7 +835,7 @@ loom worker gb10-agent plan \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --env-file /home/qianyi/loom-worker-build-staging/.env \
   --source-dir /home/qianyi/loom-worker-build-staging \
   --worker-token file:/secure/path/current-worker-token
@@ -822,7 +844,7 @@ loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
-  --pool-name gb10-arm64 \
+  --pool-name gb10 \
   --env-file /home/qianyi/loom-worker-build-staging/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
   --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
@@ -1243,6 +1265,38 @@ Set `actuator_config.exclusive=false` only for deliberately shared Slurm nodes
 after lowering `requested_cpus`, `requested_memory_mib`, and
 `requested_concurrency` to a load-tested slice that coexists with other jobs.
 
+### Slurm scheduler fields (account / QoS / reservation)
+
+`actuator_config` accepts optional Slurm scheduler bindings, all defaulting to
+empty (no flag emitted, so existing configs are unchanged):
+
+- `slurm_account` — emitted as `sbatch --account=<x>`. Use per-environment
+  accounts (e.g. `loom-dev`, `loom-staging`, `loom-prod`) for attribution and
+  scheduler-side limits.
+- `slurm_reservation` — emitted as `sbatch --reservation=<x>`. Required if a
+  Slurm reservation carves nodes out of the general pool; without it, jobs
+  pinned via `--nodelist` to reserved nodes pend indefinitely.
+- `slurm_qos`, `qos_normal`, `qos_boost` — QoS names emitted as `sbatch
+  --qos=<x>`. The controller picks the QoS **per submission** from the pool's
+  DB-sourced slot sum (`active_slots + pending_slots`, i.e. the summed
+  `requested_concurrency` of live `SlurmWorkerJob` rows), NOT a `squeue` query:
+  - if that sum is **below** `min_slots`, the pool is under its warm floor and
+    the submission uses `qos_boost` (higher priority);
+  - otherwise it uses `qos_normal` (falling back to `slurm_qos` if set).
+  Note: with `min_slots=0` the boost condition is unreachable, so `qos_boost`
+  never fires — set a positive `min_slots` if you want a boost floor.
+
+### max_slots clamp (no overshoot)
+
+The autoscaler never submits a worker that would push the pool's committed slot
+sum past `max_slots`. When a submission would overshoot, its concurrency is
+clamped to the remaining budget (`max_slots - active_plus_pending`), and its
+CPU/memory are scaled **proportionally from the pre-clamp request** using an
+integer ceiling — e.g. a 10-slot / 115000 MiB worker clamped to 4 slots
+requests `ceil(115000 * 4 / 10) = 46000` MiB (never the per-slot default
+`4 * memory_mib_per_slot`, and never a banker's-rounded under-request).
+Resource-aware `safe_slots` selection is applied first, then this budget clamp.
+
 OLDLAB 1-5 should use conservative resource-aware scale-up rather than a
 static high `requested_concurrency`. With `resource_aware=true`, the autoscaler
 queries `sinfo` before each scale-up and excludes nodes with an active Loom
@@ -1299,7 +1353,7 @@ available only on the OLDLAB submit host, mark the policy as externally run:
       "trt-eai-oldlab-5"
     ],
     "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
-    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
+    "repo_dir": "/shared_work/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 2,
     "requested_memory_mib": 8192,
     "requested_concurrency": 1,
@@ -1380,6 +1434,35 @@ then copies the latest matching staging GB10 env file template when the target
 from the replayable `--worker-token` source, forces mode `0600`, and prepares
 a clean shared checkout at the target `repo_dir` before the environment-state
 check validates existence, git HEAD, clean status, and token parity.
+
+The platform-dev installer owns the dedicated staging checkout root at
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750`. It creates or verifies that root only
+while rollout admission is closed and no request is active. The service can
+write the root, while the `qianyi` Slurm submitter can read and traverse it but
+cannot write it; the service receives no write access to `/shared_work/qianyi`
+itself. The install record binds both account names to their resolved UID/GID,
+and readiness rechecks metadata plus effective service/consumer access.
+
+Step 11 accepts only the candidate-named direct child of that exact root. It
+clones with `--no-hardlinks` into a private, unpredictable setgid-root temp
+container, normalizes the completed tree to shared-group read/execute without
+group or other write, and then publishes with same-root
+`renameat2(RENAME_NOREPLACE)`. Tracked repository symlinks remain valid;
+authority symlinks, foreign ownership, hard-linked or special files, extra
+directories, wrong modes, and SHA drift fail closed. Existing targets are
+immutable: only an exact fully validated target is reused, and rollout never
+replaces, cleans, or takes over drifted or ambient directories.
+
+Broker preflight checks the fixed 14 active GB10 nodes against the root as the
+`qianyi` consumer. After publication and before environment-state apply, step
+11 streams a trusted candidate verifier to `/usr/bin/python3 -` over the same
+protected SSH config, identity, and known-hosts boundary. The target checkout
+is data only, never verifier authority. Every node must report the exact HEAD,
+zero modified/untracked/ignored status, exact physical index and modes,
+readability of the deterministic tracked probe file, and no qianyi write
+capability. Content identities must agree 14/14; NFS device/inode evidence is
+recorded per node without requiring equality across nodes.
 
 Keep the GB10 node-agent path only for Docker Compose rollout validation,
 legacy compatibility, or break-glass operation when Slurm is unavailable. The

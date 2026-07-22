@@ -47,7 +47,7 @@ from loom_cli.secret_source import SecretSourceError, resolve_secret_source
 DEFAULT_TERMINAL_TIMEOUT_SEC = 300.0
 DEFAULT_POLL_INTERVAL_SEC = 5.0
 DEFAULT_CURRENT_GB10_SMOKE_TASK_ID = "loom-smoke/gb10-oracle-hello-world"
-DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10-arm64"
+DEFAULT_CURRENT_GB10_REQUIRED_WORKER_POOL = "gb10"
 DEFAULT_SMOKE_AGENT = "oracle"
 _NONRECOVERABLE_BATCH_RESULT_STATUSES = frozenset({"partial_failed", "all_failed"})
 _NONRECOVERABLE_FANOUT_REASONS = frozenset({"required_worker_pool_incompatible"})

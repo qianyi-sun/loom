@@ -216,6 +216,44 @@ async def issue_batch_runner_token(
     }
 
 
+@router.post("/family-orchestrator-tokens", status_code=201)
+async def issue_family_orchestrator_token(
+    request: Request,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    """Issue the teamless credential that may request family-evolver JWTs.
+
+    The credential cannot call the Gateway directly.  It can only ask the
+    Control Plane to mint a JWT for an existing trial and a provider owned by
+    or shared with that trial's team.
+    """
+    await _require_admin_scope(request, authorization, "admin:tokens")
+
+    raw = "loom_fo_" + secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    expires_at: datetime | None = None
+    days = payload.get("expires_in_days")
+    if days is not None:
+        expires_at = datetime.now(UTC) + timedelta(days=int(days))
+
+    async with request.app.state.session_factory() as session:
+        await session.execute(insert(Token).values(
+            token_hash=token_hash,
+            type="family_orchestrator",
+            scopes=["family:evolve"],
+            team_id=None,
+            issued_at=datetime.now(UTC),
+            expires_at=expires_at,
+        ))
+        await session.commit()
+
+    return {
+        "token": raw,
+        "token_hash_prefix": token_hash.hex()[:8],
+    }
+
+
 @router.delete("/worker-tokens/{prefix}")
 async def revoke_token(
     prefix: str,
@@ -447,16 +485,22 @@ async def put_gb10_worker_pool_desired_state(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/gb10-worker-pools/{environment}/{pool_name}/prod-pressure")
-async def put_gb10_worker_pool_prod_pressure(
+async def _consume_prod_pressure(
+    *,
+    request: Request,
     environment: str,
     pool_name: str,
-    request: Request,
     payload: _ProdPressurePayload,
-    authorization: str | None = Header(default=None),
+    authorization: str | None,
+    scope: str,
 ) -> dict[str, object]:
-    """Consume a prod pressure signal into desired state and claim fencing."""
-    await _require_admin_scope(request, authorization, "admin:gb10_workers")
+    """Consume a prod-pressure signal for one pool.
+
+    ``apply_prod_pressure_signal`` dispatches on the pool's actuator: GB10 pools
+    mutate desired state + registry claim fencing; Slurm pools record a drain
+    intent the external actor + claim path consume (#892).
+    """
+    await _require_admin_scope(request, authorization, scope)
     try:
         async with request.app.state.session_factory() as session:
             result = await apply_prod_pressure_signal(
@@ -476,6 +520,44 @@ async def put_gb10_worker_pool_prod_pressure(
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/worker-pools/{environment}/{pool_name}/prod-pressure")
+async def put_worker_pool_prod_pressure(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    payload: _ProdPressurePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Actuator-neutral prod-pressure route for any worker pool (#892)."""
+    return await _consume_prod_pressure(
+        request=request,
+        environment=environment,
+        pool_name=pool_name,
+        payload=payload,
+        authorization=authorization,
+        scope="admin:worker_pools",
+    )
+
+
+@router.post("/gb10-worker-pools/{environment}/{pool_name}/prod-pressure")
+async def put_gb10_worker_pool_prod_pressure(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    payload: _ProdPressurePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Backward-compatible alias of the neutral prod-pressure route."""
+    return await _consume_prod_pressure(
+        request=request,
+        environment=environment,
+        pool_name=pool_name,
+        payload=payload,
+        authorization=authorization,
+        scope="admin:gb10_workers",
+    )
 
 
 @router.get("/gb10-worker-pools/{environment}/{pool_name}/desired-state")

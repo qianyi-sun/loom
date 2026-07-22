@@ -139,12 +139,32 @@ class DockerDriver:
                 run_kwargs["tmpfs"] = _tmpfs_specs_to_docker_map(opts.tmpfs)
             if opts.labels:
                 run_kwargs["labels"] = dict(opts.labels)
-            if opts.cpus is not None:
+            # Per-sandbox benchmark limits (#853) compose with #896 per-container
+            # packed-worker caps; when both bound cpu/memory the most restrictive
+            # value wins. Each is preserved in its own format when the other is
+            # unset so both driver contracts stay intact.
+            if opts.cpus is not None and opts.container_cpus > 0:
+                run_kwargs["nano_cpus"] = min(
+                    int(opts.cpus * 1_000_000_000),
+                    int(opts.container_cpus * 1_000_000_000),
+                )
+            elif opts.cpus is not None:
                 run_kwargs["nano_cpus"] = int(opts.cpus * 1_000_000_000)
-            if opts.memory_mb is not None:
+            elif opts.container_cpus > 0:
+                run_kwargs["nano_cpus"] = int(opts.container_cpus * 1_000_000_000)
+            if opts.memory_mb is not None and opts.container_memory_mib > 0:
+                run_kwargs["mem_limit"] = min(
+                    opts.memory_mb * 1024 * 1024,
+                    opts.container_memory_mib * 1024 * 1024,
+                )
+            elif opts.memory_mb is not None:
                 run_kwargs["mem_limit"] = f"{opts.memory_mb}m"
+            elif opts.container_memory_mib > 0:
+                run_kwargs["mem_limit"] = opts.container_memory_mib * 1024 * 1024
             if opts.storage_mb is not None:
                 run_kwargs["storage_opt"] = {"size": f"{opts.storage_mb}M"}
+            if opts.container_pids > 0:
+                run_kwargs["pids_limit"] = opts.container_pids
             if opts.gpus:
                 run_kwargs["device_requests"] = [
                     docker.types.DeviceRequest(

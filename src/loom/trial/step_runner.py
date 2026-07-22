@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import posixpath
 import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -251,6 +252,7 @@ async def _run_step_impl(
             env=verifier_env,
             patterns=_artifact_patterns(ctx, step),
             required_patterns=list(step.required_artifacts),
+            platform_patterns=_verifier_artifact_patterns(ctx, verifier_result),
         )
         artifacts_uri = collection.prefix
         artifacts = [
@@ -431,12 +433,72 @@ async def _close_verifier_driver(
 
 
 def _artifact_patterns(ctx: TrialContext, step: StepConfig) -> list[str]:
-    patterns = list(step.artifacts)
+    # ``.loom/verifier`` is platform-owned. Ignore task-authored patterns in
+    # that namespace, including broad globs and normalized traversal aliases;
+    # only the exact names selected below may reach ArtifactCollector.
+    patterns = [
+        pattern
+        for pattern in step.artifacts
+        if not _is_reserved_verifier_pattern(pattern)
+    ]
     if ctx.agent.name == "terminus-2":
         loom_agent = ".loom/agent/**"
         if loom_agent not in patterns:
             patterns.append(loom_agent)
     return patterns
+
+
+_VERIFIER_PLATFORM_PATHS = frozenset(
+    {
+        ".loom/verifier/script.log",
+        ".loom/verifier/script.log.meta.json",
+        ".loom/verifier/output.json",
+        ".loom/verifier/pytest.log",
+        ".loom/verifier/pytest.log.meta.json",
+        ".loom/verifier/pytest-install.log",
+        ".loom/verifier/pytest-install.log.meta.json",
+        ".loom/verifier/junit.xml",
+    }
+)
+
+
+def _verifier_artifact_patterns(
+    ctx: TrialContext,
+    verifier_result: VerifierResult | None,
+) -> list[str]:
+    """Exact trusted names collected through ArtifactCollector's platform lane."""
+    patterns: list[str] = []
+    if ctx.agent.name == "terminus-2":
+        patterns.extend(
+            [
+                ".loom/verifier/pytest.log",
+                ".loom/verifier/pytest.log.meta.json",
+            ]
+        )
+    structured = verifier_result.structured if verifier_result is not None else None
+    if not isinstance(structured, dict):
+        return patterns
+    audit = structured.get("loom_verifier_audit")
+    if not isinstance(audit, dict):
+        return patterns
+    artifacts = audit.get("artifacts")
+    if not isinstance(artifacts, list):
+        return patterns
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        path = artifact.get("path")
+        if isinstance(path, str) and path in _VERIFIER_PLATFORM_PATHS:
+            if path not in patterns:
+                patterns.append(path)
+    return patterns
+
+
+def _is_reserved_verifier_pattern(pattern: str) -> bool:
+    normalized = posixpath.normpath(pattern).lstrip("/")
+    return normalized == ".loom/verifier" or normalized.startswith(
+        ".loom/verifier/"
+    )
 
 
 def _resolve_instruction(ctx: TrialContext, step: StepConfig) -> str:

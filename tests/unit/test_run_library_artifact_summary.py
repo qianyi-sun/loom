@@ -23,6 +23,9 @@ class _FakeExecuteResult:
     def scalars(self) -> _FakeScalarResult:
         return _FakeScalarResult(self._rows)
 
+    def all(self) -> list[object]:
+        return list(self._rows)
+
 
 class _FakeSession:
     def __init__(self, rows_by_call: list[list[object]]) -> None:
@@ -50,21 +53,28 @@ async def test_batch_list_artifact_summaries_cap_rows_per_batch(
     session = _FakeSession(
         [
             [
-                "metric_table",
-                "debug_bundle",
-                "trajectory",
-                "training_data_export",
-            ],
-            ["metric_table"],
+                (first_batch, "metric_table", None, uuid4()),
+                (first_batch, "debug_bundle", None, uuid4()),
+                (first_batch, "trajectory", None, uuid4()),
+                (first_batch, "training_data_export", None, uuid4()),
+                (second_batch, "metric_table", None, uuid4()),
+            ]
         ]
+    )
+    ctx = SimpleNamespace(
+        role=None,
+        type="team",
+        scopes=frozenset({"read:own"}),
+        team_id=uuid4(),
     )
 
     summaries, truncated = await run_library_routes._batch_list_artifact_summaries(
         session,
+        ctx,
         [first_batch, second_batch],
     )
 
-    assert session.calls == 2
+    assert session.calls == 1
     assert sum(summaries[first_batch].values()) == 3
     assert summaries[first_batch]["reports"] == 1
     assert summaries[first_batch]["raw_diagnostics"] == 1
@@ -108,12 +118,10 @@ async def test_batch_detail_artifact_preview_caps_rows_per_batch(
         ]
     )
 
-    typed_by_trial, summary, truncated = await (
-        run_library_routes._batch_detail_artifact_preview(
-            session,
-            batch_id,
-            [SimpleNamespace(id=trial_id)],
-        )
+    typed_by_trial, summary, truncated = await run_library_routes._batch_detail_artifact_preview(
+        session,
+        batch_id,
+        [SimpleNamespace(id=trial_id)],
     )
 
     assert session.calls == 1

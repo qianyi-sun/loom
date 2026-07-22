@@ -66,6 +66,16 @@ class StartOptions:
     memory_mb: int | None = None
     storage_mb: int | None = None
     gpus: int = 0
+    # #896: per-container hard resource caps for non-exclusive (packed) workers.
+    # 0 means unbounded (default, current behavior). DockerDriver maps these to
+    # nano_cpus / mem_limit / pids_limit at container create so an escaped trial
+    # container cannot consume unbounded CPU/RAM/PIDs and starve co-tenants
+    # (k3s/MinIO/Longhorn) on a shared double-duty node. These compose with the
+    # per-sandbox limits above: when both bound the same knob, the most
+    # restrictive value wins.
+    container_cpus: float = 0.0
+    container_memory_mib: int = 0
+    container_pids: int = 0
 
 
 @dataclass

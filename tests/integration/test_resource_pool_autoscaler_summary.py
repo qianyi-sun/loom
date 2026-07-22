@@ -239,7 +239,7 @@ async def test_resource_summary_exposes_pre_start_queue_diagnostics(
                     "network_policies": ["public"],
                 }],
                 max_concurrent=10,
-                pool_name="gb10-arm64",
+                pool_name="gb10",
                 drain_state="active",
                 registered_at=now,
                 last_seen_at=now,

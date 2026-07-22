@@ -19,6 +19,12 @@ spec:
           env:
             - name: LOOM_WORKER_CLAIM_POLL_INTERVAL_SEC
               value: "1.0"
+            - name: LOOM_WORKER_CONTAINER_CPUS
+              value: "0.0"
+            - name: LOOM_WORKER_CONTAINER_MEMORY_MIB
+              value: "0"
+            - name: LOOM_WORKER_CONTAINER_PIDS
+              value: "0"
             - name: LOOM_WORKER_CONTROL_PLANE_URL
               value: "http://loom-control-plane:8080"
             - name: LOOM_WORKER_DOCKER_API_TIMEOUT_SEC

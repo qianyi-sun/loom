@@ -187,6 +187,23 @@ def test_parse_trajectory_events_reads_typed_jsonl() -> None:
     assert len(parsed) == len(events)
 
 
+def test_parse_trajectory_events_reads_boto3_streaming_body_chunks() -> None:
+    """StreamingBody iterates 1 KiB chunks; parser must use iter_lines()."""
+    from botocore.response import StreamingBody
+
+    trial_id = uuid4()
+    # Many small events so the first 1 KiB chunk spans multiple JSONL lines —
+    # matching the staging failure mode (chunk != one event).
+    events = [_provenance_event(trial_id=trial_id, seq=i) for i in range(40)]
+    payload = b"".join(
+        (json.dumps(event.model_dump(mode="json")) + "\n").encode() for event in events
+    )
+    first_chunk = next(iter(StreamingBody(io.BytesIO(payload), len(payload))))
+    assert first_chunk.count(b"\n") >= 2
+    parsed = parse_trajectory_events(StreamingBody(io.BytesIO(payload), len(payload)))
+    assert len(parsed) == len(events)
+
+
 def test_validate_v2_eligibility_rejects_non_terminus2_agent() -> None:
     trial = _trial(agent_name="opencode")
     with pytest.raises(Tb2V2ExportError) as exc:

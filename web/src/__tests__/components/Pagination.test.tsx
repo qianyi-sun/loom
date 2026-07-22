@@ -1,5 +1,6 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   default as Pagination,
@@ -60,5 +61,104 @@ describe("Pagination helpers", () => {
       "title",
       "Load the next page of results.",
     );
+  });
+
+  it("aria-blocks loading controls without removing them from focus order", () => {
+    const onNext = vi.fn();
+    const onPrev = vi.fn();
+    render(
+      <Pagination
+        state={{ current: "cursor-2", stack: [null] }}
+        hasNext
+        isLoading
+        onNext={onNext}
+        onPrev={onPrev}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading page 2");
+    const previous = screen.getByRole("button", { name: /previous page/i });
+    const next = screen.getByRole("button", { name: /next page/i });
+    expect(previous).not.toHaveAttribute("disabled");
+    expect(next).not.toHaveAttribute("disabled");
+    expect(previous).toHaveAttribute("aria-disabled", "true");
+    expect(next).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(previous);
+    fireEvent.click(next);
+    expect(onPrev).not.toHaveBeenCalled();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("keeps previous and retry available after an error while blocking next", () => {
+    const retry = vi.fn();
+    render(
+      <Pagination
+        state={{ current: "cursor-2", stack: [null] }}
+        hasNext
+        isError
+        onNext={() => undefined}
+        onPrev={() => undefined}
+        onRetry={retry}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Page 2 could not be loaded",
+    );
+    expect(screen.getByRole("button", { name: /previous page/i })).toHaveAttribute(
+      "aria-disabled",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: /next page/i })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /retry page/i }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps terminal Next focused and guards keyboard activation", async () => {
+    const onNext = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <Pagination
+        state={{ current: "cursor-4", stack: [null, "cursor-2", "cursor-3"] }}
+        hasNext={false}
+        onNext={onNext}
+        onPrev={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Page 4, end of results",
+    );
+    expect(screen.getByRole("button", { name: /previous page/i })).toHaveAttribute(
+      "aria-disabled",
+      "false",
+    );
+    const next = screen.getByRole("button", { name: /next page/i });
+    expect(next).not.toHaveAttribute("disabled");
+    expect(next).toHaveAttribute("aria-disabled", "true");
+    next.focus();
+    await user.keyboard("{Enter}");
+    expect(onNext).not.toHaveBeenCalled();
+    expect(next).toHaveFocus();
+  });
+
+  it("coalesces concurrent activation before loading state renders", () => {
+    const onNext = vi.fn();
+    render(
+      <Pagination
+        state={{ current: "cursor-2", stack: [null] }}
+        hasNext
+        onNext={onNext}
+        onPrev={() => undefined}
+      />,
+    );
+
+    const next = screen.getByRole("button", { name: /next page/i });
+    fireEvent.click(next);
+    fireEvent.click(next);
+    expect(onNext).toHaveBeenCalledTimes(1);
   });
 });

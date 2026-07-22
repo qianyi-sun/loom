@@ -25,6 +25,9 @@ type TeamUserMember = NonNullable<TeamDetail["user_members"]>[number];
 
 const LINK_BUTTON =
   "inline-flex items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-medium";
+const SIGN_IN_FAILURE = new Error(
+  "Sign-in failed. Check your username and password, then try again.",
+);
 
 const ROLE_DESCRIPTIONS: Record<string, string> = {
   owner: "Can manage team access, API tokens, provider credentials, and submissions.",
@@ -100,7 +103,6 @@ export default function Settings(): JSX.Element {
     me,
     isAuthenticated,
     isAdmin,
-    authError,
     currentTeamId,
     teams,
     loginPassword,
@@ -173,7 +175,7 @@ export default function Settings(): JSX.Element {
     return (
       <div className="space-y-8">
         <header className="max-w-3xl">
-          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
             Loom staging
           </p>
           <h1 className="mt-2 text-3xl font-bold text-slate-950">
@@ -221,15 +223,10 @@ export default function Settings(): JSX.Element {
                   Sign in
                 </Button>
               </div>
-              {authError || signIn.isError ? (
-                <p
-                  role="alert"
-                  className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
-                >
-                  {authError ??
-                    (signIn.error instanceof Error ? signIn.error.message : null) ??
-                    "Sign-in failed."}
-                </p>
+              {signIn.isError ? (
+                <div role="alert">
+                  <ErrorState error={SIGN_IN_FAILURE} />
+                </div>
               ) : null}
             </Card.Body>
           </Card>
@@ -454,7 +451,7 @@ export default function Settings(): JSX.Element {
               LINK_BUTTON,
               canManageProviders
                 ? "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                : "pointer-events-none border-slate-200 bg-slate-50 text-slate-400",
+                : "pointer-events-none border-slate-200 bg-slate-50 text-slate-600",
             )}
             aria-disabled={!canManageProviders}
             title={

@@ -24,7 +24,7 @@ name: staging-smoke
 on:
   workflow_dispatch:
   pull_request:
-    types: [labeled, opened, synchronize, reopened, edited]
+    types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   merge_group:
     types: [checks_requested]
 
@@ -33,7 +33,12 @@ permissions:
 
 concurrency:
   group: staging-smoke-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
+         (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+          contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+         (github.event.action == 'edited' && github.event.changes.base != null)) }}
 
 jobs:
   plan:
@@ -41,6 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       required: ${{ steps.plan.outputs.staging_smoke }}
+      gate_mode: ${{ steps.plan.outputs.gate_mode }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -60,6 +66,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_ACTION_LABEL: ${{ github.event.label.name }}
+          PR_DRAFT: ${{ github.event.pull_request.draft || false }}
+          PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -89,12 +99,18 @@ jobs:
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
+            --pull-request-action "$PR_ACTION" \
+            --pull-request-action-label "$PR_ACTION_LABEL" \
+            --pull-request-draft "$PR_DRAFT" \
+            --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 
   smoke:
     name: kind staging smoke (build images → cluster up → verify ready)
     needs: plan
-    if: needs.plan.outputs.required == 'true'
+    if: >-
+      needs.plan.outputs.gate_mode == 'full' &&
+      needs.plan.outputs.required == 'true'
     runs-on: ubuntu-latest
     # 5 image builds (uncached) + kind boot + ingress-nginx + apply +
     # wait-for-ready easily run 30-40 min on a cold runner. 45 leaves
@@ -158,6 +174,11 @@ jobs:
         run: |
           set -euo pipefail
           export DOCKER_BUILDKIT=1
+          checkout_sha=$(git rev-parse HEAD)
+          [[ "$checkout_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "FAIL: invalid checkout SHA" >&2
+            exit 1
+          }
           # (dockerfile-suffix, image-name) pairs.
           builds=(
             "control-plane:loom-control-plane"
@@ -173,8 +194,13 @@ jobs:
             image="${image_name}:${IMAGE_TAG}"
             (
               echo "::group::Build ${image}"
+              build_args=()
+              if [[ "$suffix" == "service" ]]; then
+                build_args+=(--build-arg "LOOM_BUILD_SHA=${checkout_sha}")
+              fi
               docker build -f "deploy/Dockerfile.${suffix}" \
-                -t "${image}" . 2>&1 | sed "s/^/[${suffix}] /"
+                -t "${image}" "${build_args[@]}" . 2>&1 \
+                | sed "s/^/[${suffix}] /"
               echo "::endgroup::"
             ) &
             pids+=($!)
@@ -183,7 +209,14 @@ jobs:
           for pid in "${pids[@]}"; do
             wait "$pid" || rc=$?
           done
-          exit "$rc"
+          [[ "$rc" -eq 0 ]] || exit "$rc"
+          service_revision=$(docker inspect --type=image --format \
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "loom-service:${IMAGE_TAG}")
+          [[ "$service_revision" == "$checkout_sha" ]] || {
+            echo "FAIL: service image revision does not match checkout" >&2
+            exit 1
+          }
 
       - name: Create kind cluster
         # The ingress-nginx kind manifest pins its controller pod to
@@ -246,17 +279,24 @@ jobs:
         # to kind-loom-staging after cluster creation, so the generated kubectl
         # command targets the right cluster without an explicit --context flag.
         run: |
-          set -e
+          set -euo pipefail
+          admin_toml=/tmp/admin.toml
+          cleanup_bootstrap_secret() {
+            rm -f "$admin_toml"
+          }
+          trap cleanup_bootstrap_secret EXIT
+          umask 077
           kubectl --context kind-loom-staging create namespace loom
           ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"
           echo "::add-mask::${ADMIN_TOKEN}"
-          echo "ADMIN_TOKEN=${ADMIN_TOKEN}" >> "$GITHUB_ENV"
 
           eval "$(uv run loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
 
-          printf '[admin]\ntoken="%s"\n' "${ADMIN_TOKEN}" > /tmp/admin.toml
+          printf '[admin]\ntoken="%s"\n' "${ADMIN_TOKEN}" > "$admin_toml"
           kubectl --context kind-loom-staging -n loom create secret generic loom-admin-secret \
-            --from-file=secrets.toml=/tmp/admin.toml
+            --from-file="secrets.toml=${admin_toml}"
+          rm -f "$admin_toml"
+          trap - EXIT
 
       - name: Generate cluster-config.toml
         # image_tag must match what we built + loaded above.
@@ -270,6 +310,7 @@ jobs:
           cat > /tmp/cluster-config.toml <<EOF
           namespace = "loom"
           image_tag = "${IMAGE_TAG}"
+          runtime_environment = "development"
           ingress_host = "yylx.world"
           ingress_redirect_hosts = ["www.yylx.world"]
           frontend_environment = "staging"
@@ -755,6 +796,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Verify staging admin exchange stays hidden in kind
+        # This ephemeral cluster is deliberately non-protected development.
+        # Positive staging-session acceptance belongs only to the candidate-
+        # bound brokered staging rollout. This malformed, credential-free POST
+        # proves the runtime guard returns 404 before auth or body validation.
+        run: |
+          set -euo pipefail
+          response_headers=$(mktemp)
+          response_body=$(mktemp)
+          trap 'rm -f "$response_headers" "$response_body"' EXIT
+          status=$(curl --insecure --silent --show-error --path-as-is \
+            --request POST --header 'content-type: application/json' \
+            --data-binary '{' --no-location --max-redirs 0 --max-time 10 \
+            --dump-header "$response_headers" --output "$response_body" \
+            --write-out '%{http_code}' \
+            https://yylx.world/dev/api/v1/auth/staging-admin-browser-session)
+          if [[ "$status" != "404" ]] \
+             || [[ "$(<"$response_body")" != '{"detail":"not found"}' ]] \
+             || grep -Eqi '^(location|set-cookie|x-loom-build-sha):' "$response_headers"; then
+            echo "::error::staging admin exchange was exposed in kind: HTTP ${status}"
+            exit 1
+          fi
+
       - name: Verify /healthz on every service via port-forward
         # Probe each service's /healthz from a temporary port-forward.
         # If any returns non-200, dump pod logs + fail.
@@ -978,7 +1042,10 @@ jobs:
         run: kind delete cluster --name loom-staging || true
 
   staging-smoke-gate:
-    name: ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' || 'staging-smoke-gate' }}
+    name: >-
+      ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
+          needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
+          'staging-smoke-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
     needs: [plan, smoke]
@@ -986,11 +1053,20 @@ jobs:
       - name: Enforce selected staging smoke results
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
+          GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          case "$GATE_MODE" in
+            full|filtered) ;;
+            *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
+          esac
+          if [[ "$GATE_MODE" == "filtered" ]]; then
+            [[ "$SMOKE_RESULT" == "skipped" ]] || exit 1
+            exit 0
+          fi
           case "$REQUIRED" in
             true|false) ;;
             *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;

@@ -44,14 +44,17 @@ def test_environment_profiles_pin_approved_names_and_isolated_state() -> None:
     assert profiles["development"]["frontend_api_base"] == "https://yylx.world/dev/api"
     assert profiles["staging"]["namespace"] == "loom-staging"
     assert profiles["staging"]["ingress_host"] == "yylx.world"
-    assert profiles["staging"]["frontend_route"] == "https://yylx.world/dev"
-    assert profiles["staging"]["frontend_api_base"] == "https://yylx.world/dev/api"
+    assert profiles["staging"]["frontend_route"] == "https://yylx.world/staging"
+    assert profiles["staging"]["frontend_api_base"] == "https://yylx.world/staging/api"
     assert profiles["production"]["namespace"] == "loom-prod"
     assert profiles["production"]["ingress_host"] == "yylx.world"
     assert profiles["production"]["frontend_route"] == "https://yylx.world/prod"
     assert profiles["production"]["frontend_api_base"] == "https://yylx.world/prod/api"
 
     assert len({profile["namespace"] for profile in profiles.values()}) == 3
+    # Three distinct route surfaces: /dev, /staging, /prod (collision resolved).
+    assert len({profile["frontend_route"] for profile in profiles.values()}) == 3
+    assert len({profile["frontend_api_base"] for profile in profiles.values()}) == 3
     assert len({profile["database_name"] for profile in profiles.values()}) == 3
     assert len({profile["trajectories_bucket"] for profile in profiles.values()}) == 3
     assert len({profile["artifacts_bucket"] for profile in profiles.values()}) == 3
@@ -176,9 +179,8 @@ def test_deploy_workflow_keeps_production_secrets_on_main_only() -> None:
 
 def test_repository_checks_run_environment_isolation_tests() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
-    steps = workflow["jobs"]["tests-root"]["steps"]
-    pytest_steps = [step for step in steps if "run" in step and "uv run pytest" in str(step["run"])]
-    assert any("tests/ops" in str(step["run"]) for step in pytest_steps)
+    shards = workflow["jobs"]["tests-root"]["strategy"]["matrix"]["include"]
+    assert any("tests/ops" in shard["test_paths"].split() for shard in shards)
 
 
 def test_dockerignore_excludes_operator_local_artifacts_from_image_context() -> None:

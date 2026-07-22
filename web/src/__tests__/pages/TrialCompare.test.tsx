@@ -19,7 +19,7 @@ import TrialCompare from "../../pages/TrialCompare";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 function neverResolvingFetch(): void {
-  vi.spyOn(global, "fetch").mockImplementation(
+  vi.spyOn(globalThis, "fetch").mockImplementation(
     () => new Promise(() => undefined),
   );
 }

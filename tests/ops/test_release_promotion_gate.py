@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import yaml
+from scripts import component_ownership
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -18,12 +19,17 @@ def _candidate_sha() -> str:
 
 
 def _image_digests() -> dict[str, str]:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     return {
-        "loom-control-plane": "ghcr.io/qianyi-sun/loom-control-plane@sha256:" + "1" * 64,
-        "loom-llm-gateway": "ghcr.io/qianyi-sun/loom-llm-gateway@sha256:" + "2" * 64,
-        "loom-service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
-        "loom-worker": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "4" * 64,
-        "loom-web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "5" * 64,
+        image_name: f"ghcr.io/qianyi-sun/{image_name}@sha256:" + f"{index:x}" * 64
+        for index, image_name in enumerate(
+            (
+                component.release_digest
+                for component in manifest.components
+                if component.kind == "release-image" and component.release_digest is not None
+            ),
+            start=1,
+        )
     }
 
 
@@ -89,8 +95,8 @@ def _prod_staging_isolation_evidence() -> dict[str, Any]:
                 "environment_label": "Production",
             },
             "staging": {
-                "route": "https://yylx.world/dev",
-                "api_base": "https://yylx.world/dev/api",
+                "route": "https://yylx.world/staging",
+                "api_base": "https://yylx.world/staging/api",
                 "environment_label": "Staging",
             },
         },
@@ -99,14 +105,14 @@ def _prod_staging_isolation_evidence() -> dict[str, Any]:
                 "environment": "production",
                 "api_url": "https://yylx.world/prod/api",
                 "image": "ghcr.io/qianyi-sun/loom-worker:release-0123456789ab",
-                "image_digest": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "4" * 64,
+                "image_digest": _image_digests()["loom-worker"],
                 "source_commit": _candidate_sha(),
                 "k8s_namespace": "loom-prod",
                 "k8s_deployment": "loom-prod-worker",
             },
             "staging": {
                 "environment": "staging",
-                "api_url": "https://yylx.world/dev/api",
+                "api_url": "https://yylx.world/staging/api",
                 "image": "ghcr.io/qianyi-sun/loom-worker:staging-abc1234",
                 "image_digest": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "6" * 64,
                 "source_commit": "abcdef0123456789abcdef0123456789abcdef01",
@@ -151,15 +157,15 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1005",
             "batch_id": "batch-release-smoke",
             "trial_id": "trial-release-smoke",
-            "artifact_url": "https://yylx.world/dev/api/v1/trials/trial-release-smoke/atif",
+            "artifact_url": "https://yylx.world/staging/api/v1/trials/trial-release-smoke/atif",
         },
         "frontend_route_evidence": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/issues/486#issuecomment-route-gate",
             "production_route": "https://yylx.world/prod",
-            "development_route": "https://yylx.world/dev",
+            "staging_route": "https://yylx.world/staging",
             "production_api_base": "https://yylx.world/prod/api",
-            "development_api_base": "https://yylx.world/dev/api",
+            "staging_api_base": "https://yylx.world/staging/api",
         },
         "secret_redaction": {
             "status": "pass",
@@ -266,7 +272,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "candidate_sha": _candidate_sha(),
         "image_tag": "release-0123456789ab",
         "prod_tag": "v1.0.0",
-        "staging_url": "https://yylx.world/dev",
+        "staging_url": "https://yylx.world/staging",
         "image_digests": _image_digests(),
         "checks": checks,
     }
@@ -370,6 +376,48 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "frontend_route_evidence" in markdown
     assert "prod_staging_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
+    assert all(image_name in markdown for image_name in _image_digests())
+
+
+def test_release_gate_requires_every_manifest_release_digest(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    manifest["image_digests"].pop("loom-agent-sandbox")
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode != 0
+    assert "image_digests.loom-agent-sandbox must end with @sha256:<64 hex>" in result.stderr
+
+
+def test_release_gate_rejects_digest_without_manifest_owner(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    manifest["image_digests"]["loom-unowned-extra"] = (
+        "ghcr.io/qianyi-sun/loom-unowned-extra@sha256:" + "a" * 64
+    )
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode != 0
+    assert (
+        "image_digests contains images without a manifest release owner: "
+        "loom-unowned-extra" in result.stderr
+    )
 
 
 def test_release_gate_official_json_round_trips_through_production_verifier(
@@ -999,3 +1047,24 @@ def test_release_pr_template_requires_promotion_evidence() -> None:
         "DB recovery point",
     ):
         assert required_text in template
+
+
+def test_first_prod_runbook_frontend_evidence_matches_gate_schema() -> None:
+    """The documented release-evidence example must stay aligned with the gate
+    schema: following the runbook must produce evidence this gate accepts, not
+    rejects. Guards against the /dev-vs-/staging drift (qianyi review on #880)."""
+    from scripts.ops import release_gate
+
+    runbook = (REPO_ROOT / "docs/runbooks/first-prod-release-runbook.md").read_text(
+        encoding="utf-8",
+    )
+    canonical = release_gate.CANONICAL_FRONTEND_ROUTES
+
+    # The renamed 3-env fields + /staging values must appear; the retired 2-env
+    # field names must not (they would produce gate-rejected evidence).
+    assert '"staging_route": "https://yylx.world/staging"' in runbook
+    assert '"staging_api_base": "https://yylx.world/staging/api"' in runbook
+    assert '"development_route"' not in runbook
+    assert '"development_api_base"' not in runbook
+    for key in ("production_route", "staging_route", "production_api_base", "staging_api_base"):
+        assert f'"{key}": "{canonical[key]}"' in runbook, f"runbook missing canonical {key}"

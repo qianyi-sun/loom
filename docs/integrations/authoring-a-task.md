@@ -117,6 +117,13 @@ pytest command timeout is reported as a scored `passed=0.0` outcome with
 structured timeout diagnostics, which is appropriate for code benchmarks where
 generated solutions may hang.
 
+Loom automatically retains bounded pytest stdout/stderr plus canonical JUnit
+under exact `.loom/verifier/` channel names. Script verifiers similarly retain
+their bounded exec log and canonical scoring JSON. Task authors should not add
+a broad `.loom/verifier/**` artifact glob or copy raw logs into `structured`;
+the platform adds the exact allowlisted artifact paths and exposes only a
+bounded redacted summary under `loom_verifier_audit`.
+
 ```toml
 [verifier]
 name = "pytest"

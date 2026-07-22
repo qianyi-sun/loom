@@ -1,4 +1,9 @@
 FROM python:3.11-slim
+ARG LOOM_BUILD_SHA=unknown
+LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
+RUN install -d -m 0755 /opt/loom && \
+    printf '%s\n' "${LOOM_BUILD_SHA}" > /opt/loom/build-sha && \
+    chmod 0444 /opt/loom/build-sha
 # #199: transient PyPI ReadTimeouts during staging rollout builds
 # used to fail the whole rollout. These env vars tell pip to retry each
 # request 10 times and wait 60s per attempt instead of the 5-retry /

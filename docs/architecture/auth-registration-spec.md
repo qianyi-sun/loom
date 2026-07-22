@@ -83,6 +83,7 @@ flowchart TD
 | --- | --- | --- | --- |
 | Admin | File-backed singleton secret | Global administration | Compared in memory with `hmac.compare_digest`; not stored in `tokens`. |
 | Browser user | Username/password plus `user_sessions` row and `loom_session` cookie | Current team role | Normal SPA identity. The raw session secret is HttpOnly; unsafe requests must send the CSRF header. |
+| Staging admin browser acceptance session | Singleton admin bearer exchanged for a short-lived `user_sessions` row | Existing platform-admin user | Staging-only validation identity. It cannot be refreshed and must never be used as a production or normal user login path. |
 | User-owned API token | `tokens` row with `type='team'` and `created_by_user_id` | One team plus submitting user | CLI/API identity for service workflows. Submissions made with the token carry both `team_id` and `user_id`. |
 | Legacy team token | `tokens` row with `type='team'` and no user owner | One team | Compatibility path for old automation; it cannot create user-facing work, admin credentials, or cross-team scope. |
 | Worker | `tokens` row with `type='worker'` | Internal worker APIs | Not accepted by `loom_service` user/admin routes. |
@@ -557,10 +558,62 @@ once. The old link fails with `invalid invite`.
 
 `GET /api/v1/admin/audit-events?limit=50&cursor=<event-id>`
 
-Returns recent admin audit rows with cursor pagination. The current backend uses
-the last event id as the next cursor. Team users never see this endpoint. Raw
-tokens, provider secrets, request bodies, and artifact paths must not appear in
-audit metadata.
+Returns recent admin audit rows ordered by `created_at DESC, id DESC`. The wire
+cursor remains the last event UUID for rolling compatibility. The service looks
+up that event's timestamp, then applies the same timestamp/id tie-breaker,
+including when many events share a timestamp. This lets old and new pods accept
+each other's cursors during a rolling update. The response remains
+`{items, next_cursor}` and returns a null cursor at the terminal page. The
+platform-admin Audit tab keeps cursor history in the current session only,
+fetches the endpoint only when that tab is mounted, and renders each safe
+request ID so browser acceptance can visibly correlate a row with the current
+bootstrap request instead of matching only a repeated action name. Team users
+never see this endpoint. Raw tokens, provider secrets, request bodies, and
+artifact paths must not appear in audit metadata.
+
+### Staging Admin Browser Acceptance Session
+
+`POST /api/v1/auth/staging-admin-browser-session`
+
+This endpoint exists only when `LOOM_ENV=staging`; development, production, and
+unset environments return `404` before authentication. It accepts
+`{ "username": "..." }` from the file-backed singleton admin bearer and also
+requires safe, non-secret `X-Loom-Admin-Actor` and `X-Request-ID` headers. The
+authenticated context must be the singleton `admin` context, not an existing
+browser session.
+
+The target must already be an enabled `active` or `pending_setup`
+`platform_admin` user with an owner membership in the single enabled `admin`
+team. The exchange never creates, enables, promotes, or repairs a user, team, or
+membership. Success returns an empty `204`, sets a distinct Secure, HttpOnly,
+SameSite=Lax cookie with a fixed 900-second maximum lifetime, and adds
+`Cache-Control: no-store`. The service image must carry a lowercase 40-character
+SHA baked into `/opt/loom/build-sha` and its OCI revision label; the exchange
+reads the image file, fails `503` without it, and returns that identity as
+`X-Loom-Build-SHA`. A runtime environment variable cannot override the image
+identity. The session is validation-only: `GET`, `HEAD`, and
+`OPTIONS` remain available, while every unsafe request fails `403` before route
+handling except the exact `POST /api/v1/auth/logout` cleanup path. It cannot be
+refreshed, and verification fails outside staging or after the target is
+disabled or loses platform-admin authority. Because this is automated
+acceptance rather than a human login, it does not update the target user's
+`last_login_at` field.
+
+The session creation and `auth.staging_admin_browser_session.create` audit row
+commit atomically. Audit metadata contains only the target username/status,
+fixed TTL, and singleton-admin auth source; it never contains the bearer or raw
+cookie. It also records the running build SHA so the browser report can
+correlate the exact bootstrap request with the deployed runtime. This route is
+solely an audited #692 browser-acceptance bridge. It does not replace #802
+grant/revoke controls, normal password/setup flows, or candidate evidence from
+a non-admin user.
+
+Ephemeral kind CI is deliberately non-protected and renders
+`runtime_environment = "development"`. It sends only a credential-free,
+malformed deny probe and requires this endpoint to return `404` without a
+cookie. Positive browser acceptance belongs exclusively to a candidate-bound,
+brokered protected-staging rollout with the normal backup, mutation lease, and
+request-envelope guards intact; kind CI never impersonates that environment.
 
 ### Legacy Email-Code Browser Auth
 
@@ -591,9 +644,10 @@ The response includes a freshly rotated `csrf_token`.
 
 `POST /api/v1/auth/refresh` and `POST /api/v1/auth/logout`
 
-Refresh extends the session, rotates both the session cookie and CSRF state,
-and returns a fresh `csrf_token`. Logout revokes the session row and clears the
-session cookie.
+Refresh extends a normal user session, rotates both the session cookie and CSRF
+state, and returns a fresh `csrf_token`. The staging admin browser acceptance
+session is never refreshable or writable beyond exact logout. Logout revokes
+either session row and clears the session cookie.
 
 Every unsafe method authenticated by a browser session requires the configured
 CSRF header to match the server-side CSRF hash for that session. Bearer token
@@ -745,6 +799,10 @@ They are not normal browser identity for public users.
   tokens still work, and DB admin rows are rejected.
 - User-session tests for username/password login, `/auth/me`, logout, refresh,
   team switch, CSRF denial, role-derived scopes, and cross-team denial.
+- Staging-admin browser-session tests proving the route is hidden outside
+  staging, requires the singleton admin plus safe actor/request attribution,
+  never repairs target authority, expires within 900 seconds, cannot refresh,
+  and is revoked by logout.
 - API tests for no-email username registration, duplicate pending usernames,
   approval into an existing team/role, setup-link completion, password reset
   approval, reset completion, session/token revocation after reset, and
@@ -772,6 +830,11 @@ They are not normal browser identity for public users.
   complete platform-wide audit.
 - Browser sessions must set HttpOnly, SameSite cookies. Production deployments
   must use Secure cookies by running with `LOOM_ENV=production` behind HTTPS.
+- Staging browser acceptance may use only the audited, fixed-lifetime exchange
+  described above. Only a broker-produced report bound to the rollout request,
+  attempt, resolved merged `dev` SHA, and running service build SHA is candidate
+  evidence; PR kind tests validate the mechanism and deny boundary only. The
+  report is not a reusable login credential or proof of normal-user acceptance.
 - Existing batch/trial/artifact execution and control routes remain owner-team
   scoped. Org-wide completed-result sharing is explicit Run Library behavior
   with redaction/share-state enforcement.

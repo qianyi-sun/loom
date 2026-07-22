@@ -8,6 +8,7 @@ import { Card } from "../components/Card";
 import LoadingState from "../components/LoadingState";
 import { Modal } from "../components/Modal";
 import { StatusPill, type StatusVariant } from "../components/StatusPill";
+import { Tabs, type TabItem } from "../components/Tabs";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 
 type TabName = "overview" | "errors";
@@ -163,29 +164,34 @@ export default function TaskSetDetail(): JSX.Element {
         </div>
       </header>
 
-      <div role="tablist" className="flex gap-2 border-b border-slate-200">
-        {TAB_NAMES.map((t) => (
-          <button
-            key={t}
-            role="tab"
-            aria-selected={tab === t}
-            onClick={() => setTab(t)}
-            className={
-              tab === t
-                ? "border-b-2 border-accent px-3 py-2 text-sm font-medium text-accent"
-                : "px-3 py-2 text-sm font-medium text-slate-500 hover:text-slate-700"
-            }
-          >
-            {t === "overview" ? "Overview" : `Errors (${ts.error_summary.length})`}
-          </button>
-        ))}
-      </div>
-
-      {tab === "overview" ? (
-        <OverviewPanel ts={ts} />
-      ) : (
-        <ErrorsPanel ts={ts} />
-      )}
+      <Tabs
+        items={
+          [
+            { value: "overview", label: "Overview" },
+            {
+              value: "errors",
+              label: `Errors (${ts.error_summary.length})`,
+            },
+          ] satisfies readonly TabItem<TabName>[]
+        }
+        value={tab}
+        onValueChange={setTab}
+        ariaLabel="Task set sections"
+        className="space-y-4"
+        tabListClassName="flex gap-2 border-b border-slate-200"
+        tabClassName={({ selected }) =>
+          selected
+            ? "border-b-2 border-accent px-3 py-2 text-sm font-medium text-accent"
+            : "px-3 py-2 text-sm font-medium text-slate-500 hover:text-slate-700"
+        }
+        renderPanel={(activeTab) =>
+          activeTab === "overview" ? (
+            <OverviewPanel ts={ts} />
+          ) : (
+            <ErrorsPanel ts={ts} />
+          )
+        }
+      />
 
       <Modal
         open={deleteOpen}

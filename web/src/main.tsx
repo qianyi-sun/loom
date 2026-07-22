@@ -6,8 +6,13 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { AuthProvider } from "./auth/AuthContext";
 import { useAuth } from "./auth/useAuth";
+import { FrontendBootstrap } from "./bootstrap/FrontendBootstrap";
+import { RootErrorBoundary } from "./components/RootErrorBoundary";
 import "./index.css";
-import { getFrontendConfig, loadFrontendConfig } from "./lib/frontendConfig";
+import {
+  installBrowserConsoleErrorRedaction,
+  installBrowserErrorEventRedaction,
+} from "./lib/errorReporting";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,17 +28,21 @@ const queryClient = new QueryClient({
 // a browser-smoke signal only after React commits the application tree.
 // eslint-disable-next-line react-refresh/only-export-components
 function MountedApp({ rootElement }: { rootElement: HTMLElement }): JSX.Element {
-  const { authError, isAuthenticated, isLoading } = useAuth();
+  const { sessionStatus } = useAuth();
   React.useLayoutEffect(() => {
     rootElement.setAttribute("data-loom-mounted", "true");
-    if (isLoading) {
+    if (sessionStatus === "loading") {
       rootElement.removeAttribute("data-loom-auth-settled");
       rootElement.removeAttribute("data-loom-auth-state");
     } else {
       rootElement.setAttribute("data-loom-auth-settled", "true");
       rootElement.setAttribute(
         "data-loom-auth-state",
-        authError ? "error" : isAuthenticated ? "authenticated" : "anonymous",
+        sessionStatus === "authenticated"
+          ? "authenticated"
+          : sessionStatus === "unavailable"
+            ? "error"
+            : "anonymous",
       );
     }
     return () => {
@@ -41,34 +50,38 @@ function MountedApp({ rootElement }: { rootElement: HTMLElement }): JSX.Element 
       rootElement.removeAttribute("data-loom-auth-settled");
       rootElement.removeAttribute("data-loom-auth-state");
     };
-  }, [authError, isAuthenticated, isLoading, rootElement]);
+  }, [rootElement, sessionStatus]);
   return <App />;
 }
 
-function renderApp(): void {
-  const routePath = getFrontendConfig().routePath;
-  const rootElement = document.getElementById("root")!;
-  ReactDOM.createRoot(rootElement).render(
-    <React.StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter basename={routePath || undefined}>
-          <AuthProvider>
-            <MountedApp rootElement={rootElement} />
-          </AuthProvider>
-        </BrowserRouter>
-      </QueryClientProvider>
-    </React.StrictMode>,
-  );
-}
-
-void loadFrontendConfig()
-  .then(renderApp)
-  .catch((err: unknown) => {
-    console.error("Failed to load Loom frontend config", err);
-    const rootElement = document.getElementById("root")!;
-    const message = document.createElement("div");
-    message.className = "frontend-config-error";
-    message.setAttribute("role", "alert");
-    message.textContent = "Frontend configuration error.";
-    rootElement.replaceChildren(message);
+const rootElement = document.getElementById("root")!;
+const restoreErrorEventRedaction = installBrowserErrorEventRedaction();
+const restoreConsoleErrorRedaction = installBrowserConsoleErrorRedaction();
+const hot = (
+  import.meta as unknown as {
+    hot?: { dispose: (callback: () => void) => void };
+  }
+).hot;
+if (hot) {
+  hot.dispose(() => {
+    restoreErrorEventRedaction();
+    restoreConsoleErrorRedaction();
   });
+}
+ReactDOM.createRoot(rootElement).render(
+  <React.StrictMode>
+    <RootErrorBoundary>
+      <FrontendBootstrap>
+        {(config) => (
+          <QueryClientProvider client={queryClient}>
+            <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} basename={config.routePath || undefined}>
+              <AuthProvider>
+                <MountedApp rootElement={rootElement} />
+              </AuthProvider>
+            </BrowserRouter>
+          </QueryClientProvider>
+        )}
+      </FrontendBootstrap>
+    </RootErrorBoundary>
+  </React.StrictMode>,
+);

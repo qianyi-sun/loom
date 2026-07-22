@@ -19,6 +19,13 @@ from loom.auth import AuthContext, role_scopes
 from loom.db.schema import LoginChallenge, Team, TeamMembership, User, UserSession
 from loom_service.config import LoomServiceSettings
 
+SessionSecretPrefix = Literal["loom_session", "loom_session_staging_admin"]
+
+_DEFAULT_SESSION_SECRET_PREFIX: SessionSecretPrefix = "loom_session"
+STAGING_ADMIN_SESSION_SECRET_PREFIX: SessionSecretPrefix = "loom_session_staging_admin"
+_STAGING_ADMIN_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_STAGING_ADMIN_LOGOUT_PATH = "/api/v1/auth/logout"
+
 
 @dataclass(frozen=True)
 class CreatedSession:
@@ -59,15 +66,44 @@ def cookie_secure() -> bool:
     return os.environ.get("LOOM_ENV", "").lower() == "production"
 
 
-def session_cookie_options(settings: LoomServiceSettings) -> CookieOptions:
+def session_cookie_options(
+    settings: LoomServiceSettings,
+    *,
+    max_age: int | None = None,
+    force_secure: bool = False,
+) -> CookieOptions:
+    """Return browser cookie options without permitting a security downgrade."""
+    if max_age is not None and max_age <= 0:
+        raise ValueError("session cookie max_age must be positive")
     return {
         "key": settings.auth_session_cookie_name,
         "httponly": True,
-        "secure": cookie_secure(),
+        "secure": cookie_secure() or force_secure,
         "samesite": "lax",
-        "max_age": settings.auth_session_ttl_sec,
+        "max_age": settings.auth_session_ttl_sec if max_age is None else max_age,
         "path": "/",
     }
+
+
+def is_staging_admin_browser_session(raw_cookie: str | None) -> bool:
+    """Identify the short-lived staging-only admin browser credential."""
+    return bool(raw_cookie and raw_cookie.startswith(
+        f"{STAGING_ADMIN_SESSION_SECRET_PREFIX}_",
+    ))
+
+
+def staging_admin_browser_request_allowed(*, method: str, path: str) -> bool:
+    """Return whether a validation-only staging session may make a request.
+
+    The bootstrap bearer exchange is not authenticated by this session. Once
+    issued, its cookie is deliberately read-only across the entire ASGI app so
+    public mutation routes cannot be used to establish durable credentials.
+    The exact logout endpoint remains available so cleanup can revoke the row.
+    """
+    normalized_method = method.upper()
+    return normalized_method in _STAGING_ADMIN_SAFE_METHODS or (
+        normalized_method == "POST" and path == _STAGING_ADMIN_LOGOUT_PATH
+    )
 
 
 def verify_csrf(ctx: AuthContext, header_value: str | None) -> None:
@@ -229,6 +265,8 @@ async def create_session_for_user(
     user: User,
     session_ttl_seconds: int,
     current_team_id: UUID | None = None,
+    session_secret_prefix: SessionSecretPrefix = _DEFAULT_SESSION_SECRET_PREFIX,
+    update_last_login_at: bool = True,
 ) -> CreatedSession:
     """Create a browser session after a trusted onboarding action.
 
@@ -252,7 +290,7 @@ async def create_session_for_user(
     if role is None:
         role = membership.role
 
-    raw_session = _raw_secret("loom_session")
+    raw_session = _raw_secret(session_secret_prefix)
     raw_csrf = _raw_secret("loom_csrf")
     user_session = UserSession(
         session_hash=hash_secret(raw_session),
@@ -265,9 +303,10 @@ async def create_session_for_user(
         last_seen_at=now,
     )
     session.add(user_session)
-    await session.execute(
-        update(User).where(User.id == user.id).values(last_login_at=now),
-    )
+    if update_last_login_at:
+        await session.execute(
+            update(User).where(User.id == user.id).values(last_login_at=now),
+        )
     ctx = _ctx_from_session(
         user=user, user_session=user_session, role=role, team_id=team_id,
     )
@@ -278,6 +317,12 @@ async def verify_session_cookie(
     session: AsyncSession, raw_cookie: str | None,
 ) -> AuthContext | None:
     if not raw_cookie:
+        return None
+    staging_admin_session = is_staging_admin_browser_session(raw_cookie)
+    if (
+        staging_admin_session
+        and os.environ.get("LOOM_ENV", "").strip().lower() != "staging"
+    ):
         return None
     now = datetime.now(UTC)
     row = (await session.execute(
@@ -290,9 +335,17 @@ async def verify_session_cookie(
     user_session, user = row
     if user_session.revoked_at is not None or user_session.expires_at < now:
         return None
+    if staging_admin_session and (
+        user.disabled_at is not None
+        or user.status not in {"active", "pending_setup"}
+        or not user.is_platform_admin
+    ):
+        return None
 
     role = "platform_admin" if user.is_platform_admin else None
     team_id = user_session.current_team_id
+    if staging_admin_session and team_id is None:
+        return None
     if team_id is None:
         first = await _first_membership(session, user.id)
         if first is None:
@@ -314,6 +367,19 @@ async def verify_session_cookie(
             return None
         if role is None:
             role = membership_row[0].role
+        if staging_admin_session:
+            membership, team = membership_row
+            enabled_admin_team_ids = list((await session.execute(
+                select(Team.id)
+                .where(func.lower(Team.name) == "admin")
+                .where(Team.disabled_at.is_(None)),
+            )).scalars().all())
+            if (
+                membership.role != "owner"
+                or len(enabled_admin_team_ids) != 1
+                or enabled_admin_team_ids[0] != team.id
+            ):
+                return None
     await session.execute(
         update(UserSession)
         .where(UserSession.session_hash == user_session.session_hash)

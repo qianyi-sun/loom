@@ -12,8 +12,10 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, case, column, false, func, literal, or_, select, true
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch, LlmCall, Team, Trial
 from loom.security.redaction import redact_mapping, redact_text
@@ -302,6 +304,65 @@ def _artifact_metadata_visible(
         artifact.visibility == "org"
         and artifact.share_status == "shared"
         and _artifact_parent_visible(artifact, batch=batch, trial=trial)
+    )
+
+
+def _artifact_metadata_visibility_predicate(
+    ctx: Any,
+    *,
+    artifact_model: Any = Artifact,
+    batch_model: Any | None = None,
+    trial_model: Any | None = None,
+) -> Any:
+    """SQL equivalent of ``_artifact_metadata_visible`` for one parent kind."""
+
+    if is_admin(ctx):
+        return true()
+    if batch_model is not None:
+        parent_visible = and_(
+            batch_model.visibility == "org",
+            batch_model.share_status == "shared",
+            batch_model.state.in_(sorted(_ORG_VISIBLE_BATCH_STATES)),
+        )
+    elif trial_model is not None:
+        parent_visible = and_(
+            trial_model.visibility == "org",
+            trial_model.share_status == "shared",
+            trial_model.state.in_(sorted(_ORG_VISIBLE_TRIAL_STATES)),
+        )
+    else:
+        parent_visible = artifact_model.visibility == "org"
+
+    shared_metadata = and_(
+        artifact_model.visibility == "org",
+        artifact_model.share_status == "shared",
+        parent_visible,
+    )
+    if ctx.team_id is None:
+        return shared_metadata
+    return or_(artifact_model.team_id == ctx.team_id, shared_metadata)
+
+
+def _joined_artifact_metadata_visibility_predicate(ctx: Any) -> Any:
+    """Apply parent-priority semantics to the artifact library outer joins."""
+
+    if is_admin(ctx):
+        return true()
+    return or_(
+        and_(
+            Batch.id.is_not(None),
+            _artifact_metadata_visibility_predicate(ctx, batch_model=Batch),
+        ),
+        and_(
+            Batch.id.is_(None),
+            Trial.id.is_not(None),
+            _artifact_metadata_visibility_predicate(ctx, trial_model=Trial),
+        ),
+        and_(
+            Batch.id.is_(None),
+            Trial.id.is_(None),
+            _artifact_metadata_visibility_predicate(ctx),
+        ),
     )
 
 
@@ -718,56 +779,278 @@ def _typed_artifact_matches_filters(
     return True
 
 
-def _legacy_artifact_matches_filters(
-    item: dict[str, Any],
-    trial: Trial,
-    filters: dict[str, Any],
-) -> bool:
+def _typed_artifact_filter_predicates(filters: dict[str, Any]) -> list[Any]:
+    predicates: list[Any] = []
     artifact_type = filters.get("artifact_type")
-    legacy_type = _legacy_artifact_type(item)
-    if artifact_type is not None and artifact_type not in {
-        legacy_type,
-        _artifact_role(item),
-    }:
-        return False
+    if artifact_type is not None:
+        if artifact_type in _ARTIFACT_GROUPS:
+            matching_types = tuple(
+                item_type
+                for item_type, group in _ARTIFACT_TYPE_GROUPS.items()
+                if group == artifact_type
+            )
+            group_predicate: Any = Artifact.artifact_type.in_(matching_types)
+            if artifact_type == "reusable_outputs":
+                group_predicate = or_(
+                    group_predicate,
+                    Artifact.artifact_type.not_in(tuple(_ARTIFACT_TYPE_GROUPS)),
+                )
+            predicates.append(group_predicate)
+        else:
+            predicates.append(Artifact.artifact_type == artifact_type)
+
     owner_team_id = filters.get("owner_team_id")
-    if owner_team_id is not None and trial.team_id != owner_team_id:
-        return False
+    if owner_team_id is not None:
+        predicates.append(Artifact.team_id == owner_team_id)
     source_trial_id = filters.get("source_trial_id")
-    if source_trial_id is not None and trial.id != source_trial_id:
-        return False
+    if source_trial_id is not None:
+        predicates.append(
+            or_(
+                Artifact.trial_id == source_trial_id,
+                Artifact.provenance.contains(
+                    {"source_trial_ids": [str(source_trial_id)]},
+                ),
+            )
+        )
     source_batch_id = filters.get("source_batch_id")
-    if source_batch_id is not None and trial.batch_id != source_batch_id:
-        return False
+    if source_batch_id is not None:
+        predicates.append(
+            or_(
+                Artifact.batch_id == source_batch_id,
+                Artifact.provenance.contains(
+                    {"batch_id": str(source_batch_id)},
+                ),
+            )
+        )
     safety_state = filters.get("safety_state")
-    if safety_state is not None and _legacy_safety_state(item) != safety_state:
-        return False
+    if safety_state is not None:
+        predicates.append(Artifact.safety_state == safety_state)
     provenance_relation = filters.get("provenance_relation")
-    if provenance_relation is not None and provenance_relation != "produced_from":
-        return False
-    return True
+    if provenance_relation is not None:
+        predicates.append(
+            Artifact.provenance.contains({"relation": provenance_relation}),
+        )
+    return predicates
 
 
-async def _batch_has_matching_artifact(
-    session: Any,
-    trials: Sequence[Trial],
+def _legacy_artifact_role_expression(item: Any) -> Any:
+    raw_role = func.lower(
+        func.replace(
+            func.btrim(
+                func.coalesce(
+                    func.nullif(item["role"].astext, ""),
+                    item["artifact_role"].astext,
+                    "",
+                )
+            ),
+            "-",
+            "_",
+        )
+    )
+    key_text = func.lower(func.coalesce(item["key"].astext, ""))
+    return case(
+        (raw_role.in_(("report", "reports", "atif")), "reports"),
+        (raw_role.in_(("trajectory", "trajectories")), "trajectories"),
+        (
+            raw_role.in_(
+                ("output", "outputs", "reusable_output", "reusable_outputs"),
+            ),
+            "reusable_outputs",
+        ),
+        (
+            raw_role.in_(
+                (
+                    "log",
+                    "logs",
+                    "diagnostic",
+                    "diagnostics",
+                    "logs_diagnostics",
+                ),
+            ),
+            "logs_diagnostics",
+        ),
+        (
+            raw_role.in_(
+                (
+                    "raw",
+                    "raw_diagnostic",
+                    "raw_diagnostics",
+                    "internal_diagnostics",
+                ),
+            ),
+            "raw_diagnostics",
+        ),
+        (or_(key_text.like("%atif.json"), key_text.like("%report%")), "reports"),
+        (
+            or_(key_text.like("%events.jsonl"), key_text.like("%trajectory%")),
+            "trajectories",
+        ),
+        (
+            or_(
+                key_text.like("%debug%"),
+                key_text.like("%raw%"),
+                key_text.like("%internal%"),
+            ),
+            "raw_diagnostics",
+        ),
+        (
+            or_(key_text.like("%log%"), key_text.like("%diagnostic%")),
+            "logs_diagnostics",
+        ),
+        else_="reusable_outputs",
+    )
+
+
+def _legacy_artifact_filter_predicates(
+    item: Any,
     filters: dict[str, Any],
-) -> bool:
-    if not _artifact_filter_active(filters):
-        return True
-    typed_by_trial = await _typed_artifacts_for_trials(session, trials)
-    for trial in trials:
-        typed = typed_by_trial.get(trial.id) or []
-        if typed:
-            if any(_typed_artifact_matches_filters(artifact, filters) for artifact in typed):
-                return True
-            continue
-        if any(
-            _legacy_artifact_matches_filters(item, trial, filters)
-            for item in _artifact_items(trial.trajectory_index)
-        ):
-            return True
-    return False
+) -> tuple[list[Any], Any]:
+    role = _legacy_artifact_role_expression(item)
+    explicit_type = case(
+        (
+            func.jsonb_typeof(item["artifact_type"]) == "string",
+            func.nullif(item["artifact_type"].astext, ""),
+        ),
+        else_=None,
+    )
+    artifact_type_expression = case(
+        (explicit_type.is_not(None), explicit_type),
+        (role == "reports", "atif_projection"),
+        (role == "trajectories", "trajectory"),
+        (role.in_(("logs_diagnostics", "raw_diagnostics")), "debug_bundle"),
+        else_="evidence_bundle",
+    )
+    raw_share_status = item["share_status"].astext
+    share_status = case(
+        (
+            raw_share_status.in_(("pending_scan", "shared", "blocked")),
+            raw_share_status,
+        ),
+        else_="pending_scan",
+    )
+    safety_state_expression = case(
+        (share_status == "shared", "safe"),
+        (share_status == "blocked", "unsafe"),
+        else_="unknown",
+    )
+
+    predicates: list[Any] = []
+    artifact_type = filters.get("artifact_type")
+    if artifact_type is not None:
+        predicates.append(
+            or_(
+                artifact_type_expression == artifact_type,
+                role == artifact_type,
+            )
+        )
+    owner_team_id = filters.get("owner_team_id")
+    if owner_team_id is not None:
+        predicates.append(Trial.team_id == owner_team_id)
+    source_trial_id = filters.get("source_trial_id")
+    if source_trial_id is not None:
+        predicates.append(Trial.id == source_trial_id)
+    source_batch_id = filters.get("source_batch_id")
+    if source_batch_id is not None:
+        predicates.append(Trial.batch_id == source_batch_id)
+    safety_state = filters.get("safety_state")
+    if safety_state is not None:
+        predicates.append(safety_state_expression == safety_state)
+    provenance_relation = filters.get("provenance_relation")
+    if provenance_relation is not None:
+        predicates.append(
+            true() if provenance_relation == "produced_from" else false(),
+        )
+    return predicates, share_status
+
+
+def _batch_artifact_filter_predicate(
+    ctx: Any,
+    filters: dict[str, Any],
+) -> Any:
+    """Filter batches with one database-level artifact existence predicate."""
+
+    typed_trial = aliased(Trial, name="artifact_filter_trial")
+    typed_parent = or_(
+        and_(
+            Artifact.batch_id == Batch.id,
+            _artifact_metadata_visibility_predicate(ctx, batch_model=Batch),
+        ),
+        and_(
+            Artifact.batch_id.is_(None),
+            typed_trial.batch_id == Batch.id,
+            _artifact_metadata_visibility_predicate(ctx, trial_model=typed_trial),
+        ),
+    )
+    typed_match = (
+        select(Artifact.id)
+        .select_from(Artifact)
+        .outerjoin(typed_trial, typed_trial.id == Artifact.trial_id)
+        .where(typed_parent, *_typed_artifact_filter_predicates(filters))
+        .correlate(Batch)
+        .exists()
+    )
+
+    legacy_array = case(
+        (
+            func.jsonb_typeof(Trial.trajectory_index["artifacts"]) == "array",
+            Trial.trajectory_index["artifacts"],
+        ),
+        else_=literal([], type_=JSONB),
+    )
+    legacy_items = (
+        func.jsonb_array_elements(legacy_array)
+        .table_valued(column("value", JSONB))
+        .alias("legacy_filter_artifact")
+    )
+    legacy_item = legacy_items.c.value
+    legacy_predicates, legacy_share_status = _legacy_artifact_filter_predicates(
+        legacy_item,
+        filters,
+    )
+    legacy_visible: Any
+    if is_admin(ctx):
+        legacy_visible = true()
+    else:
+        owner_visible = Trial.team_id == ctx.team_id if ctx.team_id is not None else false()
+        legacy_visible = or_(
+            owner_visible,
+            and_(
+                Batch.visibility == "org",
+                Batch.share_status == "shared",
+                Batch.state.in_(sorted(_ORG_VISIBLE_BATCH_STATES)),
+                Trial.state.in_(sorted(_ORG_VISIBLE_TRIAL_STATES)),
+                legacy_share_status == "shared",
+            ),
+        )
+    legacy_item_match = (
+        select(literal(1))
+        .select_from(legacy_items)
+        .where(
+            func.jsonb_typeof(legacy_item) == "object",
+            legacy_visible,
+            *legacy_predicates,
+        )
+        .correlate(Batch, Trial)
+        .exists()
+    )
+    typed_for_trial = aliased(Artifact, name="typed_artifact_for_legacy_trial")
+    no_typed_registry_entry = ~(
+        select(typed_for_trial.id)
+        .where(typed_for_trial.trial_id == Trial.id)
+        .correlate(Trial)
+        .exists()
+    )
+    legacy_match = (
+        select(Trial.id)
+        .where(
+            Trial.batch_id == Batch.id,
+            no_typed_registry_entry,
+            legacy_item_match,
+        )
+        .correlate(Batch)
+        .exists()
+    )
+    return or_(typed_match, legacy_match)
 
 
 async def _batch_trials(session: Any, batch_id: UUID) -> list[Trial]:
@@ -1059,34 +1342,70 @@ async def _batch_list_trial_rollups(
 
 async def _batch_list_artifact_summaries(
     session: Any,
+    ctx: Any,
     batch_ids: Sequence[UUID],
 ) -> tuple[dict[UUID, dict[str, int]], set[UUID]]:
+    """Load capped, caller-visible typed summaries in one lateral query."""
+
     summaries = {batch_id: _empty_artifact_summary() for batch_id in batch_ids}
     truncated: set[UUID] = set()
     if not batch_ids:
         return summaries, truncated
 
     per_batch_limit = max(int(_BATCH_LIST_ARTIFACT_SUMMARY_PER_BATCH_LIMIT), 0)
-    if per_batch_limit == 0:
-        return summaries, set(batch_ids)
-
-    for batch_id in batch_ids:
-        artifact_types = (
-            (
-                await session.execute(
-                    select(Artifact.artifact_type)
-                    .where(Artifact.batch_id == batch_id)
-                    .limit(per_batch_limit + 1),
-                )
-            )
-            .scalars()
-            .all()
+    artifact_trial = aliased(Trial, name="artifact_summary_trial")
+    direct_parent = and_(
+        Artifact.batch_id == Batch.id,
+        _artifact_metadata_visibility_predicate(ctx, batch_model=Batch),
+    )
+    trial_parent = and_(
+        Artifact.batch_id.is_(None),
+        artifact_trial.batch_id == Batch.id,
+        _artifact_metadata_visibility_predicate(ctx, trial_model=artifact_trial),
+    )
+    visible_artifacts = (
+        select(
+            Artifact.artifact_type.label("artifact_type"),
+            Artifact.created_at.label("created_at"),
+            Artifact.id.label("artifact_id"),
         )
-        if len(artifact_types) > per_batch_limit:
+        .select_from(Artifact)
+        .outerjoin(artifact_trial, artifact_trial.id == Artifact.trial_id)
+        .where(or_(direct_parent, trial_parent))
+        .order_by(Artifact.created_at.asc(), Artifact.id.asc())
+        .limit(per_batch_limit + 1)
+        .correlate(Batch)
+        .lateral("visible_batch_artifacts")
+    )
+    rows = (
+        await session.execute(
+            select(
+                Batch.id,
+                visible_artifacts.c.artifact_type,
+                visible_artifacts.c.created_at,
+                visible_artifacts.c.artifact_id,
+            )
+            .select_from(Batch)
+            .join(visible_artifacts, true())
+            .where(Batch.id.in_(batch_ids))
+            .order_by(
+                Batch.id.asc(),
+                visible_artifacts.c.created_at.asc(),
+                visible_artifacts.c.artifact_id.asc(),
+            ),
+        )
+    ).all()
+
+    seen = {batch_id: 0 for batch_id in batch_ids}
+    for batch_id, artifact_type, _created_at, _artifact_id in rows:
+        if batch_id not in summaries:
+            continue
+        seen[batch_id] += 1
+        if seen[batch_id] > per_batch_limit:
             truncated.add(batch_id)
+            continue
         summary = summaries.setdefault(batch_id, _empty_artifact_summary())
-        for artifact_type in artifact_types[:per_batch_limit]:
-            summary[_artifact_group_for_type(str(artifact_type))] += 1
+        summary[_artifact_group_for_type(str(artifact_type))] += 1
     return summaries, truncated
 
 
@@ -1207,9 +1526,20 @@ def _apply_read_filter(
     return stmt.where(Batch.team_id == ctx.team_id)
 
 
+def _batch_after_cursor(cursor: Cursor) -> Any:
+    """Return the strict keyset predicate for the Run Library ordering."""
+
+    return or_(
+        Batch.created_at < cursor.submitted_at,
+        and_(
+            Batch.created_at == cursor.submitted_at,
+            Batch.id < cursor.id,
+        ),
+    )
+
+
 @router.get("/run-library/batches")
 async def list_run_library_batches(
-    request: Request,
     sc: SessionAndCtx,
     scope: Annotated[str, Query(pattern="^(my|all)$")] = "my",
     team_id: Annotated[UUID | None, Query()] = None,
@@ -1261,12 +1591,7 @@ async def list_run_library_batches(
             cur = decode_cursor(cursor)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        stmt = stmt.where(
-            or_(
-                Batch.created_at < cur.submitted_at,
-                and_(Batch.created_at == cur.submitted_at, Batch.id < cur.id),
-            ),
-        )
+        stmt = stmt.where(_batch_after_cursor(cur))
     artifact_filters = {
         "artifact_type": artifact_type,
         "owner_team_id": owner_team_id,
@@ -1276,48 +1601,36 @@ async def list_run_library_batches(
         "provenance_relation": provenance_relation,
     }
     artifact_filtering = _artifact_filter_active(artifact_filters)
-    if not artifact_filtering:
-        stmt = stmt.limit(limit + 1)
-    rows = list((await session.execute(stmt)).all())
+    if artifact_filtering:
+        stmt = stmt.where(_batch_artifact_filter_predicate(ctx, artifact_filters))
+    rows = [(batch, team) for batch, team in (await session.execute(stmt.limit(limit + 1))).all()]
 
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
     serialized: list[dict[str, Any]] = []
-    if not artifact_filtering:
-        batch_ids = [batch.id for batch, _team in rows]
-        trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
-        artifact_summaries, truncated_artifact_summaries = await _batch_list_artifact_summaries(
-            session, batch_ids
+    batch_ids = [batch.id for batch, _team in page_rows]
+    trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
+    artifact_summaries, truncated_artifact_summaries = await _batch_list_artifact_summaries(
+        session, ctx, batch_ids
+    )
+    for batch, team in page_rows:
+        item = _serialize_batch_list_item(
+            batch,
+            team,
+            trial_rollups.get(
+                batch.id,
+                (_empty_trial_summary(), None, 0.0),
+            ),
+            artifact_summaries.get(batch.id, _empty_artifact_summary()),
+            batch.id in truncated_artifact_summaries,
         )
-        for batch, team in rows:
-            item = _serialize_batch_list_item(
-                batch,
-                team,
-                trial_rollups.get(
-                    batch.id,
-                    (_empty_trial_summary(), None, 0.0),
-                ),
-                artifact_summaries.get(batch.id, _empty_artifact_summary()),
-                batch.id in truncated_artifact_summaries,
-            )
-            serialized.append(item)
-    else:
-        for batch, team in rows:
-            trials = await _batch_trials(session, batch.id)
-            if not await _batch_has_matching_artifact(
-                session,
-                trials,
-                artifact_filters,
-            ):
-                continue
-            item = await _serialize_batch(request, session, ctx, batch, team)
-            serialized.append(item)
+        serialized.append(item)
 
     next_cursor: str | None = None
-    if len(serialized) > limit:
-        serialized = serialized[:limit]
-        last_id = UUID(serialized[-1]["id"])
-        last_created = next(batch.created_at for batch, _team in rows if batch.id == last_id)
+    if has_more and page_rows:
+        last_batch = page_rows[-1][0]
         next_cursor = encode_cursor(
-            Cursor(submitted_at=last_created, id=last_id),
+            Cursor(submitted_at=last_batch.created_at, id=last_batch.id),
         )
     return {"items": serialized, "next_cursor": next_cursor}
 
@@ -1357,22 +1670,7 @@ async def _artifact_rows_for_library(
             return []
         stmt = stmt.where(Artifact.team_id == ctx.team_id)
     elif not is_admin(ctx):
-        stmt = stmt.where(
-            or_(
-                Artifact.team_id == ctx.team_id,
-                and_(
-                    Batch.visibility == "org",
-                    Batch.share_status == "shared",
-                    Batch.state.in_(sorted(_ORG_VISIBLE_BATCH_STATES)),
-                ),
-                and_(
-                    Batch.id.is_(None),
-                    Trial.visibility == "org",
-                    Trial.share_status == "shared",
-                    Trial.state.in_(sorted(_ORG_VISIBLE_TRIAL_STATES)),
-                ),
-            ),
-        )
+        stmt = stmt.where(_joined_artifact_metadata_visibility_predicate(ctx))
 
     rows = list((await session.execute(stmt)).all())
     selected: list[tuple[Artifact, Team, Batch | None, Trial | None]] = []

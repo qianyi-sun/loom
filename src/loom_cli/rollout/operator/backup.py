@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import logging
 import os
 import pwd
 import re
@@ -37,12 +38,19 @@ from loom_cli.cluster_backup_guard import (
 )
 from loom_cli.cluster_config import load_cluster_config
 
+from .backup_limits import (
+    BACKUP_MAX_TOTAL_BYTES,
+    BACKUP_NON_MINIO_ENTRY_ALLOWANCE,
+    operator_backup_traversal_limits,
+)
 from .config import (
     APPROVED_BACKUP_MAX_ENTRIES,
     APPROVED_BACKUP_MAX_OBJECTS,
     OperatorConfig,
 )
-from .model import RolloutRequest
+from .model import APPROVED_BACKUP_EVENT_REASONS, RolloutRequest
+
+logger = logging.getLogger(__name__)
 
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIRECTORY_MODE = 0o700
@@ -57,14 +65,12 @@ _RESTORE_SECRET_NAMES = (
     "loom-staging-tls",
 )
 _MINIO_LOCAL_HOST = "127.0.0.1"
-_MINIO_LOCAL_PORT = 19000
+_MINIO_REMOTE_PORT = 9000
 _POSTGRES_MAX_BYTES = 1024**4
-_BACKUP_MAX_TOTAL_BYTES = 16 * 1024**4
+_BACKUP_MAX_TOTAL_BYTES = BACKUP_MAX_TOTAL_BYTES
 _MINIO_MAX_PAGES = 20_000
-_BACKUP_NON_MINIO_FILE_ALLOWANCE = 4
-_BACKUP_NON_MINIO_ENTRY_ALLOWANCE = 6
 _MINIO_MAX_OBJECTS = APPROVED_BACKUP_MAX_OBJECTS
-_MINIO_MAX_ENTRIES = APPROVED_BACKUP_MAX_ENTRIES - _BACKUP_NON_MINIO_ENTRY_ALLOWANCE
+_MINIO_MAX_ENTRIES = APPROVED_BACKUP_MAX_ENTRIES - BACKUP_NON_MINIO_ENTRY_ALLOWANCE
 _MINIO_MAX_TOTAL_BYTES = _BACKUP_MAX_TOTAL_BYTES - _POSTGRES_MAX_BYTES
 _MINIO_TOTAL_TIMEOUT_SECONDS = float(DEFAULT_BACKUP_MAX_ELAPSED_SECONDS)
 _MINIO_DISK_RESERVE_BYTES = 256 * 1024**2
@@ -78,12 +84,16 @@ _KUBECTL_READ_TIMEOUT_SECONDS = 30.0
 _BACKUP_MIN_REMAINING_HOURS = 2
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BUNDLE_NAME_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-(?P<request_id>[a-z0-9][a-z0-9-]{7,79})$")
+_MINIO_ENDPOINT_RE = re.compile(r"^http://127\.0\.0\.1:(?P<port>[1-9][0-9]{0,4})$")
+_MINIO_FORWARD_READY_RE = re.compile(
+    rb"^Forwarding from 127\.0\.0\.1:(?P<port>[1-9][0-9]{0,4}) -> 9000$"
+)
 
 
 class PortForwardHandle(Protocol):
     """Bounded lifecycle for a localhost-only kubectl port-forward."""
 
-    def wait_ready(self, host: str, port: int, timeout_seconds: float) -> None: ...
+    def wait_ready(self, host: str, timeout_seconds: float) -> int: ...
 
     def terminate(self) -> None: ...
 
@@ -145,8 +155,54 @@ DeadlineWaiter = Callable[[threading.Event, float], bool]
 
 
 Clock = Callable[[], datetime]
-BackupPublicReason = Literal["backup_failed", "backup_object_limit_exceeded"]
-_BACKUP_PUBLIC_REASONS = frozenset({"backup_failed", "backup_object_limit_exceeded"})
+BackupPublicReason = Literal[
+    "backup_failed",
+    "backup_precondition_failed",
+    "backup_capacity_exhausted",
+    "backup_config_invalid",
+    "backup_postgres_failed",
+    "backup_minio_failed",
+    "backup_transport_failed",
+    "backup_object_limit_exceeded",
+    "backup_secrets_failed",
+    "backup_manifest_failed",
+]
+# Imported from the model so the accepted event tokens and the reasons raised
+# here share one definition and cannot drift.
+_BACKUP_PUBLIC_REASONS = APPROVED_BACKUP_EVENT_REASONS
+
+# Map each internal stage code to a durable, secret-safe public reason so an
+# operator can see *which* backup stage failed via `status`, instead of every
+# failure collapsing to a generic `backup_failed`. Codes absent here default to
+# `backup_failed` (the safe, non-committal fallback).
+_STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
+    "backup_request_not_pending": "backup_precondition_failed",
+    "backup_clock_invalid": "backup_precondition_failed",
+    "service_account_unavailable": "backup_precondition_failed",
+    "backup_path_not_approved": "backup_precondition_failed",
+    "backup_cleanup_request_invalid": "backup_precondition_failed",
+    "backup_revalidation_failed": "backup_manifest_failed",
+    "backup_capacity_unavailable": "backup_capacity_exhausted",
+    "backup_root_create_failed": "backup_capacity_exhausted",
+    "component_sync_failed": "backup_capacity_exhausted",
+    "minio_bucket_config_invalid": "backup_config_invalid",
+    "postgres_dump_failed": "backup_postgres_failed",
+    "minio_credentials_failed": "backup_minio_failed",
+    "minio_snapshot_failed": "backup_minio_failed",
+    "minio_transport_failed": "backup_transport_failed",
+    "minio_transport_cleanup_failed": "backup_transport_failed",
+    "minio_object_limit_exceeded": "backup_object_limit_exceeded",
+    "secret_export_failed": "backup_secrets_failed",
+    "manifest_write_failed": "backup_manifest_failed",
+    "manifest_validation_failed": "backup_manifest_failed",
+    "manifest_hash_failed": "backup_manifest_failed",
+    "manifest_publish_failed": "backup_manifest_failed",
+    "backup_manifest_digest_mismatch": "backup_manifest_failed",
+}
+
+
+def _public_reason_for_code(code: str) -> BackupPublicReason:
+    return _STAGE_PUBLIC_REASONS.get(code, "backup_failed")
 
 
 def normalize_backup_public_reason(value: object) -> BackupPublicReason:
@@ -397,8 +453,14 @@ class BackupError(RuntimeError):
         self,
         code: str,
         *,
-        public_reason: BackupPublicReason = "backup_failed",
+        public_reason: BackupPublicReason | None = None,
     ) -> None:
+        # Derive the durable, secret-safe operator reason from the stage code
+        # unless a caller pins one explicitly (object-limit, transport). This
+        # keeps the failing stage diagnosable through `status` for every raise
+        # site — staged or direct — instead of collapsing to `backup_failed`.
+        if public_reason is None:
+            public_reason = _public_reason_for_code(code)
         if public_reason not in _BACKUP_PUBLIC_REASONS:
             raise ValueError("backup public reason is not approved")
         super().__init__(code)
@@ -608,7 +670,12 @@ _T = TypeVar("_T")
 
 
 def _stage(code: str, operation: Callable[[], _T]) -> _T:
-    """Run a stage and discard any secret-bearing exception before raising."""
+    """Run a stage and discard any secret-bearing exception before raising.
+
+    The stage ``code`` is mapped to a durable, secret-safe ``public_reason`` so
+    the failing stage is diagnosable through the operator status/logs surface
+    instead of collapsing to a generic ``backup_failed``.
+    """
     try:
         result = operation()
     except BackupError:
@@ -1341,6 +1408,7 @@ class _MirrorBudget:
     objects: int = 0
     total_bytes: int = 0
     entries: int = 0
+    objects_warned: bool = False
 
     def check_deadline(self) -> None:
         if self.monotonic() >= self.deadline:
@@ -1353,12 +1421,20 @@ class _MirrorBudget:
         self.pages += 1
 
     def consume_object(self) -> None:
+        # Object count is a *caution* signal, not a fail-closed bound: crossing
+        # ``max_objects`` warns once and the backup continues. The resources that
+        # actually threaten the backup — total bytes, filesystem entries/inodes,
+        # list pages, and the elapsed-time deadline — remain fail-closed below and
+        # still ultimately bound the object count. A hard object-count ceiling
+        # otherwise blocks every rollout on normal data growth without adding
+        # safety the other bounds do not already provide.
         self.check_deadline()
-        if self.objects >= self.max_objects:
-            raise BackupPolicyLimitError(
-                "minio_object_limit_exceeded",
-                public_reason="backup_object_limit_exceeded",
-                message="MinIO mirror exceeded object limit",
+        if not self.objects_warned and self.objects >= self.max_objects:
+            self.objects_warned = True
+            logger.warning(
+                "MinIO backup object count reached caution threshold (%d); "
+                "continuing under byte, inode, page, and deadline bounds",
+                self.max_objects,
             )
         self.objects += 1
 
@@ -1630,7 +1706,8 @@ class Boto3MinioMirror:
         resources: _BackupResourceBudget | None = None,
     ) -> None:
         deadline = self._monotonic() + self._timeout_seconds
-        if endpoint_url != f"http://{_MINIO_LOCAL_HOST}:{_MINIO_LOCAL_PORT}":
+        endpoint_match = _MINIO_ENDPOINT_RE.fullmatch(endpoint_url)
+        if endpoint_match is None or int(endpoint_match.group("port")) > 65535:
             raise ValueError("MinIO endpoint is not approved")
         if buckets != _MINIO_BUCKETS:
             raise ValueError("MinIO bucket set is not approved")
@@ -1765,13 +1842,11 @@ class _SubprocessPortForward:
         self._startup_output = output
         self._ready = threading.Event()
         self._output_failed = threading.Event()
+        self._local_port: int | None = None
         self._reader = threading.Thread(target=self._drain_output, daemon=True)
         self._reader.start()
 
     def _drain_output(self) -> None:
-        expected = (f"Forwarding from {_MINIO_LOCAL_HOST}:{_MINIO_LOCAL_PORT} -> 9000").encode(
-            "ascii"
-        )
         startup_bytes = 0
         try:
             while True:
@@ -1786,13 +1861,17 @@ class _SubprocessPortForward:
                 if startup_bytes > _PORT_FORWARD_STARTUP_OUTPUT_LIMIT:
                     self._output_failed.set()
                     continue
-                if line.rstrip(b"\r\n") == expected:
-                    self._ready.set()
+                match = _MINIO_FORWARD_READY_RE.fullmatch(line.rstrip(b"\r\n"))
+                if match is not None:
+                    port = int(match.group("port"))
+                    if port <= 65535:
+                        self._local_port = port
+                        self._ready.set()
         except Exception:
             self._output_failed.set()
 
-    def wait_ready(self, host: str, port: int, timeout_seconds: float) -> None:
-        if host != _MINIO_LOCAL_HOST or port != _MINIO_LOCAL_PORT:
+    def wait_ready(self, host: str, timeout_seconds: float) -> int:
+        if host != _MINIO_LOCAL_HOST:
             raise RuntimeError("port-forward readiness target is not approved")
         deadline = time.monotonic() + timeout_seconds
         while True:
@@ -1801,7 +1880,9 @@ class _SubprocessPortForward:
             if self._process.poll() is not None:
                 raise RuntimeError("port-forward exited before readiness")
             if self._ready.is_set():
-                return
+                if self._local_port is None:
+                    raise RuntimeError("port-forward ready port is unavailable")
+                return self._local_port
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError("port-forward readiness timed out")
@@ -2032,7 +2113,7 @@ class BackupCreator:
         self._runner = runner or SubprocessBackupCommandRunner()
         self._minio = minio or Boto3MinioMirror(
             max_objects=config.backup_max_objects,
-            max_entries=config.backup_max_entries - _BACKUP_NON_MINIO_ENTRY_ALLOWANCE,
+            max_entries=config.backup_max_entries - BACKUP_NON_MINIO_ENTRY_ALLOWANCE,
         )
         self._now = now or (lambda: datetime.now(UTC))
         self._env = _command_environment(config)
@@ -2055,9 +2136,8 @@ class BackupCreator:
         self._disk_reserve_bytes = disk_reserve_bytes
         self._inode_reserve = inode_reserve
         self._capacity_provider = capacity_provider
-        self._traversal_limits = traversal_limits or BackupTraversalLimits(
-            max_files=config.backup_max_objects + _BACKUP_NON_MINIO_FILE_ALLOWANCE,
-            max_entries=config.backup_max_entries,
+        self._traversal_limits = traversal_limits or operator_backup_traversal_limits(
+            config,
             max_total_bytes=max_total_bytes,
         )
 
@@ -2188,10 +2268,45 @@ class BackupCreator:
             component="k8s_secrets",
         )
 
+    def _start_minio_transport(self) -> tuple[int, _OnceCloser]:
+        handle = self._runner.start(
+            [
+                "kubectl",
+                "-n",
+                self.config.namespace,
+                "port-forward",
+                "--address",
+                _MINIO_LOCAL_HOST,
+                "service/loom-minio",
+                f":{_MINIO_REMOTE_PORT}",
+            ],
+            env=self._env,
+        )
+        stop_port_forward = _OnceCloser(
+            lambda: _stop_port_forward(handle),
+            wait_timeout_seconds=_PORT_FORWARD_CLEANUP_WAIT_SECONDS,
+        )
+        try:
+            local_port = handle.wait_ready(
+                _MINIO_LOCAL_HOST,
+                _PORT_FORWARD_READY_TIMEOUT_SECONDS,
+            )
+            if type(local_port) is not int or not 1 <= local_port <= 65535:
+                raise RuntimeError("port-forward selected port is invalid")
+        except BaseException:
+            try:
+                stop_port_forward()
+            except BaseException:
+                pass
+            raise
+        return local_port, stop_port_forward
+
     def _mirror_minio(
         self,
         destination: Path,
         *,
+        local_port: int,
+        stop_port_forward: Callable[[], None],
         buckets: tuple[str, ...],
         access_key: str,
         secret_key: str,
@@ -2207,40 +2322,15 @@ class BackupCreator:
                 capacity_provider=self._capacity_provider,
                 max_entries=self._traversal_limits.max_entries,
             )
-        handle = self._runner.start(
-            [
-                "kubectl",
-                "-n",
-                self.config.namespace,
-                "port-forward",
-                "--address",
-                _MINIO_LOCAL_HOST,
-                "service/loom-minio",
-                f"{_MINIO_LOCAL_PORT}:9000",
-            ],
-            env=self._env,
+        self._minio.mirror(
+            endpoint_url=f"http://{_MINIO_LOCAL_HOST}:{local_port}",
+            access_key=access_key,
+            secret_key=secret_key,
+            buckets=buckets,
+            destination=destination,
+            cancel_on_timeout=stop_port_forward,
+            resources=resources,
         )
-        stop_port_forward = _OnceCloser(
-            lambda: _stop_port_forward(handle),
-            wait_timeout_seconds=_PORT_FORWARD_CLEANUP_WAIT_SECONDS,
-        )
-        try:
-            handle.wait_ready(
-                _MINIO_LOCAL_HOST,
-                _MINIO_LOCAL_PORT,
-                _PORT_FORWARD_READY_TIMEOUT_SECONDS,
-            )
-            self._minio.mirror(
-                endpoint_url=f"http://{_MINIO_LOCAL_HOST}:{_MINIO_LOCAL_PORT}",
-                access_key=access_key,
-                secret_key=secret_key,
-                buckets=buckets,
-                destination=destination,
-                cancel_on_timeout=stop_port_forward,
-                resources=resources,
-            )
-        finally:
-            stop_port_forward()
 
     def _write_manifest(
         self,
@@ -2541,27 +2631,55 @@ class BackupCreator:
             )
 
         buckets = _stage("minio_bucket_config_invalid", self._load_buckets)
-        _stage(
-            "postgres_dump_failed",
-            lambda: self._dump_postgres(
-                postgres_dir / "loom.dump",
-                resources=resources,
-            ),
-        )
-        access_key, secret_key = _stage(
-            "minio_credentials_failed",
-            self._read_minio_credentials,
-        )
-        _stage(
-            "minio_snapshot_failed",
-            lambda: self._mirror_minio(
-                minio_dir,
-                buckets=buckets,
-                access_key=access_key,
-                secret_key=secret_key,
-                resources=resources,
-            ),
-        )
+        transport_failed = False
+        try:
+            local_port, stop_port_forward = self._start_minio_transport()
+        except Exception:
+            transport_failed = True
+        if transport_failed:
+            raise BackupError(
+                "minio_transport_failed",
+                public_reason="backup_transport_failed",
+            )
+        operation_failure: BaseException | None = None
+        try:
+            _stage(
+                "postgres_dump_failed",
+                lambda: self._dump_postgres(
+                    postgres_dir / "loom.dump",
+                    resources=resources,
+                ),
+            )
+            access_key, secret_key = _stage(
+                "minio_credentials_failed",
+                self._read_minio_credentials,
+            )
+            _stage(
+                "minio_snapshot_failed",
+                lambda: self._mirror_minio(
+                    minio_dir,
+                    local_port=local_port,
+                    stop_port_forward=stop_port_forward,
+                    buckets=buckets,
+                    access_key=access_key,
+                    secret_key=secret_key,
+                    resources=resources,
+                ),
+            )
+        except BaseException as exc:
+            operation_failure = exc
+        cleanup_failed = False
+        try:
+            stop_port_forward()
+        except BaseException:
+            cleanup_failed = True
+        if cleanup_failed:
+            raise BackupError(
+                "minio_transport_cleanup_failed",
+                public_reason="backup_transport_failed",
+            )
+        if operation_failure is not None:
+            raise operation_failure
         for secret_name in _RESTORE_SECRET_NAMES:
             _stage(
                 "secret_export_failed",

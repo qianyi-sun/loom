@@ -57,7 +57,7 @@ EVIDENCE_MIME_ESSENCES = JAVASCRIPT_MIME_ESSENCES | {
     "text/html",
 }
 CANONICAL_BUILD_ASSET_PATH = re.compile(
-    r"^/(?:dev|prod)/assets/"
+    r"^/(?:dev|staging|prod)/assets/"
     r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.(?:js|css)$"
 )
 ENCODED_PATH_SEPARATOR_OR_CONTROL = re.compile(
@@ -342,7 +342,7 @@ def _classify_asset_reference(
     if not is_root_relative or "?" in raw:
         return _ClassifiedAssetReference(reference, "reject")
     route_path = route.path.rstrip("/")
-    if route_path not in {"/dev", "/prod"}:
+    if route_path not in {"/dev", "/staging", "/prod"}:
         return _ClassifiedAssetReference(reference, "reject")
     if (
         not asset.path.startswith(f"{route_path}/assets/")

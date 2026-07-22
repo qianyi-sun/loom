@@ -207,7 +207,7 @@ async def test_reclaim_stale_running_trial_on_fresh_worker_records_timeout_diagn
                 registered_at=now - timedelta(hours=2),
                 last_seen_at=now - timedelta(seconds=5),
                 status="active",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
             )
         )
         await s.execute(
@@ -326,7 +326,7 @@ async def test_reclaim_stale_running_trial_skips_recent_activity(
                 registered_at=now - timedelta(hours=2),
                 last_seen_at=now - timedelta(seconds=5),
                 status="active",
-                pool_name="gb10-arm64",
+                pool_name="gb10",
             )
         )
         await s.execute(

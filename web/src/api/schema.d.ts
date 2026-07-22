@@ -650,6 +650,13 @@ export interface components {
     };
     TrialDetail: components["schemas"]["Trial"] & {
       owner_team?: { id: string; name: string };
+      team_name?: string | null;
+      submitted_by_user?: {
+        id: string;
+        username: string;
+        team_id?: string | null;
+        team_name?: string | null;
+      } | null;
       visibility?: "team" | "org" | "private";
       share_status?: "pending_scan" | "shared" | "blocked";
       source_provenance?: Record<string, unknown>[];
@@ -764,6 +771,11 @@ export interface components {
     };
     Task: {
       id: string;
+      name: string | null;
+      description: string | null;
+      agent_name: string | null;
+      verifier_name: string | null;
+      step_count: number;
       checksum: string;
       source: string | null;
       license: string | null;
@@ -1116,6 +1128,10 @@ export interface components {
       id: string;
       name: string;
       created_at: string;
+      disabled_at?: string | null;
+      disabled_reason?: string | null;
+      submissions_paused_at?: string | null;
+      submissions_paused_reason?: string | null;
       quota: components["schemas"]["TeamQuota"] | null;
       members: components["schemas"]["TeamMember"][];
       user_members?: components["schemas"]["TeamUserMember"][];

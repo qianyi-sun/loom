@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from loom_cli import admin_cmd, cluster_cmd
 from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import ApplyResult, ClusterStatus, ComponentStatus
 from loom_cli.cluster_config import ClusterConfig, cluster_config_from_mapping
@@ -28,6 +29,15 @@ _ATTRIBUTION = {
     "attempt_operator": "devansh",
     "attempt_uid": 2501,
 }
+
+
+def test_cluster_and_admin_share_rollout_lock_cli_contracts() -> None:
+    assert admin_cmd._add_rollout_lock_args is cluster_cmd._add_rollout_lock_args
+    assert admin_cmd._load_broker_rollout_envelope is cluster_cmd._load_broker_rollout_envelope
+    assert admin_cmd._require_real_file is cluster_cmd._require_real_file
+    assert (
+        admin_cmd._fixed_rollout_lock_evidence_path is cluster_cmd._fixed_rollout_lock_evidence_path
+    )
 
 
 @dataclass(frozen=True)
@@ -107,6 +117,8 @@ def _broker_attempt_fixture(tmp_path: Path) -> _BrokerAttemptFixture:
         admin_token_source=f"file:{secret_root / 'admin'}",
         worker_token_source=f"file:{secret_root / 'worker'}",
         service_token_source=f"file:{secret_root / 'service'}",
+        backup_max_objects=1_000_000,
+        backup_max_entries=16_000_000,
         expect_admin_token_fingerprint=(
             "sha256:" + hashlib.sha256(b"admin-secret").hexdigest()[:12] + " len=12"
         ),
@@ -174,6 +186,11 @@ def _patch_broker_attempt(
 
 
 def _cluster_broker_argv(fixture: _BrokerAttemptFixture) -> list[str]:
+    from loom_cli.rollout.operator.backup_limits import (
+        operator_backup_traversal_limits,
+    )
+
+    limits = operator_backup_traversal_limits(fixture.config)
     return [
         "cluster",
         "up",
@@ -186,6 +203,12 @@ def _cluster_broker_argv(fixture: _BrokerAttemptFixture) -> list[str]:
         "--recover-sandbox-deadlines",
         "--sandbox-deadline-max-pods",
         "4",
+        "--backup-max-files",
+        str(limits.max_files),
+        "--backup-max-entries",
+        str(limits.max_entries),
+        "--backup-max-total-bytes",
+        str(limits.max_total_bytes),
         "--rollout-request-envelope",
         str(fixture.envelope_path),
     ]
@@ -1009,7 +1032,7 @@ def test_environment_state_cannot_hide_staging_control_plane_behind_development_
         'environment = "development"\n'
         'control_plane_environment = "staging"\n'
         "[[worker_pool_autoscaler_policies]]\n"
-        'pool_name = "gb10-arm64"\n'
+        'pool_name = "gb10"\n'
         'actuator = "slurm"\n'
         "max_slots = 1\n",
         encoding="utf-8",
@@ -1105,6 +1128,30 @@ def test_broker_cluster_up_records_exact_attribution_and_fixed_lock_paths(
     assert all({field: event[field] for field in _ATTRIBUTION} == _ATTRIBUTION for event in events)
     serialized = json.dumps({"active": active, "events": events})
     assert str(fixture.envelope_path) not in serialized
+
+
+def test_broker_cluster_up_rejects_traversal_limit_policy_drift_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fixture = _broker_attempt_fixture(tmp_path)
+    _patch_broker_attempt(monkeypatch, fixture)
+    argv = _cluster_broker_argv(fixture)
+    argv[argv.index("--backup-max-files") + 1] = "1000005"
+    calls = {"network": 0}
+
+    def track_clients(_context: str | None) -> tuple[object, object, object, object]:
+        calls["network"] += 1
+        return object(), object(), object(), object()
+
+    monkeypatch.setattr("loom_cli.cluster_cmd._load_clients", track_clients)
+
+    rc = _main_without_parser_exit(argv)
+
+    assert rc == 1
+    assert "backup traversal limits do not match fixed broker policy" in capsys.readouterr().err
+    assert calls == {"network": 0}
 
 
 @pytest.mark.parametrize(

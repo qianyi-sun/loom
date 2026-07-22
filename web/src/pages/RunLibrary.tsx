@@ -9,7 +9,9 @@ import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
+import Pagination from "../components/Pagination";
 import { StatusPill } from "../components/StatusPill";
+import { useCursorPage } from "../hooks/useCursorPage";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { modelLabel } from "../lib/modelLabel";
@@ -92,7 +94,7 @@ function ArtifactBadges({
   truncated?: boolean;
 }): JSX.Element {
   const visible = ARTIFACT_LABELS.filter(([key]) => summary[key] > 0);
-  if (visible.length === 0) return <span className="text-xs text-slate-400">None</span>;
+  if (visible.length === 0) return <span className="text-xs text-slate-600">None</span>;
   return (
     <div className="flex flex-wrap gap-1">
       {visible.map(([key, label]) => (
@@ -148,6 +150,21 @@ export default function RunLibrary(): JSX.Element {
   const modelName = searchParams.get("model_name") ?? searchParams.get("model") ?? "";
   const providerConnectionId = searchParams.get("provider_connection_id") ?? "";
   const providerModelId = searchParams.get("provider_model_id") ?? "";
+  const page = useCursorPage(
+    JSON.stringify([
+      scope,
+      teamId,
+      state,
+      artifactType,
+      search,
+      benchmarkId,
+      agentName,
+      modelProvider,
+      modelName,
+      providerConnectionId,
+      providerModelId,
+    ]),
+  );
 
   const teamsQuery = useQuery({
     queryKey: ["admin-teams", auth.isAdmin],
@@ -171,6 +188,7 @@ export default function RunLibrary(): JSX.Element {
       modelName,
       providerConnectionId,
       providerModelId,
+      page.cursor,
     ],
     queryFn: () =>
       api.listRunLibraryBatches({
@@ -185,6 +203,8 @@ export default function RunLibrary(): JSX.Element {
         model_name: modelName || undefined,
         provider_connection_id: providerConnectionId || undefined,
         provider_model_id: providerModelId || undefined,
+        cursor: page.cursor ?? undefined,
+        limit: "50",
       }),
   });
 
@@ -491,6 +511,21 @@ export default function RunLibrary(): JSX.Element {
             </div>
           )}
         </Card.Body>
+        <Card.Footer>
+          <Pagination
+            state={page.state}
+            hasNext={query.data?.next_cursor != null}
+            isLoading={query.isPending || query.isFetching}
+            isError={query.isError}
+            onNext={() => {
+              const cursor = query.data?.next_cursor;
+              if (cursor) page.next(cursor);
+            }}
+            onPrev={page.prev}
+            onRetry={() => void query.refetch()}
+            className="mt-0"
+          />
+        </Card.Footer>
       </Card>
     </div>
   );

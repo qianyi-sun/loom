@@ -173,7 +173,7 @@ async def overview_setup(
             version="test",
             capabilities=[{"backend": "docker", "cpu_arch": "arm64"}],
             max_concurrent=10,
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             registered_at=now,
             last_seen_at=now,
             status="active",
@@ -206,7 +206,7 @@ async def overview_setup(
         ))
         s.execute(insert(WorkerPoolAutoscalerPolicy).values(
             environment="production",
-            pool_name="gb10-arm64",
+            pool_name="gb10",
             actuator="slurm",
             enabled=True,
             min_slots=0,
@@ -526,7 +526,7 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     }
     assert body["resources"]["pools"] == [
         {
-            "pool_name": "gb10-arm64",
+            "pool_name": "gb10",
             "backend": "docker",
             "cpu_arch": "arm64",
             "autoscaler_environment": "production",

@@ -369,8 +369,18 @@ Raw Harbor modes keep those lightweight files and add:
 - `agent_runs/<task_id>/<trial_id>/execution_result.json`, `metrics.json`,
   `artifact_manifest.json`, `verifier_output.json`,
   `provider_logs_manifest.json`, and `atif.json`.
+- `agent_runs/<task_id>/<trial_id>/verifier/` for eligible, allowlisted
+  verifier audit logs, schema metadata, and canonical `output.json` or
+  `junit.xml`. Multi-step trials add the step name below `verifier/` to avoid
+  filename collisions.
 - `derived/sft_messages.jsonl`, derived from the redacted provider logs for
   downstream SFT-style pipelines.
+
+Verifier delivery is fail-closed: incomplete log/meta pairs, unknown verifier
+filenames, non-shared or secret-bearing objects, missing bodies, and hash or
+indexed/runtime size mismatches prevent a shareable archive from being marked
+ready. Full verifier logs stay in artifact storage and the delivery tar; the
+persisted verifier result contains only a bounded redacted summary and refs.
 
 The base `raw-harbor` mode preserves the Loom-native event stream as
 `agent_runs/<task_id>/<trial_id>/trajectory.jsonl` and leaves assistant payload
@@ -890,6 +900,10 @@ legacy team requests, approve account setup and password reset requests, switch
 to fixed-team maintenance, create/list legacy invites, manage API tokens, or
 inspect the audit log. Team owners see only invite and API-token sections.
 Account setup/reset links are revealed only once and must be shared manually.
+The platform-admin Audit tab loads only when opened and provides Previous/Next
+controls over the complete timestamp/id-ordered history. Loading marks page
+controls unavailable without removing keyboard focus; an error keeps Previous
+and Retry available; the terminal page is announced explicitly.
 
 Most web workflows now include contextual quickstarts directly on the page. Use
 the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
@@ -1020,6 +1034,13 @@ from explicit allow-lists. Provider tabs are URL-addressable with
 `?tab=overview`, `?tab=models`, and `?tab=settings`, so operators can link
 directly to the relevant setup or debugging view.
 
+Tabbed views use one keyboard contract across provider details, task-set
+details, Team access, and the model-source picker. Press Tab to enter the
+selected tab, Left/Right to move and activate, or Home/End to jump to the first
+or last available tab. Disabled choices are skipped. Each tab is linked to its
+panel for screen readers, and changing tabs does not change the underlying API
+request or saved payload semantics.
+
 Contextual snippets are not a substitute for diagnostics. If a quickstart
 command fails, open the same page's diagnostic panel or detail view, then copy
 the relevant `loom eval batch show`, `loom eval trial show`, `loom eval trial
@@ -1047,6 +1068,15 @@ Use the SPA top-level **Run Library** page:
   artifact metadata for the complete set.
 - Platform admins can use the team filter with internal team names across the
   whole platform; ordinary users see only their joined teams.
+- Use **Next** and **Previous** to traverse older and newer pages. Cursor
+  history is kept only for the current browser session and never added to the
+  URL; the shareable URL continues to contain only scope and filters.
+- Changing any scope or filter returns to page one before requesting the new
+  selection. Loading guards both page controls with accessible unavailable
+  state while keeping them focusable, failed pages offer Retry and preserve
+  Previous when available, and an empty or final page explicitly says that the
+  end of results was reached. Keyboard focus stays on the control or filter the
+  user activated.
 
 Open a Library row to inspect task selection, agent/model config, trial rollup,
 debug evidence, provenance, and artifact group previews. For multi-agent/model

@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { components } from "../../api/schema";
 import BatchDetail from "../../pages/BatchDetail";
+import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const BATCH_ID = "be792550-fb63-40b4-b5a2-795adbf2cc9d";
@@ -148,7 +149,7 @@ function mockBatch(
     status: "not_ready",
     reason: "no_delivery_export",
   },
-): ReturnType<typeof vi.spyOn> {
+): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {

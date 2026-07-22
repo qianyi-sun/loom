@@ -69,6 +69,7 @@ Out of scope for this document:
 | One user-owned API token leaked | That user's allowed submissions and that token's team-scoped reads/actions | Other teams' data, admin actions, provider secrets in plaintext, or attribution to another user |
 | Setup/reset link leaked before use | Password setup/reset for the target user until expiry or approval revocation | Email/account enumeration, reuse after consumption, or access to other accounts |
 | Admin secret leaked | Full platform administration until rotation | Silent persistence without audit trail after rotation |
+| Staging acceptance cookie leaked | At most the remaining fixed 900-second platform-admin session in staging | Refresh, production use, authority repair, or recovery of the singleton bearer |
 | Provider API key leaked | The connected upstream provider account until provider-side revocation | Leakage through sandbox env, logs, artifacts, or normal API responses |
 | SPA XSS | Can read the in-memory CSRF token and make in-origin requests as the signed-in user until session expiry/logout | HttpOnly session-cookie theft, admin secret file access, cross-team access outside the user's role, or server-side provider secret exfiltration |
 | CI workflow compromise | Read-only repo data for ordinary PRs | Deployment/provider secrets or package publishing credentials |
@@ -102,6 +103,12 @@ Out of scope for this document:
   mutations require a CSRF header matching the server-side session CSRF hash.
   The SPA receives CSRF tokens from auth responses, keeps them in memory, and
   no longer stores normal bearer-token login state in `localStorage`.
+- **Staging admin browser exchange:** only a singleton admin bearer in
+  `LOOM_ENV=staging` may exchange into an already-authorized platform-admin
+  user. The endpoint requires safe actor/request attribution, changes no
+  authority, commits a safe audit row with session creation, sets a distinct
+  Secure HttpOnly SameSite=Lax cookie for at most 900 seconds, cannot refresh,
+  and is hidden in every other environment.
 - **Hard admin rotation:** rotation invalidates the old admin secret immediately
   after the service reload/restart boundary. Operators must not rely on a long
   deprecation window.
@@ -148,5 +155,9 @@ tokens are hash-only at rest with one-time raw reveal and preserve submitting
 user attribution. Run Library sharing now uses explicit visibility/share-state
 checks and `username / team` owner labels instead of weakening execution
 routes. Remaining staging auth risk is concentrated in final staging smoke,
-documentation review, rate-limit tuning for public request endpoints, and
-operational incident practice before broad external exposure.
+rate-limit tuning for public request endpoints, and operational incident
+practice before broad external exposure. The staging-only admin browser
+exchange intentionally grants the target's existing platform-admin authority,
+so acceptance automation must keep the singleton bearer out of argv and
+artifacts, retain only a sanitized report, and prove logout plus `/auth/me`
+`401` before it reports success.

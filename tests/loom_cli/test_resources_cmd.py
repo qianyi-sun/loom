@@ -31,7 +31,7 @@ _SUMMARY = {
         },
         "pools": [
             {
-                "pool_name": "gb10-arm64",
+                "pool_name": "gb10",
                 "backend": "docker",
                 "cpu_arch": "arm64",
                 "autoscaler_environment": "production",
@@ -240,7 +240,7 @@ def test_resources_status_text_shows_slots_and_pool_breakdown(
     assert "max 52" in out
     assert "draining 2 slots / 1 workers" in out
     assert "idle=601s" in out
-    assert "gb10-arm64" in out
+    assert "gb10" in out
     assert "slurm" in out
     assert "0/10" in out
     assert "40" in out

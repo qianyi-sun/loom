@@ -4,14 +4,31 @@
  * they are on a public onboarding route such as password setup/reset
  * or invite acceptance.
  */
-import { Navigate, Outlet, useLocation } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 
 import { useAuth } from "../auth/useAuth";
 import { cn } from "../lib/cn";
+import { frontendHomePath } from "../lib/frontendConfig";
 import NavBar from "./NavBar";
+import { RecoveryPanel } from "./RecoveryPanel";
+import { RouteRecoveryBoundary } from "./RouteRecoveryBoundary";
+import { SkipLink } from "./SkipLink";
+
+const SESSION_FAILURE_COPY = {
+  network: "Loom could not reach the browser session service.",
+  http: "Loom's browser session service is temporarily unavailable.",
+  invalid: "Loom received an invalid browser session response.",
+} as const;
 
 export default function Layout(): JSX.Element {
-  const { isAuthenticated, isLoading, isAdmin, me } = useAuth();
+  const {
+    isAuthenticated,
+    isAdmin,
+    me,
+    refreshMe,
+    sessionFailure,
+    sessionStatus,
+  } = useAuth();
   const loc = useLocation();
   const isSettings = loc.pathname.startsWith("/settings");
   const isInviteAccept = loc.pathname.startsWith("/invites/accept");
@@ -20,8 +37,41 @@ export default function Layout(): JSX.Element {
     loc.pathname.startsWith("/auth/reset");
   const isPublicRoute = isSettings || isInviteAccept || isPasswordAction;
 
-  if (isLoading) {
-    return <div className="min-h-screen bg-slate-50" />;
+  if (sessionStatus === "loading") {
+    return (
+      <>
+        <SkipLink />
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="mx-auto mt-16 max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
+        >
+          <div role="status" aria-live="polite" aria-busy="true">
+            <h1 className="text-xl font-semibold text-slate-900">Loom</h1>
+            <p className="mt-2 text-sm text-slate-600">
+              Checking your browser session…
+            </p>
+          </div>
+        </main>
+      </>
+    );
+  }
+
+  if (sessionStatus === "unavailable") {
+    if (!sessionFailure) {
+      throw new Error("browser session unavailable without a support reference");
+    }
+    return (
+      <RecoveryPanel
+        title="Loom could not verify your session"
+        message={SESSION_FAILURE_COPY[sessionFailure.kind]}
+        referenceId={sessionFailure.referenceId}
+        onRetry={() => {
+          void refreshMe();
+        }}
+        homeHref={frontendHomePath()}
+      />
+    );
   }
 
   if (!isAuthenticated && !isPublicRoute) {
@@ -31,15 +81,16 @@ export default function Layout(): JSX.Element {
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-50 px-4 py-8 sm:px-6 lg:px-8">
-        <div
+        <main
+          id="main-content"
           data-testid="public-onboarding-shell"
           className={cn(
             "mx-auto w-full",
             isSettings ? "max-w-6xl" : "max-w-3xl",
           )}
         >
-          <Outlet />
-        </div>
+          <RouteRecoveryBoundary />
+        </main>
       </div>
     );
   }
@@ -52,9 +103,9 @@ export default function Layout(): JSX.Element {
         currentTeamName={me?.current_team?.name ?? null}
         currentTeamRole={me?.current_team?.role ?? null}
       />
-      <main className="min-w-0 flex-1 overflow-y-auto">
+      <main id="main-content" className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-7xl animate-fade-in px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
-          <Outlet />
+          <RouteRecoveryBoundary />
         </div>
       </main>
     </div>

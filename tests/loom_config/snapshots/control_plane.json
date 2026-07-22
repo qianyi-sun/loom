@@ -19,6 +19,11 @@
     "default": "3600",
     "required": false
   },
+  "control_plane_url": {
+    "annotation": "<class 'pydantic.networks.HttpUrl'>",
+    "default": "'http://loom-control-plane:8080'",
+    "required": false
+  },
   "db_max_overflow": {
     "annotation": "<class 'int'>",
     "default": "40",

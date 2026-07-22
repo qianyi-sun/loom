@@ -113,7 +113,7 @@ loom eval batch create \
   --benchmark loom-smoke \
   --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
   --n-per-task 1 \
-  --required-worker-pool gb10-arm64
+  --required-worker-pool gb10
 ```
 
 Evidence checklist:

@@ -75,12 +75,32 @@ Attach these to the release issue or release PR:
   public LLM Gateway, no public Control Plane, and no public object store.
 - For first prod, `python scripts/ops/frontend_route_smoke.py --route ...`
   output proving `https://yylx.world/prod` exposes production identity and
-  `https://yylx.world/prod/api`, while `https://yylx.world/dev` exposes
-  staging identity and `https://yylx.world/dev/api`, with
+  `https://yylx.world/prod/api`, while `https://yylx.world/staging` exposes
+  staging identity and `https://yylx.world/staging/api`, with
   no-store runtime config responses.
 - `www.yylx.world` must not become a second staging/prod surface. It is only a
   TLS-bound redirect host via `ingress_redirect_hosts = ["www.yylx.world"]`;
   smoke and release evidence should use the canonical bare-domain routes.
+- Sanitized `loom-staging-admin-browser-smoke.json` evidence bound to the exact
+  build SHA reported by the running service and `https://yylx.world/staging`,
+  to be produced only by a candidate-bound brokered protected-staging rollout
+  after the logged-out route smoke. Until that broker step exists and succeeds,
+  this evidence item remains unmet. The ephemeral kind workflow remains
+  `runtime_environment = "development"` and only proves that this exchange is
+  hidden with a credential-free `404`; it must never pose as protected staging.
+  Archive the report with the broker request ID, attempt, resolved merged `dev`
+  SHA, and matching running-service build SHA; a PR artifact or manual command
+  is not candidate evidence. The rollout evidence must show the correlated
+  browser request ID and safe audit event, successful product APIs and visible
+  state for all six Admin Access tabs,
+  including Arrow/Home/End roving focus and exact ARIA tab-to-panel
+  relationships, Audit log, Rate cards, logout/revocation, and final
+  `/api/v1/auth/me` `401`. The brokered rollout may source the ephemeral
+  singleton admin bearer only through an owner-only (`0600`) file or
+  non-interactive stdin; it must upload no trace, screenshot, storage state,
+  cookie, or raw secret.
+  This staging-only admin evidence does not replace normal-user onboarding,
+  team-boundary, or submission evidence.
 - For first prod, the release-promotion manifest's `prod_staging_isolation` check
   must embed structured dry-run evidence for state profiles, object storage
   buckets/prefix policy, safe token/provider refs, frontend API bases, worker
@@ -147,8 +167,8 @@ Attach these to the release issue or release PR:
   stale physical profile copy. For staging, the rendered
   service/control-plane/gateway pods must have
   `LOOM_ENV=staging`, and `environment-state` evidence must show staging
-  worker-pool policies and GB10 desired state keyed as `staging/gb10-arm64`.
-  Any current-path staging evidence that reports `production/gb10-arm64` is
+  worker-pool policies and GB10 desired state keyed as `staging/gb10`.
+  Any current-path staging evidence that reports `production/gb10` is
   drift, not a valid migration exception.
 - Benchmark reward acceptance transcript from
   `scripts/benchmark_reward_gate.py`: the readiness gate must pass against the
@@ -234,7 +254,7 @@ Attach these to the release issue or release PR:
   The canary must wait for a clean staging anchor, completed #190 targeted
   durability validation, and an explicit coordinator `GO`. The batch must use
   repeated `--required-worker-pool` flags for `oldlab` and
-  `gb10-arm64`; terminal evidence must include `runs.worker_pool_coverage`
+  `gb10`; terminal evidence must include `runs.worker_pool_coverage`
   and `runs.claimed_without_started` from the smoke gate. Staging
   clusters run with `k8s_worker.enabled=false` (#383) so x86_64
   coverage is delivered by the Slurm-managed `oldlab` pool, not by an
@@ -379,7 +399,7 @@ python scripts/staging_smoke_gate.py \
   --object-store-write-check-count 64 \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace loom-staging \
-  --required-worker-pool gb10-arm64 \
+  --required-worker-pool gb10 \
   --secret-needle env:STAGING_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
@@ -441,10 +461,10 @@ the first GB10/ARM64 canary also creates a worker-local compatibility base
 image on the ARM64 Docker daemon before building the task image, because the
 upstream tag is amd64-only.
 Do not rely on theoretical max-slot saturation to prove worker-pool coverage.
-For v1.0's GB10-only staging gate, require `--required-worker-pool gb10-arm64`.
+For v1.0's GB10-only staging gate, require `--required-worker-pool gb10`.
 For v1.1/full-cluster mixed-pool evidence, create the release/acceptance batch
 with repeated `--required-worker-pool` flags, for example
-`--required-worker-pool oldlab --required-worker-pool gb10-arm64`. On clusters
+`--required-worker-pool oldlab --required-worker-pool gb10`. On clusters
 that intentionally host a dedicated k8s worker node pool, add
 `--required-worker-pool k8s-worker` as well. The service adds one
 pool-pinned coverage trial per required pool while leaving the normal portable
@@ -574,9 +594,33 @@ paths, stale remote env worker-token fingerprints, inactive OLDLAB autoscaler
 timers, unscoped external autoscaler commands that omit `--pool-name oldlab`,
 missing or unexecutable external autoscaler `ExecStart` command paths, recent
 failed autoscaler service results such as `status=203/EXEC`, and the active
-`gb10-arm64`/`oldlab` pool shapes; the node-agent check catches stale
+`gb10`/`oldlab` pool shapes; the node-agent check catches stale
 host-local checkouts, local-build fallback using an old tree, and env files
 that did not apply even when the pool still has healthy heartbeats.
+The installed runner's private generated directory must already contain a
+service-owned mode-`0600` GB10 env template. The host installer bootstraps that
+template once from a validated fixed legacy source when the directory is empty;
+the rollout step never falls back to an arbitrary path. A missing template or
+any symlink, hard link, wrong mode, oversized file, malformed dotenv entry, or
+missing required endpoint/credential key fails before environment-state apply.
+The same installer creates the external-runner checkout authority at
+`/shared_work/qianyi/.loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750`, without granting the service write
+access to `/shared_work/qianyi`. Runtime readiness proves that `loom-rollout`
+can write/search the dedicated root and that the `qianyi` Slurm submitter can
+read/search but not write it. Step 11 publishes only the exact image-tagged
+direct child through a private setgid temp container and same-root rename;
+authority symlinks, wrong owner/group/mode, hardlinks, special files, or a
+non-exact resolved SHA fail closed. Publication is no-replace and immutable:
+an exact existing target is accepted only after full index/physical-tree
+validation, and drift is never replaced or implicitly cleaned during rollout
+or resume. Broker preflight verifies the fixed 14 active nodes can read/search
+but not write the root. After publish and before environment-state apply, step
+11 streams trusted verifier bytes over protected SSH stdin (never from the
+target) and requires all 14 nodes to agree on exact HEAD, clean status,
+index/modes, deterministic tracked-file readability, and content identity.
+Per-node NFS device/inode values are evidence only, not cross-node equality
+constraints.
 The external Slurm autoscaler also treats release-state drift as a fail-closed
 decision. This includes a pending/running job whose node is no longer in the
 policy's `allowed_nodes`; such jobs are neither healthy warm capacity nor part

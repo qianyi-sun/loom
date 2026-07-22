@@ -947,12 +947,22 @@ async def _spawn_trial(
             sandbox_extra_hosts=_sandbox_extra_hosts_for_url(subprocess_gateway_url_str),
             family_state_volumes=family_state_volumes,
             workspace_staging_policy=workspace_staging_policy,
+            # #896: per-container hard caps for non-exclusive (packed)
+            # workers. 0/unset = unbounded (default), keeping exclusive
+            # GB10 pools unchanged. Applied to both the trial container
+            # (via TrialContext → StartOptions) and the setup sidecars.
+            container_cpus=settings.container_cpus,
+            container_memory_mib=settings.container_memory_mib,
+            container_pids=settings.container_pids,
             sidecar_runtime_factory=lambda: DockerTaskSidecarRuntime(
                 task_config=task_config,
                 task_dir=task_dir,
                 task_checksum=task_checksum,
                 trial_id=trial_id,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
+                container_cpus=settings.container_cpus,
+                container_memory_mib=settings.container_memory_mib,
+                container_pids=settings.container_pids,
                 setup_slot_provider=lambda: _daemon_build_slot(
                     cp_client,
                     settings,

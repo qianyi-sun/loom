@@ -8,6 +8,15 @@
 > manually squash-merged by Qianyi. The implementation text below must not be
 > treated as current branch-protection instructions.
 
+> **Current execution addendum (2026-07-15):** PR execution is now
+> queue-head-aware. Only a non-draft PR carrying the coordinator-owned
+> `ci:merge-ready` label emits the four protected context names and runs its
+> selected heavy lanes. Other PRs emit distinct `*-preflight` or `*-filtered`
+> names; removing merge readiness or converting the selected PR to draft emits
+> a failing protected context to invalidate an earlier result on the same SHA.
+> Root and integration tests use two explicit, coverage-safe shards, and
+> integration starts directly after planning rather than after the fast tier.
+
 ## Status and scope
 
 This design is the first implementation slice of #787. Loom intentionally lets

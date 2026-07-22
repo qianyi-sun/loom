@@ -6,7 +6,7 @@ on:
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
-    types: [opened, synchronize, reopened, labeled, edited]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
   merge_group:
     # Required if dev later enables GitHub merge queue: queued merge groups
     # need to emit the same required `repository-checks` context as PRs.
@@ -28,7 +28,12 @@ on:
 # cancelled by this workflow.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
+         (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+          contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+         (github.event.action == 'edited' && github.event.changes.base != null)) }}
 
 permissions:
   contents: read
@@ -41,6 +46,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      event_relevant: ${{ steps.plan.outputs.event_relevant }}
+      full_gate: ${{ steps.plan.outputs.full_gate }}
+      gate_mode: ${{ steps.plan.outputs.gate_mode }}
       docs_only: ${{ steps.plan.outputs.docs_only }}
       integration: ${{ steps.plan.outputs.integration }}
       integration_docker: ${{ steps.plan.outputs.integration_docker }}
@@ -48,6 +56,7 @@ jobs:
       cluster_smoke: ${{ steps.plan.outputs.cluster_smoke }}
       staging_smoke: ${{ steps.plan.outputs.staging_smoke }}
       coverage_summary: ${{ steps.plan.outputs.coverage_summary }}
+      web_checks: ${{ steps.plan.outputs.web_checks }}
     # Skip on push to dev: every squash-merge to dev carries the same
     # content the PR CI just validated, so re-running burns minutes
     # for no signal. Push to main still runs (release-branch safety
@@ -71,6 +80,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_ACTION_LABEL: ${{ github.event.label.name }}
+          PR_DRAFT: ${{ github.event.pull_request.draft || false }}
+          PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
           DISPATCH_INTEGRATION: ${{ inputs.integration }}
           DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker }}
         run: |
@@ -118,6 +131,10 @@ jobs:
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
+            --pull-request-action "$PR_ACTION" \
+            --pull-request-action-label "$PR_ACTION_LABEL" \
+            --pull-request-draft "$PR_DRAFT" \
+            --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Docs-only fast path
@@ -129,7 +146,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: workflow-plan
     timeout-minutes: 12
-    if: needs.workflow-plan.outputs.docs_only != 'true'
+    if: >-
+      needs.workflow-plan.outputs.docs_only != 'true' &&
+      needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -187,11 +206,23 @@ jobs:
         run: uv run python scripts/check_ci_action_pins.py
 
   tests-root:
-    name: tests-root
+    name: tests-root (${{ matrix.shard }})
     runs-on: ubuntu-latest
     needs: workflow-plan
     timeout-minutes: 15
-    if: needs.workflow-plan.outputs.docs_only != 'true'
+    if: >-
+      needs.workflow-plan.outputs.docs_only != 'true' &&
+      needs.workflow-plan.outputs.gate_mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: unit-ops
+            test_paths: "tests/unit tests/ops"
+          - shard: cli-contract-property
+            test_paths: "tests/loom_cli tests/contract tests/property"
+    env:
+      COVERAGE_FILE: .coverage.root-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -224,14 +255,19 @@ jobs:
           uv pip install -e packages/loom-benchmarks
           uv pip install -e packages/loom-benchmark-terminal-bench-2
 
-      - name: Pytest — unit + contract + property + loom_cli
+      - name: Pytest — root shard
+        shell: bash
+        env:
+          TEST_PATHS: ${{ matrix.test_paths }}
         run: |
-          uv run pytest \
-            tests/unit tests/contract tests/property tests/loom_cli tests/ops \
+          set -euo pipefail
+          read -r -a test_paths <<< "${TEST_PATHS}"
+          uv run pytest "${test_paths[@]}" \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
       - name: Build and exercise non-editable runtime wheel
+        if: matrix.shard == 'unit-ops'
         shell: bash
         run: |
           set -euo pipefail
@@ -311,17 +347,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: coverage-data-root
-          path: .coverage
+          name: coverage-data-root-${{ matrix.shard }}
+          path: ${{ env.COVERAGE_FILE }}
           include-hidden-files: true
-          if-no-files-found: warn
+          if-no-files-found: error
 
   tests-packages:
     name: tests-packages
     runs-on: ubuntu-latest
     needs: workflow-plan
     timeout-minutes: 10
-    if: needs.workflow-plan.outputs.docs_only != 'true'
+    if: >-
+      needs.workflow-plan.outputs.docs_only != 'true' &&
+      needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -385,11 +423,8 @@ jobs:
     timeout-minutes: 10
     if: >-
       always() &&
-      (github.event_name != 'push' || github.ref != 'refs/heads/dev')
-    outputs:
-      docs_only: ${{ needs.workflow-plan.outputs.docs_only }}
-      integration: ${{ needs.workflow-plan.outputs.integration }}
-      integration_docker: ${{ needs.workflow-plan.outputs.integration_docker }}
+      (github.event_name != 'push' || github.ref != 'refs/heads/dev') &&
+      needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -414,33 +449,44 @@ jobs:
           done
 
       - name: Install coverage
-        if: needs.workflow-plan.outputs.docs_only != 'true'
+        if: >-
+          needs.workflow-plan.outputs.docs_only != 'true' &&
+          needs.workflow-plan.outputs.gate_mode == 'full'
         run: python3 -m pip install --user 'coverage>=7'
 
-      - name: Download root coverage
-        if: needs.workflow-plan.outputs.docs_only != 'true'
+      - name: Download root coverage shards
+        if: >-
+          needs.workflow-plan.outputs.docs_only != 'true' &&
+          needs.workflow-plan.outputs.gate_mode == 'full'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: coverage-data-root
+          pattern: coverage-data-root-*
           path: cov-root
+          merge-multiple: true
 
       - name: Download package coverage
-        if: needs.workflow-plan.outputs.docs_only != 'true'
+        if: >-
+          needs.workflow-plan.outputs.docs_only != 'true' &&
+          needs.workflow-plan.outputs.gate_mode == 'full'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-data-packages
           path: cov-packages
 
       - name: Combine fast-tier coverage
-        if: needs.workflow-plan.outputs.docs_only != 'true'
+        if: >-
+          needs.workflow-plan.outputs.docs_only != 'true' &&
+          needs.workflow-plan.outputs.gate_mode == 'full'
         run: |
-          cp cov-root/.coverage .coverage.root
           cp cov-packages/.coverage .coverage.packages
-          python3 -m coverage combine .coverage.root .coverage.packages
+          cp .coverage.packages cov-root/.coverage.packages
+          python3 -m coverage combine cov-root
           python3 -m coverage xml
 
       - name: Upload coverage.xml
-        if: always() && needs.workflow-plan.outputs.docs_only != 'true'
+        if: >-
+          always() && needs.workflow-plan.outputs.docs_only != 'true' &&
+          needs.workflow-plan.outputs.gate_mode == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-xml-fast
@@ -450,7 +496,9 @@ jobs:
       # Binary .coverage data file (SQLite) consumed by coverage-summary
       # job to combine with integration-tier coverage.
       - name: Upload fast-tier coverage data
-        if: always() && needs.workflow-plan.outputs.docs_only != 'true'
+        if: >-
+          always() && needs.workflow-plan.outputs.docs_only != 'true' &&
+          needs.workflow-plan.outputs.gate_mode == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-data-fast
@@ -464,7 +512,9 @@ jobs:
       # grows. Combined-tier baseline collection (Phase 3) remains
       # opt-in via the `coverage-summary` job; no combined-tier gate yet.
       - name: Coverage gate + summary (fast tier)
-        if: needs.workflow-plan.outputs.docs_only != 'true'
+        if: >-
+          needs.workflow-plan.outputs.docs_only != 'true' &&
+          needs.workflow-plan.outputs.gate_mode == 'full'
         run: |
           set +e
           python3 -m coverage report --fail-under=70 | tee coverage-report.txt
@@ -491,6 +541,8 @@ jobs:
   go-checks:
     name: go-checks
     runs-on: ubuntu-latest
+    needs: workflow-plan
+    if: needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Set up Go
@@ -511,17 +563,99 @@ jobs:
       - name: go test
         run: go test -race ./cmd/...
 
+  # Required frontend gate. It builds and serves the production bundle under
+  # a route prefix, then exercises logged-out, user, and admin paths at both
+  # supported viewports with strict browser failure ledgers and axe.
+  web-checks:
+    name: web-checks
+    runs-on: ubuntu-latest
+    needs: workflow-plan
+    timeout-minutes: 20
+    if: >-
+      needs.workflow-plan.outputs.web_checks == 'true' &&
+      (needs.workflow-plan.outputs.gate_mode == 'full' ||
+       needs.workflow-plan.outputs.gate_mode == 'preflight')
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frozen frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: TypeScript strict and ESLint
+        working-directory: web
+        run: |
+          npm run typecheck
+          npm run lint
+
+      - name: Vitest coverage gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f config/component-ownership.toml && \
+                -f scripts/component_ownership.py ]] && \
+             python3 scripts/component_ownership.py --help | grep -q -- 'test-paths'; then
+            mapfile -t owned_tests < <(
+              python3 scripts/component_ownership.py test-paths --lane frontend
+            )
+            [[ ${#owned_tests[@]} -gt 0 ]]
+            web_tests=()
+            for test_path in "${owned_tests[@]}"; do
+              [[ "$test_path" == web/* ]]
+              web_tests+=("${test_path#web/}")
+            done
+            cd web
+            npx --no-install vitest run --coverage \
+              "${web_tests[@]}" \
+              scripts/frontend-route-browser-smoke.test.mjs \
+              scripts/staging-admin-browser-smoke.test.mjs
+          else
+            cd web
+            npm run test:coverage
+          fi
+
+      - name: Production build
+        working-directory: web
+        run: npm run build
+
+      - name: Install Chromium
+        working-directory: web
+        run: npx --no-install playwright install --with-deps chromium
+
+      - name: Prefix-route browser, axe, console, and network gate
+        working-directory: web
+        run: npm run test:e2e
+
   # Fast integration tier — testcontainers Postgres + MinIO only.
   # Excludes the `@pytest.mark.docker` tests (real DockerDriver,
   # network-policy, trial-e2e, subprocess-agent, gateway-with-litellm).
   # Issue #7: split into fast + docker tiers so the fast tier fits in
   # ~10 min and the planner selects each tier from paths or opt-in labels.
   integration:
-    name: integration
+    name: integration (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    needs: fast-checks
+    needs: workflow-plan
     timeout-minutes: 20
-    if: needs.fast-checks.outputs.integration == 'true'
+    if: >-
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.integration == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: a-r
+            test_glob: "tests/integration/test_[a-r]*.py"
+          - shard: s-z
+            test_glob: "tests/integration/test_[s-z]*.py"
+    env:
+      COVERAGE_FILE: .coverage.integration-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -555,8 +689,14 @@ jobs:
           uv pip install -e packages/loom-benchmark-terminal-bench-2
 
       - name: Pytest — integration (fast tier, no docker)
+        shell: bash
+        env:
+          TEST_GLOB: ${{ matrix.test_glob }}
         run: |
-          uv run pytest tests/integration \
+          set -euo pipefail
+          mapfile -t test_files < <(compgen -G "${TEST_GLOB}" | LC_ALL=C sort)
+          [[ ${#test_files[@]} -gt 0 ]]
+          uv run pytest "${test_files[@]}" \
             -m "not docker" \
             --durations=15 \
             --cov=src --cov=packages --cov-report=term
@@ -568,10 +708,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: coverage-data-integration
-          path: .coverage
+          name: coverage-data-integration-${{ matrix.shard }}
+          path: ${{ env.COVERAGE_FILE }}
           include-hidden-files: true
-          if-no-files-found: warn
+          if-no-files-found: error
 
   # Docker-heavy tier: real DockerDriver / network-policy / trial-e2e /
   # subprocess-agent / gateway-with-litellm. Cost ~15-25 min and
@@ -580,9 +720,11 @@ jobs:
   integration-docker:
     name: integration-docker
     runs-on: ubuntu-latest
-    needs: fast-checks
+    needs: workflow-plan
     timeout-minutes: 40
-    if: needs.fast-checks.outputs.integration_docker == 'true'
+    if: >-
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.integration_docker == 'true'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -634,8 +776,9 @@ jobs:
     if: >-
       always() &&
       needs.workflow-plan.outputs.coverage_summary == 'true' &&
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.fast-checks.result == 'success' &&
-      needs.fast-checks.outputs.docs_only != 'true'
+      needs.workflow-plan.outputs.docs_only != 'true'
     permissions:
       contents: read
     steps:
@@ -664,8 +807,9 @@ jobs:
         if: needs.integration.result == 'success'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: coverage-data-integration
+          pattern: coverage-data-integration-*
           path: cov-integration
+          merge-multiple: true
 
       # Writes the coverage summary to GitHub Actions' step-summary
       # markdown rather than posting a PR comment. The step summary
@@ -681,9 +825,9 @@ jobs:
           fast_summary=$(uv run coverage report --data-file=cov-fast/.coverage | tail -1)
 
           combined_block=""
-          if [ "$INTEGRATION_RESULT" = "success" ] && [ -f cov-integration/.coverage ]; then
+          if [ "$INTEGRATION_RESULT" = "success" ] && compgen -G 'cov-integration/.coverage.integration-*' >/dev/null; then
             cp cov-fast/.coverage .coverage.fast
-            cp cov-integration/.coverage .coverage.integration
+            cp cov-integration/.coverage.integration-* .
             uv run coverage combine
             combined_pct=$(uv run coverage report --format=total)
             combined_block="**Combined (fast + integration): ${combined_pct} %** (no gate yet — Phase 3 baseline)."
@@ -707,11 +851,13 @@ jobs:
             echo "Per-file XML attached as the \`coverage-xml-fast\` workflow artifact. Tracking #260."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # PR, merge-group, and push runs must report `repository-checks` because
-  # dev branch protection requires that exact context. Manual runs use a
-  # distinct name so they cannot satisfy the protected context.
+  # Every relevant non-draft PR reports the exact protected context. Drafts and
+  # unrelated metadata events use a non-protected filtered name.
   repository-checks:
-    name: ${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || 'repository-checks' }}
+    name: >-
+      ${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' ||
+          needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' ||
+          'repository-checks-filtered' }}
     runs-on: ubuntu-latest
     if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/dev')
     needs:
@@ -721,10 +867,12 @@ jobs:
       - integration
       - integration-docker
       - coverage-summary
+      - web-checks
     steps:
       - name: Enforce selected validation results
         env:
           PLAN_RESULT: ${{ needs.workflow-plan.result }}
+          GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
           FAST_RESULT: ${{ needs.fast-checks.result }}
           GO_RESULT: ${{ needs.go-checks.result }}
           DOCS_ONLY: ${{ needs.workflow-plan.outputs.docs_only }}
@@ -734,8 +882,19 @@ jobs:
           DOCKER_RESULT: ${{ needs.integration-docker.result }}
           COVERAGE_SELECTED: ${{ needs.workflow-plan.outputs.coverage_summary }}
           COVERAGE_RESULT: ${{ needs.coverage-summary.result }}
+          WEB_SELECTED: ${{ needs.workflow-plan.outputs.web_checks }}
+          WEB_RESULT: ${{ needs.web-checks.result }}
         run: |
           set -euo pipefail
+          case "$GATE_MODE" in
+            full|filtered) ;;
+            *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
+          esac
+          [[ "$PLAN_RESULT" == "success" ]] || exit 1
+          if [[ "$GATE_MODE" == "filtered" ]]; then
+            echo "Metadata-only event filtered."
+            exit 0
+          fi
           require_boolean() {
             local name="$1" value="$2"
             case "$value" in
@@ -763,9 +922,11 @@ jobs:
           require_boolean integration "$INTEGRATION_SELECTED"
           require_boolean integration_docker "$DOCKER_SELECTED"
           require_boolean coverage_summary "$COVERAGE_SELECTED"
+          require_boolean web_checks "$WEB_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
           require_success fast-checks "$FAST_RESULT"
           require_success go-checks "$GO_RESULT"
+          require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
           require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"
           require_selected "$DOCKER_SELECTED" integration-docker "$DOCKER_RESULT"
           require_selected "$COVERAGE_SELECTED" coverage-summary "$COVERAGE_RESULT"

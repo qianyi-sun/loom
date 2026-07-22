@@ -113,6 +113,14 @@ class TrialContext:
     # MinIO remains authoritative until Slice 3c flips the SSE reader
     # to Postgres; sink failures are logged + swallowed here.
     cp_event_sink: CpEventSink | None = None
+    # #896: per-container hard resource caps for the trial container on
+    # non-exclusive (packed) workers. 0 = unbounded (default), which
+    # keeps exclusive GB10 pools byte-for-byte unchanged. Forwarded into
+    # StartOptions so DockerDriver applies nano_cpus / mem_limit /
+    # pids_limit at container create.
+    container_cpus: float = 0.0
+    container_memory_mib: int = 0
+    container_pids: int = 0
 
     @property
     def task_id(self) -> str:
@@ -224,6 +232,10 @@ class Trial:
                             memory_mb=self.ctx.task_config.environment.memory_mb,
                             storage_mb=self.ctx.task_config.environment.storage_mb,
                             gpus=self.ctx.task_config.environment.gpus,
+                            # #896: per-container caps (0 = unbounded default).
+                            container_cpus=self.ctx.container_cpus,
+                            container_memory_mib=self.ctx.container_memory_mib,
+                            container_pids=self.ctx.container_pids,
                         )
                     )
                     driver_started = True

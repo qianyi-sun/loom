@@ -2,6 +2,19 @@ import { createContext } from "react";
 
 import type { AuthMe, AuthTeam } from "../api/client";
 
+export type AuthSessionStatus =
+  | "loading"
+  | "authenticated"
+  | "signed-out"
+  | "unavailable";
+
+export type AuthSessionUnavailableKind = "network" | "http" | "invalid";
+
+export interface AuthSessionFailure {
+  kind: AuthSessionUnavailableKind;
+  referenceId: string;
+}
+
 export type AuthCtx = {
   me: AuthMe | null;
   teams: AuthTeam[];
@@ -9,7 +22,8 @@ export type AuthCtx = {
   isAuthenticated: boolean;
   isLoading: boolean;
   isAdmin: boolean;
-  authError: string | null;
+  sessionStatus: AuthSessionStatus;
+  sessionFailure: AuthSessionFailure | null;
   loginStart: (email: string) => Promise<{ status: "sent"; login_token?: string }>;
   loginComplete: (token: string) => Promise<void>;
   loginPassword: (username: string, password: string) => Promise<void>;

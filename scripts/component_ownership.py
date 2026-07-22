@@ -82,6 +82,13 @@ class Manifest:
             raise ManifestError(f"ambiguous test path {path}: {owner_ids}")
         return owners[0]
 
+    def release_components(self) -> tuple[Component, ...]:
+        """Return the ordered release-image authority."""
+
+        return tuple(
+            component for component in self.components if component.kind == "release-image"
+        )
+
 
 @lru_cache(maxsize=512)
 def _glob_regex(pattern: str) -> re.Pattern[str]:
@@ -579,6 +586,85 @@ def validate_release_image_ownership(
     return errors
 
 
+def release_image_matrix(manifest: Manifest) -> tuple[dict[str, str], ...]:
+    """Render the image workflow matrix from the component authority."""
+
+    return tuple(
+        {
+            "image": component.id,
+            "image_name": component.release_digest or "",
+            "dockerfile": component.dockerfile,
+            "context": component.build_context,
+        }
+        for component in manifest.release_components()
+    )
+
+
+def select_release_image_matrix(
+    manifest: Manifest,
+    *,
+    changed_paths: tuple[str, ...],
+    force_all: bool,
+    fallback_all: bool = False,
+) -> tuple[dict[str, str], ...]:
+    """Select release images whose manifest-owned inputs changed."""
+
+    release_components = manifest.release_components()
+    if force_all or not changed_paths:
+        selected_ids = {component.id for component in release_components}
+    else:
+        selected_ids = {
+            component.id
+            for path in changed_paths
+            for component in manifest.component_owners_for_path(path)
+            if component.kind == "release-image"
+        }
+        if any(
+            path
+            in {
+                ".github/workflows/images.yml",
+                "config/component-ownership.toml",
+                "scripts/component_ownership.py",
+            }
+            for path in changed_paths
+        ):
+            selected_ids = {component.id for component in release_components}
+    matrix = tuple(
+        entry for entry in release_image_matrix(manifest) if entry["image"] in selected_ids
+    )
+    if fallback_all and not matrix:
+        return release_image_matrix(manifest)
+    return matrix
+
+
+def validate_release_image_pair(
+    manifest: Manifest,
+    *,
+    image: str,
+    image_name: str,
+    dockerfile: str,
+    build_context: str,
+) -> list[str]:
+    """Validate an untrusted workflow matrix row against the authority."""
+
+    matches = [component for component in manifest.release_components() if component.id == image]
+    if len(matches) != 1:
+        return [f"release image id must have exactly one owner: {image}"]
+    component = matches[0]
+    observed = (image_name, dockerfile, build_context)
+    expected = (
+        component.release_digest or "",
+        component.dockerfile,
+        component.build_context,
+    )
+    if observed != expected:
+        return [
+            "release image matrix row differs from manifest: "
+            f"{image}: observed={observed!r} expected={expected!r}"
+        ]
+    return []
+
+
 def _tracked_paths(repo_root: Path) -> tuple[str, ...]:
     try:
         output = subprocess.check_output(
@@ -606,6 +692,22 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("validate", help="Validate all tracked Dockerfiles and tests.")
     query = subparsers.add_parser("query", help="Print the owners for one repository path.")
     query.add_argument("path")
+    plan_images = subparsers.add_parser(
+        "plan-images",
+        help="Write the affected release-image matrix to GitHub output.",
+    )
+    plan_images.add_argument("--changed-files", type=Path, required=True)
+    plan_images.add_argument("--github-output", type=Path, required=True)
+    plan_images.add_argument("--force-all", action="store_true")
+    plan_images.add_argument("--fallback-all", action="store_true")
+    validate_image = subparsers.add_parser(
+        "validate-image",
+        help="Validate one untrusted image workflow matrix row.",
+    )
+    validate_image.add_argument("--image", required=True)
+    validate_image.add_argument("--image-name", required=True)
+    validate_image.add_argument("--dockerfile", required=True)
+    validate_image.add_argument("--build-context", required=True)
     return parser
 
 
@@ -643,6 +745,38 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if args.command == "query":
             print(json.dumps(_query_payload(manifest, args.path), sort_keys=True))
+            return 0
+        if args.command == "plan-images":
+            changed_paths = tuple(
+                line.strip()
+                for line in args.changed_files.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+            matrix = select_release_image_matrix(
+                manifest,
+                changed_paths=changed_paths,
+                force_all=args.force_all,
+                fallback_all=args.fallback_all,
+            )
+            payload = json.dumps(matrix, separators=(",", ":"))
+            with args.github_output.open("a", encoding="utf-8") as handle:
+                handle.write(f"images={payload}\n")
+                handle.write(f"required={str(bool(matrix)).lower()}\n")
+            print(f"selected_images={payload}")
+            return 0
+        if args.command == "validate-image":
+            errors = validate_release_image_pair(
+                manifest,
+                image=args.image,
+                image_name=args.image_name,
+                dockerfile=args.dockerfile,
+                build_context=args.build_context,
+            )
+            if errors:
+                print("component ownership validation failed:", file=sys.stderr)
+                for error in errors:
+                    print(f"- {error}", file=sys.stderr)
+                return 1
             return 0
         test_count = sum(_test_language(path) is not None for path in tracked_paths)
         print(

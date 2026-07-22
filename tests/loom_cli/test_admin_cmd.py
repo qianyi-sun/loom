@@ -695,7 +695,7 @@ def test_gb10_workers_status_gets_cp_rollout_state_without_secrets(
                 "desired_states": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "2026-06-26-gb10",
                         "max_concurrent": 10,
                         "env_config_version": "gb10-env-v2",
@@ -705,7 +705,7 @@ def test_gb10_workers_status_gets_cp_rollout_state_without_secrets(
                 "nodes": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "hostname": "trt-gb10-1",
                         "apply_state": "applied",
                         "current_image_tag": "2026-06-26-gb10",
@@ -738,7 +738,7 @@ def test_gb10_workers_status_gets_cp_rollout_state_without_secrets(
     assert captured["headers"]["Authorization"] == "Bearer admin-secret"
 
     out = capsys.readouterr().out
-    assert "production/gb10-arm64" in out
+    assert "production/gb10" in out
     assert "2026-06-26-gb10" in out
     assert "trt-gb10-1" in out
     assert "applied" in out
@@ -809,7 +809,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
                 "desired_states": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "staging-new",
                         "max_concurrent": 10,
                         "env_config_version": "env-new",
@@ -820,7 +820,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
                 "nodes": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "hostname": "trt-gb10-1",
                         "apply_state": "applied",
                         "current_image_tag": "staging-old",
@@ -850,7 +850,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
             "--environment",
             "production",
             "--pool-name",
-            "gb10-arm64",
+            "gb10",
             "--release-image-tag",
             "staging-new",
             "--release-env-config-version",
@@ -877,7 +877,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_missing_active_host(
                 "desired_states": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "staging-76875ac",
                         "max_concurrent": 10,
                         "env_config_version": "staging-76875ac",
@@ -901,7 +901,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_missing_active_host(
             "--environment",
             "production",
             "--pool-name",
-            "gb10-arm64",
+            "gb10",
             "--release-image-tag",
             "staging-76875ac",
             "--release-env-config-version",
@@ -927,7 +927,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_unhealthy_active_node(
                 "desired_states": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "staging-76875ac",
                         "max_concurrent": 10,
                         "env_config_version": "staging-76875ac",
@@ -937,7 +937,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_unhealthy_active_node(
                 "nodes": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "hostname": "trt-gb10-14",
                         "apply_state": "unavailable",
                         "current_image_tag": "staging-76875ac",
@@ -987,7 +987,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_capacity_mismatch(
                 "desired_states": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "staging-76875ac",
                         "max_concurrent": 10,
                         "env_config_version": "staging-76875ac",
@@ -997,7 +997,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_capacity_mismatch(
                 "nodes": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "hostname": "trt-gb10-1",
                         "apply_state": "applied",
                         "current_image_tag": "staging-76875ac",
@@ -1047,7 +1047,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
                 "desired_states": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "staging-76875ac",
                         "max_concurrent": 10,
                         "env_config_version": "staging-76875ac",
@@ -1058,7 +1058,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
                 "nodes": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "hostname": "trt-gb10-1",
                         "apply_state": "applied",
                         "current_image_tag": "staging-76875ac",
@@ -1117,7 +1117,7 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
                 "desired_states": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "image_tag": "staging-76875ac",
                         "max_concurrent": 10,
                         "env_config_version": "staging-76875ac",
@@ -1127,7 +1127,7 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
                 "nodes": [
                     {
                         "environment": "production",
-                        "pool_name": "gb10-arm64",
+                        "pool_name": "gb10",
                         "hostname": "trt-gb10-1",
                         "apply_state": "applied",
                         "current_image_tag": "staging-76875ac",
@@ -1329,7 +1329,7 @@ def _write_environment_state_profile(path: Path) -> None:
 environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 min_slots = 0
@@ -1351,7 +1351,7 @@ max_jobs = 15
 pending_job_cap = 2
 
 [[gb10_worker_pool_desired_states]]
-pool_name = "gb10-arm64"
+pool_name = "gb10"
 image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
@@ -1413,8 +1413,8 @@ def test_environment_state_apply_puts_profile_resources(
 
     assert rc == 0
     assert [item["url"] for item in captured] == [
-        "http://cp:8080/admin/worker-pool-autoscaler-policies/staging/gb10-arm64",
-        "http://cp:8080/admin/gb10-worker-pools/staging/gb10-arm64/desired-state",
+        "http://cp:8080/admin/worker-pool-autoscaler-policies/staging/gb10",
+        "http://cp:8080/admin/gb10-worker-pools/staging/gb10/desired-state",
     ]
     assert captured[0]["headers"]["Authorization"] == "Bearer admin-secret"
     assert captured[0]["json"]["actuator"] == "slurm"
@@ -1440,7 +1440,7 @@ def test_environment_state_check_fails_with_actionable_drift(
                     "policies": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "actuator": "gb10",
                             "enabled": True,
                             "min_slots": 0,
@@ -1463,7 +1463,7 @@ def test_environment_state_check_fails_with_actionable_drift(
                     "desired_states": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "image_tag": "staging-old",
                             "max_concurrent": 10,
                             "env_config_version": "staging-old",
@@ -1501,9 +1501,9 @@ def test_environment_state_check_fails_with_actionable_drift(
     assert rc == 1
     err = capsys.readouterr().err
     assert "Environment state drift for staging" in err
-    assert "worker_pool_autoscaler_policies[staging/gb10-arm64].actuator" in err
+    assert "worker_pool_autoscaler_policies[staging/gb10].actuator" in err
     assert "desired='slurm' live='gb10'" in err
-    assert "gb10_worker_pool_desired_states[staging/gb10-arm64].image_tag" in err
+    assert "gb10_worker_pool_desired_states[staging/gb10].image_tag" in err
 
 
 def test_environment_state_check_json_reports_autoscaler_blockers(
@@ -1523,7 +1523,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
                     "policies": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "actuator": "slurm",
                             "enabled": True,
                             "min_slots": 0,
@@ -1566,7 +1566,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
                     "desired_states": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "image_tag": "staging-57a7509",
                             "max_concurrent": 10,
                             "env_config_version": "staging-57a7509",
@@ -1610,7 +1610,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
     assert body["autoscaler_blockers"] == [
         {
             "environment": "staging",
-            "pool_name": "gb10-arm64",
+            "pool_name": "gb10",
             "actuator": "slurm",
             "last_decision": "blocked",
             "last_decision_reason": "no_safe_slurm_nodes",
@@ -1647,7 +1647,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
                     "policies": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "actuator": "slurm",
                             "enabled": True,
                             "min_slots": 0,
@@ -1678,7 +1678,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
                     "desired_states": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "image_tag": "staging-57a7509",
                             "max_concurrent": 10,
                             "env_config_version": "staging-57a7509",
@@ -1795,7 +1795,7 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
                     "policies": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "actuator": "slurm",
                             "enabled": True,
                             "min_slots": 0,
@@ -1826,7 +1826,7 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
                     "desired_states": [
                         {
                             "environment": "staging",
-                            "pool_name": "gb10-arm64",
+                            "pool_name": "gb10",
                             "image_tag": "staging-57a7509",
                             "max_concurrent": 10,
                             "env_config_version": "staging-57a7509",
@@ -1848,7 +1848,7 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
             StateDrift(
                 path=(
                     "external_slurm_runner_prerequisites"
-                    "[staging/gb10-arm64].worker_token_fingerprint"
+                    "[staging/gb10].worker_token_fingerprint"
                 ),
                 desired="sha256:active123456 len=33",
                 live="sha256:stale1234567 len=28",

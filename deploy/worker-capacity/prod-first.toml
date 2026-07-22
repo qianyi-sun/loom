@@ -31,92 +31,92 @@ k8s_namespace = "loom-dev"
 
 [[hosts]]
 name = "trt-gb10-1"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-2"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-3"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-4"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-5"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-6"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-7"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "unreachable"
 reason = "Temporarily excluded pending #822 re-admission evidence"
 
 [[hosts]]
 name = "trt-gb10-8"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-9"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-10"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-11"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-12"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-13"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-14"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 
 [[hosts]]
 name = "trt-gb10-15"
-pool = "gb10-arm64"
+pool = "gb10"
 total_slots = 10
 state = "eligible"
 

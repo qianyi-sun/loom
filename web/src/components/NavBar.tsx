@@ -64,7 +64,7 @@ export default function NavBar({
     >
       <div className="px-3 lg:mb-3">
         <p className="text-lg font-bold tracking-tight text-slate-900">loom</p>
-        <p className="text-xs uppercase tracking-wider text-slate-400">
+        <p className="text-xs uppercase tracking-wider text-slate-600">
           benchmark platform
         </p>
         <div
@@ -94,7 +94,7 @@ export default function NavBar({
         ))}
         {canManageTeam ? (
           <>
-            <div className="hidden px-3 pt-3 text-xs font-semibold uppercase tracking-wider text-slate-400 lg:block">
+            <div className="hidden px-3 pt-3 text-xs font-semibold uppercase tracking-wider text-slate-600 lg:block">
               {isAdmin ? "Admin" : "Team"}
             </div>
             <NavLink
@@ -125,7 +125,7 @@ export default function NavBar({
           aria-label="Current user and team"
           className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
         >
-          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
             Signed in
           </p>
           <p className="mt-1 truncate font-medium text-slate-900">

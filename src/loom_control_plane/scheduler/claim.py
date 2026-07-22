@@ -68,6 +68,17 @@ WITH next AS (
             NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
             OR w.pool_name = t.requires_caps->>'worker_pool'
           )
+          -- #892: fence claims on a Slurm pool under active prod-pressure
+          -- drain. GB10 pools are already fenced via w.drain_state; Slurm
+          -- pools keep a single writer (the external actor), so the claim
+          -- path reads the intent directly to stop new claims immediately.
+          AND NOT EXISTS (
+            SELECT 1
+              FROM worker_pool_autoscaler_policies p
+             WHERE p.pool_name = w.pool_name
+               AND p.actuator = 'slurm'
+               AND p.prod_pressure_state->>'state' = 'draining'
+          )
      )
    ORDER BY
        (q.in_flight_count * 1.0) / NULLIF(q.fair_share_weight, 0) ASC,
