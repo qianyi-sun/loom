@@ -44,6 +44,9 @@ interface RawFrontendConfig {
   apiRouteBase?: unknown;
 }
 
+const STAGING_REHEARSAL_ROUTE_PATTERN =
+  /^(\/staging\/rehearsal\/[0-9a-f]{24})(?:\/|$)/u;
+
 function viteApiBase(): string {
   const env = (
     import.meta as unknown as { env: { VITE_API_BASE?: string } }
@@ -69,13 +72,14 @@ function normalizePath(raw: string, field: string): string {
   return raw.replace(/\/+$/u, "");
 }
 
-function detectRoutePath(location: Location | URL): string {
+function detectRoutePath(location: Pick<Location, "pathname">): string {
   const pathname = location.pathname.replace(/\/+$/u, "") || "/";
-  const rehearsal = pathname.match(
-    /^(\/dev\/rehearsal\/[0-9a-f]{24})(?:\/|$)/u,
-  );
+  const rehearsal = pathname.match(STAGING_REHEARSAL_ROUTE_PATTERN);
   if (rehearsal) return rehearsal[1];
   if (pathname === "/prod" || pathname.startsWith("/prod/")) return "/prod";
+  if (pathname === "/staging" || pathname.startsWith("/staging/")) {
+    return "/staging";
+  }
   if (pathname === "/dev" || pathname.startsWith("/dev/")) return "/dev";
   return "";
 }
@@ -288,6 +292,17 @@ export function frontendHomePath(
   locationLike: Pick<Location, "pathname"> = window.location,
 ): string {
   const pathname = locationLike.pathname.replace(/\/+$/u, "") || "/";
+  const rehearsal = pathname.match(STAGING_REHEARSAL_ROUTE_PATTERN);
+  if (rehearsal) return `${rehearsal[1]}/`;
+  if (
+    pathname === "/staging/rehearsal" ||
+    pathname.startsWith("/staging/rehearsal/")
+  ) {
+    return "/";
+  }
+  if (pathname === "/staging" || pathname.startsWith("/staging/")) {
+    return "/staging/";
+  }
   if (pathname === "/prod" || pathname.startsWith("/prod/")) return "/prod/";
   if (pathname === "/dev" || pathname.startsWith("/dev/")) return "/dev/";
   return "/";

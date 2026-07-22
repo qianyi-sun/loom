@@ -172,6 +172,12 @@ describe("frontend runtime config", () => {
     expect(frontendHomePath(new URL("https://loom.test/dev/settings"))).toBe(
       "/dev/",
     );
+    expect(frontendHomePath(new URL("https://loom.test/staging"))).toBe(
+      "/staging/",
+    );
+    expect(
+      frontendHomePath(new URL("https://loom.test/staging/library")),
+    ).toBe("/staging/");
     expect(frontendHomePath(new URL("https://loom.test/prod/monitor"))).toBe(
       "/prod/",
     );
@@ -200,5 +206,32 @@ describe("frontend runtime config", () => {
     );
     expect(config.routePath).toBe(routePath);
     expect(config.apiRouteBase).toBe(`https://yylx.world${routePath}/api`);
+  });
+
+  it("keeps recovery home links inside an exact rehearsal route prefix", () => {
+    const rehearsalId = "a5".repeat(12);
+    const routePath = `/staging/rehearsal/${rehearsalId}`;
+
+    expect(frontendHomePath(new URL(`https://loom.test${routePath}`))).toBe(
+      `${routePath}/`,
+    );
+    expect(
+      frontendHomePath(new URL(`https://loom.test${routePath}/admin/access`)),
+    ).toBe(`${routePath}/`);
+  });
+
+  it("fails closed for malformed rehearsal route near-misses", () => {
+    const nearMisses = [
+      "/staging/rehearsal",
+      `/staging/rehearsal/${"a".repeat(23)}`,
+      `/staging/rehearsal/${"A".repeat(24)}`,
+      `/staging/rehearsal/${"a".repeat(25)}`,
+    ];
+
+    for (const pathname of nearMisses) {
+      expect(frontendHomePath(new URL(`https://loom.test${pathname}`))).toBe(
+        "/",
+      );
+    }
   });
 });
