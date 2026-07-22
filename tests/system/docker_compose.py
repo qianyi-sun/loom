@@ -5,14 +5,14 @@ System tests are explicitly OUT of the default `pytest tests/` collection
 (see pyproject.toml: `addopts = "--ignore=tests/system"`). Run them with
 `pytest tests/system -v` from a host with Docker + docker-compose v2.
 
-Compose-up has TWO stages because the worker container needs a real
-worker token in its environment before it can register:
+Compose-up has FOUR ordered phases because services require an Alembic-head
+database and the worker container needs a real token before it can register:
 
-  1. Bring up infra + control-plane + gateway (worker excluded by
-     `profiles: ["worker"]`).
-  2. Run seed_test_data.py against the now-running Postgres to mint a
+  1. Bring up Postgres + MinIO, then apply Alembic migrations.
+  2. Bring up control-plane + gateway (worker excluded by its profile).
+  3. Run seed_test_data.py against the migrated Postgres to mint a
      team token + worker token + seed the fixture task.
-  3. Re-invoke `docker compose up -d` with the worker profile enabled
+  4. Re-invoke `docker compose up -d --build` with the worker profile enabled
      and `LOOM_WORKER_TOKEN` exported into the subprocess env.
 
 stack_up() returns both raw tokens so tests can use the team token for
@@ -24,17 +24,33 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
+import httpx
+
+from loom.security.redaction import redact_text
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "deploy" / "docker-compose.test.yml"
+ALEMBIC_CONFIG = REPO_ROOT / "migrations" / "alembic.ini"
+DB_URL = "postgresql+psycopg://loom:loom@localhost:55432/loom"
+CONTROL_PLANE_URL = "http://localhost:58080"
+DIAGNOSTICS_ENV = "LOOM_SYSTEM_SMOKE_DIAGNOSTICS"
+_CANARY_MAX_TIMEOUT_SEC = 30.0
+_CANARY_POLL_INTERVAL_SEC = 0.25
+_COMPOSE_INSPECT_TIMEOUT_SEC = 5.0
+_COMPOSE_DIAGNOSTICS_TIMEOUT_SEC = 15.0
+_COMPOSE_TEARDOWN_TIMEOUT_SEC = 60.0
+_TERMINAL_TRIAL_STATES = {"succeeded", "failed", "cancelled"}
 
 
 def _compose(
     *args: str,
     check: bool = True,
     env_extra: dict[str, str] | None = None,
+    timeout_sec: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
     env = os.environ.copy()
@@ -46,7 +62,7 @@ def _compose(
         env.update(env_extra)
     return subprocess.run(
         cmd, check=check, cwd=REPO_ROOT, capture_output=True, text=True,
-        env=env,
+        env=env, timeout=timeout_sec,
     )
 
 
@@ -55,7 +71,20 @@ def _wait_services_healthy(
 ) -> None:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
-        ps = _compose("ps", "--format", "json")
+        remaining = deadline - time.monotonic()
+        try:
+            ps = _compose(
+                "ps",
+                "--format",
+                "json",
+                timeout_sec=max(
+                    0.001,
+                    min(_COMPOSE_INSPECT_TIMEOUT_SEC, remaining),
+                ),
+            )
+        except subprocess.TimeoutExpired:
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            continue
         statuses = [
             json.loads(line)
             for line in ps.stdout.splitlines()
@@ -80,34 +109,395 @@ def stack_up(
     task_id: str = "hello-world",
     timeout_sec: float = 300.0,
 ) -> tuple[str, str]:
-    """Two-stage compose-up. Returns (team_token, worker_token)."""
-    # Stage 1: deps + control plane + gateway. Worker excluded by profile.
+    """Bootstrap the system stack and clean partial state on any failure."""
+    try:
+        return _stack_up(task_id=task_id, timeout_sec=timeout_sec)
+    except BaseException:
+        stack_down_with_diagnostics(failed=True)
+        raise
+
+
+def _stack_up(
+    task_id: str,
+    timeout_sec: float,
+) -> tuple[str, str]:
+    """Ordered system-stack bootstrap. Returns (team_token, worker_token)."""
+    # Stage 1: start stateful dependencies, then apply migrations explicitly.
+    # Long-running services validate schema-at-head and intentionally never
+    # auto-migrate, so they must not be started against a blank database.
+    _compose("up", "-d", "postgres", "minio")
+    _wait_services_healthy(["postgres", "minio"], timeout_sec=timeout_sec)
+    migration_env = os.environ.copy()
+    migration_env["LOOM_DB_URL"] = DB_URL
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "alembic",
+            "-c",
+            str(ALEMBIC_CONFIG),
+            "upgrade",
+            "head",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        env=migration_env,
+    )
+
+    # Stage 2: start application services. Worker remains excluded by profile.
     _compose("up", "-d", "--build")
     _wait_services_healthy(
         ["postgres", "minio", "llm-gateway", "control-plane"],
         timeout_sec=timeout_sec,
     )
 
-    # Stage 2: mint a team + worker token (and seed the fixture).
+    # Stage 3: mint a team + worker token (and seed the fixture).
     seed = subprocess.run(
-        ["python", "scripts/seed_test_data.py",
+        [sys.executable, "scripts/seed_test_data.py",
          "--task-id", task_id, "--print", "both"],
         check=True, cwd=REPO_ROOT, capture_output=True, text=True,
     )
     team_token, worker_token = seed.stdout.strip().splitlines()[:2]
 
-    # Stage 3: start the worker with the real token wired in.
+    # Stage 4: start the worker with the real token wired in.
     _compose(
-        "--profile", "worker", "up", "-d",
+        "--profile", "worker", "up", "-d", "--build", "--no-deps", "worker",
         env_extra={"LOOM_WORKER_TOKEN": worker_token},
     )
     _wait_services_healthy(["worker"], timeout_sec=60.0)
+    _verify_worker_claim_canary(team_token, timeout_sec=_CANARY_MAX_TIMEOUT_SEC)
 
     return team_token, worker_token
 
 
 def stack_down() -> None:
-    _compose("--profile", "worker", "down", "-v", check=False)
+    try:
+        _compose(
+            "--profile",
+            "worker",
+            "down",
+            "-v",
+            "--remove-orphans",
+            check=False,
+            timeout_sec=_COMPOSE_TEARDOWN_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "warning: Compose teardown exceeded its bounded timeout",
+            file=sys.stderr,
+        )
+
+
+def _response_json(response: httpx.Response, *, operation: str) -> dict[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        message = f"worker claim canary {operation} returned invalid JSON"
+        raise RuntimeError(message) from None
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"worker claim canary {operation} returned a non-object payload",
+        )
+    return payload
+
+
+def _canary_request(
+    method: str,
+    url: str,
+    *,
+    deadline: float,
+    headers: dict[str, str],
+    json_body: dict[str, object] | None = None,
+    retry_connect_errors: bool = False,
+) -> httpx.Response:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("worker claim canary exceeded its 30 second deadline")
+        try:
+            return httpx.request(
+                method,
+                url,
+                headers=headers,
+                json=json_body,
+                timeout=max(0.001, min(5.0, remaining)),
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if not retry_connect_errors or time.monotonic() >= deadline:
+                # Keep request headers (and therefore the team token) out of failures.
+                raise RuntimeError(
+                    "worker claim canary local API request failed",
+                ) from None
+            _sleep_for_canary_poll(deadline)
+        except httpx.HTTPError:
+            # Keep request headers (and therefore the team token) out of failures.
+            raise RuntimeError("worker claim canary local API request failed") from None
+
+
+def _worker_container_running(*, deadline: float) -> bool | None:
+    """Return the worker's confirmed running state, or None if uninspectable."""
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    try:
+        result = _compose(
+            "--profile",
+            "worker",
+            "ps",
+            "-a",
+            "--format",
+            "json",
+            "worker",
+            check=False,
+            timeout_sec=max(0.001, min(5.0, remaining)),
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode != 0:
+        return None
+    statuses: list[dict[str, object]] = []
+    try:
+        decoded = json.loads(result.stdout)
+        if isinstance(decoded, dict):
+            statuses = [decoded]
+        elif isinstance(decoded, list):
+            statuses = [row for row in decoded if isinstance(row, dict)]
+    except json.JSONDecodeError:
+        try:
+            statuses = [
+                row
+                for line in result.stdout.splitlines()
+                if line.strip()
+                and isinstance((row := json.loads(line)), dict)
+            ]
+        except json.JSONDecodeError:
+            return None
+    worker = next(
+        (row for row in statuses if row.get("Service") == "worker"),
+        None,
+    )
+    if worker is None:
+        return None
+    return str(worker.get("State", "")).lower() == "running"
+
+
+def _require_worker_running(*, deadline: float) -> None:
+    running = _worker_container_running(deadline=deadline)
+    if running is False:
+        raise RuntimeError(
+            "worker container exited during the hello-world claim canary",
+        )
+
+
+def _sleep_for_canary_poll(deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        time.sleep(min(_CANARY_POLL_INTERVAL_SEC, remaining))
+
+
+def _verify_worker_claim_canary(
+    team_token: str,
+    *,
+    timeout_sec: float = _CANARY_MAX_TIMEOUT_SEC,
+) -> None:
+    """Prove the healthy worker can claim a local hello-world trial.
+
+    The entire probe is capped at 30 seconds. It observes the worker container
+    while polling, cancels the claimed trial, and waits for a terminal state so
+    the session starts without a canary trial still consuming worker capacity.
+    """
+
+    total_timeout = min(max(timeout_sec, 0.1), _CANARY_MAX_TIMEOUT_SEC)
+    started_at = time.monotonic()
+    deadline = started_at + total_timeout
+    # Reserve up to five seconds (or 20% for very small unit-test deadlines)
+    # for cancellation and its terminal-state observation.
+    cancel_budget = min(5.0, total_timeout * 0.2)
+    claim_deadline = deadline - cancel_budget
+    headers = {"Authorization": f"Bearer {team_token}"}
+    trial_id: str | None = None
+    cancel_attempted = False
+
+    try:
+        response = _canary_request(
+            "POST",
+            f"{CONTROL_PLANE_URL}/trials",
+            deadline=claim_deadline,
+            headers=headers,
+            json_body={
+                "task_id": "hello-world",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            retry_connect_errors=True,
+        )
+        if response.status_code != 201:
+            raise RuntimeError(
+                "worker claim canary trial submission failed "
+                f"with HTTP {response.status_code}",
+            )
+        submitted = _response_json(response, operation="submission")
+        raw_trial_id = submitted.get("trial_id")
+        if not isinstance(raw_trial_id, str) or not raw_trial_id:
+            raise RuntimeError("worker claim canary submission omitted trial_id")
+        trial_id = raw_trial_id
+
+        while time.monotonic() < claim_deadline:
+            _require_worker_running(deadline=claim_deadline)
+            response = _canary_request(
+                "GET",
+                f"{CONTROL_PLANE_URL}/trials/{trial_id}",
+                deadline=claim_deadline,
+                headers=headers,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(
+                    "worker claim canary status read failed "
+                    f"with HTTP {response.status_code}",
+                )
+            status = _response_json(response, operation="status read")
+            attempt_count = status.get("attempt_count")
+            claimed = (
+                isinstance(attempt_count, int)
+                and not isinstance(attempt_count, bool)
+                and attempt_count > 0
+            ) or bool(status.get("claimed_at"))
+            if claimed:
+                break
+            state = status.get("state")
+            if state in _TERMINAL_TRIAL_STATES:
+                raise RuntimeError(
+                    "hello-world canary reached a terminal state without claim evidence",
+                )
+            _sleep_for_canary_poll(claim_deadline)
+        else:
+            raise RuntimeError(
+                "worker did not claim the hello-world canary within the bounded deadline",
+            )
+
+        _require_worker_running(deadline=deadline)
+        cancel_attempted = True
+        response = _canary_request(
+            "POST",
+            f"{CONTROL_PLANE_URL}/trials/{trial_id}/cancel",
+            deadline=deadline,
+            headers=headers,
+        )
+        if response.status_code not in (200, 409):
+            raise RuntimeError(
+                "worker claim canary cancellation failed "
+                f"with HTTP {response.status_code}",
+            )
+
+        while time.monotonic() < deadline:
+            _require_worker_running(deadline=deadline)
+            response = _canary_request(
+                "GET",
+                f"{CONTROL_PLANE_URL}/trials/{trial_id}",
+                deadline=deadline,
+                headers=headers,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(
+                    "worker claim canary cancellation status read failed "
+                    f"with HTTP {response.status_code}",
+                )
+            status = _response_json(response, operation="cancellation status read")
+            if status.get("state") in _TERMINAL_TRIAL_STATES:
+                return
+            _sleep_for_canary_poll(deadline)
+        raise RuntimeError("worker claim canary cancellation did not become terminal")
+    except BaseException:
+        # A submitted-but-unclaimed trial should not leak into the real suite.
+        # Best effort only: preserve the primary diagnostic and the 30s cap.
+        if trial_id is not None and not cancel_attempted and time.monotonic() < deadline:
+            try:
+                _canary_request(
+                    "POST",
+                    f"{CONTROL_PLANE_URL}/trials/{trial_id}/cancel",
+                    deadline=deadline,
+                    headers=headers,
+                )
+            except RuntimeError:
+                pass
+        raise
+
+
+def _redact_diagnostics(text: str) -> str:
+    return redact_text(text)
+
+
+def preserve_compose_diagnostics() -> None:
+    """Capture Compose state while containers still exist, with redaction."""
+
+    sections: list[str] = []
+    for heading, args in (
+        ("compose ps -a", ("--profile", "worker", "ps", "-a")),
+        (
+            "compose logs --tail=300",
+            ("--profile", "worker", "logs", "--no-color", "--tail=300"),
+        ),
+    ):
+        try:
+            result = _compose(
+                *args,
+                check=False,
+                timeout_sec=_COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
+            )
+            content = f"{result.stdout}{result.stderr}".rstrip() or (
+                f"<no output; exit code {result.returncode}>"
+            )
+        except subprocess.TimeoutExpired:
+            content = "capture exceeded its bounded timeout"
+        sections.append(f"===== {heading} =====\n{content}".rstrip())
+    project_name = os.environ.get("COMPOSE_PROJECT_NAME", COMPOSE_FILE.parent.name)
+    try:
+        raw_ps = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--no-trunc",
+                "--filter",
+                f"label=com.docker.compose.project={project_name}",
+                "--format",
+                "{{.Names}}\t{{.Image}}\t{{.Status}}",
+            ],
+            check=False,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=_COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
+        )
+        raw_content = f"{raw_ps.stdout}{raw_ps.stderr}".rstrip() or (
+            f"<no output; exit code {raw_ps.returncode}>"
+        )
+    except subprocess.TimeoutExpired:
+        raw_content = "capture exceeded its bounded timeout"
+    sections.append(f"===== docker ps for project {project_name} =====\n{raw_content}")
+    payload = _redact_diagnostics("\n\n".join(sections)) + "\n"
+    destination = os.environ.get(DIAGNOSTICS_ENV)
+    if destination:
+        Path(destination).write_text(payload, encoding="utf-8")
+    else:
+        print(payload, file=sys.stderr, end="")
+
+
+def stack_down_with_diagnostics(*, failed: bool) -> None:
+    """Preserve failure evidence before the destructive Compose teardown."""
+
+    try:
+        if failed:
+            try:
+                preserve_compose_diagnostics()
+            except Exception as exc:  # diagnostics must not mask the test failure
+                print(
+                    "warning: failed to preserve Compose diagnostics: "
+                    f"{redact_text(str(exc))}",
+                    file=sys.stderr,
+                )
+    finally:
+        stack_down()
 
 
 def kill_service(name: str) -> None:
@@ -135,7 +525,7 @@ def run_seed(task_id: str = "hello-world", which: str = "team") -> str:
     token (stripped). `which` is forwarded to --print.
     """
     out = subprocess.run(
-        ["python", "scripts/seed_test_data.py",
+        [sys.executable, "scripts/seed_test_data.py",
          "--task-id", task_id, "--print", which],
         check=True, cwd=REPO_ROOT, capture_output=True, text=True,
     )

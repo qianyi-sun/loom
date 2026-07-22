@@ -55,6 +55,12 @@ PLANNER_PATHS = {
     "tests/ops/test_plan_ci_validations.py",
 }
 
+OWNERSHIP_AUTHORITY_PATHS = {
+    "config/component-ownership.toml",
+    "scripts/component_ownership.py",
+    "tests/ops/test_component_ownership_manifest.py",
+}
+
 PROTECTED_STAGING_ROLLOUT_EXACT = {
     "deploy/environments/staging.cluster.toml",
     "deploy/environment-state/staging.toml",
@@ -224,6 +230,10 @@ def plan_validations(
         for name in HEAVY_CHECKS:
             select(name, "planner-change")
 
+    if any(path in OWNERSHIP_AUTHORITY_PATHS for path in paths):
+        for name in HEAVY_CHECKS:
+            select(name, "ownership-authority-change")
+
     if any(_is_protected_staging_rollout_path(path) for path in paths):
         for name in HEAVY_CHECKS:
             select(name, "protected-staging-rollout")
@@ -346,7 +356,11 @@ def plan_validations(
     for path in paths:
         if _is_documentation_path(path):
             continue
-        matched_owner = path in PLANNER_PATHS or _is_protected_staging_rollout_path(path)
+        matched_owner = (
+            path in PLANNER_PATHS
+            or path in OWNERSHIP_AUTHORITY_PATHS
+            or _is_protected_staging_rollout_path(path)
+        )
         if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
             select("integration", f"path:{path}")
             matched_owner = True

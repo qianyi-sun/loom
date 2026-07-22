@@ -7,6 +7,9 @@ description = "Smallest possible Loom task. Used as canary in CI."
 
 [environment]
 os = "linux"
+# The canary uses a multi-architecture Python base image and must be claimable
+# by both x86_64 CI workers and arm64 developer machines.
+cpu_arch = "any"
 # Custom image so the agent env has pytest pre-installed (v1 verifier
 # env mode is shared; separate-env support is v1.5).
 dockerfile = "environment/Dockerfile"

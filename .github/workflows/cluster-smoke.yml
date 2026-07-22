@@ -125,7 +125,7 @@ jobs:
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -148,8 +148,18 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Sync python deps (with [cluster] and [rollout] extras)
-        run: uv sync --extra cluster --extra rollout
+      - name: Sync python deps (with [dev], [cluster], and [rollout] extras)
+        run: uv sync --extra dev --extra cluster --extra rollout
+
+      - name: Pytest — manifest-owned cluster smoke lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t test_paths < <(
+            uv run python scripts/component_ownership.py test-paths --lane cluster-smoke
+          )
+          [[ ${#test_paths[@]} -gt 0 ]]
+          uv run pytest "${test_paths[@]}"
 
       - name: Create kind cluster
         run: |

@@ -9,8 +9,6 @@ from pathlib import Path, PurePosixPath
 import pytest
 import scripts.component_ownership as component_ownership
 
-from loom_cli.rollout.steps.s02_build_images import ROLLOUT_IMAGES
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -32,7 +30,7 @@ def test_load_manifest_parses_typed_component_and_test_suite(tmp_path: Path) -> 
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["tests-root"]
 smoke_owners = ["cluster-smoke"]
 scan_owners = ["image-scan"]
@@ -61,20 +59,23 @@ include_paths = ["tests/unit/**/*.py"]
 
     manifest = component_ownership.load_manifest(manifest_path)
 
-    assert manifest.schema_version == 1
+    assert manifest.schema_version == 2
     assert manifest.smoke_owners == ("cluster-smoke",)
     assert manifest.scan_owners == ("image-scan",)
     assert manifest.attestation_owners == ("release-attestation",)
     assert manifest.components[0].release_digest == "loom-example"
+    assert manifest.components[0].rollout_role == "none"
     assert manifest.test_suites[0].lane == "tests-root"
-    assert manifest.test_suites[0].runtime_payload is False
+    assert manifest.execution_policies == ()
+    assert manifest.execution_cases == ()
+    assert manifest.test_suites[0].execution_policy is None
 
 
 def test_load_manifest_rejects_unknown_keys(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "example"
@@ -109,7 +110,7 @@ def test_load_manifest_rejects_non_integer_schema_version(
 
     with pytest.raises(
         component_ownership.ManifestError,
-        match="schema_version must be the integer 1",
+        match="schema_version must be the integer 2",
     ):
         component_ownership.load_manifest(manifest_path)
 
@@ -122,7 +123,7 @@ def test_load_manifest_rejects_unsafe_repository_paths(
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         f"""
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "example"
@@ -143,11 +144,11 @@ runtime_policy = "start"
         component_ownership.load_manifest(manifest_path)
 
 
-def test_test_suite_must_choose_lane_or_runtime_payload_not_both(tmp_path: Path) -> None:
+def test_legacy_runtime_payload_boolean_is_rejected(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["tests-root"]
 
 [[test_suites]]
@@ -160,9 +161,94 @@ include_paths = ["tests/fixtures/**/*.py"]
         encoding="utf-8",
     )
 
+    with pytest.raises(component_ownership.ManifestError, match="unknown keys: runtime_payload"):
+        component_ownership.load_manifest(manifest_path)
+
+
+def test_execution_policy_must_be_declared_and_assigned_to_a_lane(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 2
+ci_lanes = ["runtime-payload"]
+
+[[execution_policies]]
+id = "virtual-workspace-v1"
+language = "python"
+runner = "python-zero-arg-v1"
+container_image = "python@sha256:baf89808ec37adeaab83cec287adb4a2afa4a11c1d51e961c7ec737877e61af6"
+virtual_root = "/workspace"
+
+[[test_suites]]
+id = "fixture-tests"
+language = "python"
+lane = "runtime-payload"
+execution_policy = "undeclared-policy"
+include_paths = ["tests/fixtures/**/*.py"]
+""".strip(),
+        encoding="utf-8",
+    )
+
     with pytest.raises(
-        component_ownership.ManifestError, match="exactly one of lane or runtime_payload"
+        component_ownership.ManifestError,
+        match="uses undeclared execution policy: undeclared-policy",
     ):
+        component_ownership.load_manifest(manifest_path)
+
+
+@pytest.mark.parametrize(
+    "container_image",
+    [
+        "python:3.11-slim",
+        "python@sha256:deadbeef",
+        "Python@sha256:" + "a" * 64,
+    ],
+)
+def test_execution_policy_requires_full_lowercase_image_digest(
+    tmp_path: Path,
+    container_image: str,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        f"""
+schema_version = 2
+
+[[execution_policies]]
+id = "virtual-workspace-v1"
+language = "python"
+runner = "python-zero-arg-v1"
+container_image = "{container_image}"
+virtual_root = "/workspace"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        component_ownership.ManifestError,
+        match="must be pinned by a full sha256 digest",
+    ):
+        component_ownership.load_manifest(manifest_path)
+
+
+def test_execution_policy_id_requires_explicit_version(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 2
+
+[[execution_policies]]
+id = "virtual-workspace"
+language = "python"
+runner = "python-zero-arg-v1"
+container_image = "python@sha256:baf89808ec37adeaab83cec287adb4a2afa4a11c1d51e961c7ec737877e61af6"
+virtual_root = "/workspace"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(component_ownership.ManifestError, match="explicit -vN version"):
         component_ownership.load_manifest(manifest_path)
 
 
@@ -172,7 +258,7 @@ def test_test_owner_matcher_applies_exclusions_and_fails_on_unknown_paths(
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["integration", "integration-docker"]
 
 [[test_suites]]
@@ -205,7 +291,7 @@ def test_component_matcher_returns_all_affected_components(tmp_path: Path) -> No
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "service"
@@ -246,7 +332,7 @@ runtime_policy = "start"
 
 def test_validator_fails_closed_for_unowned_dockerfile(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
-    manifest_path.write_text("schema_version = 1\n", encoding="utf-8")
+    manifest_path.write_text("schema_version = 2\n", encoding="utf-8")
     dockerfile = tmp_path / "deploy/Dockerfile.new-runtime"
     dockerfile.parent.mkdir()
     dockerfile.write_text("FROM scratch\n", encoding="utf-8")
@@ -278,7 +364,7 @@ def test_validator_fails_closed_for_unowned_test_files(
     language: str,
 ) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
-    manifest_path.write_text("schema_version = 1\n", encoding="utf-8")
+    manifest_path.write_text("schema_version = 2\n", encoding="utf-8")
     target = tmp_path / test_path
     target.parent.mkdir(parents=True)
     target.write_text("# test\n", encoding="utf-8")
@@ -297,7 +383,7 @@ def test_validator_rejects_duplicate_release_digest_ownership(tmp_path: Path) ->
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "one"
@@ -359,7 +445,7 @@ def test_component_kind_enforces_release_and_runtime_policy_contract(
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         f"""
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "example"
@@ -421,7 +507,7 @@ def test_validator_requires_any_docker_marked_pytest_module_in_docker_lane(
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["tests-root"]
 
 [[test_suites]]
@@ -454,7 +540,7 @@ def test_validator_ignores_docker_marker_text_inside_strings(tmp_path: Path) -> 
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["tests-root"]
 
 [[test_suites]]
@@ -524,7 +610,7 @@ def test_validator_rejects_duplicate_component_ids(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "duplicate"
@@ -571,7 +657,7 @@ def test_validator_rejects_component_dockerfile_that_is_not_tracked(tmp_path: Pa
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "missing"
@@ -602,7 +688,7 @@ def test_validator_rejects_missing_build_context(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "example"
@@ -636,7 +722,7 @@ def test_validator_requires_source_paths_to_own_component_dockerfile(tmp_path: P
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "example"
@@ -698,7 +784,7 @@ def test_validator_derives_release_or_payload_kind_from_dockerfile_location(
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         f"""
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "example"
@@ -735,7 +821,7 @@ def test_release_image_validator_rejects_digest_name_mismatch(tmp_path: Path) ->
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "service"
@@ -766,14 +852,50 @@ runtime_policy = "start"
 
 def test_rollout_release_images_have_exact_manifest_owner() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    rollout_images = component_ownership.release_images_for_runtime_policy(
+        manifest,
+        runtime_policy="start",
+    )
 
     assert (
         component_ownership.validate_release_image_ownership(
             manifest,
-            ROLLOUT_IMAGES,
+            tuple(
+                (entry["image_name"], entry["dockerfile"])
+                for entry in rollout_images
+            ),
         )
         == []
     )
+    assert len(rollout_images) == 7
+
+
+def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    primary = component_ownership.release_images_for_rollout_role(
+        manifest,
+        rollout_role="primary",
+    )
+    auxiliary = component_ownership.release_images_for_rollout_role(
+        manifest,
+        rollout_role="auxiliary",
+    )
+    primary_names = {entry["image_name"] for entry in primary}
+    auxiliary_names = {entry["image_name"] for entry in auxiliary}
+
+    assert len(primary) == 7
+    assert len(auxiliary) == 2
+    assert not primary_names & auxiliary_names
+    assert auxiliary_names == {
+        "loom-rehearsal-postgres",
+        "loom-staging-admin-browser-smoke",
+    }
+    assert {
+        component.release_digest
+        for component in manifest.release_components()
+        if "sandbox" in component.id
+    }.isdisjoint(primary_names | auxiliary_names)
 
 
 def test_release_image_matrix_is_derived_from_all_release_components() -> None:
@@ -888,11 +1010,180 @@ def test_release_image_pair_rejects_matrix_tampering() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "lane",
+    [
+        "tests-root",
+        "tests-packages",
+        "integration",
+        "integration-docker",
+        "runtime-payload",
+    ],
+)
+def test_required_ci_lane_paths_are_derived_from_manifest(lane: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    tracked_paths = component_ownership._tracked_paths(REPO_ROOT)
+
+    paths = component_ownership.test_paths_for_lane(
+        manifest,
+        tracked_paths=tracked_paths,
+        lane=lane,
+    )
+
+    assert paths
+    assert all(manifest.test_owner_for_path(path).lane == lane for path in paths)
+
+
+def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
+    manifest = component_ownership.load_manifest(
+        REPO_ROOT / "config/component-ownership.toml",
+    )
+    tracked_paths = component_ownership._tracked_paths(REPO_ROOT)
+    lane_paths = component_ownership.test_paths_for_lane(
+        manifest,
+        tracked_paths=tracked_paths,
+        lane="runtime-payload",
+    )
+
+    assert len(lane_paths) == 11
+    policy_paths = {
+        path
+        for policy in manifest.execution_policies
+        for path in component_ownership.test_paths_for_policy(
+            manifest,
+            tracked_paths=tracked_paths,
+            policy=policy.id,
+        )
+    }
+    assert len(policy_paths) == 11
+    assert policy_paths == set(lane_paths)
+    assert all(
+        manifest.test_owner_for_path(path).execution_policy is not None
+        for path in policy_paths
+    )
+
+
+def test_root_lane_includes_previously_unexecuted_owned_directories() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    paths = component_ownership.test_paths_for_lane(
+        manifest,
+        tracked_paths=component_ownership._tracked_paths(REPO_ROOT),
+        lane="tests-root",
+    )
+
+    assert any(path.startswith("tests/loom_config/") for path in paths)
+    assert any(path.startswith("tests/loom_egress_xds/") for path in paths)
+
+
+@pytest.mark.parametrize(
+    ("lane", "strategy"),
+    [("tests-root", "round-robin"), ("integration", "contiguous")],
+)
+def test_manifest_lane_shards_are_disjoint_and_complete(
+    lane: str,
+    strategy: str,
+) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    paths = component_ownership.test_paths_for_lane(
+        manifest,
+        tracked_paths=component_ownership._tracked_paths(REPO_ROOT),
+        lane=lane,
+    )
+
+    shards = [
+        set(
+            component_ownership.shard_paths(
+                paths,
+                shard_index=index,
+                shard_count=2,
+                strategy=strategy,
+            )
+        )
+        for index in range(2)
+    ]
+
+    assert shards[0].isdisjoint(shards[1])
+    assert set().union(*shards) == set(paths)
+    if strategy == "contiguous":
+        first_shard = component_ownership.shard_paths(
+            paths,
+            shard_index=0,
+            shard_count=2,
+            strategy=strategy,
+        )
+        assert first_shard == paths[: len(first_shard)]
+
+
+def test_contiguous_sharding_limits_assignment_churn_from_a_new_early_path() -> None:
+    paths = tuple(f"tests/integration/test_{index:03d}.py" for index in range(20))
+    original = {
+        path: shard_index
+        for shard_index in range(2)
+        for path in component_ownership.shard_paths(
+            paths,
+            shard_index=shard_index,
+            shard_count=2,
+            strategy="contiguous",
+        )
+    }
+    expanded = ("tests/integration/test_000_new.py", *paths)
+    updated = {
+        path: shard_index
+        for shard_index in range(2)
+        for path in component_ownership.shard_paths(
+            expanded,
+            shard_index=shard_index,
+            shard_count=2,
+            strategy="contiguous",
+        )
+    }
+
+    assert sum(original[path] != updated[path] for path in paths) <= 1
+
+
+def test_lane_execution_excludes_conftest_and_helper_modules() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    paths = component_ownership.test_paths_for_lane(
+        manifest,
+        tracked_paths=component_ownership._tracked_paths(REPO_ROOT),
+        lane="tests-packages",
+    )
+
+    assert not any(Path(path).name == "conftest.py" for path in paths)
+    assert all(
+        Path(path).name.startswith("test_") or Path(path).name.endswith("_test.py")
+        for path in paths
+    )
+
+
+def test_test_path_query_rejects_undeclared_lane() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    with pytest.raises(component_ownership.ManifestError, match="undeclared CI lane"):
+        component_ownership.test_paths_for_lane(
+            manifest,
+            tracked_paths=(),
+            lane="typo-lane",
+        )
+
+    with pytest.raises(
+        component_ownership.ManifestError,
+        match="undeclared execution policy",
+    ):
+        component_ownership.test_paths_for_policy(
+            manifest,
+            tracked_paths=(),
+            policy="typo-policy",
+        )
+
+
 def test_load_manifest_rejects_unknown_test_language(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["unknown"]
 
 [[test_suites]]
@@ -912,7 +1203,7 @@ def test_validator_requires_dockerfile_inside_build_context(tmp_path: Path) -> N
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "example"
@@ -990,7 +1281,7 @@ def test_release_image_validator_rejects_duplicate_consumer_pairs(tmp_path: Path
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "service"
@@ -1024,7 +1315,7 @@ def test_load_manifest_rejects_lane_not_declared_in_registry(tmp_path: Path) -> 
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["integration"]
 
 [[test_suites]]
@@ -1044,7 +1335,7 @@ def test_validator_rejects_stale_component_source_pattern(tmp_path: Path) -> Non
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "service"
@@ -1078,7 +1369,7 @@ def test_validator_rejects_stale_test_include_and_exclude_patterns(tmp_path: Pat
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["tests-root"]
 
 [[test_suites]]
@@ -1124,7 +1415,7 @@ def test_load_manifest_rejects_non_slug_component_identity_fields(
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         f"""
-schema_version = 1
+schema_version = 2
 
 [[components]]
 id = "{values["id"]}"
@@ -1172,7 +1463,7 @@ def test_validator_rejects_undeclared_component_owner(
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         f"""
-schema_version = 1
+schema_version = 2
 smoke_owners = ["staging-smoke"]
 scan_owners = ["images"]
 attestation_owners = ["release-provenance"]
@@ -1211,7 +1502,7 @@ def test_validator_rejects_unused_lane_and_component_owner_registry_entries(
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
         """
-schema_version = 1
+schema_version = 2
 ci_lanes = ["tests-root", "unused-lane"]
 smoke_owners = ["staging-smoke", "unused-smoke"]
 scan_owners = ["images", "unused-scan"]

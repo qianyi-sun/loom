@@ -24,7 +24,12 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_relative_path,
     rollout_cluster_config,
 )
-from loom_cli.rollout.steps.s02_build_images import ROLLOUT_IMAGES, image_tag
+from loom_cli.rollout.steps.s02_build_images import (
+    _matrix_digest,
+    image_tag,
+    rollout_images,
+    rollout_images_from_candidate,
+)
 from loom_cli.rollout.steps.s10_env_state import (
     _is_gb10_node_status_drift_only,
     _profile_path_for,
@@ -235,6 +240,7 @@ class ReleaseGateStep(SubcommandStep):
     name = "release-gate"
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
+        images = rollout_images_from_candidate(ctx)
         return {
             "admin_token_source": ctx.admin_token_source,
             "expect_admin_token_fingerprint": ctx.expect_admin_token_fingerprint,
@@ -252,6 +258,7 @@ class ReleaseGateStep(SubcommandStep):
                 if ctx.environment == "staging" and ctx.rollout_root == _STAGING_ROLLOUT_ROOT
                 else None
             ),
+            "rollout_image_matrix_sha256": _matrix_digest(images),
         }
 
     def release_manifest_path(self, ctx: RolloutContext, step_dir: StepDir) -> Path:
@@ -507,15 +514,22 @@ class ReleaseGateStep(SubcommandStep):
         rendered_images = _rendered_deployment_images(
             rendered_path.read_text(encoding="utf-8"),
         )
-        managed_images = {image_tag(image, ctx) for image, _ in ROLLOUT_IMAGES}
-        rendered_managed_images = sorted(
-            {
-                image
-                for by_container in rendered_images.values()
-                for image in by_container.values()
-                if image in managed_images
-            }
-        )
+        managed_images = {
+            image_tag(image, ctx) for image, _, _ in rollout_images(ctx, step_dir)
+        }
+        rendered_release_images = {
+            image
+            for by_container in rendered_images.values()
+            for image in by_container.values()
+            if _repo_part(image).split("/")[-1].startswith("loom-")
+        }
+        unexpected = rendered_release_images - managed_images
+        if unexpected:
+            raise ValueError(
+                "rendered release image set contains images absent from the "
+                f"candidate rollout matrix: {sorted(unexpected)}"
+            )
+        rendered_managed_images = sorted(rendered_release_images)
         if not rendered_managed_images:
             raise ValueError(
                 "rendered manifest does not reference any release-managed "

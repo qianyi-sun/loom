@@ -147,11 +147,18 @@ prevents workflow-to-documentation drift.
 The machine-readable ownership authority lives at
 `config/component-ownership.toml`. Its fail-closed validator owns the schema,
 all tracked Dockerfile and test-path assignments, allowed CI lanes, component
-owner registries, and rollout image identity checks. The images workflow now
-derives its nine-image build matrix, build contexts, release names, and
-changed-path selection directly from the authority. Planner, staging, rollout,
-release, and test-lane consumers remain staged #788 work; this slice alone is
-not evidence that every downstream list is generated from one source.
+owner registries, runtime-payload execution policies, and rollout image identity
+checks. The images workflow derives its eleven-image release matrix, build
+contexts, release names, and changed-path selection directly from the authority.
+Ordinary pytest lanes and the isolated runtime-payload lane derive their exact
+inputs from the same source. Runtime payloads execute one file per read-only, networkless,
+resource-limited container, using a digest-pinned image and a per-file minimal
+synthetic passing-workspace fixture case;
+that result is verifier-conformance evidence, not real task or trial success.
+Rollout build/load and expected-image evidence reuse a nine-image matrix generated
+from the fixed candidate worktree's explicitly tagged seven primary and two
+auxiliary components. The two sandbox conformance images remain outside the
+rollout matrix.
 
 GitHub settings are part of the acceptance evidence:
 

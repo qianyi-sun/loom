@@ -26,7 +26,6 @@ services:
       MINIO_ROOT_PASSWORD: loomtest
     ports:
       - "59000:9000"
-      - "59001:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 2s
@@ -41,6 +40,8 @@ services:
     environment:
       LOOM_GW_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
       LOOM_GW_ANTHROPIC_API_KEY: stub-key
+      # Test-only shared key. MUST match LOOM_CP_STEP_JWT_SIGNING_KEY.
+      LOOM_GW_STEP_JWT_SIGNING_KEY: test-step-jwt-signing-key-do-not-use-in-prod
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,6 +59,8 @@ services:
       LOOM_CP_MINIO_ACCESS_KEY: loomtest
       LOOM_CP_MINIO_SECRET_KEY: loomtest
       LOOM_CP_LLM_GATEWAY_URL: http://llm-gateway:9100
+      # Test-only shared key. MUST match LOOM_GW_STEP_JWT_SIGNING_KEY.
+      LOOM_CP_STEP_JWT_SIGNING_KEY: test-step-jwt-signing-key-do-not-use-in-prod
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,9 +87,21 @@ services:
       LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000
       LOOM_WORKER_MINIO_ACCESS_KEY: loomtest
       LOOM_WORKER_MINIO_SECRET_KEY: loomtest
+      # System-test tasks are seeded with `fixture://<task_id>` sources; the
+      # worker materializes them from this test-only, read-only fixtures root.
+      LOOM_WORKER_FIXTURES_ROOT: /app/tests/fixtures/tasks
+      # Keep cancellation observation fast for the bounded startup canary.
+      # Production keeps the schema-owned default; this applies only here.
+      LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC: "0.1"
+      # The compose suite validates worker execution, not the host-pressure
+      # admission policy. Docker Desktop and hosted runners expose different
+      # swap/PSI values; keep those host signals from making system smoke
+      # wait five minutes or fail before it can build the fixture image.
+      LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED: "false"
     profiles: ["worker"]
     depends_on:
       control-plane:
         condition: service_started
     volumes:
+      - ../tests/fixtures/tasks:/app/tests/fixtures/tasks:ro
       - /var/run/docker.sock:/var/run/docker.sock

@@ -26,6 +26,11 @@ AUXILIARY_ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
     ("loom-rehearsal-postgres", "deploy/Dockerfile.rehearsal-postgres"),
 )
 ALL_BUILD_IMAGES = ROLLOUT_IMAGES + AUXILIARY_ROLLOUT_IMAGES
+RolloutImage = tuple[str, str, str]
+RolloutImagePlan = tuple[RolloutImage, ...]
+DEFAULT_ROLLOUT_IMAGE_PLAN: RolloutImagePlan = tuple(
+    (name, dockerfile, ".") for name, dockerfile in ALL_BUILD_IMAGES
+)
 REVISION_LABEL = "org.opencontainers.image.revision"
 BROWSER_IMAGE = "loom-staging-admin-browser-smoke"
 BROWSER_ENTRYPOINT = ("node", "/opt/loom/web/scripts/staging-admin-browser-smoke.mjs")
@@ -154,10 +159,18 @@ class ImageBuildSession:
             )
 
 
-def image_plan_digest() -> str:
+def _validate_image_plan(plan: RolloutImagePlan) -> None:
+    if len(plan) != len(DEFAULT_ROLLOUT_IMAGE_PLAN) or set(plan) != set(DEFAULT_ROLLOUT_IMAGE_PLAN):
+        raise ValueError("rollout image plan differs from the exact nine-image contract")
+
+
+def image_plan_digest(
+    plan: RolloutImagePlan = DEFAULT_ROLLOUT_IMAGE_PLAN,
+) -> str:
+    _validate_image_plan(plan)
     payload = {
         "browser_entrypoint": BROWSER_ENTRYPOINT,
-        "images": ALL_BUILD_IMAGES,
+        "images": plan,
         "nonroot_runtime_probes": dict(NONROOT_RUNTIME_PROBES),
         "revision_label": REVISION_LABEL,
     }
@@ -216,29 +229,33 @@ def _contract_matches(name: str, descriptor: ImageDescriptor, resolved_sha: str)
 def inspect_exact_images(
     run: DockerRunner,
     *,
+    plan: RolloutImagePlan = DEFAULT_ROLLOUT_IMAGE_PLAN,
     image_tag: str,
     resolved_sha: str,
 ) -> ImageArtifactSet:
     """Read every image contract without building or modifying Docker state."""
+    _validate_image_plan(plan)
     if _IMAGE_TAG_RE.fullmatch(image_tag) is None or _HEX_SHA_RE.fullmatch(resolved_sha) is None:
         raise ValueError("rollout image inspection binding is invalid")
     descriptors: dict[str, ImageDescriptor] = {}
-    for name, _dockerfile in ALL_BUILD_IMAGES:
+    for name, _dockerfile, _context in plan:
         descriptor = _inspect_image(run, f"{name}:{image_tag}")
         if descriptor is None or not _contract_matches(name, descriptor, resolved_sha):
             raise ValueError(f"rollout image contract failed for {name}")
         descriptors[name] = descriptor
-    return _artifact_set(descriptors)
+    return _artifact_set(descriptors, plan=plan)
 
 
 def build_exact_images(
     run: DockerRunner,
     *,
+    plan: RolloutImagePlan = DEFAULT_ROLLOUT_IMAGE_PLAN,
     candidate_root: Path,
     image_tag: str,
     resolved_sha: str,
 ) -> ImageArtifactSet:
     """Build each missing/drifted tag once, then bind its immutable local ID."""
+    _validate_image_plan(plan)
     if (
         not candidate_root.is_absolute()
         or not candidate_root.is_dir()
@@ -247,7 +264,7 @@ def build_exact_images(
     ):
         raise ValueError("rollout image build binding is invalid")
     descriptors: dict[str, ImageDescriptor] = {}
-    for name, dockerfile in ALL_BUILD_IMAGES:
+    for name, dockerfile, build_context in plan:
         tag = f"{name}:{image_tag}"
         descriptor = _inspect_image(run, tag)
         if descriptor is None or not _contract_matches(name, descriptor, resolved_sha):
@@ -262,7 +279,7 @@ def build_exact_images(
                 dockerfile,
                 "-t",
                 tag,
-                ".",
+                build_context,
             )
             result = run(command, candidate_root)
             if result.returncode != 0:
@@ -271,26 +288,28 @@ def build_exact_images(
         if descriptor is None or not _contract_matches(name, descriptor, resolved_sha):
             raise ValueError(f"rollout image contract failed for {name}")
         descriptors[name] = descriptor
-    return _artifact_set(descriptors)
+    return _artifact_set(descriptors, plan=plan)
 
 
 def verify_image_contract(
     run: DockerRunner,
     *,
+    plan: RolloutImagePlan = DEFAULT_ROLLOUT_IMAGE_PLAN,
     image_tag: str,
     resolved_sha: str,
     expected_digests: Mapping[str, str],
 ) -> ImageArtifactSet:
     """Re-inspect preflight-built images without rebuilding them."""
+    _validate_image_plan(plan)
     if (
         _IMAGE_TAG_RE.fullmatch(image_tag) is None
         or _HEX_SHA_RE.fullmatch(resolved_sha) is None
-        or set(expected_digests) != {name for name, _path in ALL_BUILD_IMAGES}
+        or set(expected_digests) != {name for name, _dockerfile, _context in plan}
         or any(_IMAGE_ID_RE.fullmatch(value) is None for value in expected_digests.values())
     ):
         raise ValueError("rollout image digest set is incomplete")
     descriptors: dict[str, ImageDescriptor] = {}
-    for name, _dockerfile in ALL_BUILD_IMAGES:
+    for name, _dockerfile, _context in plan:
         descriptor = _inspect_image(run, f"{name}:{image_tag}")
         if (
             descriptor is None
@@ -300,7 +319,7 @@ def verify_image_contract(
             raise ValueError(f"rollout image contract drifted for {name}")
         descriptors[name] = descriptor
     _verify_nonroot_runtime_contract(run, image_tag=image_tag)
-    return _artifact_set(descriptors)
+    return _artifact_set(descriptors, plan=plan)
 
 
 def _verify_nonroot_runtime_contract(run: DockerRunner, *, image_tag: str) -> None:
@@ -328,7 +347,11 @@ def _verify_nonroot_runtime_contract(run: DockerRunner, *, image_tag: str) -> No
             raise ValueError(f"rollout image non-root runtime failed for {name}")
 
 
-def _artifact_set(descriptors: Mapping[str, ImageDescriptor]) -> ImageArtifactSet:
+def _artifact_set(
+    descriptors: Mapping[str, ImageDescriptor],
+    *,
+    plan: RolloutImagePlan = DEFAULT_ROLLOUT_IMAGE_PLAN,
+) -> ImageArtifactSet:
     payload = {
         "images": {
             name: {
@@ -340,11 +363,11 @@ def _artifact_set(descriptors: Mapping[str, ImageDescriptor]) -> ImageArtifactSe
             }
             for name, descriptor in sorted(descriptors.items())
         },
-        "plan_digest": image_plan_digest(),
+        "plan_digest": image_plan_digest(plan),
     }
     return ImageArtifactSet(
         descriptors=descriptors,
-        plan_digest=image_plan_digest(),
+        plan_digest=image_plan_digest(plan),
         artifact_digest=hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
@@ -356,6 +379,7 @@ __all__ = [
     "AUXILIARY_ROLLOUT_IMAGES",
     "BROWSER_ENTRYPOINT",
     "BROWSER_IMAGE",
+    "DEFAULT_ROLLOUT_IMAGE_PLAN",
     "NONROOT_RUNTIME_PROBES",
     "REHEARSAL_POSTGRES_ENTRYPOINT",
     "REHEARSAL_POSTGRES_IMAGE",
@@ -365,6 +389,8 @@ __all__ = [
     "ImageArtifactSet",
     "ImageBuildSession",
     "ImageDescriptor",
+    "RolloutImage",
+    "RolloutImagePlan",
     "build_exact_images",
     "image_plan_digest",
     "inspect_exact_images",

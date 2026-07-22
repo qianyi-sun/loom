@@ -197,10 +197,11 @@ contain no deployment credentials.
 ```bash
 uv run ruff check src tests packages migrations
 uv run mypy
-uv run pytest tests/unit tests/ops tests/loom_cli tests/contract tests/property
-uv run pytest packages/loom-launcher/tests \
-              packages/loom-benchmarks/tests \
-              packages/loom-benchmark-terminal-bench-2/tests
+mapfile -t root_tests < <(uv run python scripts/component_ownership.py test-paths --lane tests-root)
+uv run pytest "${root_tests[@]}" --cov=src --cov=packages --cov-report=term
+mapfile -t package_tests < <(uv run python scripts/component_ownership.py test-paths --lane tests-packages)
+uv run pytest "${package_tests[@]}" --cov=src --cov=packages --cov-append --cov-report=term
+uv run coverage report --fail-under=70
 ```
 
 Local verification should use Python 3.11, matching the `repository-checks`
@@ -224,10 +225,11 @@ LOOM_RUN_DAYTONA_INTEGRATION=1 DAYTONA_API_KEY=... \
   pytest tests/integration/test_daytona_driver.py -v
 ```
 
-On GitHub, selected non-Docker integration tests are split into two disjoint
-filename shards and start directly after the planner, in parallel with the
-fast tier. The local commands remain serial equivalents so they are easy to
-reproduce.
+On GitHub, selected non-Docker integration tests are split into two disjoint,
+contiguous ranges of the manifest-owned filename order. Contiguous ordering
+preserves the suite's session-scoped Postgres setup/cleanup contract while the
+two shards start directly after the planner, in parallel with the fast tier.
+The local commands remain serial equivalents so they are easy to reproduce.
 
 Every relevant non-draft PR runs its path-selected validation plan and emits
 the four protected contexts. Drafts and unrelated metadata events use only a
@@ -237,14 +239,18 @@ gate authority; validation labels only add work to the path-inferred plan.
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
 network-policy + full trial e2e + Daytona live). CI selects integration for
-non-documentation changes. The phase-one ownership authority at
+non-documentation changes. The ownership authority at
 `config/component-ownership.toml` inventories every tracked Dockerfile and
-Python, Go, or web test path. It also declares the allowed CI lanes and
-component smoke, scan, and attestation owners. Validate the whole inventory or
-query one path with:
+Python, Go, or web test path. Schema v2 also declares the allowed CI lanes,
+versioned runtime-payload execution policies, immutable container digests,
+per-payload minimal fixture cases, and component smoke, scan, and attestation
+owners. Validate the whole inventory, inspect the exact isolated
+payload plan, or query one path with:
 
 ```bash
 python3 scripts/component_ownership.py validate
+python3 scripts/component_ownership.py execution-plan --lane runtime-payload
+python3 scripts/runtime_payload_conformance.py
 python3 scripts/component_ownership.py query tests/integration/test_trial_e2e_docker.py
 python3 scripts/component_ownership.py test-paths --lane frontend
 ```
@@ -258,10 +264,18 @@ responsibility.
 
 The validator fails for missing or ambiguous ownership, stale patterns,
 undeclared owner names, and a `pytest.mark.docker` module outside the Docker
-tier. Planner, workflow, rollout, staging-start, and release consumers still
-use their existing checked-in mappings until the remaining #788 migration
-slices make the manifest their generated input. During that transition, every
-change under `tests/integration/` continues to select the Docker tier;
+tier. Runtime payloads are not executed as host pytest: each manifest-owned
+file runs in its own read-only, networkless, resource-limited container against
+the payload case's minimal synthetic passing-workspace fixtures. The immutable
+image is pulled once, then every case runs with further pulls disabled. This
+proves verifier conformance only; it is not proof that a real task or trial
+succeeded. Planner, staging-start, and release consumers use manifest-derived
+inputs. Rollout build, kind-load, and expected-image evidence use one nine-image
+matrix generated from the fixed candidate worktree's seven
+`rollout_role = "primary"` and two `rollout_role = "auxiliary"` components, then
+persisted by the build step. The two sandbox conformance images are intentionally
+excluded. Every change under `tests/integration/`
+continues to select the Docker tier;
 relevant runtime paths do too. `ci:integration` and `ci:integration-docker`
 add those tiers when paths do not already require them. The selected smoke
 gates cancel superseded PR runs, so a new push to the same PR stops the older

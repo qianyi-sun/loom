@@ -1,10 +1,11 @@
-schema_version = 1
+schema_version = 2
 ci_lanes = [
   "cluster-smoke",
   "frontend",
   "go-checks",
   "integration",
   "integration-docker",
+  "runtime-payload",
   "system-smoke",
   "tests-packages",
   "tests-root",
@@ -30,10 +31,82 @@ attestation_owners = [
   "runtime-payload-provenance",
 ]
 
-# This file is the typed ownership authority. The images workflow derives its
-# release matrix, build inputs, and changed-path selection from it. Planner,
-# staging, rollout, release, and test-lane consumers migrate in later slices;
-# the validator already rejects any missing or ambiguous Dockerfile/test owner.
+[[execution_policies]]
+id = "virtual-app-v1"
+language = "python"
+runner = "python-zero-arg-v1"
+container_image = "python@sha256:baf89808ec37adeaab83cec287adb4a2afa4a11c1d51e961c7ec737877e61af6"
+virtual_root = "/app"
+
+[[execution_policies]]
+id = "virtual-workspace-v1"
+language = "python"
+runner = "python-zero-arg-v1"
+container_image = "python@sha256:baf89808ec37adeaab83cec287adb4a2afa4a11c1d51e961c7ec737877e61af6"
+virtual_root = "/workspace"
+
+[[execution_cases]]
+path = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-chess-best-move/tests/test_best_move.py"
+policy = "virtual-app-v1"
+fixture_files = [{ path = "best_move.txt", content = "e4\n" }]
+
+[[execution_cases]]
+path = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world/tests/test_outputs.py"
+policy = "virtual-app-v1"
+fixture_files = [{ path = "hello.txt", content = "Hello, world!\n" }]
+
+[[execution_cases]]
+path = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "result.txt", content = "hello\n" }]
+
+[[execution_cases]]
+path = "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py"
+policy = "virtual-workspace-v1"
+fixture_files = [
+  { path = ".ready", content = "" },
+  { path = "ok.txt", content = "" },
+]
+
+[[execution_cases]]
+path = "tests/fixtures/tasks/family-runs-dev/smoke/tests/test_result.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "result.txt", content = "family-runs-dev-ok\n" }]
+
+[[execution_cases]]
+path = "tests/fixtures/tasks/hello-world/tests/test_result.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "result.txt", content = "hello\n" }]
+
+[[execution_cases]]
+path = "tests/fixtures/tasks/in-box-cli/tests/test_out.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "out.txt", content = "in-box\n" }]
+
+[[execution_cases]]
+path = "tests/fixtures/tasks/large-artifact/tests/test_payload.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "payload.bin", size = 104857600 }]
+
+[[execution_cases]]
+path = "tests/fixtures/tasks/multi-step-3/tests/test_phase1.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "step1.txt", content = "step1\n" }]
+
+[[execution_cases]]
+path = "tests/fixtures/tasks/multi-step-3/tests/test_phase2.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "step2.txt", content = "step2\n" }]
+
+[[execution_cases]]
+path = "tests/fixtures/tasks/multi-step-3/tests/test_phase3.py"
+policy = "virtual-workspace-v1"
+fixture_files = [{ path = "step3.txt", content = "step3\n" }]
+
+# This file is the typed ownership authority. Image builds and test lanes derive
+# their execution plans from it, and rollout build/load/evidence consumes the
+# fixed candidate's explicitly tagged primary and auxiliary rollout matrix.
+# The validator rejects any missing or ambiguous Dockerfile/test owner.
 
 [[components]]
 id = "agent-sandbox"
@@ -51,6 +124,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-agent-sandbox"
 runtime_policy = "conformance"
+rollout_role = "none"
 
 [[components]]
 id = "control-plane"
@@ -70,6 +144,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-control-plane"
 runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "egress-xds"
@@ -86,6 +161,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-egress-xds"
 runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "family-orchestrator"
@@ -105,6 +181,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-family-orchestrator"
 runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "llm-gateway"
@@ -124,6 +201,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-llm-gateway"
 runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "llm-gateway-sandbox"
@@ -142,6 +220,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-llm-gateway-sandbox"
 runtime_policy = "conformance"
+rollout_role = "none"
 
 [[components]]
 id = "service"
@@ -162,6 +241,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-service"
 runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "web"
@@ -181,6 +261,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-web"
 runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "staging-admin-browser-smoke"
@@ -199,6 +280,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-staging-admin-browser-smoke"
 runtime_policy = "conformance"
+rollout_role = "auxiliary"
 
 [[components]]
 id = "rehearsal-postgres"
@@ -214,6 +296,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-rehearsal-postgres"
 runtime_policy = "conformance"
+rollout_role = "auxiliary"
 
 [[components]]
 id = "worker"
@@ -233,6 +316,7 @@ scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-worker"
 runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "gb10-smoke-task"
@@ -473,13 +557,15 @@ include_paths = ["tests/system/**/*.py"]
 [[test_suites]]
 id = "python-task-runtime-payload"
 language = "python"
-runtime_payload = true
+lane = "runtime-payload"
+execution_policy = "virtual-workspace-v1"
 include_paths = ["tests/fixtures/**/*.py"]
 
 [[test_suites]]
 id = "python-catalog-runtime-payload"
 language = "python"
-runtime_payload = true
+lane = "runtime-payload"
+execution_policy = "virtual-workspace-v1"
 include_paths = ["deploy/catalog/**/tests/**/*.py"]
 
 [[test_suites]]
@@ -492,7 +578,8 @@ exclude_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/**/*.p
 [[test_suites]]
 id = "python-tb2-runtime-payload"
 language = "python"
-runtime_payload = true
+lane = "runtime-payload"
+execution_policy = "virtual-app-v1"
 include_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/**/*.py"]
 
 [[test_suites]]

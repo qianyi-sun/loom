@@ -33,10 +33,14 @@ def test_contributor_quickstart_uses_ci_python_for_local_verification() -> None:
 def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     root_job = workflow["jobs"]["tests-root"]
+    root_steps = root_job["steps"]
     package_steps = workflow["jobs"]["tests-packages"]["steps"]
     fast_steps = workflow["jobs"]["fast-checks"]["steps"]
+    root_pytest_step = next(
+        step for step in root_steps if step.get("name") == "Pytest — manifest-owned root shard"
+    )
     sibling_pytest_step = next(
-        step for step in package_steps if step.get("name") == "Pytest — sibling packages"
+        step for step in package_steps if step.get("name") == "Pytest — manifest-owned package lane"
     )
     coverage_gate_step = next(
         step
@@ -46,25 +50,14 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
 
     text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
     normalized_text = _normalize_command(text)
-    local_sibling_run = sibling_pytest_step["run"].replace(
-        "--cov=src --cov=packages \\",
-        "--cov=src --cov=packages --cov-append \\",
-    )
-
-    root_paths = [
-        path
-        for shard in root_job["strategy"]["matrix"]["include"]
-        for path in shard["test_paths"].split()
-    ]
-    assert set(root_paths) == {
-        "tests/unit",
-        "tests/contract",
-        "tests/property",
-        "tests/loom_cli",
-        "tests/ops",
-    }
-    assert _normalize_command(f"uv run pytest {' '.join(root_paths)}") in normalized_text
-    assert _normalize_command(local_sibling_run) in normalized_text
+    root_shards = root_job["strategy"]["matrix"]["include"]
+    assert {shard["shard_index"] for shard in root_shards} == {0, 1}
+    assert "test-paths --lane tests-root" in root_pytest_step["run"]
+    assert "--shard-index" in root_pytest_step["run"]
+    assert "test-paths --lane tests-packages" in sibling_pytest_step["run"]
+    assert "test-paths --lane tests-root" in normalized_text
+    assert "test-paths --lane tests-packages" in normalized_text
+    assert "--cov-append" in normalized_text
     assert "coverage report --fail-under=70" in coverage_gate_step["run"]
     assert "uv run coverage report --fail-under=70" in text
     assert "first pytest command alone is not the fast coverage gate" in text

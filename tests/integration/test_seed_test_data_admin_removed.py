@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Token
+from loom.db.schema import TeamMembership, Token, User
 
 
 def test_seed_test_data_does_not_create_db_admin_tokens(postgres_url: str) -> None:
@@ -42,9 +42,28 @@ def test_seed_test_data_does_not_create_db_admin_tokens(postgres_url: str) -> No
         if ":" in line
     }
     assert printed == {"team", "worker"}
+    printed_tokens = dict(
+        line.split(":", 1)
+        for line in result.stdout.splitlines()
+        if ":" in line
+    )
+    assert printed_tokens["team"].strip().startswith("loom_api_")
 
     with session_factory() as s:
-        rows = s.execute(select(Token.type, Token.scopes)).all()
+        rows = s.execute(
+            select(Token.type, Token.scopes, Token.created_by_user_id),
+        ).all()
+        submitting_token = next(row for row in rows if "submit" in row.scopes)
+        assert submitting_token.created_by_user_id is not None
+        user = s.get(User, submitting_token.created_by_user_id)
+        assert user is not None
+        assert user.status == "active"
+        membership = s.execute(
+            select(TeamMembership).where(
+                TeamMembership.user_id == submitting_token.created_by_user_id,
+            ),
+        ).scalar_one()
+        assert membership.role == "owner"
 
     assert rows
     assert all(row.type != "admin" for row in rows)

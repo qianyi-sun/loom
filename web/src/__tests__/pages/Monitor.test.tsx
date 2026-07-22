@@ -490,6 +490,9 @@ describe("Monitor human-readable labels", () => {
     });
 
     expect(await screen.findByText("Monitor health")).toBeInTheDocument();
+    // Worker-capacity ("3 / 12") loads from a separate fetch than the health
+    // header, so await it rather than reading synchronously — otherwise the
+    // assertion races the capacity render (flaky under the full-suite run).
     expect(await screen.findByText("3 / 12")).toBeInTheDocument();
     expect(screen.getByText("Concurrent tasks")).toBeInTheDocument();
     expect(screen.getByText("2 active workers")).toBeInTheDocument();

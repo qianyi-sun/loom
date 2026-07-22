@@ -17,6 +17,7 @@ COPY src ./src
 COPY packages ./packages
 RUN pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -e ./packages/loom-launcher && \
+    pip install --no-cache-dir -e ./packages/loom-benchmarks && \
     pip install --no-cache-dir \
       "harbor @ git+https://github.com/harbor-framework/harbor.git@${HARBOR_COMPAT_SHA}" && \
     pip check

@@ -13,11 +13,11 @@ from collections.abc import Iterator
 
 import pytest
 
-from tests.system.docker_compose import stack_down, stack_up
+from tests.system.docker_compose import stack_down_with_diagnostics, stack_up
 
 
 @pytest.fixture(scope="session")
-def compose_stack() -> Iterator[dict[str, str]]:
+def compose_stack(request: pytest.FixtureRequest) -> Iterator[dict[str, str]]:
     if os.environ.get("LOOM_SKIP_SYSTEM_TESTS") == "1":
         pytest.skip("LOOM_SKIP_SYSTEM_TESTS=1 — skipping compose-based suite")
     team_token, worker_token = stack_up()
@@ -39,4 +39,4 @@ def compose_stack() -> Iterator[dict[str, str]]:
             "minio_secret_key": "loomtest",
         }
     finally:
-        stack_down()
+        stack_down_with_diagnostics(failed=request.session.testsfailed > 0)

@@ -5916,14 +5916,21 @@ checklist:
   + boundary + apply + status + down round-trip. Fast (~1 min).
 - **`staging-smoke`** (kind, label-gated `staging-smoke`) — builds
   REAL images, applies them, waits for every pod to reach Ready,
-  probes `/healthz` + `/metrics` on every component. Closes the
-  cold-start regression gap (~15-20 min). This required PR gate is
+  probes `/healthz` + `/metrics` on every component. In parallel on a separate
+  runner, its manifest-owned `system-smoke` job executes the Compose full-stack
+  lane selected by `config/component-ownership.toml`; the aggregate gate
+  requires both jobs when the planner selects staging validation. This closes the
+  cold-start and dormant-system-fixture regression gaps (~15-20 min). The
+  system lane applies Alembic migrations explicitly, builds current service and
+  worker images, mounts the manifest-owned test fixtures read-only into the worker,
+  uses only test-local credentials, preserves redacted Compose diagnostics before
+  teardown on failure, and always removes its containers and volumes. This required PR gate is
   credential-free and renders `runtime_environment=development`; it proves the
   staging-only admin exchange stays hidden with a `404`, but does not perform
-  authenticated staging acceptance. It never enters `ci-aws` and does not
-  claim real AWS S3 coverage. Record authenticated staging and real-AWS
-  validation only from separately protected, brokered post-merge/release runs;
-  a missing or skipped protected run is not evidence.
+  authenticated staging acceptance. It never enters `ci-aws` and does not claim
+  real AWS S3 coverage. Record authenticated staging and real-AWS validation only
+  from separately protected, brokered post-merge/release runs; a missing or
+  skipped protected run is not evidence.
 - **`scripts/staging_smoke_gate.py`** — covers public health, logged-out SPA
   reachability, two-team non-admin user-owned API-token auth, provider/model
   discovery, runnable benchmark catalog presence, sampled ready benchmark bundle objects,
