@@ -24,6 +24,15 @@ from loom.data_lifecycle import (
 )
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.external_supervisor_readiness import (
+    REHEARSAL_KUBECONFIG as EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
+)
+from loom_cli.rollout.external_supervisor_readiness import (
+    ExternalSupervisorArtifact,
+    ExternalSupervisorIdentity,
+    build_external_supervisor_artifact,
+    staging_working_directory,
+)
 from loom_cli.rollout.gb10_rehearsal import (
     FixedGB10RehearsalTransport,
     GB10RehearsalAuthority,
@@ -78,6 +87,7 @@ _REHEARSAL_DUMP_PATH = "/var/lib/postgresql/data/loom-rehearsal.dump"
 _REHEARSAL_DUMP_TRANSFER_TIMEOUT = 180
 _REHEARSAL_DUMP_DIGEST_TIMEOUT = 120
 _REHEARSAL_DUMP_RESTORE_TIMEOUT = 1470
+_EXTERNAL_SUPERVISOR_VALIDATION_TIMEOUT_SECONDS = 180
 _API_SMOKE_REQUEST_IDS = frozenset(
     {
         "batch-readback",
@@ -160,6 +170,7 @@ ReleaseArtifactBuilder = Callable[[RehearsalPlan], RehearsalReleaseArtifact]
 SecretArtifactBuilder = Callable[[RehearsalPlan], RehearsalSecretArtifact]
 BrowserArtifactBuilder = Callable[[RehearsalPlan, str], RehearsalBrowserArtifact]
 RuntimeImageResolver = Callable[[RehearsalPlan, Sequence[str]], Mapping[str, Sequence[str]] | None]
+ExternalSupervisorArtifactBuilder = Callable[[RehearsalPlan], ExternalSupervisorArtifact]
 
 
 class GB10RehearsalTransport(Protocol):
@@ -265,6 +276,16 @@ def _default_browser_artifact(plan: RehearsalPlan, ingress_ip: str) -> Rehearsal
     return build_rehearsal_browser_artifact(plan, ingress_ip=ingress_ip)
 
 
+def _default_external_supervisor_artifact(plan: RehearsalPlan) -> ExternalSupervisorArtifact:
+    return build_external_supervisor_artifact(
+        Path(staging_working_directory(plan.candidate_sha)),
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        image_tag=plan.image_tag,
+        environment="staging",
+    )
+
+
 def _open_absolute_regular_no_follow(path: Path) -> int:
     if not path.is_absolute() or ".." in path.parts or path == Path("/"):
         raise OSError("rehearsal stream source path is invalid")
@@ -296,6 +317,9 @@ class IsolatedRehearsalExecutor:
     release_artifacts: ReleaseArtifactBuilder = _default_release_artifact
     secret_artifacts: SecretArtifactBuilder = _default_secret_artifact
     browser_artifacts: BrowserArtifactBuilder = _default_browser_artifact
+    external_supervisor_artifacts: ExternalSupervisorArtifactBuilder = (
+        _default_external_supervisor_artifact
+    )
     kubeconfig: Path = REHEARSAL_KUBECONFIG
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
@@ -303,7 +327,11 @@ class IsolatedRehearsalExecutor:
     runtime_image_resolver: RuntimeImageResolver | None = None
 
     def __post_init__(self) -> None:
-        if not self.kubeconfig.is_absolute() or ".." in self.kubeconfig.parts:
+        if (
+            not self.kubeconfig.is_absolute()
+            or ".." in self.kubeconfig.parts
+            or str(self.kubeconfig) != EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG
+        ):
             raise ValueError("rehearsal executor kubeconfig authority is invalid")
 
     def execute(self, check_id: str, plan: RehearsalPlan) -> RehearsalStepOutcome:
@@ -1297,6 +1325,10 @@ class IsolatedRehearsalExecutor:
         for name in secrets.secret_names:
             if self._secret_plan_digest(plan, name) != plan.plan_digest:
                 return _blocked("release", "secret-readback-drift")
+        supervisor_validation_digest, supervisor_blocker = self._validate_external_supervisors(plan)
+        if supervisor_blocker is not None:
+            return _blocked("release", supervisor_blocker)
+        assert supervisor_validation_digest is not None
         if not self._status_with_payload(
             (
                 "kubectl",
@@ -1436,12 +1468,210 @@ class IsolatedRehearsalExecutor:
         return RehearsalStepOutcome(
             passed=True,
             details={
+                "external-supervisor-validation-sha256": supervisor_validation_digest,
                 "manifest-sha256": release.artifact_sha256,
                 "secret-artifact-sha256": secrets.artifact_sha256,
                 "status": "ready",
             },
             blockers={},
         )
+
+    def _validate_external_supervisors(
+        self,
+        plan: RehearsalPlan,
+    ) -> tuple[str | None, str | None]:
+        try:
+            artifact = self.external_supervisor_artifacts(plan)
+        except (OSError, RuntimeError, ValueError):
+            return None, "external-supervisor-artifact-invalid"
+        if not _external_supervisor_artifact_matches_plan(artifact, plan):
+            return None, "external-supervisor-artifact-drift"
+        try:
+            validation_commands = dict(
+                artifact.validation_argv(
+                    plan.resources.namespace,
+                    EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
+                )
+            )
+        except (RuntimeError, ValueError):
+            return None, "external-supervisor-command-invalid"
+        if set(validation_commands) != {item.name for item in artifact.supervisors}:
+            return None, "external-supervisor-command-drift"
+
+        validations: list[tuple[ExternalSupervisorIdentity, str, str, tuple[str, ...]]] = []
+        for supervisor in artifact.supervisors:
+            command = validation_commands.get(supervisor.name)
+            if not isinstance(command, tuple) or not command:
+                return None, "external-supervisor-command-drift"
+            unit = _external_supervisor_validation_unit(plan, supervisor.service_name)
+            description = _external_supervisor_validation_description(
+                plan,
+                supervisor.service_name,
+            )
+            validations.append((supervisor, unit, description, command))
+        if len({unit for _supervisor, unit, _description, _command in validations}) != len(
+            validations
+        ):
+            return None, "external-supervisor-unit-collision"
+
+        for _supervisor, unit, _description, _command in validations:
+            load_state = self._external_supervisor_unit_load_state(unit)
+            if load_state == "unavailable":
+                return None, "external-supervisor-readback-failed"
+            if load_state != "not-found":
+                return None, "external-supervisor-unit-preexisting"
+
+        command_digests: dict[str, str] = {}
+        for supervisor, unit, description, command in validations:
+            command_digests[supervisor.name] = hashlib.sha256(
+                _json_bytes({"argv": list(command), "unit": unit})
+            ).hexdigest()
+            passed = self._status(
+                _external_supervisor_validation_start_argv(
+                    unit=unit,
+                    description=description,
+                    command=command,
+                    working_directory=supervisor.working_directory,
+                ),
+                timeout=_EXTERNAL_SUPERVISOR_VALIDATION_TIMEOUT_SECONDS + 30,
+            )
+            cleanup_blocker = self._retire_external_supervisor_validation_unit(
+                plan,
+                service_name=supervisor.service_name,
+                unit=unit,
+            )
+            if cleanup_blocker is not None:
+                return None, cleanup_blocker
+            if not passed:
+                return None, "external-supervisor-validation-failed"
+
+        if any(
+            self._external_supervisor_unit_load_state(unit) != "not-found"
+            for _supervisor, unit, _description, _command in validations
+        ):
+            return None, "external-supervisor-final-readback-failed"
+        evidence_digest = hashlib.sha256(
+            _json_bytes(
+                {
+                    "artifact_sha256": artifact.artifact_digest,
+                    "command_sha256": command_digests,
+                    "namespace": plan.resources.namespace,
+                    "schema_version": 1,
+                }
+            )
+        ).hexdigest()
+        return evidence_digest, None
+
+    def _retire_external_supervisor_validation_unit(
+        self,
+        plan: RehearsalPlan,
+        *,
+        service_name: str,
+        unit: str,
+    ) -> str | None:
+        load_state = self._external_supervisor_unit_load_state(unit)
+        if load_state == "not-found":
+            return None
+        if load_state != "loaded":
+            return "external-supervisor-cleanup-readback-failed"
+        properties = self._external_supervisor_validation_properties(unit)
+        if properties != _external_supervisor_validation_expected_properties(
+            plan,
+            service_name,
+        ):
+            return "external-supervisor-cleanup-identity-drift"
+        if not self._status(("systemctl", "--user", "stop", unit), timeout=30):
+            if self._external_supervisor_unit_load_state(unit) != "not-found":
+                return "external-supervisor-cleanup-stop-failed"
+            return None
+        if not self._status(("systemctl", "--user", "reset-failed", unit), timeout=30):
+            if self._external_supervisor_unit_load_state(unit) != "not-found":
+                return "external-supervisor-cleanup-reset-failed"
+            return None
+        if not self._wait_external_supervisor_unit_absent(unit):
+            return "external-supervisor-cleanup-remains"
+        return None
+
+    def _external_supervisor_validation_properties(
+        self,
+        unit: str,
+    ) -> dict[str, str] | None:
+        properties = (
+            "LoadState",
+            "Type",
+            "Transient",
+            "Description",
+            "WorkingDirectory",
+            "Environment",
+            "KillMode",
+        )
+        try:
+            result = self.run(
+                (
+                    "systemctl",
+                    "--user",
+                    "show",
+                    unit,
+                    *(f"--property={name}" for name in properties),
+                ),
+                None,
+                15,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        if (
+            result.returncode != 0
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or len(result.stdout.encode()) > _MAX_OUTPUT_BYTES
+            or len(result.stderr.encode()) > _MAX_OUTPUT_BYTES
+        ):
+            return None
+        parsed = parse_systemctl_properties(result.stdout)
+        return parsed or None
+
+    def _external_supervisor_unit_load_state(self, unit: str) -> str:
+        try:
+            result = self.run(
+                (
+                    "systemctl",
+                    "--user",
+                    "show",
+                    unit,
+                    "--property=LoadState",
+                    "--value",
+                ),
+                None,
+                15,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return "unavailable"
+        if (
+            result.returncode not in {0, 4}
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or len(result.stdout.encode()) > 64
+            or len(result.stderr.encode()) > _MAX_OUTPUT_BYTES
+        ):
+            return "unavailable"
+        value = result.stdout.strip()
+        return value if value in {"loaded", "not-found"} else "unavailable"
+
+    def _wait_external_supervisor_unit_absent(self, unit: str) -> bool:
+        load_state = self._external_supervisor_unit_load_state(unit)
+        if load_state == "not-found":
+            return True
+        if load_state != "loaded":
+            return False
+        deadline = self.monotonic() + 5.0
+        while self.monotonic() < deadline:
+            self.sleep(0.1)
+            load_state = self._external_supervisor_unit_load_state(unit)
+            if load_state == "not-found":
+                return True
+            if load_state != "loaded":
+                return False
+        return False
 
     def _load_images(self, plan: RehearsalPlan, names: Sequence[str]) -> bool:
         tags = tuple(f"{name}:{plan.image_tag}" for name in names)
@@ -1785,6 +2015,9 @@ class IsolatedRehearsalExecutor:
                     return _blocked("cleanup", "systemd-reset-failed")
         if not self._wait_systemd_absent(contract):
             return _blocked("cleanup", "systemd-remains")
+        supervisor_cleanup_blocker = self._cleanup_external_supervisor_validation_units(plan)
+        if supervisor_cleanup_blocker is not None:
+            return _blocked("cleanup", supervisor_cleanup_blocker)
 
         namespace_state, observed = self._namespace_observation(plan)
         if namespace_state == "unavailable":
@@ -1848,6 +2081,38 @@ class IsolatedRehearsalExecutor:
             "cleanup",
             "namespace-remains" if wait_succeeded else "namespace-delete-timeout",
         )
+
+    def _cleanup_external_supervisor_validation_units(
+        self,
+        plan: RehearsalPlan,
+    ) -> str | None:
+        service_names = tuple(
+            sorted(
+                name for name in plan.external_supervisor_unit_sha256 if name.endswith(".service")
+            )
+        )
+        if not service_names:
+            return "external-supervisor-cleanup-unit-set-invalid"
+        units = {
+            service_name: _external_supervisor_validation_unit(plan, service_name)
+            for service_name in service_names
+        }
+        if len(set(units.values())) != len(units):
+            return "external-supervisor-cleanup-unit-collision"
+        for service_name, unit in units.items():
+            blocker = self._retire_external_supervisor_validation_unit(
+                plan,
+                service_name=service_name,
+                unit=unit,
+            )
+            if blocker is not None:
+                return blocker
+        if any(
+            self._external_supervisor_unit_load_state(unit) != "not-found"
+            for unit in units.values()
+        ):
+            return "external-supervisor-cleanup-final-readback-failed"
+        return None
 
     def _namespace_observation(
         self,
@@ -2460,6 +2725,114 @@ def _observer_binding_matches(value: dict[str, object], plan: RehearsalPlan) -> 
         and value.get("roleRef") == expected["roleRef"]
         and value.get("subjects") == expected["subjects"]
     )
+
+
+def _external_supervisor_artifact_matches_plan(
+    artifact: object,
+    plan: RehearsalPlan,
+) -> bool:
+    return bool(
+        isinstance(artifact, ExternalSupervisorArtifact)
+        and artifact.candidate_sha == plan.candidate_sha
+        and artifact.candidate_tree == plan.candidate_tree
+        and artifact.environment == "staging"
+        and artifact.image_tag == plan.image_tag
+        and artifact.artifact_digest == plan.external_supervisor_artifact_sha256
+        and artifact.profile_sha256 == plan.external_supervisor_profile_sha256
+        and dict(artifact.script_sha256) == dict(plan.external_supervisor_script_sha256)
+        and dict(artifact.unit_sha256) == dict(plan.external_supervisor_unit_sha256)
+    )
+
+
+def _external_supervisor_validation_identity(
+    plan: RehearsalPlan,
+    service_name: str,
+) -> str:
+    return hashlib.sha256(
+        _json_bytes(
+            {
+                "plan_sha256": plan.plan_digest,
+                "service_name": service_name,
+            }
+        )
+    ).hexdigest()
+
+
+def _external_supervisor_validation_unit(
+    plan: RehearsalPlan,
+    service_name: str,
+) -> str:
+    identity = _external_supervisor_validation_identity(plan, service_name)
+    return f"loom-rehearsal-supervisor-{identity[:24]}.service"
+
+
+def _external_supervisor_validation_description(
+    plan: RehearsalPlan,
+    service_name: str,
+) -> str:
+    identity = _external_supervisor_validation_identity(plan, service_name)
+    return f"Loom isolated external supervisor validation {identity}"
+
+
+def _external_supervisor_validation_start_argv(
+    *,
+    unit: str,
+    description: str,
+    command: tuple[str, ...],
+    working_directory: str,
+) -> tuple[str, ...]:
+    expected_working_directory = _safe_external_supervisor_validation_working_directory(
+        working_directory
+    )
+    timeout = f"{_EXTERNAL_SUPERVISOR_VALIDATION_TIMEOUT_SECONDS}s"
+    return (
+        "systemd-run",
+        "--user",
+        "--wait",
+        "--collect",
+        f"--unit={unit}",
+        f"--description={description}",
+        "--property=Type=oneshot",
+        f"--property=WorkingDirectory={expected_working_directory}",
+        (
+            "--property=Environment="
+            f"PYTHONPATH={expected_working_directory}/src PYTHONDONTWRITEBYTECODE=1"
+        ),
+        f"--property=TimeoutStartSec={timeout}",
+        f"--property=RuntimeMaxSec={timeout}",
+        "--property=KillMode=control-group",
+        "--",
+        *command,
+    )
+
+
+def _external_supervisor_validation_expected_properties(
+    plan: RehearsalPlan,
+    service_name: str,
+) -> dict[str, str]:
+    working_directory = staging_working_directory(plan.candidate_sha)
+    return {
+        "LoadState": "loaded",
+        "Type": "oneshot",
+        "Transient": "yes",
+        "Description": _external_supervisor_validation_description(plan, service_name),
+        "WorkingDirectory": working_directory,
+        "Environment": f"PYTHONPATH={working_directory}/src PYTHONDONTWRITEBYTECODE=1",
+        "KillMode": "control-group",
+    }
+
+
+def _safe_external_supervisor_validation_working_directory(value: str) -> str:
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or str(path) != value
+        or len(path.parts) < 2
+        or path.name != "repo"
+    ):
+        raise ValueError("external supervisor validation working directory is invalid")
+    return value
 
 
 def _blocked(component: str, reason: str) -> RehearsalStepOutcome:

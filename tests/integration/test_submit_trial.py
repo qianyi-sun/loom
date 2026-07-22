@@ -8,7 +8,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Benchmark, Task, Team, TeamQuota, Token, Trial, User
+from loom.db.schema import (
+    Benchmark,
+    DataLifecycleAuthority,
+    Task,
+    Team,
+    TeamQuota,
+    Token,
+    Trial,
+    User,
+)
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -72,6 +81,11 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
         with session_factory() as s:
             s.execute(delete(Trial))
             s.execute(delete(Token))
+            s.execute(
+                delete(DataLifecycleAuthority).where(
+                    DataLifecycleAuthority.team_id == team_id,
+                ),
+            )
             s.execute(delete(TeamQuota))
             s.execute(delete(User).where(User.id == user_id))
             s.execute(delete(Team))

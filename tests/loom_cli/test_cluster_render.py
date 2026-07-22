@@ -964,6 +964,7 @@ def test_trusted_controller_guard_ignores_encoded_separator_in_query() -> None:
 @pytest.mark.parametrize(
     ("filename", "runtime_environment"),
     [
+        ("development.cluster.toml", "development"),
         ("production.cluster.toml", "production"),
         ("staging.cluster.toml", "staging"),
     ],
@@ -978,6 +979,14 @@ def test_render_profiles_set_backend_runtime_environment(
     for deployment in ("loom-control-plane", "loom-service", "loom-llm-gateway"):
         assert _deployment_env_value(docs, deployment, "LOOM_ENV") == runtime_environment
         assert _deployment_env_value(docs, deployment, "LOOM_NAMESPACE") == cfg.namespace
+    assert (
+        _deployment_env_value(
+            docs,
+            "loom-control-plane",
+            "LOOM_CP_SLURM_WORKER_CONTROLLER_ENVIRONMENT",
+        )
+        == runtime_environment
+    )
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ from loom_cli.rollout.final_attestation_admission import (
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     AttestationBindings,
     CheckContext,
     CheckOperation,
@@ -24,6 +25,7 @@ from loom_cli.rollout.preflight_contract import (
     RegisteredCheck,
     SecretRedactionPolicy,
     StageCapability,
+    external_supervisor_unit_set_digest,
 )
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
@@ -122,7 +124,13 @@ def _checks(
     *,
     boot_id: str = "boot-1",
     baseline_digest: str = "6" * 64,
+    predecessor_live_digest: str = "d" * 64,
+    predecessor_pool_digest: str = "2" * 64,
 ) -> tuple[RegisteredCheck, ...]:
+    predecessor_units = {
+        "loom-autoscaler-gb10-staging.service": "e" * 64,
+        "loom-autoscaler-gb10-staging.timer": "f" * 64,
+    }
     tier0 = (
         _check(
             "candidate.identity",
@@ -154,6 +162,33 @@ def _checks(
             "gb10.host-readiness",
             {"inventory-digest": "4" * 64, "boot-ids": {"gb10-1": boot_id}},
             (EvidenceField("inventory-digest", "sha256"), EvidenceField("boot-ids", "string-map")),
+        ),
+        _check(
+            "external-supervisor.predecessor",
+            {
+                "authority-kind": "legacy-manifest",
+                "authority-digest": "c" * 64,
+                "pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                "unit-digests": predecessor_units,
+                "unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
+                "live-evidence-digest": predecessor_live_digest,
+                "pending-transition-digest": "1" * 64,
+                "transition-clear": True,
+                "runtime-ready": True,
+                "pool-identity-digest": predecessor_pool_digest,
+            },
+            (
+                EvidenceField("authority-kind", "string"),
+                EvidenceField("authority-digest", "sha256"),
+                EvidenceField("pointer-digest", "sha256"),
+                EvidenceField("unit-digests", "string-map"),
+                EvidenceField("unit-set-digest", "sha256"),
+                EvidenceField("live-evidence-digest", "sha256"),
+                EvidenceField("pending-transition-digest", "sha256"),
+                EvidenceField("transition-clear", "boolean"),
+                EvidenceField("runtime-ready", "boolean"),
+                EvidenceField("pool-identity-digest", "sha256"),
+            ),
         ),
     )
     tier2 = (
@@ -196,6 +231,10 @@ def _checks(
 
 
 def _bindings() -> AttestationBindings:
+    predecessor_units = {
+        "loom-autoscaler-gb10-staging.service": "e" * 64,
+        "loom-autoscaler-gb10-staging.timer": "f" * 64,
+    }
     return AttestationBindings(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
@@ -223,6 +262,16 @@ def _bindings() -> AttestationBindings:
         gb10_unit_digest="b" * 64,
         browser_image_digest="sha256:" + "c" * 64,
         browser_report_schema="v3",
+        supervisor_predecessor_kind="legacy-manifest",
+        supervisor_predecessor_digest="c" * 64,
+        supervisor_predecessor_pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        supervisor_predecessor_unit_sha256=predecessor_units,
+        supervisor_predecessor_unit_set_digest=external_supervisor_unit_set_digest(
+            predecessor_units
+        ),
+        supervisor_predecessor_live_evidence_digest="d" * 64,
+        supervisor_predecessor_pending_transition_digest="1" * 64,
+        supervisor_transition_digest="2" * 64,
     )
 
 
@@ -259,7 +308,7 @@ def _attestation(plan: CandidatePreflightPlan) -> PreflightAttestation:
         tuple(check for check in plan.registry.checks if check.spec.tier in {0, 2})
     ).run(plan.context, through_tier=2, now=lambda: NOW - timedelta(minutes=1))
     return PreflightAttestation(
-        schema_version=1,
+        schema_version=2,
         bindings=_bindings(),
         registry_digest=plan.registry.registry_digest,
         coverage_digest=plan.registry.coverage_digest,
@@ -281,11 +330,25 @@ def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
         now=NOW,
     )
 
-    assert len(admission.tier0_executions) == 6
+    assert len(admission.tier0_executions) == 7
     assert all(execution.passed for execution in admission.tier0_executions)
     assert len(admission.tier2_executions) == 6
     assert all(execution.passed for execution in admission.tier2_executions)
     assert admission.preflight_plan is plan
+
+
+def test_final_admission_rejects_pool_identity_drift() -> None:
+    attested_plan = _plan(_checks(predecessor_pool_digest="2" * 64))
+    drifted_plan = _plan(_checks(predecessor_pool_digest="3" * 64))
+
+    with pytest.raises(ValueError, match="evidence changed"):
+        validate_final_attestation(
+            attestation=_attestation(attested_plan),
+            candidate=_candidate(),
+            plan=drifted_plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
 
 
 def test_final_admission_rejects_host_boot_or_epoch_drift() -> None:
@@ -324,6 +387,20 @@ def test_final_admission_rejects_tier2_baseline_drift() -> None:
         )
 
 
+def test_final_admission_rejects_predecessor_drift_before_apply() -> None:
+    attested_plan = _plan(_checks())
+    drifted_plan = _plan(_checks(predecessor_live_digest="0" * 64))
+
+    with pytest.raises(ValueError, match="evidence changed"):
+        validate_final_attestation(
+            attestation=_attestation(attested_plan),
+            candidate=_candidate(),
+            plan=drifted_plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
+
+
 def test_post_apply_drift_reuses_exact_admission_without_baseline_replay() -> None:
     plan = _plan(_checks())
     admission = validate_final_attestation(
@@ -334,9 +411,10 @@ def test_post_apply_drift_reuses_exact_admission_without_baseline_replay() -> No
         now=NOW,
     )
 
+    post_apply_plan = _plan(_checks(predecessor_live_digest="0" * 64))
     evidence = validate_post_apply_attestation_drift(
         admission=admission,
-        plan=plan,
+        plan=post_apply_plan,
         current_mutation_epoch=8,
         now=NOW,
     )

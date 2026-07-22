@@ -4,6 +4,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread, current_thread
 
@@ -11,6 +12,7 @@ import pytest
 
 import loom_cli.rollout.preflight_contract as preflight_contract
 from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     AttestationBindings,
     CheckContext,
     CheckExecution,
@@ -25,6 +27,7 @@ from loom_cli.rollout.preflight_contract import (
     RegisteredCheck,
     SecretRedactionPolicy,
     StageCapability,
+    external_supervisor_unit_set_digest,
 )
 
 NOW = datetime(2026, 7, 19, 16, tzinfo=UTC)
@@ -647,6 +650,21 @@ def test_tier_zero_allows_only_isolated_or_nonmutating_checks() -> None:
         )
 
 
+def test_tier_zero_live_readonly_stage_round_trips_but_tier_one_is_rejected() -> None:
+    check = _check(
+        "external-supervisor.predecessor",
+        tier=0,
+        stage=StageCapability.BASELINE_LIVE_READONLY,
+    )
+
+    execution = PreflightDag((check,)).run(_context(), now=lambda: NOW)[0]
+
+    assert execution.stage is StageCapability.BASELINE_LIVE_READONLY
+    assert CheckExecution.from_dict(execution.to_dict()) == execution
+    with pytest.raises(ValueError, match="tier does not match stage"):
+        replace(check.spec, tier=1)
+
+
 def test_check_contract_accepts_bounded_string_map_evidence() -> None:
     spec = CheckSpec(
         check_id="gb10.host-readiness",
@@ -726,6 +744,10 @@ def test_check_contract_rejects_unsafe_string_map_evidence(
 
 
 def _bindings(**overrides: object) -> AttestationBindings:
+    predecessor_units = {
+        "loom-autoscaler-gb10-staging.service": "d" * 64,
+        "loom-autoscaler-gb10-staging.timer": "e" * 64,
+    }
     values: dict[str, object] = {
         "candidate_sha": "a" * 40,
         "candidate_tree": "b" * 40,
@@ -753,6 +775,16 @@ def _bindings(**overrides: object) -> AttestationBindings:
         "gb10_unit_digest": "7" * 64,
         "browser_image_digest": "sha256:" + "8" * 64,
         "browser_report_schema": "v3",
+        "supervisor_predecessor_kind": "legacy-manifest",
+        "supervisor_predecessor_digest": "f" * 64,
+        "supervisor_predecessor_pointer_digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        "supervisor_predecessor_unit_sha256": predecessor_units,
+        "supervisor_predecessor_unit_set_digest": external_supervisor_unit_set_digest(
+            predecessor_units
+        ),
+        "supervisor_predecessor_live_evidence_digest": "1" * 64,
+        "supervisor_predecessor_pending_transition_digest": "2" * 64,
+        "supervisor_transition_digest": "3" * 64,
     }
     values.update(overrides)
     return AttestationBindings(**values)  # type: ignore[arg-type]
@@ -797,6 +829,35 @@ def test_attestation_round_trip_preserves_exact_digest_and_immutable_maps() -> N
     assert decoded.attestation_digest == attestation.attestation_digest
     with pytest.raises(TypeError):
         decoded.evidence_hashes["other.check"] = "0" * 64  # type: ignore[index]
+    with pytest.raises(TypeError):
+        decoded.bindings.supervisor_predecessor_unit_sha256[  # type: ignore[index]
+            "loom-autoscaler-gb10-staging.service"
+        ] = "0" * 64
+
+
+def test_attestation_v2_rejects_absent_predecessor_or_v1_schema() -> None:
+    with pytest.raises(ValueError, match="supervisor predecessor binding"):
+        _bindings(
+            supervisor_predecessor_kind="absent",
+            supervisor_predecessor_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            supervisor_predecessor_pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            supervisor_predecessor_unit_sha256={},
+            supervisor_predecessor_unit_set_digest="0" * 64,
+        )
+
+    result = PreflightDag([_check("candidate.identity")]).run(
+        _context(),
+        now=lambda: NOW,
+    )
+    attestation = PreflightAttestation.issue(
+        bindings=_bindings(),
+        executions=result,
+        issued_at=NOW,
+        registry_digest="9" * 64,
+        coverage_digest="a" * 64,
+    )
+    with pytest.raises(ValueError, match="schema is unsupported"):
+        replace(attestation, schema_version=1)
 
 
 def test_attestation_round_trip_rejects_payload_and_digest_tampering() -> None:

@@ -1,17 +1,34 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from loom.data_lifecycle import StagingCapacity
+from loom_cli.rollout.external_supervisor_predecessor import (
+    ExternalSupervisorPoolIdentity,
+    load_predecessor_manifest,
+)
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
+from loom_cli.rollout.operator import installed_deep_preflight_factory
 from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
 from loom_cli.rollout.operator.installed_deep_preflight import InstalledDeepPreflightComposition
 from loom_cli.rollout.operator.installed_preflight_inputs import InstalledPreflightInputs
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
+from loom_cli.rollout.operator.protected_external_supervisor_transport import (
+    PROTECTED_USER_UNIT_DIR,
+    ServiceRuntimeStatus,
+    TimerRuntimeStatus,
+)
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
-from loom_cli.rollout.preflight_registered_checks import CredentialProbeSource
+from loom_cli.rollout.preflight_contract import EXTERNAL_SUPERVISOR_ABSENT_DIGEST, CheckContext
+from loom_cli.rollout.preflight_registered_checks import (
+    CredentialProbeSource,
+    ExternalSupervisorPredecessorSnapshot,
+)
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
 
@@ -90,6 +107,22 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         ),
         capacity_source=lambda: StagingCapacity(0, 0, 100, 100),
         backup_authority_factory=lambda _epoch: None,  # type: ignore[arg-type,return-value]
+        external_supervisor_predecessor_source=lambda _context: (
+            ExternalSupervisorPredecessorSnapshot(
+                kind="legacy-manifest",
+                authority_digest="a" * 64,
+                pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                unit_sha256={
+                    "loom-autoscaler-gb10-staging.service": "b" * 64,
+                    "loom-autoscaler-gb10-staging.timer": "c" * 64,
+                },
+                live_evidence_digest="d" * 64,
+                pending_transition_digest="e" * 64,
+                transition_clear=False,
+                runtime_ready=False,
+                pool_identity_digest="f" * 64,
+            )
+        ),
         systemd_run=command,
         gb10_run=command,
         gb10_mount_source=lambda: GB10SharedMountReadiness(
@@ -130,3 +163,219 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         }
     ]
     assert composition.authority().current_mutation_epoch() == 9
+
+
+class _LegacyExternalSupervisorStore:
+    def __init__(self) -> None:
+        self.manifest = load_predecessor_manifest()
+
+    def list_units(self) -> tuple[str, ...]:
+        return tuple(self.manifest.unit_sha256)
+
+    def read_unit(self, name: str) -> bytes:
+        return self.manifest.unit_payloads[name].encode()
+
+    def read_canonical(self):
+        return None
+
+    def compensation_blockers(self) -> dict[str, str]:
+        return {}
+
+
+class _ReadyLegacyExternalSupervisorControl:
+    def timer_status(self, name: str) -> TimerRuntimeStatus:
+        return TimerRuntimeStatus(
+            load_state="loaded",
+            unit_file_state="enabled",
+            active_state="active",
+            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            need_daemon_reload="no",
+        )
+
+    def service_status(self, name: str) -> ServiceRuntimeStatus:
+        return ServiceRuntimeStatus(
+            load_state="loaded",
+            result="success",
+            exec_main_status=0,
+            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            need_daemon_reload="no",
+        )
+
+
+def _git_run(arguments: list[str]):
+    return subprocess.run(arguments, capture_output=True, check=False, text=True)
+
+
+def _installed_predecessor_context(
+    candidate_root: Path,
+    *,
+    schema_revision: str = "0066",
+) -> CheckContext:
+    candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"])
+    candidate_tree = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"])
+    assert candidate_sha.returncode == 0
+    assert candidate_tree.returncode == 0
+    return CheckContext(
+        {
+            "candidate.sha": candidate_sha.stdout.strip(),
+            "candidate.tree": candidate_tree.stdout.strip(),
+            "schema.revision": schema_revision,
+        }
+    )
+
+
+_POOL_IDENTITY_TABLES = (
+    "gb10_worker_node_statuses",
+    "gb10_worker_pool_desired_states",
+    "slurm_worker_jobs",
+    "worker_pool_autoscaler_policies",
+    "workers",
+)
+
+
+def _pool_identity(
+    schema_revision: str = "0066",
+    *,
+    legacy_count: int = 1,
+    target_count: int = 0,
+) -> ExternalSupervisorPoolIdentity:
+    return ExternalSupervisorPoolIdentity.build(
+        schema_revision=schema_revision,
+        legacy_rows={name: legacy_count for name in _POOL_IDENTITY_TABLES},
+        target_rows={name: target_count for name in _POOL_IDENTITY_TABLES},
+    )
+
+
+def test_installed_external_supervisor_predecessor_source_binds_merged_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    store = _LegacyExternalSupervisorStore()
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: store,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: _ReadyLegacyExternalSupervisorControl(),
+    )
+
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=_pool_identity,
+    )
+    snapshot = source(_installed_predecessor_context(candidate_root))
+
+    assert snapshot.kind == "legacy-manifest"
+    assert snapshot.authority_digest == store.manifest.manifest_digest
+    assert dict(snapshot.unit_sha256) == dict(store.manifest.unit_sha256)
+    assert snapshot.transition_clear is True
+    assert snapshot.runtime_ready is True
+
+
+def test_installed_external_supervisor_predecessor_source_rejects_source_blob_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: _LegacyExternalSupervisorStore(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: _ReadyLegacyExternalSupervisorControl(),
+    )
+
+    def drifted_git_run(arguments: list[str]):
+        if "cat-file" in arguments:
+            return SimpleNamespace(returncode=0, stdout="drifted\n", stderr="")
+        return _git_run(arguments)
+
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=drifted_git_run,
+        service_uid=501,
+        pool_identity_source=_pool_identity,
+    )
+
+    with pytest.raises(ValueError, match="Git provenance drifted"):
+        source(_installed_predecessor_context(candidate_root))
+
+
+def test_external_supervisor_pool_identity_is_one_way_across_0067() -> None:
+    _pool_identity("0066").require_predecessor_kind("legacy-manifest")
+    _pool_identity("0067", legacy_count=0, target_count=1).require_predecessor_kind("canonical")
+
+    with pytest.raises(ValueError, match="pre-0067 pool identity drifted"):
+        _pool_identity("0066", target_count=1).require_predecessor_kind("legacy-manifest")
+    with pytest.raises(ValueError, match="post-0067 pool identity drifted"):
+        _pool_identity("0067", legacy_count=1, target_count=1).require_predecessor_kind("canonical")
+    with pytest.raises(ValueError, match="post-0067 pool identity drifted"):
+        _pool_identity("0067", legacy_count=0, target_count=1).require_predecessor_kind(
+            "legacy-manifest"
+        )
+
+
+def test_installed_predecessor_source_rejects_legacy_after_0067(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: _LegacyExternalSupervisorStore(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: _ReadyLegacyExternalSupervisorControl(),
+    )
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0067",
+            legacy_count=0,
+            target_count=1,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="post-0067 pool identity drifted"):
+        source(_installed_predecessor_context(candidate_root, schema_revision="0067"))
+
+
+def test_installed_pool_identity_probe_rejects_missing_or_duplicate_tables() -> None:
+    def query(sql: str):
+        if "alembic_version" in sql:
+            return ({"schema_revision": "0067"},)
+        return tuple(
+            {
+                "table_name": name,
+                "legacy_rows": 0,
+                "target_rows": 1,
+            }
+            for name in _POOL_IDENTITY_TABLES
+        )
+
+    identity = installed_deep_preflight_factory._probe_external_supervisor_pool_identity(query)
+    assert identity.schema_revision == "0067"
+    assert identity.legacy_rows == {name: 0 for name in _POOL_IDENTITY_TABLES}
+    assert identity.target_rows == {name: 1 for name in _POOL_IDENTITY_TABLES}
+
+    def duplicate_query(sql: str):
+        if "alembic_version" in sql:
+            return ({"schema_revision": "0067"},)
+        return (
+            {"table_name": "workers", "legacy_rows": 0, "target_rows": 1},
+            {"table_name": "workers", "legacy_rows": 0, "target_rows": 1},
+        )
+
+    with pytest.raises(ValueError, match="pool identity is invalid"):
+        installed_deep_preflight_factory._probe_external_supervisor_pool_identity(duplicate_query)

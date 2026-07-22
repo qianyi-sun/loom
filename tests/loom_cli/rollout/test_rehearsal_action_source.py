@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.external_supervisor_readiness import build_external_supervisor_artifact
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
     ROLLOUT_IMAGES,
@@ -141,6 +142,7 @@ def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
         manifest_artifacts=_manifests,
         migration_artifacts=_migration,
         production_defaults_artifacts=lambda: _production_defaults(candidate_tree="b" * 40),
+        external_supervisor_artifacts=_external_supervisor,
         artifact_store=PreflightArtifactStore(tmp_path / "state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
@@ -150,6 +152,15 @@ def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
         smoke_authority=_smoke_authority(),
         gb10_authority=gb10_rehearsal_authority(),
         backend=backend,
+    )
+
+
+def _external_supervisor():
+    return build_external_supervisor_artifact(
+        Path(__file__).resolve().parents[3],
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        image_tag="staging-aaaaaaa",
     )
 
 
@@ -212,6 +223,7 @@ def test_isolation_identity_changes_with_browser_contract(tmp_path: Path) -> Non
         manifest_artifacts=_manifests,
         migration_artifacts=_migration,
         production_defaults_artifacts=lambda: _production_defaults(candidate_tree="b" * 40),
+        external_supervisor_artifacts=_external_supervisor,
         artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",
@@ -235,6 +247,7 @@ def test_isolation_identity_changes_with_smoke_authority(tmp_path: Path) -> None
         manifest_artifacts=_manifests,
         migration_artifacts=_migration,
         production_defaults_artifacts=lambda: _production_defaults(candidate_tree="b" * 40),
+        external_supervisor_artifacts=_external_supervisor,
         artifact_store=PreflightArtifactStore(tmp_path / "changed-state"),
         migration_plan_sha256="b" * 64,
         migration_target_revision="0067",

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import loom_cli.rollout.operator.installed_final_gate_executor as installed_module
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
 from loom_cli.rollout.operator.installed_final_gate_executor import (
     BoundedStagingSmokeTransport,
@@ -188,3 +189,54 @@ def test_staging_smoke_authority_is_shared_and_fixed(tmp_path: Path) -> None:
         "task_id": "loom-smoke/gb10-oracle-hello-world",
         "team_id": "11111111-1111-4111-8111-111111111111",
     }
+
+
+@pytest.mark.parametrize(
+    ("check_id", "executor_name", "operation"),
+    [
+        ("final.protected-apply", "MigrationEpochProtectedApplyExecutor", CheckOperation.APPLY),
+        ("final.convergence", "KubernetesProtectedConvergenceExecutor", CheckOperation.VERIFY),
+    ],
+)
+def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    check_id: str,
+    executor_name: str,
+    operation: CheckOperation,
+) -> None:
+    executor = _executor(tmp_path)
+    plan = _bound_plan(tmp_path)
+    sentinel_supervisor = object()
+    sentinel_gb10 = object()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_external_supervisor_transport",
+        lambda *, service_uid: (
+            captured.setdefault("service_uid", service_uid),
+            sentinel_supervisor,
+        )[1],
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_ssh_transport",
+        lambda *_args, **_kwargs: sentinel_gb10,
+    )
+
+    class _ProtectedExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __call__(self, actual_check, actual_operation, actual_plan):
+            assert (actual_check, actual_operation, actual_plan) == (check_id, operation, plan)
+            return "dispatched"
+
+    monkeypatch.setattr(installed_module, executor_name, _ProtectedExecutor)
+
+    assert executor(check_id, operation, plan) == "dispatched"  # type: ignore[comparison-overlap]
+    assert captured["candidate_root"] == executor.config.runner_repo
+    assert captured["external_supervisor_transport"] is sentinel_supervisor
+    assert captured["gb10_transport"] is sentinel_gb10
+    assert captured["service_uid"] == os.geteuid()

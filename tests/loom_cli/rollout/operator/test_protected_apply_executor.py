@@ -22,8 +22,9 @@ from loom_cli.rollout.operator.protected_apply_executor import (
     SubprocessProtectedApplyCommandRunner,
 )
 from loom_cli.rollout.preflight_contract import CheckOperation
-from tests.loom_cli.rollout.operator.test_protected_migration_component import (
-    _published_plan,
+from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
+    _bound_artifact,
+    _observation,
 )
 
 
@@ -129,6 +130,48 @@ class GB10Fleet:
         self.exact = True
 
 
+class ExternalSupervisors:
+    def __init__(self, *, exact: bool = False, fail_reconcile: bool = False) -> None:
+        self.exact = exact
+        self.fail_reconcile = fail_reconcile
+        self.calls: list[str] = []
+        self.plan_digest = "a" * 64
+        self.attestation_digest = "b" * 64
+
+    def observe(self, artifact, predecessor_authority=None):
+        self.calls.append("supervisor-read")
+        observation = _observation(
+            artifact,
+            files="exact" if self.exact else "legacy",
+            runtime="exact",
+            plan_digest=self.plan_digest,
+            attestation_digest=self.attestation_digest,
+        )
+        if predecessor_authority is not None:
+            assert predecessor_authority == observation.predecessor_authority
+        return observation
+
+    def apply(
+        self,
+        _artifact,
+        _expected,
+        *,
+        plan_digest,
+        attestation_digest,
+        transition_digest,
+    ):
+        assert len(transition_digest) == 64
+        self.calls.append("supervisor-apply")
+        self.plan_digest = plan_digest
+        self.attestation_digest = attestation_digest
+        self.exact = True
+
+    def reconcile_compensations(self):
+        self.calls.append("supervisor-reconcile")
+        if self.fail_reconcile:
+            raise RuntimeError("reconciliation blocked")
+
+
 def _attempt(state_root: Path) -> None:
     state_root.mkdir(mode=0o700, exist_ok=True)
     state_root.chmod(0o700)
@@ -137,7 +180,7 @@ def _attempt(state_root: Path) -> None:
 
 
 def _plan(tmp_path: Path):
-    plan = _published_plan(tmp_path)
+    plan, _candidate_root, _artifact = _bound_artifact(tmp_path)
     token_path = tmp_path / "service-token"
     token_path.write_text("service-secret\n")
     token_path.chmod(0o600)
@@ -173,11 +216,14 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     plan = _plan(tmp_path)
     runner = Runner(revision="0066", epoch=7)
     runner.plan_digest = plan.plan_digest
+    supervisors = ExternalSupervisors()
     executor = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=GB10Fleet(),
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=supervisors,
         production_defaults_request=_defaults_request,
     )
 
@@ -186,6 +232,7 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     assert result.ready
     assert result.observed_epoch == 8
     assert result.protected_mutation
+    assert supervisors.calls[0] == "supervisor-reconcile"
     assert runner.calls.index("epoch-apply") < runner.calls.index("migration-apply")
     assert runner.calls.index("migration-apply") < runner.calls.index("manifest-apply")
     before = tuple(runner.calls)
@@ -193,6 +240,32 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     assert "epoch-apply" not in runner.calls[len(before) :]
     assert "migration-apply" not in runner.calls[len(before) :]
     assert "manifest-apply" not in runner.calls[len(before) :]
+
+
+def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    _attempt(state)
+    plan = _plan(tmp_path)
+    runner = Runner(revision="0066", epoch=7)
+    runner.plan_digest = plan.plan_digest
+    supervisors = ExternalSupervisors(fail_reconcile=True)
+    executor = MigrationEpochProtectedApplyExecutor(
+        state_root=state,
+        service_uid=os.geteuid(),
+        runner=runner,
+        gb10_transport=GB10Fleet(),
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=supervisors,
+        production_defaults_request=_defaults_request,
+    )
+
+    with pytest.raises(RuntimeError, match="reconciliation blocked"):
+        executor("final.protected-apply", CheckOperation.APPLY, plan)
+
+    assert supervisors.calls == ["supervisor-reconcile"]
+    assert runner.calls == []
 
 
 def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path) -> None:
@@ -210,6 +283,8 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=GB10Fleet(),
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=ExternalSupervisors(),
         production_defaults_request=_defaults_request,
     )
 
@@ -223,6 +298,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[2].name == "02-staging-manifests"
     assert roots[3].name == "03-gb10-candidate"
     assert roots[4].name == "04-production-defaults"
+    assert roots[5].name == "05-external-supervisors"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
@@ -231,6 +307,8 @@ def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
         service_uid=os.geteuid(),
         runner=Runner(revision="0066", epoch=7),
         gb10_transport=GB10Fleet(),
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=ExternalSupervisors(),
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.browser", CheckOperation.VERIFY, _plan(tmp_path))
@@ -243,11 +321,14 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     runner = Runner(revision="0066", epoch=7)
     runner.plan_digest = plan.plan_digest
     gb10 = GB10Fleet()
+    supervisors = ExternalSupervisors()
     applied = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=gb10,
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=supervisors,
         production_defaults_request=_defaults_request,
     )("final.protected-apply", CheckOperation.APPLY, plan)
     assert applied.ready
@@ -257,6 +338,8 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=gb10,
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=supervisors,
         production_defaults_request=_defaults_request,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
@@ -281,6 +364,8 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=GB10Fleet(exact=False),
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=ExternalSupervisors(exact=False),
         production_defaults_request=_defaults_request,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
@@ -291,6 +376,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         "staging-manifests",
         "gb10-candidate",
         "production-defaults",
+        "external-supervisors",
     }
     assert all(not call.endswith("-apply") for call in runner.calls)
 
@@ -300,6 +386,8 @@ def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -
         service_uid=os.geteuid(),
         runner=Runner(revision="0067", epoch=8),
         gb10_transport=GB10Fleet(exact=True),
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=ExternalSupervisors(exact=True),
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.convergence", CheckOperation.APPLY, _plan(tmp_path))

@@ -9,6 +9,8 @@ from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
     CheckContext,
     CheckExecution,
+    external_supervisor_transition_digest,
+    external_supervisor_unit_set_digest,
 )
 
 
@@ -54,6 +56,7 @@ def derive_attestation_bindings(
         "runner.install",
         "credentials.metadata",
         "backup.lease-eligibility",
+        "external-supervisor.predecessor",
         "images.contract",
         "migration.manifest",
         "migration.plan",
@@ -87,6 +90,8 @@ def derive_attestation_bindings(
         evidence("candidate.identity", "resolved-tree"),
         "candidate tree",
     )
+    if candidate_tree != _string(binding("candidate.tree"), "context candidate tree"):
+        raise ValueError("preflight candidate tree evidence drifted from context")
     image_digests = _string_map(
         evidence("images.contract", "image-digests"),
         "image digests",
@@ -105,6 +110,83 @@ def derive_attestation_bindings(
     protected_mutation = evidence("rehearsal.cleanup", "protected-mutation")
     if cleanup is not True or protected_mutation is not False:
         raise ValueError("isolated rehearsal cleanup evidence is incomplete")
+
+    predecessor_kind = _string(
+        evidence("external-supervisor.predecessor", "authority-kind"),
+        "external supervisor predecessor kind",
+    )
+    if predecessor_kind not in {"legacy-manifest", "canonical"}:
+        raise ValueError("external supervisor predecessor evidence is not authoritative")
+    predecessor_digest = _string(
+        evidence("external-supervisor.predecessor", "authority-digest"),
+        "external supervisor predecessor digest",
+    )
+    predecessor_pointer_digest = _string(
+        evidence("external-supervisor.predecessor", "pointer-digest"),
+        "external supervisor predecessor pointer",
+    )
+    predecessor_units = _string_map(
+        evidence("external-supervisor.predecessor", "unit-digests"),
+        "external supervisor predecessor units",
+    )
+    predecessor_unit_set_digest = _string(
+        evidence("external-supervisor.predecessor", "unit-set-digest"),
+        "external supervisor predecessor unit set",
+    )
+    predecessor_live_evidence_digest = _string(
+        evidence("external-supervisor.predecessor", "live-evidence-digest"),
+        "external supervisor predecessor live evidence",
+    )
+    predecessor_pending_transition_digest = _string(
+        evidence("external-supervisor.predecessor", "pending-transition-digest"),
+        "external supervisor predecessor pending transition",
+    )
+    if (
+        evidence("external-supervisor.predecessor", "transition-clear") is not True
+        or evidence("external-supervisor.predecessor", "runtime-ready") is not True
+        or external_supervisor_unit_set_digest(predecessor_units) != predecessor_unit_set_digest
+    ):
+        raise ValueError("external supervisor predecessor evidence is not authoritative")
+
+    target_artifact_digest = _string(
+        evidence("systemd.render", "supervisor-artifact-digest"),
+        "external supervisor target artifact",
+    )
+    target_profile_sha256 = _string(
+        evidence("systemd.render", "supervisor-profile-sha256"),
+        "external supervisor target profile",
+    )
+    target_script_sha256 = _string_map(
+        evidence("systemd.render", "supervisor-script-digests"),
+        "external supervisor target scripts",
+    )
+    target_unit_sha256 = _string_map(
+        evidence("systemd.render", "supervisor-unit-digests"),
+        "external supervisor target units",
+    )
+    target_unit_set_digest = _string(
+        evidence("systemd.render", "supervisor-unit-set-digest"),
+        "external supervisor target unit set",
+    )
+    if external_supervisor_unit_set_digest(target_unit_sha256) != target_unit_set_digest:
+        raise ValueError("external supervisor target unit evidence drifted")
+    supervisor_transition = external_supervisor_transition_digest(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        environment=_string(binding("environment"), "environment"),
+        predecessor_kind=predecessor_kind,
+        predecessor_digest=predecessor_digest,
+        predecessor_pointer_digest=predecessor_pointer_digest,
+        predecessor_unit_sha256=predecessor_units,
+        predecessor_unit_set_digest=predecessor_unit_set_digest,
+        predecessor_live_evidence_digest=predecessor_live_evidence_digest,
+        predecessor_pending_transition_digest=predecessor_pending_transition_digest,
+        target_artifact_digest=target_artifact_digest,
+        target_profile_sha256=target_profile_sha256,
+        target_script_sha256=target_script_sha256,
+        target_unit_sha256=target_unit_sha256,
+        target_unit_set_digest=target_unit_set_digest,
+    )
     if backup_lease is None:
         backup_lease_id = _string(
             evidence("backup.lease-eligibility", "source-request"),
@@ -185,6 +267,14 @@ def derive_attestation_bindings(
             evidence("browser.runtime", "report-schema-digest"),
             "browser report schema",
         ),
+        supervisor_predecessor_kind=predecessor_kind,
+        supervisor_predecessor_digest=predecessor_digest,
+        supervisor_predecessor_pointer_digest=predecessor_pointer_digest,
+        supervisor_predecessor_unit_sha256=predecessor_units,
+        supervisor_predecessor_unit_set_digest=predecessor_unit_set_digest,
+        supervisor_predecessor_live_evidence_digest=predecessor_live_evidence_digest,
+        supervisor_predecessor_pending_transition_digest=(predecessor_pending_transition_digest),
+        supervisor_transition_digest=supervisor_transition,
     )
 
 

@@ -78,13 +78,33 @@ class FinalGateActionSource:
             or admission.attestation != attestation
         ):
             raise ValueError("final gate action source mutation epoch drifted")
-        publication = self._publication(envelope, attestation)
+        rehearsal = self.request_store.read_preflight_rehearsal(envelope.request_id)
+        self._validate_rehearsal(rehearsal, attestation)
+        publication = self._publication(rehearsal, attestation)
+        systemd_evidence = self._execution_evidence(
+            rehearsal,
+            attestation,
+            check_id="systemd.render",
+        )
+        predecessor_evidence = self._execution_evidence(
+            rehearsal,
+            attestation,
+            check_id="external-supervisor.predecessor",
+        )
         lease = self.request_store.read_backup_lease(attestation.bindings.backup_lease_digest)
         baseline = ProtectedApplyBaseline.from_executions(
             attestation,
             admission.tier2_executions,
         )
-        plan = FinalGatePlan.build(envelope, attestation, publication, lease, baseline)
+        plan = FinalGatePlan.build(
+            envelope,
+            attestation,
+            publication,
+            lease,
+            baseline,
+            systemd_evidence,
+            predecessor_evidence,
+        )
         plan_path = FinalGatePlanStore(
             self.state_root,
             request_id=envelope.request_id,
@@ -142,32 +162,15 @@ class FinalGateActionSource:
 
     def _publication(
         self,
-        envelope: DriverEnvelope,
+        rehearsal: PreflightRehearsal,
         attestation: PreflightAttestation,
     ) -> PreflightArtifactPublication:
-        rehearsal = self.request_store.read_preflight_rehearsal(envelope.request_id)
-        if (
-            not rehearsal.passed
-            or rehearsal.registry_digest != attestation.registry_digest
-            or rehearsal.coverage_digest != attestation.coverage_digest
-        ):
-            raise ValueError("final gate rehearsal authority drifted")
-        matches = tuple(
-            execution
-            for execution in rehearsal.executions
-            if execution.check_id == "artifacts.publish"
+        execution_evidence = self._execution_evidence(
+            rehearsal,
+            attestation,
+            check_id="artifacts.publish",
         )
-        if len(matches) != 1:
-            raise ValueError("final gate artifact evidence is missing or ambiguous")
-        execution = matches[0]
-        if (
-            not execution.passed
-            or attestation.check_implementation_digests.get(execution.check_id)
-            != execution.implementation_digest
-            or attestation.evidence_hashes.get(execution.check_id) != execution.evidence_hash
-        ):
-            raise ValueError("final gate artifact evidence drifted from attestation")
-        digest = execution.evidence.get("bundle-digest")
+        digest = execution_evidence.get("bundle-digest")
         if not isinstance(digest, str):
             raise ValueError("final gate artifact bundle identity is missing")
         publication = self.artifact_store.read(digest)
@@ -180,9 +183,43 @@ class FinalGateActionSource:
             "migration-artifact-digest": publication.migration_manifest_artifact_sha256,
             "production-defaults-digest": publication.production_defaults_sha256,
         }
-        if dict(execution.evidence) != expected_evidence:
+        if dict(execution_evidence) != expected_evidence:
             raise ValueError("final gate artifact publication drifted from evidence")
         return publication
+
+    @staticmethod
+    def _validate_rehearsal(
+        rehearsal: PreflightRehearsal,
+        attestation: PreflightAttestation,
+    ) -> None:
+        if (
+            not rehearsal.passed
+            or rehearsal.registry_digest != attestation.registry_digest
+            or rehearsal.coverage_digest != attestation.coverage_digest
+        ):
+            raise ValueError("final gate rehearsal authority drifted")
+
+    @staticmethod
+    def _execution_evidence(
+        rehearsal: PreflightRehearsal,
+        attestation: PreflightAttestation,
+        *,
+        check_id: str,
+    ) -> Mapping[str, object]:
+        matches = tuple(
+            execution for execution in rehearsal.executions if execution.check_id == check_id
+        )
+        if len(matches) != 1:
+            raise ValueError(f"final gate {check_id} evidence is missing or ambiguous")
+        execution = matches[0]
+        if (
+            not execution.passed
+            or attestation.check_implementation_digests.get(execution.check_id)
+            != execution.implementation_digest
+            or attestation.evidence_hashes.get(execution.check_id) != execution.evidence_hash
+        ):
+            raise ValueError(f"final gate {check_id} evidence drifted from attestation")
+        return dict(execution.evidence)
 
 
 __all__ = ["FinalGateActionSource", "FinalGateRehearsalStore"]

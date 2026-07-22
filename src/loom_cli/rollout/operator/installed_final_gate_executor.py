@@ -27,6 +27,9 @@ from .protected_apply_executor import (
     MigrationEpochProtectedApplyExecutor,
     SubprocessProtectedApplyCommandRunner,
 )
+from .protected_external_supervisor_transport import (
+    build_fixed_external_supervisor_transport,
+)
 from .protected_gb10_transport import build_fixed_gb10_ssh_transport
 from .staging_smoke_authority import staging_smoke_authority
 
@@ -153,18 +156,25 @@ class InstalledFinalGateExecutor:
                 run=self._ssh_run,
                 max_concurrency=self.config.gb10_prep_concurrency,
             )
+            external_supervisors = build_fixed_external_supervisor_transport(
+                service_uid=self.service_uid
+            )
         if check_id == "final.protected-apply":
             return MigrationEpochProtectedApplyExecutor(
                 state_root=self.config.state_root,
                 service_uid=self.service_uid,
                 runner=protected_runner,
                 gb10_transport=gb10,
+                candidate_root=self.config.runner_repo,
+                external_supervisor_transport=external_supervisors,
             )(check_id, operation, plan)
         if check_id == "final.convergence":
             return KubernetesProtectedConvergenceExecutor(
                 service_uid=self.service_uid,
                 runner=protected_runner,
                 gb10_transport=gb10,
+                candidate_root=self.config.runner_repo,
+                external_supervisor_transport=external_supervisors,
             )(check_id, operation, plan)
         if check_id == "final.smoke":
             return FinalSmokeExecutor(
@@ -252,7 +262,8 @@ def _run_command(
         "HOME": "/var/lib/loom-staging-rollout",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": "/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "XDG_RUNTIME_DIR": f"/run/user/{os.geteuid()}",
     }
     result = subprocess.run(

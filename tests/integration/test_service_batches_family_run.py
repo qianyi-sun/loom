@@ -28,7 +28,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -48,6 +48,7 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.integration.gateway_db import delete_lifecycle_authorities
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
 
@@ -106,31 +107,38 @@ def _insert_provider_connection(
     owner_team_id: UUID,
     *,
     display_name: str,
+    ownership: _FakeStateBackend,
 ) -> UUID:
     connection_id = uuid4()
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     try:
         with sl() as s:
-            s.execute(insert(ProviderConnection).values(
-                id=connection_id,
-                team_id=owner_team_id,
-                provider_type="openai-compatible",
-                display_name=display_name,
-                base_url="https://provider.invalid/v1",
-                upstream_host="provider.invalid",
-                encrypted_api_key_ref=(
-                    f"loom://test/{owner_team_id}/{connection_id}"
-                ),
-                created_by="test",
-            ))
+            s.execute(
+                insert(ProviderConnection).values(
+                    id=connection_id,
+                    team_id=owner_team_id,
+                    provider_type="openai-compatible",
+                    display_name=display_name,
+                    base_url="https://provider.invalid/v1",
+                    upstream_host="provider.invalid",
+                    encrypted_api_key_ref=(f"loom://test/{owner_team_id}/{connection_id}"),
+                    created_by="test",
+                )
+            )
             s.commit()
     finally:
         sync_engine.dispose()
+    ownership.owned_connection_ids.add(connection_id)
     return connection_id
 
 
-def _insert_team(postgres_url: str, *, name: str) -> UUID:
+def _insert_team(
+    postgres_url: str,
+    *,
+    name: str,
+    ownership: _FakeStateBackend,
+) -> UUID:
     team_id = uuid4()
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -140,6 +148,7 @@ def _insert_team(postgres_url: str, *, name: str) -> UUID:
             s.commit()
     finally:
         sync_engine.dispose()
+    ownership.owned_team_ids.add(team_id)
     return team_id
 
 
@@ -160,9 +169,15 @@ class _FakeStateBackend:
 
     def __init__(self) -> None:
         self.initialized: list[tuple[UUID, str]] = []
+        self.owned_team_ids: set[UUID] = set()
+        self.owned_connection_ids: set[UUID] = set()
 
     async def initialize(
-        self, *, batch_id: UUID, family_key: str, params: dict[str, Any],
+        self,
+        *,
+        batch_id: UUID,
+        family_key: str,
+        params: dict[str, Any],
     ) -> str:
         self.initialized.append((batch_id, family_key))
         return f"s3://fake/family-state/{batch_id}/{family_key}/state.tar.gz"
@@ -207,55 +222,68 @@ async def camp_setup(
     )
 
     team_id = uuid4()
+    fake_backend.owned_team_ids.add(team_id)
     username = f"FamilyRunOwner-{team_id.hex[:8]}"
     user_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
+    worker_id = uuid4()
+    owned_task_ids = (
+        "benchmarks/skillflow-iterative/family-a/task-1",
+        "benchmarks/skillflow-iterative/family-a/task-2",
+    )
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(User).values(
-            id=user_id,
-            username=username,
-            username_normalized=username.casefold(),
-            status="active",
-            is_platform_admin=False,
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team",
-            scopes=["submit", "read:own"],
-            team_id=team_id,
-            created_by_user_id=user_id,
-            issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(TeamMembership).values(
-            team_id=team_id,
-            user_id=user_id,
-            role="owner",
-        ))
+        s.execute(
+            insert(User).values(
+                id=user_id,
+                username=username,
+                username_normalized=username.casefold(),
+                status="active",
+                is_platform_admin=False,
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_id,
+                created_by_user_id=user_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(TeamMembership).values(
+                team_id=team_id,
+                user_id=user_id,
+                role="owner",
+            )
+        )
         # Two tasks in a shared family under a distinct benchmark path.
-        for slug in (
-            "benchmarks/skillflow-iterative/family-a/task-1",
-            "benchmarks/skillflow-iterative/family-a/task-2",
-        ):
-            s.execute(insert(Task).values(
-                id=slug,
-                checksum="x" * 64,
-                config=_task_config(slug),
-                source="local",
-                license="Apache-2.0",
-            ))
+        for slug in owned_task_ids:
+            s.execute(
+                insert(Task).values(
+                    id=slug,
+                    checksum="x" * 64,
+                    config=_task_config(slug),
+                    source="local",
+                    license="Apache-2.0",
+                )
+            )
         # Fake worker so POST /batches passes the no-worker check.
-        s.execute(insert(Worker).values(
-            id=uuid4(),
-            hostname="fixture-worker",
-            version="test",
-            capabilities=[{"backend": "docker"}, {"backend": "fake"}],
-            registered_at=datetime.now(UTC),
-            last_seen_at=datetime.now(UTC),
-            status="active",
-        ))
+        s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="fixture-worker",
+                version="test",
+                capabilities=[{"backend": "docker"}, {"backend": "fake"}],
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC),
+                status="active",
+            )
+        )
         s.commit()
     try:
         yield app, raw, team_id, fake_backend
@@ -263,19 +291,41 @@ async def camp_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
+            owned_team_ids = tuple(fake_backend.owned_team_ids)
+            trial_rows = tuple(
+                s.execute(
+                    select(Trial.id, Trial.team_id).where(Trial.team_id.in_(owned_team_ids))
+                ).all()
+            )
+            batch_rows = tuple(
+                s.execute(
+                    select(Batch.id, Batch.team_id).where(Batch.team_id.in_(owned_team_ids))
+                ).all()
+            )
             # Cascade cleanup: batch_family_state.batch_id has ON DELETE
             # CASCADE, so deleting Batch is enough.
-            s.execute(delete(Trial))
-            s.execute(delete(Batch))
-            s.execute(delete(ProviderConnectionShare))
-            s.execute(delete(ProviderConnection))
-            s.execute(delete(Token))
-            s.execute(delete(Task))
-            s.execute(delete(Worker))
-            s.execute(delete(TeamQuota))
-            s.execute(delete(TeamMembership))
-            s.execute(delete(User).where(User.username_normalized == username.casefold()))
-            s.execute(delete(Team))
+            s.execute(delete(Trial).where(Trial.team_id.in_(owned_team_ids)))
+            s.execute(delete(Batch).where(Batch.team_id.in_(owned_team_ids)))
+            s.execute(
+                delete(ProviderConnection).where(
+                    ProviderConnection.id.in_(tuple(fake_backend.owned_connection_ids))
+                )
+            )
+            s.execute(delete(Token).where(Token.team_id.in_(owned_team_ids)))
+            s.execute(delete(Task).where(Task.id.in_(owned_task_ids)))
+            s.execute(delete(Worker).where(Worker.id == worker_id))
+            delete_lifecycle_authorities(
+                s,
+                bindings=(
+                    *(("trial", "trial", str(row.id), row.team_id) for row in trial_rows),
+                    *(("event", "trial", str(row.id), row.team_id) for row in trial_rows),
+                    *(("run", "batch", str(row.id), row.team_id) for row in batch_rows),
+                ),
+            )
+            s.execute(delete(TeamQuota).where(TeamQuota.team_id.in_(owned_team_ids)))
+            s.execute(delete(TeamMembership).where(TeamMembership.team_id.in_(owned_team_ids)))
+            s.execute(delete(User).where(User.id == user_id))
+            s.execute(delete(Team).where(Team.id.in_(owned_team_ids)))
             s.commit()
         sync_engine.dispose()
 
@@ -453,6 +503,7 @@ async def test_family_evolver_provider_owned_by_submission_team_is_canonicalized
         postgres_url,
         team_id,
         display_name="family-evolver-owner",
+        ownership=fake_backend,
     )
 
     r = await _post_family_batch(
@@ -486,21 +537,25 @@ async def test_family_evolver_provider_shared_with_submission_team_is_accepted(
     owner_team_id = _insert_team(
         postgres_url,
         name=f"family-provider-owner-{uuid4().hex[:8]}",
+        ownership=fake_backend,
     )
     connection_id = _insert_provider_connection(
         postgres_url,
         owner_team_id,
         display_name="family-evolver-shared",
+        ownership=fake_backend,
     )
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     try:
         with sl() as s:
-            s.execute(insert(ProviderConnectionShare).values(
-                provider_connection_id=connection_id,
-                target_team_id=team_id,
-                created_by_actor="test",
-            ))
+            s.execute(
+                insert(ProviderConnectionShare).values(
+                    provider_connection_id=connection_id,
+                    target_team_id=team_id,
+                    created_by_actor="test",
+                )
+            )
             s.commit()
     finally:
         sync_engine.dispose()
@@ -545,11 +600,13 @@ async def test_family_evolver_unshared_provider_is_hidden_before_state_seed(
     owner_team_id = _insert_team(
         postgres_url,
         name=f"family-provider-other-{uuid4().hex[:8]}",
+        ownership=fake_backend,
     )
     connection_id = _insert_provider_connection(
         postgres_url,
         owner_team_id,
         display_name="family-evolver-unshared",
+        ownership=fake_backend,
     )
 
     r = await _post_family_batch(

@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, insert, text
+from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.auth import mint_step_jwt
@@ -25,7 +25,12 @@ from loom.db.schema import (
 )
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
-from tests.integration.gateway_db import delete_all_teams_and_quotas, delete_team_and_quota
+from tests.integration.gateway_db import (
+    delete_gateway_trial,
+    delete_team_and_quota,
+    delete_teams_and_quotas,
+    insert_gateway_trial,
+)
 
 
 @pytest.fixture
@@ -77,10 +82,54 @@ def seed_data(postgres_url: str) -> tuple[UUID, str]:
         s.execute(delete(ProviderConnection))
         s.execute(delete(Secret))
         s.execute(delete(Token))
-        delete_all_teams_and_quotas(s)
+        delete_teams_and_quotas(s, (team_id,))
         s.execute(delete(RateCard))
         s.commit()
     engine.dispose()
+
+
+@pytest.fixture
+def gateway_trial_factory(
+    postgres_url: str,
+    seed_data: tuple[UUID, str],
+):
+    """Create and track real Trial owners required by gateway writes."""
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    seed_team_id, _raw_token = seed_data
+    seeded_trials: list[tuple[UUID, str, UUID]] = []
+
+    def _insert(team_id: UUID) -> UUID:
+        trial_id = uuid4()
+        with session_factory() as s:
+            task_id = insert_gateway_trial(s, team_id=team_id, trial_id=trial_id)
+            s.commit()
+        seeded_trials.append((trial_id, task_id, team_id))
+        return trial_id
+
+    try:
+        yield _insert
+    finally:
+        with session_factory() as s:
+            for trial_id, task_id, _team_id in seeded_trials:
+                s.execute(delete(LlmCall).where(LlmCall.trial_id == trial_id))
+                delete_gateway_trial(s, trial_id=trial_id, task_id=task_id)
+            delete_teams_and_quotas(
+                s,
+                {
+                    team_id
+                    for _trial_id, _task_id, team_id in seeded_trials
+                    if team_id != seed_team_id
+                },
+            )
+            s.commit()
+        engine.dispose()
+
+
+@pytest.fixture
+def seeded_trial_id(gateway_trial_factory, seed_data):  # type: ignore[no-untyped-def]
+    team_id, _raw_token = seed_data
+    return gateway_trial_factory(team_id)
 
 
 @pytest.fixture
@@ -116,7 +165,11 @@ def app(
     return a
 
 
-def test_chat_returns_loom_event_payload(app, seed_data):  # type: ignore[no-untyped-def]
+def test_chat_returns_loom_event_payload(  # type: ignore[no-untyped-def]
+    app,
+    seed_data,
+    seeded_trial_id,
+):
     team_id, raw_token = seed_data
     with TestClient(app) as client:
         r = client.post(
@@ -127,7 +180,7 @@ def test_chat_returns_loom_event_payload(app, seed_data):  # type: ignore[no-unt
                 "messages": [{"role": "user", "content": "hi"}],
                 "loom": {
                     "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
+                    "trial_id": str(seeded_trial_id),
                     "step_id": "main",
                 },
             },
@@ -260,7 +313,11 @@ def test_chat_rejects_missing_model_with_400(app, seed_data):  # type: ignore[no
         assert r.status_code == 400
 
 
-def test_chat_strips_reserved_body_kwargs(app, seed_data):  # type: ignore[no-untyped-def]
+def test_chat_strips_reserved_body_kwargs(  # type: ignore[no-untyped-def]
+    app,
+    seed_data,
+    seeded_trial_id,
+):
     """Regression for Bug 4: a body containing reserved kwargs (api_key,
     timeout) must not duplicate-shadow the route's explicit named args."""
     team_id, raw_token = seed_data
@@ -273,7 +330,7 @@ def test_chat_strips_reserved_body_kwargs(app, seed_data):  # type: ignore[no-un
                 "messages": [{"role": "user", "content": "hi"}],
                 "loom": {
                     "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
+                    "trial_id": str(seeded_trial_id),
                     "step_id": "main",
                 },
                 # Reserved keys that used to cause TypeError → 500.
@@ -550,6 +607,7 @@ class _CapturingEgressPool:
 def test_chat_byo_uses_egress_pool_for_openai_compatible(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
+    seeded_trial_id,
     postgres_url,
 ):
     """#216: BYO openai-compatible chat must use EgressClientPool so
@@ -573,7 +631,7 @@ def test_chat_byo_uses_egress_pool_for_openai_compatible(  # type: ignore[no-unt
                 "messages": [{"role": "user", "content": "hi"}],
                 "loom": {
                     "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
+                    "trial_id": str(seeded_trial_id),
                     "step_id": "main",
                     "provider_connection_id": str(conn_id),
                 },
@@ -596,6 +654,7 @@ def test_chat_byo_uses_egress_pool_for_openai_compatible(  # type: ignore[no-unt
 def test_chat_byo_accepts_header_only_connection_id(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
+    seeded_trial_id,
     postgres_url,
 ):
     app, _ = app_with_byo
@@ -615,7 +674,7 @@ def test_chat_byo_accepts_header_only_connection_id(  # type: ignore[no-untyped-
                 "messages": [{"role": "user", "content": "hi"}],
                 "loom": {
                     "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
+                    "trial_id": str(seeded_trial_id),
                     "step_id": "main",
                 },
             },
@@ -627,6 +686,7 @@ def test_chat_byo_accepts_header_only_connection_id(  # type: ignore[no-untyped-
 def test_chat_byo_accepts_matching_header_and_body(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
+    seeded_trial_id,
     postgres_url,
 ):
     app, _ = app_with_byo
@@ -646,7 +706,7 @@ def test_chat_byo_accepts_matching_header_and_body(  # type: ignore[no-untyped-d
                 "messages": [{"role": "user", "content": "hi"}],
                 "loom": {
                     "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
+                    "trial_id": str(seeded_trial_id),
                     "step_id": "main",
                     "provider_connection_id": str(conn_id),
                 },
@@ -693,6 +753,7 @@ def test_chat_byo_rejects_mismatched_header_and_body(  # type: ignore[no-untyped
 def test_chat_byo_omits_null_optional_message_fields_before_forwarding(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
+    seeded_trial_id,
     postgres_url,
 ):
     """Strict OpenAI-compatible providers reject explicit null fields.
@@ -727,7 +788,7 @@ def test_chat_byo_omits_null_optional_message_fields_before_forwarding(  # type:
                 ],
                 "loom": {
                     "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
+                    "trial_id": str(seeded_trial_id),
                     "step_id": "main",
                     "provider_connection_id": str(conn_id),
                 },
@@ -744,6 +805,7 @@ def test_chat_byo_omits_null_optional_message_fields_before_forwarding(  # type:
 def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
+    seeded_trial_id,
     postgres_url,
 ):
     """#179: BYO connection with pricing_source=tokens-only on a model
@@ -767,7 +829,7 @@ def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untype
                 "messages": [{"role": "user", "content": "hi"}],
                 "loom": {
                     "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
+                    "trial_id": str(seeded_trial_id),
                     "step_id": "main",
                     "provider_connection_id": str(conn_id),
                 },
@@ -782,6 +844,7 @@ def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untype
 def test_chat_byo_records_llm_call_for_usage_attribution(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
+    seeded_trial_id,
     postgres_url,
 ):
     """#222: successful BYO chat completions must persist llm_calls.
@@ -791,7 +854,7 @@ def test_chat_byo_records_llm_call_for_usage_attribution(  # type: ignore[no-unt
     """
     app, _captured = app_with_byo
     team_id, raw_token = seed_data
-    trial_id = uuid4()
+    trial_id = seeded_trial_id
     conn_id = _seed_byo_connection(
         postgres_url,
         team_id,
@@ -847,6 +910,7 @@ def test_chat_byo_records_llm_call_for_usage_attribution(  # type: ignore[no-unt
 def test_chat_byo_upstream_error_redacts_authorization_header(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
+    seeded_trial_id,
     postgres_url,
     caplog,
 ):
@@ -887,7 +951,7 @@ def test_chat_byo_upstream_error_redacts_authorization_header(  # type: ignore[n
                 "messages": [{"role": "user", "content": "hi"}],
                 "loom": {
                     "team_id": str(team_id),
-                    "trial_id": str(uuid4()),
+                    "trial_id": str(seeded_trial_id),
                     "step_id": "main",
                     "provider_connection_id": str(conn_id),
                 },
@@ -906,12 +970,13 @@ def test_chat_byo_upstream_error_redacts_authorization_header(  # type: ignore[n
 def test_chat_byo_upstream_500_records_failed_audit_row(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
+    seeded_trial_id,
     postgres_url,
 ):
     """#93: an attempted upstream request must not disappear on failure."""
     app, _captured = app_with_byo
     team_id, raw_token = seed_data
-    trial_id = uuid4()
+    trial_id = seeded_trial_id
     conn_id = _seed_byo_connection(
         postgres_url,
         team_id,
@@ -1027,12 +1092,12 @@ def test_chat_byo_invalid_uuid_returns_400(  # type: ignore[no-untyped-def]
 def test_chat_byo_shared_connection_uses_jwt_authority_and_target_attribution(
     app_with_byo,
     seed_data,
+    gateway_trial_factory,
     postgres_url,
 ):  # type: ignore[no-untyped-def]
     app, _ = app_with_byo
     owner_team, _ = seed_data
     target_team = uuid4()
-    target_trial = uuid4()
     conn_id = _seed_byo_connection(postgres_url, owner_team)
 
     engine = create_engine(postgres_url)
@@ -1046,6 +1111,7 @@ def test_chat_byo_shared_connection_uses_jwt_authority_and_target_attribution(
             )
         )
     engine.dispose()
+    target_trial = gateway_trial_factory(target_team)
 
     pool = _CapturingEgressPool()
     with TestClient(app) as client:
@@ -1195,6 +1261,7 @@ def test_chat_byo_cross_team_returns_404(  # type: ignore[no-untyped-def]
 def test_chat_records_family_evolver_dialect_from_loom_block(
     app,
     seed_data,
+    seeded_trial_id,
     postgres_url,
 ):  # type: ignore[no-untyped-def]
     """#672 PR-3: when the client sets ``loom.dialect`` on a chat call,
@@ -1203,7 +1270,7 @@ def test_chat_records_family_evolver_dialect_from_loom_block(
     family-run adapter spend from agent spend on the same trial.
     """
     team_id, raw_token = seed_data
-    trial_id = uuid4()
+    trial_id = seeded_trial_id
     with TestClient(app) as client:
         r = client.post(
             "/v1/chat/completions",

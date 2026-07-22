@@ -1728,7 +1728,8 @@ record but before replacing the installed package. A failed package-resource
 probe also forces synchronization at the same SHA, and the exact
 `--reinstall-package loom` option restores the project package even when uv
 would otherwise consider it satisfied. Immediately after `uv sync`, the
-installer opens uv's generated `/opt/loom-staging-runner/venv/.lock` without
+installer opens uv's generated
+`/opt/loom-staging-runner/candidates/<source-sha>/venv/.lock` without
 following symlinks, requires a regular root-owned file, converges it to mode
 `0600`, and only then validates the complete venv authority tree. A symlink,
 non-root owner, special file, or any other writable venv entry fails closed.
@@ -2011,13 +2012,15 @@ already accept only the service identity. Private hosts converge before the
 jump host; any private-host failure leaves the jump host unchanged:
 
 ```bash
+CANDIDATE_SHA=<exact-40-character-candidate-sha>
+
 # Fresh or same-service-key repair:
-sudo /opt/loom-staging-runner/venv/bin/python \
+sudo "/opt/loom-staging-runner/candidates/${CANDIDATE_SHA}/venv/bin/python" \
   /usr/local/libexec/loom-staging-rollout-gb10-trust bootstrap \
   --bootstrap-identity /secure/path/<approved-admin-ed25519-key>
 
 # Only when that approved bootstrap key occupies the canonical marker:
-sudo /opt/loom-staging-runner/venv/bin/python \
+sudo "/opt/loom-staging-runner/candidates/${CANDIDATE_SHA}/venv/bin/python" \
   /usr/local/libexec/loom-staging-rollout-gb10-trust rotate-bootstrap \
   --bootstrap-identity /secure/path/<approved-admin-ed25519-key>
 

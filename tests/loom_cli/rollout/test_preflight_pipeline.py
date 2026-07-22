@@ -8,6 +8,7 @@ import pytest
 
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     AttestationBindings,
     CheckContext,
     CheckOperation,
@@ -16,6 +17,7 @@ from loom_cli.rollout.preflight_contract import (
     EvidenceField,
     RegisteredCheck,
     SecretRedactionPolicy,
+    external_supervisor_unit_set_digest,
 )
 from loom_cli.rollout.preflight_coverage import load_coverage_manifest
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipeline
@@ -24,6 +26,10 @@ from loom_cli.rollout.preflight_registry import PreflightRegistry
 
 def _bindings(*, epoch: int = 7) -> AttestationBindings:
     digest = "1" * 64
+    predecessor_units = {
+        "loom-autoscaler-gb10-staging.service": "d" * 64,
+        "loom-autoscaler-gb10-staging.timer": "e" * 64,
+    }
     return AttestationBindings(
         candidate_sha="2" * 40,
         candidate_tree="3" * 40,
@@ -51,6 +57,16 @@ def _bindings(*, epoch: int = 7) -> AttestationBindings:
         gb10_unit_digest="a" * 64,
         browser_image_digest=f"sha256:{'b' * 64}",
         browser_report_schema="v3",
+        supervisor_predecessor_kind="legacy-manifest",
+        supervisor_predecessor_digest="f" * 64,
+        supervisor_predecessor_pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        supervisor_predecessor_unit_sha256=predecessor_units,
+        supervisor_predecessor_unit_set_digest=external_supervisor_unit_set_digest(
+            predecessor_units
+        ),
+        supervisor_predecessor_live_evidence_digest="1" * 64,
+        supervisor_predecessor_pending_transition_digest="2" * 64,
+        supervisor_transition_digest="3" * 64,
     )
 
 

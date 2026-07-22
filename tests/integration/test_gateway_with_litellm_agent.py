@@ -36,7 +36,7 @@ from loom.trajectory.writer import TrajectoryWriter
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
-from tests.integration.gateway_db import delete_all_teams_and_quotas
+from tests.integration.gateway_db import delete_teams_and_quotas
 
 pytestmark = pytest.mark.docker
 
@@ -208,7 +208,7 @@ async def test_e2e_litellm_agent_via_gateway(
             )
             s.execute(delete(Task).where(Task.id == task_id))
             s.execute(delete(Token))
-            delete_all_teams_and_quotas(s)
+            delete_teams_and_quotas(s, (team_id,))
             s.execute(delete(RateCard))
             s.commit()
         sync_engine.dispose()

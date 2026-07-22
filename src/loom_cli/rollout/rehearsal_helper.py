@@ -13,6 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.external_supervisor_readiness import (
+    build_external_supervisor_artifact,
+    staging_working_directory,
+)
 from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.checkpoint_lease import inspect_critical_checkpoint
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
@@ -64,6 +68,7 @@ def _load_plan(path: Path, expected_digest: str) -> RehearsalPlan:
         raise ValueError("rehearsal helper plan path escaped its authority")
     _verify_checkpoint(plan)
     _verify_artifact_publication(plan)
+    _verify_external_supervisor_binding(plan)
     return plan
 
 
@@ -113,6 +118,27 @@ def _verify_artifact_publication(plan: RehearsalPlan) -> None:
         or publication.browser_report_schema_sha256 != plan.browser_report_schema_sha256
     ):
         raise ValueError("rehearsal helper artifact publication drifted")
+
+
+def _verify_external_supervisor_binding(plan: RehearsalPlan) -> None:
+    artifact = build_external_supervisor_artifact(
+        Path(staging_working_directory(plan.candidate_sha)),
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        image_tag=plan.image_tag,
+        environment="staging",
+    )
+    if (
+        artifact.candidate_sha != plan.candidate_sha
+        or artifact.candidate_tree != plan.candidate_tree
+        or artifact.image_tag != plan.image_tag
+        or artifact.environment != "staging"
+        or artifact.artifact_digest != plan.external_supervisor_artifact_sha256
+        or artifact.profile_sha256 != plan.external_supervisor_profile_sha256
+        or dict(artifact.script_sha256) != dict(plan.external_supervisor_script_sha256)
+        or dict(artifact.unit_sha256) != dict(plan.external_supervisor_unit_sha256)
+    ):
+        raise ValueError("rehearsal helper external supervisor identity drifted")
 
 
 def _record(

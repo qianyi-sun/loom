@@ -30,6 +30,12 @@ from .protected_epoch_component import (
     KubernetesProtectedEpochComponent,
     requires_legacy_epoch_bootstrap,
 )
+from .protected_external_supervisor_component import (
+    ProtectedExternalSupervisorComponent,
+)
+from .protected_external_supervisor_transport import (
+    ProtectedExternalSupervisorTransport,
+)
 from .protected_gb10_component import (
     ProtectedGB10CandidateComponent,
     ProtectedGB10FleetTransport,
@@ -101,7 +107,8 @@ class SubprocessProtectedApplyCommandRunner:
             "KUBECONFIG": str(self.kubeconfig),
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
-            "PATH": "/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "XDG_RUNTIME_DIR": f"/run/user/{uid}",
         }
 
@@ -238,6 +245,8 @@ class MigrationEpochProtectedApplyExecutor:
     service_uid: int
     runner: ProtectedApplyCommandRunner
     gb10_transport: ProtectedGB10FleetTransport
+    candidate_root: Path
+    external_supervisor_transport: ProtectedExternalSupervisorTransport
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
@@ -246,6 +255,8 @@ class MigrationEpochProtectedApplyExecutor:
         if (
             not self.state_root.is_absolute()
             or ".." in self.state_root.parts
+            or not self.candidate_root.is_absolute()
+            or ".." in self.candidate_root.parts
             or self.service_uid < 0
         ):
             raise ValueError("protected apply executor authority is invalid")
@@ -261,6 +272,12 @@ class MigrationEpochProtectedApplyExecutor:
         environment = self.runner.environment
         if environment.get("KUBECONFIG") is None:
             raise ValueError("protected apply executor command environment is invalid")
+        # Reconcile any prior append-only timer activation prefix before this
+        # request is allowed to mutate a new candidate.  The authoritative
+        # pointer selects active target convergence, active predecessor
+        # convergence, or (only for an explicit absent predecessor) quiescence;
+        # every path is identity/hash-bound and fails closed on verification.
+        self.external_supervisor_transport.reconcile_compensations()
         epoch = KubernetesProtectedEpochComponent(
             runner=self.runner,
             environment=environment,
@@ -287,10 +304,29 @@ class MigrationEpochProtectedApplyExecutor:
             transport=self.gb10_transport,
             epoch_guard=epoch.classify,
         ).component(plan)
+        external_supervisors = ProtectedExternalSupervisorComponent(
+            candidate_root=self.candidate_root,
+            transport=self.external_supervisor_transport,
+            epoch_guard=epoch.classify,
+        ).component(plan)
         components = (
-            (migration, epoch, manifests, gb10, production_defaults)
+            (
+                migration,
+                epoch,
+                manifests,
+                gb10,
+                production_defaults,
+                external_supervisors,
+            )
             if requires_legacy_epoch_bootstrap(plan)
-            else (epoch, migration, manifests, gb10, production_defaults)
+            else (
+                epoch,
+                migration,
+                manifests,
+                gb10,
+                production_defaults,
+                external_supervisors,
+            )
         )
         terminals = ProtectedApplyJournal(
             self.state_root,
@@ -320,12 +356,18 @@ class KubernetesProtectedConvergenceExecutor:
     service_uid: int
     runner: ProtectedApplyCommandRunner
     gb10_transport: ProtectedGB10FleetTransport
+    candidate_root: Path
+    external_supervisor_transport: ProtectedExternalSupervisorTransport
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
 
     def __post_init__(self) -> None:
-        if self.service_uid < 0:
+        if (
+            self.service_uid < 0
+            or not self.candidate_root.is_absolute()
+            or ".." in self.candidate_root.parts
+        ):
             raise ValueError("protected convergence authority is invalid")
 
     def __call__(
@@ -367,6 +409,11 @@ class KubernetesProtectedConvergenceExecutor:
                 epoch_guard=epoch.classify,
                 request=self.production_defaults_request,
             ).classify(plan),
+            "external-supervisors": ProtectedExternalSupervisorComponent(
+                candidate_root=self.candidate_root,
+                transport=self.external_supervisor_transport,
+                epoch_guard=epoch.classify,
+            ).classify(plan),
         }
         expected_epoch = plan.starting_mutation_epoch + 1
         blockers = {
@@ -382,6 +429,8 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["gb10-candidate"] = "protected-epoch-not-exact"
         if observations["production-defaults"].observed_epoch != expected_epoch:
             blockers["production-defaults"] = "protected-epoch-not-exact"
+        if observations["external-supervisors"].observed_epoch != expected_epoch:
+            blockers["external-supervisors"] = "protected-epoch-not-exact"
         return FinalGateResult(
             check_id=check_id,
             operation=operation,

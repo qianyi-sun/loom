@@ -18,6 +18,7 @@ import tomllib
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -33,9 +34,11 @@ from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
     GB10SharedMountReadiness,
 )
+from loom_cli.rollout.install_attestation import verify_runner_install
 from loom_cli.rollout.kubernetes_readiness import probe_kubernetes_client
 from loom_cli.rollout.runtime_readiness import ModuleImporter, probe_runtime_readiness
 
+from .candidate import CandidateBindingError, bind_configured_candidate
 from .config import OperatorConfig
 from .policy import sanitized_child_environment
 from .redaction import redact_rollout_text
@@ -312,57 +315,43 @@ def _directory_has_access(path: Path, modes: tuple[int, ...]) -> bool:
     )
 
 
-def _checkout_tree_is_trusted(root: Path, *, service_uid: int) -> bool:
-    allowed_owners = {0, service_uid}
-    try:
-        root_metadata = root.lstat()
-        root_resolved = root.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return False
-    if (
-        not stat.S_ISDIR(root_metadata.st_mode)
-        or stat.S_ISLNK(root_metadata.st_mode)
-        or root_metadata.st_uid not in allowed_owners
-        or stat.S_IMODE(root_metadata.st_mode) & 0o022
-    ):
-        return False
-    for directory, directories, filenames in os.walk(root, followlinks=False):
-        for name in [".", *directories, *filenames]:
-            path = Path(directory) if name == "." else Path(directory) / name
-            try:
-                metadata = path.lstat()
-            except OSError:
-                return False
-            if metadata.st_uid not in allowed_owners:
-                return False
-            if stat.S_ISLNK(metadata.st_mode):
-                try:
-                    target = (path.parent / os.readlink(path)).resolve(strict=False)
-                except (OSError, RuntimeError):
-                    return False
-                if not target.is_relative_to(root_resolved):
-                    return False
-                continue
-            if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
-                return False
-            if stat.S_IMODE(metadata.st_mode) & 0o022:
-                return False
-    try:
-        git_dir = (root / ".git").lstat()
-    except OSError:
-        return False
-    return stat.S_ISDIR(git_dir.st_mode) and not stat.S_ISLNK(git_dir.st_mode)
+def _checkout_is_trusted(
+    config: OperatorConfig,
+    *,
+    service_uid: int,
+    run: CommandRunner,
+) -> bool:
+    """Reuse fixed-size install metadata and the shared exact candidate proof.
 
-
-def _checkout_is_trusted(config: OperatorConfig, *, service_uid: int) -> bool:
-    if not _checkout_tree_is_trusted(config.runner_repo, service_uid=service_uid):
+    The root installer recursively validates and hardens the candidate once.
+    Runtime Tier 0 therefore re-hashes the fixed install-asset allowlist and
+    delegates checkout identity to ``bind_configured_candidate``.  That shared
+    predicate checks fixed root metadata plus detached SHA/tree/remote and, for
+    a sealed cumulative source, the configured base and bounded linear history.
+    It intentionally performs neither a checkout walk nor a Git status scan.
+    """
+    if service_uid < 0:
         return False
-    return (
-        _readable_config_bytes(
-            config.runner_repo / ".git" / "config",
-            service_uid=service_uid,
+    try:
+        installed = verify_runner_install(service_uid=service_uid)
+        if not installed.ready:
+            return False
+        binding = bind_configured_candidate(
+            config,
+            run=lambda argv: run(argv),
+            now=lambda: datetime.now(UTC),
         )
-        is not None
+    except (CandidateBindingError, OSError, RuntimeError, ValueError):
+        return False
+
+    statement = installed.attestation
+    expected_tree = binding.resolved_tree or "none"
+    expected_base = binding.approved_base_sha or "none"
+    return bool(
+        statement.source_mode == config.source_mode == binding.source_mode
+        and statement.source_sha == binding.resolved_sha
+        and statement.source_tree_sha == expected_tree
+        and statement.source_base_sha == expected_base
     )
 
 
@@ -874,65 +863,16 @@ def collect_preflight(
     def add(name: str, passed: bool, remediation: str) -> None:
         checks.append(PreflightCheck(name, bool(passed), None if passed else remediation))
 
-    trusted_checkout = service_uid >= 0 and _checkout_is_trusted(config, service_uid=service_uid)
-    remotes: str | None = None
-    origin_url: str | None = None
-    status: str | None = None
-    pushurl_absent = False
-    if trusted_checkout:
-        remotes = _command_stdout(
-            child_run,
-            ["git", "-C", str(config.runner_repo), "remote"],
-        )
-        origin_url = _command_stdout(
-            child_run,
-            [
-                "git",
-                "-C",
-                str(config.runner_repo),
-                "remote",
-                "get-url",
-                "--all",
-                "origin",
-            ],
-        )
-        try:
-            pushurl = child_run(
-                [
-                    "git",
-                    "-C",
-                    str(config.runner_repo),
-                    "config",
-                    "--get-all",
-                    "remote.origin.pushurl",
-                ]
-            )
-            pushurl_absent = (
-                pushurl.returncode == 1 and pushurl.stdout == "" and pushurl.stderr == ""
-            )
-        except Exception:
-            pushurl_absent = False
-        status = _command_stdout(
-            child_run,
-            [
-                "git",
-                "-C",
-                str(config.runner_repo),
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-            ],
-        )
-    clean_checkout = (
-        trusted_checkout
-        and remotes is not None
-        and remotes.splitlines() == ["origin"]
-        and origin_url is not None
-        and origin_url.splitlines() == [config.remote_url]
-        and pushurl_absent
-        and status == ""
+    trusted_checkout = _checkout_is_trusted(
+        config,
+        service_uid=service_uid,
+        run=child_run,
     )
-    add("checkout", clean_checkout, "restore the protected clean runner checkout")
+    add(
+        "checkout",
+        trusted_checkout,
+        "restore the exact protected runner candidate and install attestation",
+    )
 
     executable_lookup = which or (lambda name: shutil.which(name, path=environment["PATH"]))
     runtime = probe_runtime_readiness(

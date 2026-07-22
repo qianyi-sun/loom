@@ -600,7 +600,8 @@ broker supplies the protected worker-token source; evidence contains only
 redacted sha256-prefix fingerprints. The Slurm check catches pending/stale
 capacity requests, active jobs launched from stale `LOOM_REMOTE_WORKER_*`
 paths, stale remote env worker-token fingerprints, inactive OLDLAB autoscaler
-timers, unscoped external autoscaler commands that omit `--pool-name oldlab`,
+timers, unscoped external autoscaler commands that omit `--environment staging`
+or `--pool-name oldlab`,
 missing or unexecutable external autoscaler `ExecStart` command paths, recent
 failed autoscaler service results such as `status=203/EXEC`, and the active
 `gb10`/`oldlab` pool shapes; the node-agent check catches stale

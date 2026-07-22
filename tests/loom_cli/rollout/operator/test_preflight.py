@@ -6,6 +6,7 @@ import os
 import struct
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ import pytest
 
 from loom_cli.rollout.docker_readiness import DockerRuntimeReadiness
 from loom_cli.rollout.kubernetes_readiness import KubernetesClientReadiness
+from loom_cli.rollout.operator import candidate as candidate_module
 from loom_cli.rollout.operator import preflight as preflight_module
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.policy import sanitized_child_environment
@@ -26,6 +28,8 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 REAL_SHARED_REPOSITORY_BINDING = preflight_module._shared_repository_binding
 REMOTE_REPOSITORY_DEVICE = os.makedev(103, 203)
 REMOTE_REPOSITORY_INODE = 303
+CANDIDATE_SHA = "a" * 40
+CANDIDATE_TREE = "b" * 40
 
 
 def _test_shared_repository_binding(*, service_uid: int) -> dict[str, int]:
@@ -50,6 +54,34 @@ def _fixed_shared_repository_binding(monkeypatch: pytest.MonkeyPatch) -> None:
         preflight_module,
         "_shared_repository_binding",
         _test_shared_repository_binding,
+    )
+    monkeypatch.setattr(
+        candidate_module,
+        "_configured_candidate_sha",
+        lambda _config: CANDIDATE_SHA,
+    )
+    monkeypatch.setattr(
+        candidate_module,
+        "_validate_protected_config",
+        lambda _config: None,
+    )
+    monkeypatch.setattr(
+        candidate_module,
+        "_validate_installed_runtime",
+        lambda _config: CANDIDATE_SHA,
+    )
+    monkeypatch.setattr(
+        preflight_module,
+        "verify_runner_install",
+        lambda **_kwargs: SimpleNamespace(
+            ready=True,
+            attestation=SimpleNamespace(
+                source_mode="merged-dev",
+                source_sha=CANDIDATE_SHA,
+                source_tree_sha="none",
+                source_base_sha="none",
+            ),
+        ),
     )
 
 
@@ -222,6 +254,12 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
         stdout = "https://github.com/qianyi-sun/loom.git\n"
     elif argv[-2:] == ["--get-all", "remote.origin.pushurl"]:
         return subprocess.CompletedProcess(argv, 1, "", "")
+    elif argv[-3:] == ["symbolic-ref", "-q", "HEAD"]:
+        return subprocess.CompletedProcess(argv, 1, "", "")
+    elif argv[-3:] == ["rev-parse", "--verify", "HEAD^{commit}"]:
+        stdout = f"{CANDIDATE_SHA}\n"
+    elif argv[-3:] == ["rev-parse", "--verify", "HEAD^{tree}"]:
+        stdout = f"{CANDIDATE_TREE}\n"
     elif argv[-2:] == ["config", "current-context"]:
         stdout = "kind-loom-staging\n"
     elif argv and argv[0] == "/usr/sbin/sysctl":
@@ -775,9 +813,10 @@ def test_collect_preflight_requires_service_tools_and_all_rollout_imports(
 
 
 @pytest.mark.parametrize("unsafe", ["mode", "symlink"])
-def test_checkout_rejects_untrusted_git_config_before_any_git_command(
+def test_checkout_fails_closed_when_candidate_authority_rejects_git_config(
     tmp_path: Path,
     unsafe: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = make_config(tmp_path)
     git_config = config.runner_repo / ".git/config"
@@ -791,27 +830,30 @@ def test_checkout_rejects_untrusted_git_config_before_any_git_command(
         git_config.symlink_to(target)
     calls: list[list[str]] = []
 
+    def reject_candidate(*_args: object, **_kwargs: object) -> object:
+        raise candidate_module.CandidateBindingError("trusted git config is unsafe")
+
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         return successful_command(argv)
 
-    report = collect_preflight(
+    monkeypatch.setattr(preflight_module, "bind_configured_candidate", reject_candidate)
+
+    trusted = preflight_module._checkout_is_trusted(  # type: ignore[attr-defined]
         config,
         service_uid=os.geteuid(),
         run=run,
-        which=lambda name: f"/usr/bin/{name}",
-        importer=lambda name: object(),
     )
 
-    checkout = next(check for check in report.checks if check.name == "checkout")
-    assert checkout.passed is False
+    assert trusted is False
     assert calls == []
 
 
 @pytest.mark.parametrize("unsafe", ["writable-directory", "escaping-symlink"])
-def test_checkout_rejects_unsafe_descendant_before_any_git_command(
+def test_checkout_probe_is_constant_and_does_not_walk_unrelated_descendants(
     tmp_path: Path,
     unsafe: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = make_config(tmp_path)
     if unsafe == "writable-directory":
@@ -820,34 +862,134 @@ def test_checkout_rejects_unsafe_descendant_before_any_git_command(
         (config.runner_repo / "escape").symlink_to(tmp_path / "outside")
     calls: list[list[str]] = []
 
+    def reject_walk(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Tier 0 must not recursively walk the candidate checkout")
+
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         return successful_command(argv)
 
-    report = collect_preflight(
+    monkeypatch.setattr(preflight_module.os, "walk", reject_walk)
+
+    trusted = preflight_module._checkout_is_trusted(  # type: ignore[attr-defined]
         config,
         service_uid=os.geteuid(),
         run=run,
+    )
+
+    assert trusted is True
+    assert len(calls) == 6
+    assert [argv[-3:] for argv in calls] == [
+        ["-C", str(config.runner_repo), "remote"],
+        ["get-url", "--all", "origin"],
+        ["config", "--get-all", "remote.origin.pushurl"],
+        ["symbolic-ref", "-q", "HEAD"],
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        ["rev-parse", "--verify", "HEAD^{tree}"],
+    ]
+    assert all("status" not in argv and "--untracked-files=all" not in argv for argv in calls)
+
+
+def test_checkout_fails_closed_when_candidate_root_authority_rejects_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    linked = tmp_path / "linked-repo"
+    linked.symlink_to(config.runner_repo, target_is_directory=True)
+    linked_config = replace(config, runner_repo=linked)
+
+    def reject_candidate(*_args: object, **_kwargs: object) -> object:
+        raise candidate_module.CandidateBindingError("trusted checkout path must not be a symlink")
+
+    monkeypatch.setattr(preflight_module, "bind_configured_candidate", reject_candidate)
+
+    assert (
+        preflight_module._checkout_is_trusted(  # type: ignore[attr-defined]
+            linked_config,
+            service_uid=os.geteuid(),
+            run=successful_command,
+        )
+        is False
+    )
+
+
+def test_checkout_rejects_unverified_install_before_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        preflight_module,
+        "verify_runner_install",
+        lambda **_kwargs: SimpleNamespace(ready=False),
+    )
+
+    trusted = preflight_module._checkout_is_trusted(  # type: ignore[attr-defined]
+        config,
+        service_uid=os.geteuid(),
+        run=lambda argv: calls.append(argv) or successful_command(argv),
+    )
+
+    assert trusted is False
+    assert calls == []
+
+
+def test_checkout_rejects_install_attestation_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setattr(
+        preflight_module,
+        "verify_runner_install",
+        lambda **_kwargs: SimpleNamespace(
+            ready=True,
+            attestation=SimpleNamespace(
+                source_mode="merged-dev",
+                source_sha="c" * 40,
+                source_tree_sha="none",
+                source_base_sha="none",
+            ),
+        ),
+    )
+
+    assert (
+        preflight_module._checkout_is_trusted(  # type: ignore[attr-defined]
+            config,
+            service_uid=os.geteuid(),
+            run=successful_command,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("unsafe", ["broken", "symlink"])
+def test_internal_cluster_config_fails_closed_at_direct_consumer(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    config = make_config(tmp_path)
+    original = config.cluster_config_path.read_bytes()
+    config.cluster_config_path.unlink()
+    target = tmp_path / ("missing-cluster.toml" if unsafe == "broken" else "external.toml")
+    if unsafe == "symlink":
+        target.write_bytes(original)
+    config.cluster_config_path.symlink_to(target)
+
+    report = collect_preflight(
+        config,
+        service_uid=os.geteuid(),
+        run=successful_command,
         which=lambda name: f"/usr/bin/{name}",
         importer=lambda name: object(),
     )
 
-    assert next(check for check in report.checks if check.name == "checkout").passed is False
-    assert calls == []
-
-
-def test_checkout_rejects_symlinked_repository_root(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
-    linked = tmp_path / "linked-repo"
-    linked.symlink_to(config.runner_repo, target_is_directory=True)
-
-    assert (
-        preflight_module._checkout_tree_is_trusted(  # type: ignore[attr-defined]
-            linked,
-            service_uid=os.geteuid(),
-        )
-        is False
-    )
+    outcomes = {check.name: check.passed for check in report.checks}
+    assert report.passed is False
+    assert outcomes["checkout"] is True
+    assert outcomes["gb10-topology"] is False
 
 
 def test_checkout_requires_pushurl_to_be_exactly_absent(tmp_path: Path) -> None:

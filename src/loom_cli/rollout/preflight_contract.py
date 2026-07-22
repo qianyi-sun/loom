@@ -24,6 +24,15 @@ from time import monotonic
 from types import MappingProxyType
 from typing import NoReturn, TypeAlias, cast
 
+from loom_cli.rollout.external_supervisor_predecessor import (
+    ABSENT_PREDECESSOR_DIGEST as EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+)
+from loom_cli.rollout.external_supervisor_predecessor import (
+    PROTECTED_CANONICAL_UNIT_DIR as EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
+)
+from loom_cli.rollout.external_supervisor_predecessor import (
+    external_supervisor_unit_set_digest,
+)
 from loom_cli.rollout.operator.redaction import redact_rollout_mapping, redact_rollout_text
 
 SafeScalar: TypeAlias = str | int | float | bool | None
@@ -38,6 +47,86 @@ _SECRET_KEY_RE = re.compile(
 )
 _FATAL_TIMEOUT_EXIT_CODE = 70
 _DEFAULT_CANCELLATION_GRACE_SECONDS = 5.0
+
+
+def external_supervisor_transition_digest(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    environment: str,
+    predecessor_kind: str,
+    predecessor_digest: str,
+    predecessor_pointer_digest: str,
+    predecessor_unit_sha256: Mapping[str, str],
+    predecessor_unit_set_digest: str,
+    predecessor_live_evidence_digest: str,
+    predecessor_pending_transition_digest: str,
+    target_artifact_digest: str,
+    target_profile_sha256: str,
+    target_script_sha256: Mapping[str, str],
+    target_unit_sha256: Mapping[str, str],
+    target_unit_set_digest: str,
+) -> str:
+    """Bind the exact live predecessor to the exact candidate target."""
+
+    if (
+        len(candidate_sha) not in {40, 64}
+        or len(candidate_tree) not in {40, 64}
+        or any(character not in "0123456789abcdef" for character in candidate_sha)
+        or any(character not in "0123456789abcdef" for character in candidate_tree)
+        or environment != "staging"
+        or predecessor_kind not in {"legacy-manifest", "canonical"}
+        or any(
+            _SHA256_RE.fullmatch(value) is None
+            for value in (
+                predecessor_digest,
+                predecessor_pointer_digest,
+                predecessor_unit_set_digest,
+                predecessor_live_evidence_digest,
+                predecessor_pending_transition_digest,
+                target_artifact_digest,
+                target_profile_sha256,
+                target_unit_set_digest,
+            )
+        )
+        or external_supervisor_unit_set_digest(predecessor_unit_sha256)
+        != predecessor_unit_set_digest
+        or external_supervisor_unit_set_digest(target_unit_sha256) != target_unit_set_digest
+        or not target_script_sha256
+        or any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(digest, str)
+            or _SHA256_RE.fullmatch(digest) is None
+            for name, digest in target_script_sha256.items()
+        )
+    ):
+        raise ValueError("external supervisor transition identity is invalid")
+    return _hash_json(
+        {
+            "schema_version": 1,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "environment": environment,
+            "unit_directory": EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
+            "predecessor": {
+                "kind": predecessor_kind,
+                "authority_digest": predecessor_digest,
+                "pointer_digest": predecessor_pointer_digest,
+                "unit_sha256": dict(sorted(predecessor_unit_sha256.items())),
+                "unit_set_digest": predecessor_unit_set_digest,
+                "live_evidence_digest": predecessor_live_evidence_digest,
+                "pending_transition_digest": predecessor_pending_transition_digest,
+            },
+            "target": {
+                "artifact_digest": target_artifact_digest,
+                "profile_sha256": target_profile_sha256,
+                "script_sha256": dict(sorted(target_script_sha256.items())),
+                "unit_sha256": dict(sorted(target_unit_sha256.items())),
+                "unit_set_digest": target_unit_set_digest,
+            },
+        }
+    )
 
 
 def _terminate_runner_for_timeout(
@@ -142,7 +231,7 @@ class CheckSpec:
             raise ValueError("preflight tier must be in [0, 4]")
         expected_tiers = {
             StageCapability.STATIC: {0, 1},
-            StageCapability.BASELINE_LIVE_READONLY: {2},
+            StageCapability.BASELINE_LIVE_READONLY: {0, 2},
             StageCapability.ISOLATED_REHEARSAL: {3},
             StageCapability.FINAL_ONLY: {4},
         }
@@ -439,7 +528,7 @@ class CheckExecution:
             raise ValueError("check execution timestamps are invalid")
         stage_tiers = {
             StageCapability.STATIC: {0, 1},
-            StageCapability.BASELINE_LIVE_READONLY: {2},
+            StageCapability.BASELINE_LIVE_READONLY: {0, 2},
             StageCapability.ISOLATED_REHEARSAL: {3},
             StageCapability.FINAL_ONLY: {4},
         }
@@ -1080,6 +1169,14 @@ class AttestationBindings:
     gb10_unit_digest: str
     browser_image_digest: str
     browser_report_schema: str
+    supervisor_predecessor_kind: str
+    supervisor_predecessor_digest: str
+    supervisor_predecessor_pointer_digest: str
+    supervisor_predecessor_unit_sha256: Mapping[str, str]
+    supervisor_predecessor_unit_set_digest: str
+    supervisor_predecessor_live_evidence_digest: str
+    supervisor_predecessor_pending_transition_digest: str
+    supervisor_transition_digest: str
 
     def __post_init__(self) -> None:
         git_identities = (
@@ -1104,6 +1201,18 @@ class AttestationBindings:
             ("GB10 inventory", self.gb10_inventory_digest),
             ("GB10 mount", self.gb10_mount_digest),
             ("GB10 unit", self.gb10_unit_digest),
+            ("supervisor predecessor", self.supervisor_predecessor_digest),
+            ("supervisor predecessor pointer", self.supervisor_predecessor_pointer_digest),
+            ("supervisor predecessor unit set", self.supervisor_predecessor_unit_set_digest),
+            (
+                "supervisor predecessor live evidence",
+                self.supervisor_predecessor_live_evidence_digest,
+            ),
+            (
+                "supervisor predecessor pending transition",
+                self.supervisor_predecessor_pending_transition_digest,
+            ),
+            ("supervisor transition", self.supervisor_transition_digest),
         ):
             if _SHA256_RE.fullmatch(value) is None:
                 raise ValueError(f"attestation {name} hash is invalid")
@@ -1123,6 +1232,23 @@ class AttestationBindings:
             raise ValueError("attestation browser image digest is invalid")
         if self.staging_mutation_epoch < 0 or self.environment != "staging":
             raise ValueError("attestation staging epoch binding is invalid")
+        predecessor_units = dict(self.supervisor_predecessor_unit_sha256)
+        if (
+            self.supervisor_predecessor_kind not in {"legacy-manifest", "canonical"}
+            or not predecessor_units
+            or self.supervisor_predecessor_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            or external_supervisor_unit_set_digest(predecessor_units)
+            != self.supervisor_predecessor_unit_set_digest
+            or (
+                self.supervisor_predecessor_kind == "legacy-manifest"
+                and self.supervisor_predecessor_pointer_digest != EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            )
+            or (
+                self.supervisor_predecessor_kind == "canonical"
+                and self.supervisor_predecessor_pointer_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            )
+        ):
+            raise ValueError("attestation supervisor predecessor binding is invalid")
         for value in (
             self.backup_lease_id,
             self.db_snapshot_identity,
@@ -1157,6 +1283,11 @@ class AttestationBindings:
             self,
             "gb10_boot_ids",
             MappingProxyType(dict(self.gb10_boot_ids)),
+        )
+        object.__setattr__(
+            self,
+            "supervisor_predecessor_unit_sha256",
+            MappingProxyType(dict(sorted(predecessor_units.items()))),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1212,6 +1343,24 @@ class AttestationBindings:
             gb10_unit_digest=require_string("gb10_unit_digest"),
             browser_image_digest=require_string("browser_image_digest"),
             browser_report_schema=require_string("browser_report_schema"),
+            supervisor_predecessor_kind=require_string("supervisor_predecessor_kind"),
+            supervisor_predecessor_digest=require_string("supervisor_predecessor_digest"),
+            supervisor_predecessor_pointer_digest=require_string(
+                "supervisor_predecessor_pointer_digest"
+            ),
+            supervisor_predecessor_unit_sha256=require_string_map(
+                "supervisor_predecessor_unit_sha256"
+            ),
+            supervisor_predecessor_unit_set_digest=require_string(
+                "supervisor_predecessor_unit_set_digest"
+            ),
+            supervisor_predecessor_live_evidence_digest=require_string(
+                "supervisor_predecessor_live_evidence_digest"
+            ),
+            supervisor_predecessor_pending_transition_digest=require_string(
+                "supervisor_predecessor_pending_transition_digest"
+            ),
+            supervisor_transition_digest=require_string("supervisor_transition_digest"),
         )
 
 
@@ -1228,7 +1377,7 @@ class PreflightAttestation:
     attestation_digest: str
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version != 2:
             raise ValueError("preflight attestation schema is unsupported")
         if not isinstance(self.bindings, AttestationBindings):
             raise ValueError("preflight attestation bindings are invalid")
@@ -1297,7 +1446,7 @@ class PreflightAttestation:
         evidence = {result.check_id: result.evidence_hash for result in required}
         expires_at = min(result.expires_at for result in freshness_authority)
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "bindings": _attestation_bindings_payload(bindings),
             "registry_digest": registry_digest,
             "coverage_digest": coverage_digest,
@@ -1307,7 +1456,7 @@ class PreflightAttestation:
             "expires_at": expires_at.isoformat(),
         }
         return cls(
-            schema_version=1,
+            schema_version=2,
             bindings=bindings,
             registry_digest=registry_digest,
             coverage_digest=coverage_digest,
@@ -1432,6 +1581,8 @@ def _preflight_attestation_payload(attestation: PreflightAttestation) -> dict[st
 
 
 __all__ = [
+    "EXTERNAL_SUPERVISOR_ABSENT_DIGEST",
+    "EXTERNAL_SUPERVISOR_UNIT_DIRECTORY",
     "AttestationBindings",
     "CheckContext",
     "CheckExecution",
@@ -1446,4 +1597,6 @@ __all__ = [
     "RegisteredCheck",
     "SecretRedactionPolicy",
     "StageCapability",
+    "external_supervisor_transition_digest",
+    "external_supervisor_unit_set_digest",
 ]

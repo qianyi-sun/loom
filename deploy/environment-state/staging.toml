@@ -140,9 +140,22 @@ name = "gb10-staging"
 pool_name = "gb10"
 service_name = "loom-autoscaler-gb10-staging.service"
 timer_name = "loom-autoscaler-gb10-staging.timer"
-working_directory = "/opt/loom-staging-runner/repo"
-python_path = "/opt/loom-staging-runner/venv/bin/python"
-script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--pool-name", "gb10", "--namespace", "loom-staging", "--kubeconfig", "/etc/loom/kubeconfig/staging.yaml", "--db-local-port", "15451", "--freshness-sec", "120"]
+working_directory = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo"
+python_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/venv/bin/python"
+script_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = [
+  "--environment", "staging",
+  "--pool-name", "gb10",
+  "--namespace", "loom-staging",
+  "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--db-local-host", "127.0.0.1",
+  "--db-local-port", "15451",
+  "--db-service", "service/loom-postgres",
+  "--db-remote-port", "5432",
+  "--db-port-forward-ready-timeout-sec", "10",
+  "--db-port-forward-stop-timeout-sec", "5",
+  "--db-connect-timeout-sec", "10",
+  "--freshness-sec", "120",
+]
 enabled = true
 active = true

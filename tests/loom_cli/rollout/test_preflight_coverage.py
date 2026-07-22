@@ -19,6 +19,7 @@ from loom_cli.rollout.preflight_contract import (
 )
 from loom_cli.rollout.preflight_coverage import (
     DEFAULT_COVERAGE_MANIFEST,
+    CoverageEntry,
     CoverageManifest,
     load_coverage_manifest,
 )
@@ -76,8 +77,11 @@ def test_known_late_failures_are_shifted_before_final_only() -> None:
         "browser.runtime",
         "gb10.host-readiness",
         "capacity.high-water",
+        "external-supervisor.predecessor",
         "staging.release-baseline",
+        "systemd.render",
         "rehearsal.migration",
+        "rehearsal.release",
         "rehearsal.production-defaults",
         "rehearsal.api-smoke",
         "rehearsal.browser",
@@ -111,10 +115,47 @@ def test_systemd_activation_is_classified_as_isolated_rehearsal() -> None:
     entries = {entry.check_id: entry for entry in load_coverage_manifest().checks}
 
     manager = entries["systemd.user-manager"]
+    predecessor = entries["external-supervisor.predecessor"]
+    render = entries["systemd.render"]
     launch_cancel = entries["lifecycle.launch-cancel"]
     activation = entries["rehearsal.systemd-launch"]
     assert manager.tier == 0
     assert manager.mutation_class is MutationClass.NONE
+    assert predecessor.tier == 0
+    assert predecessor.stage is StageCapability.BASELINE_LIVE_READONLY
+    assert predecessor.mutation_class is MutationClass.NONE
+    assert predecessor.dependencies == ("candidate.identity", "systemd.user-manager")
+    assert "absent or self-authored bootstrap state fails closed" in predecessor.predicate
+    assert render.tier == 1
+    assert render.stage is StageCapability.STATIC
+    assert render.mutation_class is MutationClass.NONE
+    assert {"env-state", "gb10-prep"} <= set(render.consumers)
+    assert "every enabled or active staging external autoscaler supervisor" in render.predicate
+    assert "service and timer" in render.predicate
+    predicates = {entry.predicate_id: entry for entry in load_coverage_manifest().final_predicates}
+    assert predicates["protected.external-supervisor-artifact"].earliest_check_id == (
+        "systemd.render"
+    )
+    assert predicates["protected.external-supervisor-predecessor"].earliest_check_id == (
+        "external-supervisor.predecessor"
+    )
+    assert predicates["protected.external-supervisor-transition"].earliest_check_id == (
+        "systemd.render"
+    )
+    assert predicates["protected.external-supervisor-validation"].earliest_check_id == (
+        "rehearsal.release"
+    )
+    assert predicates["protected.external-supervisor-activation"].earliest_check_id == (
+        "final.protected-apply"
+    )
+    assert not predicates["protected.external-supervisor-activation"].preflight_capable
+    assert predicates["convergence.external-supervisor-live"].earliest_check_id == (
+        "final.convergence"
+    )
+    assert (
+        predicates["convergence.external-supervisor-active-pointer"].earliest_check_id
+        == "final.convergence"
+    )
     assert launch_cancel.tier == 0
     assert launch_cancel.stage is StageCapability.STATIC
     assert launch_cancel.mutation_class is MutationClass.ISOLATED
@@ -122,6 +163,24 @@ def test_systemd_activation_is_classified_as_isolated_rehearsal() -> None:
     assert activation.stage is StageCapability.ISOLATED_REHEARSAL
     assert activation.mutation_class is MutationClass.ISOLATED
     assert "rehearsal.systemd-launch" in entries["rehearsal.cleanup"].dependencies
+
+
+def test_coverage_stage_tiers_allow_fast_live_readonly_but_reject_tier_one() -> None:
+    base = {
+        "check_id": "external-supervisor.predecessor",
+        "failure_code": "external-supervisor.predecessor.drift",
+        "tier": 0,
+        "stage": "baseline-live-readonly",
+        "dependencies": [],
+        "mutation_class": "none",
+        "consumers": ["preflight"],
+        "legacy_checks": [],
+        "predicate": "Read the exact live predecessor without protected mutation.",
+    }
+
+    assert CoverageEntry.from_dict(base).tier == 0
+    with pytest.raises(ValueError, match="tier does not match stage"):
+        CoverageEntry.from_dict({**base, "tier": 1})
 
 
 def _registered_from_manifest(

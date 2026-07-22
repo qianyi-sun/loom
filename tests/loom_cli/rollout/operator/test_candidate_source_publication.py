@@ -32,8 +32,9 @@ def _binding() -> CandidateBinding:
 
 
 def _config(tmp_path: Path):  # type: ignore[no-untyped-def]
+    del tmp_path
     return replace(
-        make_config(tmp_path / "repo"),
+        make_config(Path(f"/opt/loom-staging-runner/candidates/{SHA}/repo")),
         source_mode="sealed-cumulative",
         source_commit_sha=SHA,
         source_tree_sha=TREE,
@@ -78,7 +79,7 @@ def test_prepare_publishes_exact_candidate_and_emits_digest(
             "expected_ref": "staging-aaaaaaa",
             "repo_dir": publication._SHARED_REPOSITORY_ROOT / "loom-remote-worker-staging-aaaaaaa",
             "resolved_sha": SHA,
-            "source_repo": tmp_path / "repo",
+            "source_repo": Path(f"/opt/loom-staging-runner/candidates/{SHA}/repo"),
         }
     ]
     digest = str(result.pop("evidence_sha256"))
@@ -127,6 +128,10 @@ def test_check_is_read_only_and_requires_matched_evidence(
         {**_record("matched"), "repo_head": "d" * 40},
         {**_record("matched"), "repo_mode": "0770"},
         {**_record("matched"), "repo_status": "dirty"},
+        {**_record("matched"), "repo_group_id": 0},
+        {**_record("matched"), "repo_group_id": True},
+        {**_record("matched"), "unexpected": "field"},
+        _record("created"),
         {**_record("unexpected")},
     ],
 )
@@ -167,6 +172,55 @@ def test_publication_rejects_non_staging_or_source_mode_drift(
         )
 
 
+def test_publication_rejects_cross_candidate_runtime_or_tree_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(publication, "_service_uid", lambda _config: os.getuid())
+    cross_candidate = replace(
+        _config(tmp_path),
+        runner_repo=Path(f"/opt/loom-staging-runner/candidates/{'d' * 40}/repo"),
+    )
+    with pytest.raises(
+        publication.CandidateSourcePublicationError,
+        match="binding is invalid",
+    ):
+        publication.publish_installed_candidate_source(
+            config=cross_candidate,
+            candidate=_binding(),
+            operation="check",
+        )
+
+    with pytest.raises(
+        publication.CandidateSourcePublicationError,
+        match="binding is invalid",
+    ):
+        publication.publish_installed_candidate_source(
+            config=_config(tmp_path),
+            candidate=_binding(),
+            candidate_tree="d" * 40,
+            operation="check",
+        )
+
+
+def test_publication_rejects_non_mapping_materializer_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(publication, "_service_uid", lambda _config: os.getuid())
+
+    with pytest.raises(
+        publication.CandidateSourcePublicationError,
+        match="failed safely",
+    ):
+        publication.publish_installed_candidate_source(
+            config=_config(tmp_path),
+            candidate=_binding(),
+            operation="check",
+            verify=lambda **_kwargs: None,  # type: ignore[return-value]
+        )
+
+
 def test_merged_candidate_accepts_separately_verified_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -180,7 +234,7 @@ def test_merged_candidate_accepts_separately_verified_tree(
     )
 
     result = publication.publish_installed_candidate_source(
-        config=make_config(tmp_path / "repo"),
+        config=make_config(Path(f"/opt/loom-staging-runner/candidates/{SHA}/repo")),
         candidate=candidate,
         candidate_tree=TREE,
         operation="check",

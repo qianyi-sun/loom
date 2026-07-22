@@ -28,31 +28,42 @@ def _token_scopes(session: object) -> dict[bytes, list[str]]:
 
 
 @pytest.fixture
-def seeded_tokens(postgres_url: str) -> Iterator[None]:
+def seeded_tokens(isolated_migration_postgres_url: str) -> Iterator[None]:
     """Roll back to revision 0004 (pre-Plan-17), seed tokens, yield.
     Cleanup runs `upgrade head` so subsequent tests in the session
     see the latest schema."""
-    cfg = _alembic_cfg(postgres_url)
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.downgrade(cfg, "0004")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     sl = sessionmaker(engine)
     with sl() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(b"a").digest(),
-            type="admin", scopes=["admin:tokens"], team_id=None,
-            issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(b"b").digest(),
-            type="admin",
-            scopes=["admin:tokens", "admin:rate_cards"],
-            team_id=None, issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(b"c").digest(),
-            type="team", scopes=["read:own"], team_id=None,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(b"a").digest(),
+                type="admin",
+                scopes=["admin:tokens"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(b"b").digest(),
+                type="admin",
+                scopes=["admin:tokens", "admin:rate_cards"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(b"c").digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     try:
         yield
@@ -65,11 +76,12 @@ def seeded_tokens(postgres_url: str) -> Iterator[None]:
 
 
 def test_migration_grants_new_scope(
-    postgres_url: str, seeded_tokens: None,
+    isolated_migration_postgres_url: str,
+    seeded_tokens: None,
 ) -> None:
-    cfg = _alembic_cfg(postgres_url)
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0005")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     sl = sessionmaker(engine)
     with sl() as s:
         by_hash = _token_scopes(s)
@@ -85,13 +97,14 @@ def test_migration_grants_new_scope(
 
 
 def test_migration_idempotent(
-    postgres_url: str, seeded_tokens: None,
+    isolated_migration_postgres_url: str,
+    seeded_tokens: None,
 ) -> None:
-    cfg = _alembic_cfg(postgres_url)
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0005")
     # Manually re-run the data migration. Alembic refuses to call
     # upgrade twice on the same head, so invoke the SQL directly.
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     with engine.begin() as conn:
         conn.exec_driver_sql(
             "UPDATE tokens SET scopes = array_append(scopes, 'admin:rate_cards') "
@@ -108,12 +121,13 @@ def test_migration_idempotent(
 
 
 def test_migration_downgrade_removes_scope(
-    postgres_url: str, seeded_tokens: None,
+    isolated_migration_postgres_url: str,
+    seeded_tokens: None,
 ) -> None:
-    cfg = _alembic_cfg(postgres_url)
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0005")
     command.downgrade(cfg, "0004")
-    engine = create_engine(postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
     sl = sessionmaker(engine)
     with sl() as s:
         rows = _token_scopes(s).values()

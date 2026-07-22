@@ -139,7 +139,7 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
     header fallback during a rolling upgrade."""
     if not token.startswith(_STEP_JWT_PREFIX):
         raise jwt.InvalidTokenError("not a step JWT")
-    body = token[len(_STEP_JWT_PREFIX):]
+    body = token[len(_STEP_JWT_PREFIX) :]
     payload = jwt.decode(body, signing_key, algorithms=["HS256"])
     provider_connection_id_bound = "provider_connection_id" in payload
     raw_conn_id = payload.get("provider_connection_id")
@@ -147,7 +147,7 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
         UUID(raw_conn_id) if isinstance(raw_conn_id, str) else None
     )
     return AuthContext(
-        token_hash=b"",                       # synthetic — no DB row
+        token_hash=b"",  # synthetic — no DB row
         type="step_session",
         scopes=list(payload.get("scopes", [])),
         team_id=UUID(payload["team_id"]),
@@ -166,12 +166,15 @@ async def verify_bearer_token(
     signing_key: str | None = None,
     admin_verifier: AdminSecretVerifier | None = None,
     allow_readonly_probe: bool = False,
+    allow_family_orchestrator: bool = False,
 ) -> AuthContext | None:
     """Validate a Bearer token. Returns an AuthContext or None.
 
     `signing_key` enables the step-JWT branch; if None, JWTs always
     return None (effectively disabling that path). DB-backed tokens
-    are unaffected by `signing_key`.
+    are unaffected by `signing_key`. `allow_family_orchestrator` is a
+    narrow opt-in for the Control Plane step-token exchange; it remains
+    false for every other bearer-token consumer.
     """
     if not header_value or not header_value.lower().startswith("bearer "):
         return None
@@ -203,24 +206,33 @@ async def verify_bearer_token(
         except jwt.PyJWTError:
             return None
 
-    # DB-backed branch for team/worker credentials. Admin credentials moved to
-    # the singleton secret verifier above; legacy DB admin rows are ignored so
-    # production cannot accidentally authenticate through the removed path.
+    # DB-backed branch for team/worker credentials plus narrowly opted-in
+    # service principals. Admin credentials moved to the singleton secret
+    # verifier above; legacy DB admin rows are ignored so production cannot
+    # accidentally authenticate through the removed path.
     token_hash = hashlib.sha256(raw.encode()).digest()
-    row = (await session.execute(
-        select(Token).where(Token.token_hash == token_hash),
-    )).scalar_one_or_none()
+    row = (
+        await session.execute(
+            select(Token).where(Token.token_hash == token_hash),
+        )
+    ).scalar_one_or_none()
     if row is None:
         return None
-    if row.type == "admin" or any(
-        scope.startswith("admin:") for scope in row.scopes
-    ):
+    if row.type == "admin" or any(scope.startswith("admin:") for scope in row.scopes):
         return None
     if row.type == "readonly_probe":
         if (
             not allow_readonly_probe
             or row.team_id is None
             or list(row.scopes) != ["read:own"]
+            or row.created_by_user_id is not None
+        ):
+            return None
+    elif row.type == "family_orchestrator":
+        if (
+            not allow_family_orchestrator
+            or row.team_id is not None
+            or list(row.scopes) != ["family:evolve"]
             or row.created_by_user_id is not None
         ):
             return None
@@ -238,9 +250,11 @@ async def verify_bearer_token(
     user_id = row.created_by_user_id
     role = None
     if user_id is not None:
-        is_platform_admin = (await session.execute(
-            select(User.is_platform_admin).where(User.id == user_id),
-        )).scalar_one_or_none()
+        is_platform_admin = (
+            await session.execute(
+                select(User.is_platform_admin).where(User.id == user_id),
+            )
+        ).scalar_one_or_none()
         if is_platform_admin:
             role = "platform_admin"
     expires_at = row.expires_at
@@ -253,8 +267,7 @@ async def verify_bearer_token(
             update(Token)
             .where(Token.token_hash == token_hash)
             .where(
-                (Token.last_seen_at.is_(None))
-                | (Token.last_seen_at <= touch_cutoff),
+                (Token.last_seen_at.is_(None)) | (Token.last_seen_at <= touch_cutoff),
             )
             .values(last_used_at=now, last_seen_at=now),
         )

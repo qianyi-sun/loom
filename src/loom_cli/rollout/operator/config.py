@@ -24,6 +24,9 @@ APPROVED_CP_URL = "http://127.0.0.1:18081"
 APPROVED_SCOPE = "current-gb10"
 APPROVED_BACKUP_MAX_OBJECTS = 1_000_000
 APPROVED_BACKUP_MAX_ENTRIES = 16_000_000
+CANDIDATE_RUNTIME_ROOT = Path("/opt/loom-staging-runner/candidates")
+CANDIDATE_REPO_NAME = "repo"
+CANDIDATE_CLUSTER_CONFIG = Path("deploy/environments/staging.cluster.toml")
 
 ServiceUser = Literal["loom-rollout"]
 OperatorGroup = Literal["loom-staging-operators"]
@@ -71,6 +74,19 @@ _MAX_CONFIG_BYTES = 1 << 20
 
 class ConfigError(ValueError):
     """Raised when the protected runner configuration fails closed."""
+
+
+def candidate_sha_from_runner_repo(path: Path) -> str:
+    """Return the full SHA encoded by one installer-published candidate path."""
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or path.name != CANDIDATE_REPO_NAME
+        or path.parent.parent != CANDIDATE_RUNTIME_ROOT
+        or _SHA_RE.fullmatch(path.parent.name) is None
+    ):
+        raise ConfigError("runner_repo must be /opt/loom-staging-runner/candidates/<full-sha>/repo")
+    return path.parent.name
 
 
 def _require_string(raw: dict[str, object], key: str) -> str:
@@ -301,7 +317,9 @@ class OperatorConfig:
         schema_version = raw.get("schema_version")
         if type(schema_version) is not int or schema_version not in {1, 2}:
             raise ConfigError("schema_version must be 1 or 2")
-        expected_keys = _BASE_CONFIG_KEYS if schema_version == 1 else _BASE_CONFIG_KEYS | _SEALED_CONFIG_KEYS
+        expected_keys = (
+            _BASE_CONFIG_KEYS if schema_version == 1 else _BASE_CONFIG_KEYS | _SEALED_CONFIG_KEYS
+        )
         actual_keys = set(raw)
         unknown = sorted(actual_keys - expected_keys)
         missing = sorted(expected_keys - actual_keys)
@@ -369,18 +387,26 @@ class OperatorConfig:
                 f"{APPROVED_BACKUP_MAX_ENTRIES}"
             )
 
+        runner_repo = _require_absolute_path(raw, "runner_repo")
+        candidate_sha = candidate_sha_from_runner_repo(runner_repo)
+        cluster_config_path = _require_absolute_path(raw, "cluster_config_path")
+        if cluster_config_path != runner_repo / CANDIDATE_CLUSTER_CONFIG:
+            raise ConfigError("cluster_config_path must belong to the exact candidate repo")
+        if source_commit_sha is not None and source_commit_sha != candidate_sha:
+            raise ConfigError("sealed source commit must match the candidate runtime path")
+
         return cls(
             schema_version=1,
             service_user=cast(ServiceUser, service_user),
             operator_group=cast(OperatorGroup, operator_group),
             remote_url=remote_url,
             target_ref=target_ref,
-            runner_repo=_require_absolute_path(raw, "runner_repo"),
+            runner_repo=runner_repo,
             state_root=_require_absolute_path(raw, "state_root"),
             runtime_root=_require_absolute_path(raw, "runtime_root"),
             rollout_root=_require_absolute_path(raw, "rollout_root"),
             kubeconfig_path=_require_absolute_path(raw, "kubeconfig_path"),
-            cluster_config_path=_require_absolute_path(raw, "cluster_config_path"),
+            cluster_config_path=cluster_config_path,
             admin_token_source=_require_file_source(raw, "admin_token_source"),
             worker_token_source=_require_file_source(raw, "worker_token_source"),
             service_token_source=_require_file_source(raw, "service_token_source"),
@@ -408,6 +434,10 @@ __all__ = [
     "APPROVED_BACKUP_MAX_ENTRIES",
     "APPROVED_BACKUP_MAX_OBJECTS",
     "APPROVED_REMOTE_URL",
+    "CANDIDATE_CLUSTER_CONFIG",
+    "CANDIDATE_REPO_NAME",
+    "CANDIDATE_RUNTIME_ROOT",
     "ConfigError",
     "OperatorConfig",
+    "candidate_sha_from_runner_repo",
 ]

@@ -12,8 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.environment_state import load_environment_state_profile
 from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_digest
 from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
+from loom_cli.rollout.external_supervisor_readiness import SCRIPT_PATH
 from loom_cli.rollout.final_gate_readiness import (
     FINAL_CHECK_IDS,
     PROTECTED_MUTATION_CHECK_IDS,
@@ -44,6 +46,8 @@ from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+    EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
     CheckContext,
     CheckOperation,
     CheckProbe,
@@ -57,6 +61,7 @@ from loom_cli.rollout.preflight_contract import (
 )
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
+    ExternalSupervisorPredecessorSnapshot,
     build_backup_lease_eligibility_check,
     build_backup_rotation_capacity_check,
     build_browser_runtime_check,
@@ -64,6 +69,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_credentials_metadata_check,
     build_docker_runtime_check,
+    build_external_supervisor_predecessor_check,
     build_final_gate_checks,
     build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
@@ -587,6 +593,76 @@ def test_registered_user_manager_check_fails_closed_without_raw_output() -> None
     assert not manager.passed
     assert "token" not in str(dict(manager.evidence))
     assert "secret" not in str(dict(manager.evidence))
+
+
+def _external_supervisor_context() -> CheckContext:
+    return CheckContext(
+        {
+            "candidate.sha": "1" * 40,
+            "candidate.tree": "2" * 40,
+            "environment": "staging",
+            "external-supervisor.unit-directory": EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
+            "runner.config.sha256": "a" * 64,
+            "schema.revision": "0066",
+            "service.uid": 1001,
+        }
+    )
+
+
+def _external_supervisor_snapshot() -> ExternalSupervisorPredecessorSnapshot:
+    return ExternalSupervisorPredecessorSnapshot(
+        kind="legacy-manifest",
+        authority_digest="b" * 64,
+        pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        unit_sha256={
+            "loom-autoscaler-gb10-staging.service": "c" * 64,
+            "loom-autoscaler-gb10-staging.timer": "d" * 64,
+        },
+        live_evidence_digest="e" * 64,
+        pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+        transition_clear=True,
+        runtime_ready=True,
+        pool_identity_digest="f" * 64,
+    )
+
+
+def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> None:
+    snapshot = _external_supervisor_snapshot()
+    check = build_external_supervisor_predecessor_check(lambda _context: snapshot)
+
+    probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
+
+    assert probe.passed
+    assert probe.evidence["authority-kind"] == "legacy-manifest"
+    assert probe.evidence["unit-digests"] == dict(snapshot.unit_sha256)
+    assert probe.evidence["transition-clear"] is True
+    assert probe.evidence["pool-identity-digest"] == snapshot.pool_identity_digest
+    assert "schema.revision" in check.spec.input_keys
+
+
+def test_registered_external_supervisor_predecessor_rejects_absent_or_pending() -> None:
+    with pytest.raises(ValueError, match="snapshot is invalid"):
+        ExternalSupervisorPredecessorSnapshot(
+            kind="absent",
+            authority_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            unit_sha256={},
+            live_evidence_digest="e" * 64,
+            pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+            transition_clear=True,
+            runtime_ready=True,
+            pool_identity_digest="f" * 64,
+        )
+
+    pending = replace(
+        _external_supervisor_snapshot(),
+        pending_transition_digest="f" * 64,
+        transition_clear=False,
+    )
+    check = build_external_supervisor_predecessor_check(lambda _context: pending)
+    probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
+    assert not probe.passed
+    assert probe.evidence["pending-transition-digest"] == "f" * 64
 
 
 def _credential_sources(tmp_path: Path) -> tuple[CredentialProbeSource, ...]:
@@ -1496,15 +1572,24 @@ def test_registered_migration_plan_rejects_candidate_drift_before_graph_read(
 
 def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
     repo_root = Path(__file__).resolve().parents[3]
+    candidate_sha = "1" * 40
+    candidate_tree = "2" * 40
+    image_tag = "staging-1111111"
     check = build_systemd_render_check(
         lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
         candidate_root=repo_root,
-        expected_candidate_sha="1" * 40,
+        expected_candidate_sha=candidate_sha,
+        expected_candidate_tree=candidate_tree,
+        expected_image_tag=image_tag,
+        expected_environment="staging",
     )
     context = CheckContext(
         {
             "runner.config.sha256": "a" * 64,
-            "candidate.sha": "1" * 40,
+            "candidate.sha": candidate_sha,
+            "candidate.tree": candidate_tree,
+            "candidate.image-tag": image_tag,
+            "environment": "staging",
         }
     )
     dag = PreflightDag(
@@ -1520,22 +1605,66 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
     )
 
     assert result.passed
-    assert result.evidence["unit-count"] == 3
     assert result.evidence["failed-units"] == {}
+    assert result.evidence["supervisor-artifact-digest"] != "0" * 64
+    assert result.evidence["supervisor-profile-sha256"] != "0" * 64
+
+    profile = load_environment_state_profile(
+        repo_root / "deploy/environment-state/staging.toml",
+        variables={
+            "ENV_CONFIG_VERSION": candidate_tree,
+            "GIT_SHA": candidate_sha,
+            "IMAGE_TAG": image_tag,
+        },
+        expected_environment="staging",
+    )
+    supervisors = tuple(
+        supervisor
+        for supervisor in profile.external_slurm_autoscaler_supervisors
+        if supervisor["enabled"] or supervisor["active"]
+    )
+    expected_supervisor_units = {
+        str(supervisor[field])
+        for supervisor in supervisors
+        for field in ("service_name", "timer_name")
+    }
+    assert expected_supervisor_units <= set(result.evidence["unit-digests"])
+    assert result.evidence["unit-count"] == 3 + len(expected_supervisor_units)
+    assert set(result.evidence["supervisor-script-digests"]) == {SCRIPT_PATH}
 
 
-def test_registered_systemd_render_rejects_candidate_drift_without_verifier() -> None:
+@pytest.mark.parametrize(
+    ("binding", "observed"),
+    [
+        ("candidate.sha", "9" * 40),
+        ("candidate.tree", "8" * 40),
+        ("candidate.image-tag", "staging-9999999"),
+        ("environment", "production"),
+    ],
+)
+def test_registered_systemd_render_rejects_candidate_drift_without_verifier(
+    binding: str,
+    observed: str,
+) -> None:
     calls: list[tuple[str, ...]] = []
     check = build_systemd_render_check(
         lambda argv: calls.append(tuple(argv)) or subprocess.CompletedProcess(argv, 0, "", ""),
         candidate_root=Path("/missing/candidate"),
         expected_candidate_sha="1" * 40,
+        expected_candidate_tree="2" * 40,
+        expected_image_tag="staging-1111111",
+        expected_environment="staging",
     )
+    bindings = {
+        "runner.config.sha256": "a" * 64,
+        "candidate.sha": "1" * 40,
+        "candidate.tree": "2" * 40,
+        "candidate.image-tag": "staging-1111111",
+        "environment": "staging",
+    }
+    bindings[binding] = observed
     context = CheckContext(
-        {
-            "runner.config.sha256": "a" * 64,
-            "candidate.sha": "2" * 40,
-        }
+        bindings,
     )
     dag = PreflightDag(
         (
@@ -1551,6 +1680,9 @@ def test_registered_systemd_render_rejects_candidate_drift_without_verifier() ->
 
     assert not result.passed
     assert result.evidence["unit-count"] == 0
+    assert result.evidence["supervisor-artifact-digest"] == "0" * 64
+    assert result.evidence["supervisor-profile-sha256"] == "0" * 64
+    assert result.evidence["supervisor-script-digests"] == {}
     assert calls == []
 
 
@@ -1952,8 +2084,10 @@ def test_registered_rehearsal_runs_exact_isolated_journaled_actions() -> None:
 
     executions = dag.run(context, through_tier=3)
     by_id = {execution.check_id: execution for execution in executions}
+    specs = {check.spec.check_id: check.spec for check in checks}
     assert set(calls) == set(REHEARSAL_CHECK_IDS)
     assert all(by_id[check_id].passed for check_id in REHEARSAL_CHECK_IDS)
+    assert "rehearsal.systemd-launch" in specs["rehearsal.release"].dependencies
     assert by_id["rehearsal.cleanup"].evidence["cleanup-verified"] is True
     assert by_id["rehearsal.cleanup"].evidence["protected-mutation"] is False
     assert all(

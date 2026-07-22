@@ -17,6 +17,7 @@ from loom_cli.rollout.rehearsal_helper import (
     _load_plan,
     _verify_artifact_publication,
     _verify_checkpoint,
+    _verify_external_supervisor_binding,
     main,
 )
 from tests.loom_cli.rollout.rehearsal_fixtures import gb10_rehearsal_authority
@@ -63,6 +64,15 @@ def _plan() -> RehearsalPlan:
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256="8" * 64,
         production_defaults_sha256="9" * 64,
+        external_supervisor_artifact_sha256="a" * 64,
+        external_supervisor_profile_sha256="b" * 64,
+        external_supervisor_script_sha256={
+            "scripts/ops/worker_pool_autoscaler_external_once.py": "c" * 64,
+        },
+        external_supervisor_unit_sha256={
+            "loom-autoscaler-gb10-staging.service": "d" * 64,
+            "loom-autoscaler-gb10-staging.timer": "e" * 64,
+        },
         migration_plan_sha256="3" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="4" * 64,
@@ -110,6 +120,10 @@ def test_helper_loads_exact_plan_and_returns_normalized_blocker(
         "loom_cli.rollout.rehearsal_helper._verify_checkpoint",
         lambda _plan: None,
     )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper._verify_external_supervisor_binding",
+        lambda _plan: None,
+    )
 
     assert (
         main(
@@ -142,6 +156,10 @@ def test_helper_rejects_plan_drift_and_schema_confusion(
     )
     monkeypatch.setattr(
         "loom_cli.rollout.rehearsal_helper._verify_checkpoint",
+        lambda _plan: None,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper._verify_external_supervisor_binding",
         lambda _plan: None,
     )
     assert _load_plan(path, plan.plan_digest) == plan
@@ -239,6 +257,125 @@ def test_helper_revalidates_complete_checkpoint_identity(
     record["mutation_epoch"] = True
     with pytest.raises(ValueError, match="schema"):
         RehearsalPlan.from_record(record)
+
+
+def test_helper_rebuilds_and_binds_external_supervisor_before_action(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan, path = _write_plan(monkeypatch, tmp_path)
+    artifact = SimpleNamespace(
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        image_tag=plan.image_tag,
+        environment="staging",
+        artifact_digest=plan.external_supervisor_artifact_sha256,
+        profile_sha256=plan.external_supervisor_profile_sha256,
+        script_sha256=plan.external_supervisor_script_sha256,
+        unit_sha256=plan.external_supervisor_unit_sha256,
+    )
+    builds: list[dict[str, object]] = []
+
+    def build(root: Path, **kwargs):
+        builds.append({"root": root, **kwargs})
+        return artifact
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper._verify_artifact_publication",
+        lambda _plan: None,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper._verify_checkpoint",
+        lambda _plan: None,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper.build_external_supervisor_artifact",
+        build,
+    )
+    expected_build = {
+        "root": Path("/opt/loom-staging-runner/candidates/" + "a" * 40 + "/repo"),
+        "candidate_sha": plan.candidate_sha,
+        "candidate_tree": plan.candidate_tree,
+        "image_tag": plan.image_tag,
+        "environment": "staging",
+    }
+    _verify_external_supervisor_binding(plan)
+    assert builds == [expected_build]
+    builds.clear()
+    executed = False
+
+    def execute(_check_id: str, _plan: RehearsalPlan):
+        nonlocal executed
+        executed = True
+        raise AssertionError("action must not execute after supervisor drift")
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_helper._execute", execute)
+    artifact.artifact_digest = "0" * 64
+
+    assert (
+        main(
+            [
+                "execute",
+                "--check-id",
+                "rehearsal.namespace",
+                "--plan",
+                str(path),
+                "--plan-sha256",
+                plan.plan_digest,
+            ]
+        )
+        == 2
+    )
+    assert not executed
+    assert builds == [expected_build]
+
+
+@pytest.mark.parametrize(
+    ("field", "drifted"),
+    [
+        ("candidate_sha", "0" * 40),
+        ("candidate_tree", "1" * 40),
+        ("image_tag", "staging-bbbbbbbb"),
+        ("environment", "dev"),
+        ("artifact_digest", "2" * 64),
+        ("profile_sha256", "3" * 64),
+        (
+            "script_sha256",
+            {"scripts/ops/worker_pool_autoscaler_external_once.py": "4" * 64},
+        ),
+        (
+            "unit_sha256",
+            {
+                "loom-autoscaler-gb10-staging.service": "5" * 64,
+                "loom-autoscaler-gb10-staging.timer": "e" * 64,
+            },
+        ),
+    ],
+)
+def test_helper_rejects_each_external_supervisor_binding_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    drifted: object,
+) -> None:
+    plan = _plan()
+    artifact = SimpleNamespace(
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        image_tag=plan.image_tag,
+        environment="staging",
+        artifact_digest=plan.external_supervisor_artifact_sha256,
+        profile_sha256=plan.external_supervisor_profile_sha256,
+        script_sha256=plan.external_supervisor_script_sha256,
+        unit_sha256=plan.external_supervisor_unit_sha256,
+    )
+    setattr(artifact, field, drifted)
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_helper.build_external_supervisor_artifact",
+        lambda *_args, **_kwargs: artifact,
+    )
+
+    with pytest.raises(ValueError, match="external supervisor identity drifted"):
+        _verify_external_supervisor_binding(plan)
 
 
 def test_wrapper_never_inherits_ambient_environment() -> None:

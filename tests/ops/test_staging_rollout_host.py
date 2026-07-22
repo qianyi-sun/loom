@@ -18,6 +18,8 @@ TEAM_ID = "11111111-1111-4111-8111-111111111111"
 TEAM_ID_2 = "22222222-2222-4222-8222-222222222222"
 SERVICE_FINGERPRINT = "SHA256:6JjXfjyF6JMXDB2Wp4t1YgAzFJPaTv5mQJaqodL6GdU"
 OTHER_SERVICE_FINGERPRINT = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+TEST_CANDIDATE_SHA = "a" * 40
+TEST_CANDIDATE_VENV = host._candidate_venv_path(TEST_CANDIDATE_SHA)
 
 
 class FakeSystem:
@@ -69,6 +71,10 @@ class FakeSystem:
         self.preflight_credentials = False
         self.preflight_candidate_source = False
         self.inotify_capacity = False
+        self.runtime_venvs: set[Path] = set()
+
+    def _observe_runtime_venv(self, venv: Path) -> None:
+        self.runtime_venvs.add(venv)
 
     def validate_prerequisites(self) -> None:
         self.validated += 1
@@ -348,20 +354,29 @@ class FakeSystem:
             assert source_base_sha == "c" * 40
         return self.candidate_sha == expected_sha
 
-    def venv_ready(self) -> bool:
+    def venv_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         if self.venv_lock_mode not in {None, 0o600}:
             raise host.InstallError("root venv authority is unsafe")
         return self.venv
 
-    def venv_lock_requires_hardening(self) -> bool:
+    def venv_lock_requires_hardening(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         return self.venv_lock_mode is not None and self.venv_lock_mode != 0o600
 
-    def harden_venv_lock(self) -> None:
+    def harden_venv_lock(self, venv: Path) -> None:
+        self._observe_runtime_venv(venv)
         assert self.venv_lock_mode is not None
         self.venv_lock_mode = 0o600
         self.venv_lock_hardenings += 1
 
-    def sync_venv(self, source_root: Path) -> None:
+    def sync_venv(
+        self,
+        source_root: Path,
+        *,
+        venv: Path,
+    ) -> None:
+        self._observe_runtime_venv(venv)
         assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
         self.sync_safety_snapshots.append(
             (self.maintenance, self.filesystem.exists(host.SUDOERS_PATH))
@@ -372,16 +387,25 @@ class FakeSystem:
         self.broker_ready = True
         self.venv_lock_mode = 0o600
 
-    def broker_runtime_ready(self) -> bool:
+    def broker_runtime_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         return self.broker_ready
 
-    def package_runtime_ready(self) -> bool:
+    def package_runtime_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         return self.package_ready
 
-    def preflight_credentials_ready(self) -> bool:
+    def preflight_credentials_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         return self.preflight_credentials
 
-    def ensure_preflight_credentials(self, team_id: str) -> bool:
+    def ensure_preflight_credentials(
+        self,
+        team_id: str,
+        *,
+        venv: Path,
+    ) -> bool:
+        self._observe_runtime_venv(venv)
         assert team_id in {TEAM_ID, TEAM_ID_2}
         changed = not self.preflight_credentials
         self.preflight_credentials = True
@@ -394,10 +418,12 @@ class FakeSystem:
             self.filesystem.atomic_write(path, b"credential-fixture\n", 0o600)
         return changed
 
-    def preflight_candidate_source_ready(self) -> bool:
+    def preflight_candidate_source_ready(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         return self.preflight_candidate_source
 
-    def ensure_preflight_candidate_source(self) -> bool:
+    def ensure_preflight_candidate_source(self, venv: Path) -> bool:
+        self._observe_runtime_venv(venv)
         changed = not self.preflight_candidate_source
         self.preflight_candidate_source = True
         return changed
@@ -484,12 +510,12 @@ class FakeSystem:
 
     def prepare_gb10_trust_ledger(
         self,
-        source_root: Path,
+        source_sha: str,
         *,
         mode: str,
         previous_source_sha: str | None,
     ) -> None:
-        assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
+        assert source_sha in {"a" * 40, "b" * 40}
         assert mode in {"fresh", "legacy", "existing"}
         self.ledger_modes.append(mode)
         self.ledger_previous_source_shas.append(previous_source_sha)
@@ -508,7 +534,9 @@ class FakeSystem:
         if mode == "legacy":
             self._write_trust_ledger([f"trt-gb10-{number}" for number in range(1, 16)])
 
-    def require_gb10_revocation_complete(self) -> None:
+    def require_gb10_revocation_complete(self, venv: Path, source_sha: str) -> None:
+        self._observe_runtime_venv(venv)
+        assert source_sha in {"a" * 40, "b" * 40}
         self.events.append("trust-ledger:finalize-check")
         if self._trust_ledger().get("revocation_hosts") != []:
             raise host.InstallError("fake GB10 trust revocation is incomplete")
@@ -545,7 +573,9 @@ class FakeSystem:
             and (nlink is None or mapped.stat().st_nlink == nlink)
         )
 
-    def gb10_trust_ready(self) -> bool:
+    def gb10_trust_ready(self, venv: Path, source_sha: str) -> bool:
+        self._observe_runtime_venv(venv)
+        assert source_sha in {"a" * 40, "b" * 40}
         return self.trust_ready
 
     def run_post_install_preflight(self) -> dict[str, object]:
@@ -647,7 +677,9 @@ class FakeSystem:
     def maintenance_marker_status(self) -> str:
         return "enabled" if self.maintenance else "disabled"
 
-    def revoke_gb10_trust(self) -> None:
+    def revoke_gb10_trust(self, venv: Path, source_sha: str) -> None:
+        self._observe_runtime_venv(venv)
+        assert source_sha in {"a" * 40, "b" * 40}
         if self.revoke_error is not None:
             raise host.InstallError(self.revoke_error)
         self._trust_ledger()
@@ -777,6 +809,22 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert "admin-token-fixture" not in rendered
     assert "__ADMIN_TOKEN_FINGERPRINT__" not in rendered
     assert "__SMOKE_ON_BEHALF_TEAM_ID__" not in rendered
+    assert "__SOURCE_SHA__" not in rendered
+    candidate_repo = host._candidate_repo_path("a" * 40)
+    candidate_venv = host._candidate_venv_path("a" * 40)
+    assert f'runner_repo = "{candidate_repo}"' in rendered
+    assert (
+        f'cluster_config_path = "{candidate_repo}/deploy/environments/staging.cluster.toml"'
+        in rendered
+    )
+    assert system.runtime_venvs == {candidate_venv}
+    for path in (host.BROKER_PATH, host.REHEARSAL_PATH, host.FINAL_GATE_PATH):
+        wrapper = installer.filesystem.path(path).read_text(encoding="utf-8")
+        assert str(candidate_venv / "bin/python") in wrapper
+        assert "PYTHONDONTWRITEBYTECODE=1" in wrapper
+        assert "__CANDIDATE_VENV__" not in wrapper
+        assert str(host.LEGACY_VENV) not in wrapper
+    assert str(host.LEGACY_CANDIDATE_REPO) not in rendered
     config_path = installer.filesystem.path(host.CONFIG_PATH)
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
     assert (
@@ -894,6 +942,38 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_install_keeps_legacy_repo_and_venv_frozen_across_candidate_updates(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    legacy_repo = installer.filesystem.path(host.LEGACY_CANDIDATE_REPO)
+    legacy_venv = installer.filesystem.path(host.LEGACY_VENV)
+    legacy_repo.mkdir(parents=True)
+    legacy_venv.mkdir(parents=True)
+    repo_sentinel = legacy_repo / "active-pr907-script.py"
+    venv_sentinel = legacy_venv / "active-pr907-python"
+    repo_sentinel.write_bytes(b"legacy-repo-exact-bytes\n")
+    venv_sentinel.write_bytes(b"legacy-venv-exact-bytes\n")
+
+    installer.install(TEAM_ID)
+    system.remote_source_sha = "b" * 40
+    system.status = "done"
+    installer.install(TEAM_ID_2)
+
+    assert repo_sentinel.read_bytes() == b"legacy-repo-exact-bytes\n"
+    assert venv_sentinel.read_bytes() == b"legacy-venv-exact-bytes\n"
+    assert host.LEGACY_VENV not in system.runtime_venvs
+    assert system.runtime_venvs == {
+        host._candidate_venv_path("a" * 40),
+        host._candidate_venv_path("b" * 40),
+    }
+    rendered = installer.filesystem.path(host.CONFIG_PATH).read_text(encoding="utf-8")
+    assert str(host._candidate_repo_path("b" * 40)) in rendered
+    assert str(host._candidate_venv_path("b" * 40)) in installer.filesystem.path(
+        host.BROKER_PATH
+    ).read_text(encoding="utf-8")
 
 
 def test_explicit_maintenance_is_bounded_idempotent_and_visible_to_check(
@@ -2039,8 +2119,9 @@ def test_same_sha_broker_repair_failure_stays_admission_closed(tmp_path: Path) -
     system.package_ready = False
     system.broker_ready = False
 
-    def fail_sync(source_root: Path) -> None:
+    def fail_sync(source_root: Path, *, venv: Path) -> None:
         assert source_root == host.REPO_ROOT
+        assert venv == host._candidate_venv_path("a" * 40)
         assert system.maintenance is True
         assert not installer.filesystem.exists(host.SUDOERS_PATH)
         raise host.InstallError("injected same-SHA runtime repair failure")
@@ -2167,8 +2248,9 @@ def test_retry_resyncs_candidate_and_venv_for_non_ready_new_sha_record(
     system.status = "done"
     original_sync_venv = system.sync_venv
 
-    def fail_before_venv_sync(source_root: Path) -> None:
+    def fail_before_venv_sync(source_root: Path, *, venv: Path) -> None:
         assert source_root == host.REPO_ROOT
+        assert venv == host._candidate_venv_path("b" * 40)
         assert system.candidate_sha == "b" * 40
         raise host.InstallError("injected pre-venv crash")
 
@@ -2912,7 +2994,12 @@ def test_system_python_version_probe_fails_closed(returncode: int, version: str)
         )
 
 
-def _runtime_probe_argv(service_uid: int, program: str) -> list[str]:
+def _runtime_probe_argv(
+    service_uid: int,
+    program: str,
+    *,
+    venv: Path = TEST_CANDIDATE_VENV,
+) -> list[str]:
     return [
         "sudo",
         "-n",
@@ -2924,14 +3011,15 @@ def _runtime_probe_argv(service_uid: int, program: str) -> list[str]:
         f"HOME={host.STATE_ROOT}",
         f"USER={host.SERVICE_USER}",
         f"LOGNAME={host.SERVICE_USER}",
-        f"PATH={host.VENV / 'bin'}:{host._ROOT_PATH}",
+        f"PATH={venv / 'bin'}:{host._ROOT_PATH}",
         "LANG=C.UTF-8",
         "LC_ALL=C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE=1",
         f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
         f"KUBECONFIG={host.KUBECONFIG_PATH}",
         f"LOOM_STAGING_ROLLOUT_CONFIG={host.CONFIG_PATH}",
-        str(host.VENV / "bin/python"),
+        str(venv / "bin/python"),
         "-I",
         "-B",
         "-c",
@@ -2939,7 +3027,12 @@ def _runtime_probe_argv(service_uid: int, program: str) -> list[str]:
     ]
 
 
-def _candidate_source_publication_argv(service_uid: int, operation: str) -> list[str]:
+def _candidate_source_publication_argv(
+    service_uid: int,
+    operation: str,
+    *,
+    venv: Path = TEST_CANDIDATE_VENV,
+) -> list[str]:
     return [
         "sudo",
         "-n",
@@ -2951,14 +3044,15 @@ def _candidate_source_publication_argv(service_uid: int, operation: str) -> list
         f"HOME={host.STATE_ROOT}",
         f"USER={host.SERVICE_USER}",
         f"LOGNAME={host.SERVICE_USER}",
-        f"PATH={host.VENV / 'bin'}:{host._ROOT_PATH}",
+        f"PATH={venv / 'bin'}:{host._ROOT_PATH}",
         "LANG=C.UTF-8",
         "LC_ALL=C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE=1",
         f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
         f"KUBECONFIG={host.KUBECONFIG_PATH}",
         f"LOOM_STAGING_ROLLOUT_CONFIG={host.CONFIG_PATH}",
-        str(host.VENV / "bin/python"),
+        str(venv / "bin/python"),
         "-I",
         "-B",
         "-m",
@@ -3036,15 +3130,19 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
     )
     runner = SyncRunner()
     system = host.HostSystem(runner)
-    monkeypatch.setattr(system, "harden_venv_lock", lambda: events.append("harden-lock"))
+    monkeypatch.setattr(
+        system,
+        "harden_venv_lock",
+        lambda _venv: events.append("harden-lock"),
+    )
     monkeypatch.setattr(
         system,
         "venv_ready",
-        lambda: events.append("validate-authority") or True,
+        lambda _venv: events.append("validate-authority") or True,
     )
     source_root = Path("/opt/loom-staging-runner/source")
 
-    system.sync_venv(source_root)
+    system.sync_venv(source_root, venv=TEST_CANDIDATE_VENV)
 
     sync_call, sync_kwargs = next(
         call for call in runner.calls if call[0][0] == "/usr/local/bin/uv"
@@ -3069,7 +3167,7 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         "PATH": host._ROOT_PATH,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "UV_PROJECT_ENVIRONMENT": str(host.VENV),
+        "UV_PROJECT_ENVIRONMENT": str(TEST_CANDIDATE_VENV),
     }
     assert events == ["uv-sync", "harden-lock", "validate-authority", "broker-import"]
     assert runner.calls[-5:] == [
@@ -3107,11 +3205,14 @@ def test_sync_venv_rejects_broken_installed_broker_import(
         }[path],
     )
     system = host.HostSystem(BrokenBrokerRunner())
-    monkeypatch.setattr(system, "harden_venv_lock", lambda: None)
-    monkeypatch.setattr(system, "venv_ready", lambda: True)
+    monkeypatch.setattr(system, "harden_venv_lock", lambda _venv: None)
+    monkeypatch.setattr(system, "venv_ready", lambda _venv: True)
 
     with pytest.raises(host.InstallError, match="broker import probe failed"):
-        system.sync_venv(Path("/opt/loom-staging-runner/source"))
+        system.sync_venv(
+            Path("/opt/loom-staging-runner/source"),
+            venv=TEST_CANDIDATE_VENV,
+        )
 
 
 def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
@@ -3131,8 +3232,50 @@ def test_broker_runtime_probe_loads_fixed_config_as_service_user() -> None:
 
     runner = ProbeRunner()
 
-    assert host.HostSystem(runner).broker_runtime_ready() is True
+    assert host.HostSystem(runner).broker_runtime_ready(TEST_CANDIDATE_VENV) is True
     assert runner.calls[-1][1] == {"check": False}
+
+
+def test_gb10_trust_probe_binds_exact_candidate_runtime() -> None:
+    class ProbeRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append((list(argv), dict(kwargs)))
+            return host.CommandResult(0)
+
+    runner = ProbeRunner()
+
+    assert host.HostSystem(runner).gb10_trust_ready(
+        TEST_CANDIDATE_VENV,
+        TEST_CANDIDATE_SHA,
+    )
+    assert runner.calls == [
+        (
+            [
+                str(TEST_CANDIDATE_VENV / "bin/python"),
+                "-I",
+                "-B",
+                str(host._candidate_trust_tool_path(TEST_CANDIDATE_SHA)),
+                "--ssh-config",
+                str(host._candidate_ssh_config_path(TEST_CANDIDATE_SHA)),
+                "check",
+            ],
+            {
+                "check": False,
+                "env": {
+                    "PATH": host._ROOT_PATH,
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "HOME": str(host.STATE_ROOT),
+                    "USER": host.SERVICE_USER,
+                    "LOGNAME": host.SERVICE_USER,
+                },
+            },
+        )
+    ]
 
 
 def test_service_git_disables_optional_locks_and_replace_refs() -> None:
@@ -3170,7 +3313,7 @@ def test_candidate_source_publication_uses_fixed_service_user_boundary() -> None
 
     runner = PublicationRunner()
 
-    assert host.HostSystem(runner).preflight_candidate_source_ready() is True
+    assert host.HostSystem(runner).preflight_candidate_source_ready(TEST_CANDIDATE_VENV) is True
     assert runner.calls[-1][1] == {"check": False}
 
 
@@ -3187,7 +3330,7 @@ def test_candidate_source_publication_rejects_tampered_evidence_digest() -> None
             return host.CommandResult(0, json.dumps(payload) + "\n")
 
     with pytest.raises(host.InstallError, match="evidence digest"):
-        host.HostSystem(TamperedRunner()).preflight_candidate_source_ready()
+        host.HostSystem(TamperedRunner()).preflight_candidate_source_ready(TEST_CANDIDATE_VENV)
 
 
 @pytest.mark.parametrize(
@@ -3341,9 +3484,9 @@ def test_venv_lock_hardening_converges_root_regular_file_to_mode_0600(
         mode = requested_mode
 
     def fake_lstat(path: Path) -> os.stat_result:
-        if path == host.VENV:
+        if path == TEST_CANDIDATE_VENV:
             return os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
-        assert path == host.VENV / ".lock"
+        assert path == TEST_CANDIDATE_VENV / ".lock"
         return metadata(mode)
 
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
@@ -3352,9 +3495,9 @@ def test_venv_lock_hardening_converges_root_regular_file_to_mode_0600(
     monkeypatch.setattr(host.os, "fchmod", fake_fchmod)
     monkeypatch.setattr(host.os, "close", lambda fd: calls.append(("close", fd)))
 
-    host.HostSystem(RecordingRunner()).harden_venv_lock()
+    host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
-    assert calls[0][0:2] == ("open", host.VENV / ".lock")
+    assert calls[0][0:2] == ("open", TEST_CANDIDATE_VENV / ".lock")
     assert calls[0][2] & getattr(os, "O_NOFOLLOW", 0)
     assert calls[1:] == [("fchmod", descriptor, 0o600), ("close", descriptor)]
 
@@ -3377,9 +3520,9 @@ def test_venv_lock_hardening_rejects_unsafe_authority_before_open(
     metadata = os.stat_result((unsafe_mode, 23, 17, 1, unsafe_uid, unsafe_gid, 0, 0, 0, 0))
 
     def fake_lstat(path: Path) -> os.stat_result:
-        if path == host.VENV:
+        if path == TEST_CANDIDATE_VENV:
             return os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
-        assert path == host.VENV / ".lock"
+        assert path == TEST_CANDIDATE_VENV / ".lock"
         return metadata
 
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
@@ -3390,7 +3533,7 @@ def test_venv_lock_hardening_rejects_unsafe_authority_before_open(
     )
 
     with pytest.raises(host.InstallError, match="lock authority is unsafe"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
 
 def test_venv_lock_hardening_rejects_identity_change_after_open(
@@ -3400,13 +3543,17 @@ def test_venv_lock_hardening_rejects_identity_change_after_open(
     before = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
     after = os.stat_result((stat.S_IFREG | 0o666, 24, 17, 1, 0, 0, 0, 0, 0, 0))
     closed: list[int] = []
-    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else before)
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: root if path == TEST_CANDIDATE_VENV else before,
+    )
     monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
     monkeypatch.setattr(host.os, "fstat", lambda fd: after)
     monkeypatch.setattr(host.os, "close", lambda fd: closed.append(fd))
 
     with pytest.raises(host.InstallError, match="lock authority is unsafe"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
     assert closed == [41]
 
@@ -3416,14 +3563,18 @@ def test_venv_lock_hardening_fails_if_mode_does_not_converge(
 ) -> None:
     root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
     lock = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else lock)
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: root if path == TEST_CANDIDATE_VENV else lock,
+    )
     monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
     monkeypatch.setattr(host.os, "fstat", lambda fd: lock)
     monkeypatch.setattr(host.os, "fchmod", lambda fd, mode: None)
     monkeypatch.setattr(host.os, "close", lambda fd: None)
 
     with pytest.raises(host.InstallError, match="hardening did not converge"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
 
 def test_venv_lock_hardening_converts_fchmod_failure(
@@ -3431,7 +3582,11 @@ def test_venv_lock_hardening_converts_fchmod_failure(
 ) -> None:
     root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
     lock = os.stat_result((stat.S_IFREG | 0o666, 23, 17, 1, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else lock)
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: root if path == TEST_CANDIDATE_VENV else lock,
+    )
     monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
     monkeypatch.setattr(host.os, "fstat", lambda fd: lock)
     monkeypatch.setattr(
@@ -3442,7 +3597,7 @@ def test_venv_lock_hardening_converts_fchmod_failure(
     monkeypatch.setattr(host.os, "close", lambda fd: None)
 
     with pytest.raises(host.InstallError, match="lock hardening failed"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
 
 def test_venv_lock_hardening_converts_close_failure_without_masking_authority_error(
@@ -3451,17 +3606,21 @@ def test_venv_lock_hardening_converts_close_failure_without_masking_authority_er
     root = os.stat_result((stat.S_IFDIR | 0o755, 11, 7, 1, 0, 0, 0, 0, 0, 0))
     before = os.stat_result((stat.S_IFREG | 0o600, 23, 17, 1, 0, 0, 0, 0, 0, 0))
     changed = os.stat_result((stat.S_IFREG | 0o600, 24, 17, 1, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(host.os, "lstat", lambda path: root if path == host.VENV else before)
+    monkeypatch.setattr(
+        host.os,
+        "lstat",
+        lambda path: root if path == TEST_CANDIDATE_VENV else before,
+    )
     monkeypatch.setattr(host.os, "open", lambda path, flags: 41)
     monkeypatch.setattr(host.os, "close", lambda fd: (_ for _ in ()).throw(OSError("close")))
 
     monkeypatch.setattr(host.os, "fstat", lambda fd: before)
     with pytest.raises(host.InstallError, match="lock close failed"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
     monkeypatch.setattr(host.os, "fstat", lambda fd: changed)
     with pytest.raises(host.InstallError, match="lock authority is unsafe"):
-        host.HostSystem(RecordingRunner()).harden_venv_lock()
+        host.HostSystem(RecordingRunner()).harden_venv_lock(TEST_CANDIDATE_VENV)
 
 
 def test_verify_user_manager_places_clean_connectivity_probe_inside_sudo() -> None:
@@ -3892,17 +4051,17 @@ def test_venv_python_minor_drift_converges_through_resync(
                 assert kwargs == {"check": False}
                 return host.CommandResult(0, "3.13\n")
             assert kwargs == {"check": False}
-            assert call == ["stat", "-c", "%F:%U:%G:%a", str(host.VENV)]
+            assert call == ["stat", "-c", "%F:%U:%G:%a", str(TEST_CANDIDATE_VENV)]
             return host.CommandResult(0, "directory:root:root:755\n")
 
     resolved = {
         host.SYSTEM_PYTHON: Path("/usr/bin/python3.13"),
-        host.VENV / "bin/python": Path("/usr/bin/python3.12"),
+        TEST_CANDIDATE_VENV / "bin/python": Path("/usr/bin/python3.12"),
     }
     monkeypatch.setattr(
         host.os.path,
         "lexists",
-        lambda path: path in {host.VENV, host.VENV / "bin/python"},
+        lambda path: path in {TEST_CANDIDATE_VENV, TEST_CANDIDATE_VENV / "bin/python"},
     )
     monkeypatch.setattr(
         host,
@@ -3915,7 +4074,7 @@ def test_venv_python_minor_drift_converges_through_resync(
         lambda root, *, expected_uid, expected_gid, allowed_external_symlink_targets: None,
     )
 
-    assert host.HostSystem(VenvRunner()).venv_ready() is False
+    assert host.HostSystem(VenvRunner()).venv_ready(TEST_CANDIDATE_VENV) is False
 
 
 def test_dangling_venv_python_converges_only_after_tree_validation(
@@ -3930,7 +4089,7 @@ def test_dangling_venv_python_converges_only_after_tree_validation(
             assert kwargs == {"check": False}
             return host.CommandResult(0, "directory:root:root:755\n")
 
-    python = host.VENV / "bin/python"
+    python = TEST_CANDIDATE_VENV / "bin/python"
     tree_validated = False
 
     def validate_tree(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -3946,11 +4105,15 @@ def test_dangling_venv_python_converges_only_after_tree_validation(
         assert tree_validated
         raise host.InstallError("dangling venv Python")
 
-    monkeypatch.setattr(host.os.path, "lexists", lambda path: path in {host.VENV, python})
+    monkeypatch.setattr(
+        host.os.path,
+        "lexists",
+        lambda path: path in {TEST_CANDIDATE_VENV, python},
+    )
     monkeypatch.setattr(host, "_safe_root_executable", resolve_executable)
     monkeypatch.setattr(host, "_validate_owned_tree", validate_tree)
 
-    assert host.HostSystem(VenvRunner()).venv_ready() is False
+    assert host.HostSystem(VenvRunner()).venv_ready(TEST_CANDIDATE_VENV) is False
     assert tree_validated
 
 
@@ -3991,7 +4154,6 @@ def test_venv_python_link_rejects_non_system_python_target(
             assert kwargs == {"check": False}
             return host.CommandResult(0, "directory:root:root:755\n")
 
-    monkeypatch.setattr(host, "VENV", venv)
     monkeypatch.setattr(
         host,
         "_safe_root_executable",
@@ -3999,7 +4161,7 @@ def test_venv_python_link_rejects_non_system_python_target(
     )
 
     with pytest.raises(host.InstallError, match="link is unsafe"):
-        host.HostSystem(VenvRunner()).venv_ready()
+        host.HostSystem(VenvRunner()).venv_ready(venv)
 
 
 class RecordingRunner:
@@ -5119,7 +5281,7 @@ def test_candidate_convergence_hardens_existing_checkout_and_uses_fixed_umask(
 ) -> None:
     uid, gid = os.geteuid(), os.getegid()
     sha = "a" * 40
-    candidate = tmp_path / "repo"
+    candidate = tmp_path / sha / "repo"
     git_dir = candidate / ".git"
     git_dir.mkdir(parents=True, mode=0o775)
     config = git_dir / "config"
@@ -5156,7 +5318,7 @@ def test_candidate_convergence_hardens_existing_checkout_and_uses_fixed_umask(
                 return host.CommandResult(0, sha + "\n")
             raise AssertionError(f"unexpected command: {call}")
 
-    monkeypatch.setattr(host, "CANDIDATE_REPO", candidate)
+    monkeypatch.setattr(host, "CANDIDATE_RUNTIME_ROOT", tmp_path)
     runner = CandidateRunner()
 
     assert host.HostSystem(runner).ensure_candidate(sha, refresh=False) is True
@@ -5182,7 +5344,7 @@ def test_sealed_candidate_fetch_uses_fixed_install_source_upload_pack(
     sha = "a" * 40
     tree = "b" * 40
     base = "c" * 40
-    candidate = tmp_path / "repo"
+    candidate = tmp_path / sha / "repo"
     (candidate / ".git").mkdir(parents=True)
 
     class SealedCandidateRunner:
@@ -5218,7 +5380,7 @@ def test_sealed_candidate_fetch_uses_fixed_install_source_upload_pack(
                 return host.CommandResult(0, f"{sha} {base}\n")
             raise AssertionError(f"unexpected command: {call}")
 
-    monkeypatch.setattr(host, "CANDIDATE_REPO", candidate)
+    monkeypatch.setattr(host, "CANDIDATE_RUNTIME_ROOT", tmp_path)
     monkeypatch.setattr(host, "_validate_git_checkout_tree", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(host, "_harden_owned_tree", lambda *_args, **_kwargs: False)
     runner = SealedCandidateRunner()
@@ -5253,8 +5415,8 @@ def test_sealed_candidate_fetch_uses_fixed_install_source_upload_pack(
         == [
             "/bin/sh",
             "-c",
-            'umask 077; exec "$@"',
-            "loom-staging-git",
+            'umask 022; exec "$@"',
+            "loom-staging-root-git",
             "/usr/bin/git",
         ]
         for call in runner.calls

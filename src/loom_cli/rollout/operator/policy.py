@@ -11,7 +11,7 @@ from .model import CallerIdentity
 
 _UID_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 _CHILD_HOME = "/var/lib/loom-staging-rollout"
-_CHILD_PATH = "/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin"
+_CHILD_SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 GroupResolver = Callable[[str], Collection[str]]
 
@@ -68,11 +68,13 @@ def sanitized_child_environment(
 ) -> dict[str, str]:
     """Build the complete, non-inheriting environment for broker child processes."""
     runtime_dir = f"/run/user/{service_uid}"
+    candidate_venv_bin = config.runner_repo.parent / "venv" / "bin"
     return {
         "HOME": _CHILD_HOME,
         "USER": config.service_user,
         "LOGNAME": config.service_user,
-        "PATH": _CHILD_PATH,
+        "PATH": f"{candidate_venv_bin}:{_CHILD_SYSTEM_PATH}",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "XDG_RUNTIME_DIR": runtime_dir,
         "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
         "KUBECONFIG": str(config.kubeconfig_path),

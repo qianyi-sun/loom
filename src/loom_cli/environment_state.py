@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import tomllib
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,8 @@ from loom.worker_token import (
 )
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_SYSTEMD_UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\Z")
+_SYSTEMD_SECONDS_RE = re.compile(r"[1-9][0-9]{0,4}\Z")
 
 # Matches the git-SHA suffix in a release tag like `staging-c72f50d`.
 # Kept in sync with the copy in `loom_cli.admin_cmd` — both derive the
@@ -97,6 +100,7 @@ _EXTERNAL_AUTOSCALER_SUPERVISOR_DEFAULTS: dict[str, Any] = {
     "timer_on_boot_sec": "45",
     "timer_on_unit_active_sec": "30",
     "timer_accuracy_sec": "5",
+    "service_timeout_sec": "180",
     "enabled": True,
     "active": True,
 }
@@ -131,6 +135,65 @@ def _clean_nonempty(value: object, field: str) -> str:
     if not cleaned:
         raise EnvironmentStateProfileError(f"{field} must be a non-empty string")
     return cleaned
+
+
+def _systemd_unit_name(value: object, field: str, *, suffix: str) -> str:
+    cleaned = _clean_nonempty(value, field)
+    if (
+        _SYSTEMD_UNIT_RE.fullmatch(cleaned) is None
+        or not cleaned.endswith(suffix)
+        or "/" in cleaned
+        or "\\" in cleaned
+    ):
+        raise EnvironmentStateProfileError(
+            f"{field} must be one safe {suffix} unit basename",
+        )
+    return cleaned
+
+
+def _systemd_seconds(value: object, field: str, *, maximum: int) -> str:
+    cleaned = _clean_nonempty(value, field)
+    if _SYSTEMD_SECONDS_RE.fullmatch(cleaned) is None or int(cleaned) > maximum:
+        raise EnvironmentStateProfileError(
+            f"{field} must be whole seconds in 1..{maximum}",
+        )
+    return cleaned
+
+
+def _systemd_text(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise EnvironmentStateProfileError(f"{field} must be a string")
+    cleaned = value.strip()
+    if (
+        not cleaned
+        or cleaned != value
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
+        raise EnvironmentStateProfileError(
+            f"{field} must be a non-empty control-free string",
+        )
+    return cleaned
+
+
+def _systemd_string_list(value: object, field: str) -> list[str]:
+    items = _as_string_list(value, field)
+    return [_systemd_text(item, f"{field}[{index}]") for index, item in enumerate(items)]
+
+
+def _systemd_dependency_list(value: object, field: str) -> list[str]:
+    items = _systemd_string_list(value, field)
+    for index, item in enumerate(items):
+        if _SYSTEMD_UNIT_RE.fullmatch(item) is None or "/" in item or "\\" in item:
+            raise EnvironmentStateProfileError(
+                f"{field}[{index}] must be one safe systemd unit basename",
+            )
+    return items
+
+
+def _strict_boolean(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        raise EnvironmentStateProfileError(f"{field} must be a boolean")
+    return value
 
 
 def _replace_placeholders(value: Any, variables: dict[str, str], *, path: str) -> Any:
@@ -216,6 +279,16 @@ def _args_include_pool_name(args: list[str], pool_name: str) -> bool:
     return False
 
 
+def _args_exact_option_values(args: list[str], option: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for idx, arg in enumerate(args):
+        if arg == option and idx + 1 < len(args):
+            values.append(args[idx + 1])
+        elif arg.startswith(f"{option}="):
+            values.append(arg.split("=", 1)[1])
+    return tuple(values)
+
+
 def _args_db_local_port(args: list[str]) -> str | None:
     for idx, arg in enumerate(args):
         if arg == "--db-local-port" and idx + 1 < len(args):
@@ -242,8 +315,7 @@ def _validate_supervisor_collisions(
             value = str(supervisor[field])
             if value in seen:
                 raise EnvironmentStateProfileError(
-                    "external_slurm_autoscaler_supervisors: duplicate "
-                    f"{field} {value!r}",
+                    f"external_slurm_autoscaler_supervisors: duplicate {field} {value!r}",
                 )
             seen.add(value)
     seen_ports: set[str] = set()
@@ -253,8 +325,7 @@ def _validate_supervisor_collisions(
             continue
         if port in seen_ports:
             raise EnvironmentStateProfileError(
-                "external_slurm_autoscaler_supervisors: duplicate "
-                f"--db-local-port {port!r}",
+                f"external_slurm_autoscaler_supervisors: duplicate --db-local-port {port!r}",
             )
         seen_ports.add(port)
 
@@ -327,58 +398,77 @@ def _normalize_external_slurm_autoscaler_supervisor(
     item: dict[str, Any],
     *,
     environment: str,
+    control_plane_environment: str,
     index: int,
 ) -> dict[str, Any]:
     field = f"external_slurm_autoscaler_supervisors[{index}]"
     payload = dict(_EXTERNAL_AUTOSCALER_SUPERVISOR_DEFAULTS)
     payload.update(item)
     name = _clean_nonempty(payload.get("name"), f"{field}.name")
-    pool_name = _clean_nonempty(payload.get("pool_name"), f"{field}.pool_name")
-    args = _as_string_list(payload.get("args"), f"{field}.args")
+    pool_name = _systemd_text(payload.get("pool_name"), f"{field}.pool_name")
+    args = _systemd_string_list(payload.get("args"), f"{field}.args")
     if not _args_include_pool_name(args, pool_name):
         raise EnvironmentStateProfileError(
             f"{field}.args must include --pool-name {pool_name}",
         )
+    if _args_exact_option_values(args, "--environment") != (control_plane_environment,):
+        raise EnvironmentStateProfileError(
+            f"{field}.args must include exactly one --environment {control_plane_environment}",
+        )
     normalized = {
         "environment": environment,
+        "control_plane_environment": control_plane_environment,
         "name": name,
         "pool_name": pool_name,
-        "service_name": _clean_nonempty(
+        "service_name": _systemd_unit_name(
             payload.get("service_name"),
             f"{field}.service_name",
+            suffix=".service",
         ),
-        "timer_name": _clean_nonempty(
+        "timer_name": _systemd_unit_name(
             payload.get("timer_name"),
             f"{field}.timer_name",
+            suffix=".timer",
         ),
-        "working_directory": _clean_nonempty(
+        "working_directory": _systemd_text(
             payload.get("working_directory"),
             f"{field}.working_directory",
         ),
-        "python_path": _clean_nonempty(
+        "python_path": _systemd_text(
             payload.get("python_path"),
             f"{field}.python_path",
         ),
-        "script_path": _clean_nonempty(
+        "script_path": _systemd_text(
             payload.get("script_path"),
             f"{field}.script_path",
         ),
         "args": args,
-        "requires": _as_string_list(payload.get("requires"), f"{field}.requires"),
-        "timer_on_boot_sec": _clean_nonempty(
+        "requires": _systemd_dependency_list(
+            payload.get("requires"),
+            f"{field}.requires",
+        ),
+        "timer_on_boot_sec": _systemd_seconds(
             payload.get("timer_on_boot_sec"),
             f"{field}.timer_on_boot_sec",
+            maximum=3600,
         ),
-        "timer_on_unit_active_sec": _clean_nonempty(
+        "timer_on_unit_active_sec": _systemd_seconds(
             payload.get("timer_on_unit_active_sec"),
             f"{field}.timer_on_unit_active_sec",
+            maximum=3600,
         ),
-        "timer_accuracy_sec": _clean_nonempty(
+        "timer_accuracy_sec": _systemd_seconds(
             payload.get("timer_accuracy_sec"),
             f"{field}.timer_accuracy_sec",
+            maximum=3600,
         ),
-        "enabled": bool(payload.get("enabled", True)),
-        "active": bool(payload.get("active", True)),
+        "service_timeout_sec": _systemd_seconds(
+            payload.get("service_timeout_sec"),
+            f"{field}.service_timeout_sec",
+            maximum=7200,
+        ),
+        "enabled": _strict_boolean(payload.get("enabled"), f"{field}.enabled"),
+        "active": _strict_boolean(payload.get("active"), f"{field}.active"),
     }
     return normalized
 
@@ -480,6 +570,7 @@ def load_environment_state_profile(
         _normalize_external_slurm_autoscaler_supervisor(
             item,
             environment=environment,
+            control_plane_environment=control_plane_environment,
             index=idx,
         )
         for idx, item in enumerate(
@@ -1025,8 +1116,10 @@ def render_external_slurm_autoscaler_service(supervisor: dict[str, Any]) -> str:
             "",
             "[Service]",
             "Type=oneshot",
+            f"TimeoutStartSec={supervisor['service_timeout_sec']}",
             f"WorkingDirectory={supervisor['working_directory']}",
             f"Environment=PYTHONPATH={supervisor['working_directory']}/src",
+            "Environment=PYTHONDONTWRITEBYTECODE=1",
             f"ExecStart={_quote_command(command)}",
         ],
     )

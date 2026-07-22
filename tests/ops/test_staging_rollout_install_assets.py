@@ -24,9 +24,7 @@ def test_client_and_sudoers_fix_the_broker_command() -> None:
     assert "/usr/bin/env -i" in broker
     assert broker.index("umask 077") < broker.index("exec /usr/bin/env -i")
     assert 'SUDO_USER="${SUDO_USER}"' in broker
-    python_command = (
-        "/opt/loom-staging-runner/venv/bin/python -I -B -m loom_cli.rollout.operator.broker"
-    )
+    python_command = "__CANDIDATE_VENV__/bin/python -I -B -m loom_cli.rollout.operator.broker"
     assert python_command in broker
     for setting in (
         "GIT_CONFIG_NOSYSTEM=1",
@@ -78,8 +76,10 @@ def test_config_template_is_non_secret_and_fixed_to_merged_dev() -> None:
     assert config["remote_url"] == "https://github.com/qianyi-sun/loom.git"
     assert config["target_ref"] == "refs/heads/dev"
     assert config["service_user"] == "loom-rollout"
+    assert config["runner_repo"] == ("/opt/loom-staging-runner/candidates/__SOURCE_SHA__/repo")
     assert config["cluster_config_path"] == (
-        "/opt/loom-staging-runner/repo/deploy/environments/staging.cluster.toml"
+        "/opt/loom-staging-runner/candidates/__SOURCE_SHA__/repo/"
+        "deploy/environments/staging.cluster.toml"
     )
     assert config["expect_admin_token_fingerprint"] == "__ADMIN_TOKEN_FINGERPRINT__"
     assert config["smoke_on_behalf_team_id"] == "__SMOKE_ON_BEHALF_TEAM_ID__"
@@ -107,7 +107,9 @@ def test_repo_configs_no_longer_reference_qianyi_private_deploy_key() -> None:
 def test_installed_gb10_trust_tool_uses_the_root_owned_candidate_inventory() -> None:
     source = (REPO_ROOT / "scripts/ops/staging_rollout_gb10_trust.py").read_text(encoding="utf-8")
 
-    assert "/opt/loom-staging-runner/repo/deploy/worker-pools/gb10/ssh_config" in source
+    assert "_CANDIDATE_SSH_CONFIG_RE" in source
+    assert "/opt/loom-staging-runner/candidates/" in source
+    assert "/opt/loom-staging-runner/repo/deploy/worker-pools/gb10/ssh_config" not in source
     assert "Path(__file__).resolve().parents[2]" not in source
 
 

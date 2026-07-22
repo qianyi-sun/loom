@@ -22,6 +22,7 @@ from loom_cli.rollout.preflight_artifact_store import (
     PreflightArtifactStore,
 )
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
+from loom_cli.rollout.preflight_registered_checks import ExternalSupervisorPredecessorSource
 from loom_cli.rollout.preflight_runtime import RehearsalActionFactory, RehearsalIdentityFactory
 from loom_cli.rollout.preflight_runtime_sources import (
     BackupAdmissionAuthority,
@@ -63,6 +64,7 @@ class InstalledDeepPreflightComposition:
     readonly_authority_source: Callable[[], ReadonlyAuthorityEvidence]
     capacity_source: Callable[[], StagingCapacity]
     backup_authority_factory: BackupAuthorityFactory
+    external_supervisor_predecessor_source: ExternalSupervisorPredecessorSource
     systemd_run: SystemdCommandRunner
     gb10_run: SystemdCommandRunner
     gb10_mount_source: Callable[[], GB10SharedMountReadiness]
@@ -136,6 +138,7 @@ class InstalledDeepPreflightComposition:
             readonly_authority_source=self.readonly_authority_source,
             capacity_source=self.capacity_source,
             backup_authority=self.backup_authority_factory(mutation_epoch),
+            external_supervisor_predecessor_source=(self.external_supervisor_predecessor_source),
             systemd_run=self.systemd_run,
             gb10_run=self.gb10_run,
             gb10_targets=self.inputs.gb10_targets,

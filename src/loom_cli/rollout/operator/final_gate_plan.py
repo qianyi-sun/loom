@@ -11,10 +11,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import TypedDict, cast
 from uuid import uuid4
 
+from loom_cli.rollout.external_supervisor_readiness import SCRIPT_PATH
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
-from loom_cli.rollout.preflight_contract import PreflightAttestation
+from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+    PreflightAttestation,
+    external_supervisor_transition_digest,
+    external_supervisor_unit_set_digest,
+)
+from loom_cli.rollout.systemd_unit_readiness import UNIT_PATHS
 
 from .backup_lease import BackupLease, component_set_digest
 from .model import DriverEnvelope, driver_envelope_sha256, validate_safe_identifier
@@ -35,6 +43,26 @@ _PROTECTED_BASELINE_IDS = frozenset(
         "staging.release-baseline",
     }
 )
+
+
+class _SystemdEvidence(TypedDict):
+    supervisor_artifact_digest: str
+    supervisor_profile_sha256: str
+    supervisor_script_digests: dict[str, str]
+    supervisor_unit_digests: dict[str, str]
+    supervisor_unit_set_digest: str
+    systemd_unit_digests: dict[str, str]
+    systemd_unit_set_digest: str
+
+
+class _PredecessorEvidence(TypedDict):
+    kind: str
+    authority_digest: str
+    pointer_digest: str
+    unit_sha256: dict[str, str]
+    unit_set_digest: str
+    live_evidence_digest: str
+    pending_transition_digest: str
 
 
 class FinalGatePlanError(RuntimeError):
@@ -96,6 +124,19 @@ class FinalGatePlan:
     gb10_boot_ids: Mapping[str, str]
     gb10_mount_digest: str
     gb10_unit_digest: str
+    supervisor_artifact_digest: str
+    supervisor_profile_sha256: str
+    supervisor_script_digests: Mapping[str, str]
+    systemd_unit_digests: Mapping[str, str]
+    systemd_unit_set_digest: str
+    supervisor_predecessor_kind: str
+    supervisor_predecessor_digest: str
+    supervisor_predecessor_pointer_digest: str
+    supervisor_predecessor_unit_sha256: Mapping[str, str]
+    supervisor_predecessor_unit_set_digest: str
+    supervisor_predecessor_live_evidence_digest: str
+    supervisor_predecessor_pending_transition_digest: str
+    supervisor_transition_digest: str
     check_implementation_digests: Mapping[str, str]
     evidence_hashes: Mapping[str, str]
     protected_baseline_digest: str
@@ -106,7 +147,7 @@ class FinalGatePlan:
         validate_safe_identifier(self.request_id, "request_id")
         validate_safe_identifier(self.rollout_id, "rollout_id")
         if (
-            self.schema_version != 2
+            self.schema_version != 3
             or type(self.attempt_number) is not int
             or self.attempt_number < 1
             or self.source_mode not in {"merged-dev", "sealed-cumulative"}
@@ -145,6 +186,15 @@ class FinalGatePlan:
             self.gb10_inventory_digest,
             self.gb10_mount_digest,
             self.gb10_unit_digest,
+            self.supervisor_artifact_digest,
+            self.supervisor_profile_sha256,
+            self.systemd_unit_set_digest,
+            self.supervisor_predecessor_digest,
+            self.supervisor_predecessor_pointer_digest,
+            self.supervisor_predecessor_unit_set_digest,
+            self.supervisor_predecessor_live_evidence_digest,
+            self.supervisor_predecessor_pending_transition_digest,
+            self.supervisor_transition_digest,
             self.protected_baseline_digest,
             self.plan_digest,
         )
@@ -193,6 +243,9 @@ class FinalGatePlan:
             "image": self.image_digests,
             "secret metadata": self.secret_metadata_fingerprints,
             "GB10 boot": self.gb10_boot_ids,
+            "supervisor script": self.supervisor_script_digests,
+            "systemd unit": self.systemd_unit_digests,
+            "supervisor predecessor unit": self.supervisor_predecessor_unit_sha256,
             "check implementation": self.check_implementation_digests,
             "evidence": self.evidence_hashes,
             "protected baseline": self.protected_baseline_resource_digests,
@@ -227,6 +280,9 @@ class FinalGatePlan:
         if any(
             _SHA256_RE.fullmatch(value) is None
             for values in (
+                self.supervisor_script_digests,
+                self.systemd_unit_digests,
+                self.supervisor_predecessor_unit_sha256,
                 self.check_implementation_digests,
                 self.evidence_hashes,
                 self.protected_baseline_resource_digests,
@@ -234,6 +290,64 @@ class FinalGatePlan:
             for value in values.values()
         ):
             raise ValueError("final gate check digest map is invalid")
+        unit_names = set(self.systemd_unit_digests)
+        dynamic_services = {
+            name for name in unit_names - set(UNIT_PATHS) if name.endswith(".service")
+        }
+        dynamic_timers = {name for name in unit_names - set(UNIT_PATHS) if name.endswith(".timer")}
+        target_unit_sha256 = {
+            name: digest
+            for name, digest in self.systemd_unit_digests.items()
+            if name not in UNIT_PATHS
+        }
+        if (
+            not set(UNIT_PATHS).issubset(unit_names)
+            or not dynamic_services
+            or len(dynamic_services) != len(dynamic_timers)
+            or {name.removesuffix(".service") for name in dynamic_services}
+            != {name.removesuffix(".timer") for name in dynamic_timers}
+            or any("/" in name or "\\" in name for name in dynamic_services | dynamic_timers)
+            or set(self.supervisor_script_digests) != {SCRIPT_PATH}
+            or self.systemd_unit_set_digest
+            != _hash_json({"failed": {}, "units": dict(self.systemd_unit_digests)})
+        ):
+            raise ValueError("final gate systemd supervisor coverage is invalid")
+        if (
+            self.supervisor_predecessor_kind not in {"legacy-manifest", "canonical"}
+            or self.supervisor_predecessor_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            or external_supervisor_unit_set_digest(self.supervisor_predecessor_unit_sha256)
+            != self.supervisor_predecessor_unit_set_digest
+            or (
+                self.supervisor_predecessor_kind == "legacy-manifest"
+                and self.supervisor_predecessor_pointer_digest != EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            )
+            or (
+                self.supervisor_predecessor_kind == "canonical"
+                and self.supervisor_predecessor_pointer_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            )
+        ):
+            raise ValueError("final gate supervisor predecessor authority is invalid")
+        expected_transition = external_supervisor_transition_digest(
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+            environment=self.environment,
+            predecessor_kind=self.supervisor_predecessor_kind,
+            predecessor_digest=self.supervisor_predecessor_digest,
+            predecessor_pointer_digest=self.supervisor_predecessor_pointer_digest,
+            predecessor_unit_sha256=self.supervisor_predecessor_unit_sha256,
+            predecessor_unit_set_digest=self.supervisor_predecessor_unit_set_digest,
+            predecessor_live_evidence_digest=(self.supervisor_predecessor_live_evidence_digest),
+            predecessor_pending_transition_digest=(
+                self.supervisor_predecessor_pending_transition_digest
+            ),
+            target_artifact_digest=self.supervisor_artifact_digest,
+            target_profile_sha256=self.supervisor_profile_sha256,
+            target_script_sha256=self.supervisor_script_digests,
+            target_unit_sha256=target_unit_sha256,
+            target_unit_set_digest=external_supervisor_unit_set_digest(target_unit_sha256),
+        )
+        if expected_transition != self.supervisor_transition_digest:
+            raise ValueError("final gate supervisor transition identity drifted")
         if self.check_implementation_digests.keys() != self.evidence_hashes.keys():
             raise ValueError("final gate check evidence maps differ")
         if self.protected_baseline_resource_digests.keys() != _PROTECTED_BASELINE_IDS:
@@ -250,6 +364,21 @@ class FinalGatePlan:
             MappingProxyType(dict(self.secret_metadata_fingerprints)),
         )
         object.__setattr__(self, "gb10_boot_ids", MappingProxyType(dict(self.gb10_boot_ids)))
+        object.__setattr__(
+            self,
+            "supervisor_script_digests",
+            MappingProxyType(dict(self.supervisor_script_digests)),
+        )
+        object.__setattr__(
+            self,
+            "systemd_unit_digests",
+            MappingProxyType(dict(self.systemd_unit_digests)),
+        )
+        object.__setattr__(
+            self,
+            "supervisor_predecessor_unit_sha256",
+            MappingProxyType(dict(self.supervisor_predecessor_unit_sha256)),
+        )
         object.__setattr__(
             self,
             "check_implementation_digests",
@@ -270,8 +399,29 @@ class FinalGatePlan:
         artifacts: PreflightArtifactPublication,
         lease: BackupLease,
         baseline: ProtectedApplyBaseline,
+        systemd_evidence: Mapping[str, object],
+        predecessor_evidence: Mapping[str, object],
     ) -> FinalGatePlan:
         bindings = attestation.bindings
+        systemd = _parse_systemd_evidence(systemd_evidence)
+        predecessor = _parse_external_supervisor_predecessor_evidence(predecessor_evidence)
+        supervisor_transition = external_supervisor_transition_digest(
+            candidate_sha=bindings.candidate_sha,
+            candidate_tree=bindings.candidate_tree,
+            environment=bindings.environment,
+            predecessor_kind=predecessor["kind"],
+            predecessor_digest=predecessor["authority_digest"],
+            predecessor_pointer_digest=predecessor["pointer_digest"],
+            predecessor_unit_sha256=predecessor["unit_sha256"],
+            predecessor_unit_set_digest=predecessor["unit_set_digest"],
+            predecessor_live_evidence_digest=predecessor["live_evidence_digest"],
+            predecessor_pending_transition_digest=predecessor["pending_transition_digest"],
+            target_artifact_digest=systemd["supervisor_artifact_digest"],
+            target_profile_sha256=systemd["supervisor_profile_sha256"],
+            target_script_sha256=systemd["supervisor_script_digests"],
+            target_unit_sha256=systemd["supervisor_unit_digests"],
+            target_unit_set_digest=systemd["supervisor_unit_set_digest"],
+        )
         if (
             envelope.preflight_attestation_sha256 != attestation.attestation_digest
             or envelope.preflight_registry_sha256 != attestation.registry_digest
@@ -304,10 +454,20 @@ class FinalGatePlan:
             or baseline.environment != bindings.environment
             or baseline.namespace != bindings.namespace
             or baseline.mutation_epoch != bindings.staging_mutation_epoch
+            or predecessor["kind"] != bindings.supervisor_predecessor_kind
+            or predecessor["authority_digest"] != bindings.supervisor_predecessor_digest
+            or predecessor["pointer_digest"] != bindings.supervisor_predecessor_pointer_digest
+            or predecessor["unit_sha256"] != dict(bindings.supervisor_predecessor_unit_sha256)
+            or predecessor["unit_set_digest"] != bindings.supervisor_predecessor_unit_set_digest
+            or predecessor["live_evidence_digest"]
+            != bindings.supervisor_predecessor_live_evidence_digest
+            or predecessor["pending_transition_digest"]
+            != bindings.supervisor_predecessor_pending_transition_digest
+            or supervisor_transition != bindings.supervisor_transition_digest
         ):
             raise ValueError("final gate plan inputs drifted")
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "request_id": envelope.request_id,
             "rollout_id": envelope.rollout_id,
             "attempt_number": envelope.attempt_number,
@@ -358,6 +518,21 @@ class FinalGatePlan:
             "gb10_boot_ids": dict(bindings.gb10_boot_ids),
             "gb10_mount_digest": bindings.gb10_mount_digest,
             "gb10_unit_digest": bindings.gb10_unit_digest,
+            "supervisor_artifact_digest": systemd["supervisor_artifact_digest"],
+            "supervisor_profile_sha256": systemd["supervisor_profile_sha256"],
+            "supervisor_script_digests": systemd["supervisor_script_digests"],
+            "systemd_unit_digests": systemd["systemd_unit_digests"],
+            "systemd_unit_set_digest": systemd["systemd_unit_set_digest"],
+            "supervisor_predecessor_kind": predecessor["kind"],
+            "supervisor_predecessor_digest": predecessor["authority_digest"],
+            "supervisor_predecessor_pointer_digest": predecessor["pointer_digest"],
+            "supervisor_predecessor_unit_sha256": predecessor["unit_sha256"],
+            "supervisor_predecessor_unit_set_digest": predecessor["unit_set_digest"],
+            "supervisor_predecessor_live_evidence_digest": predecessor["live_evidence_digest"],
+            "supervisor_predecessor_pending_transition_digest": predecessor[
+                "pending_transition_digest"
+            ],
+            "supervisor_transition_digest": supervisor_transition,
             "check_implementation_digests": dict(attestation.check_implementation_digests),
             "evidence_hashes": dict(attestation.evidence_hashes),
             "protected_baseline_digest": baseline.baseline_digest,
@@ -425,6 +600,29 @@ class FinalGatePlan:
             gb10_boot_ids=_string_map(value, "gb10_boot_ids"),
             gb10_mount_digest=_string(value, "gb10_mount_digest"),
             gb10_unit_digest=_string(value, "gb10_unit_digest"),
+            supervisor_artifact_digest=_string(value, "supervisor_artifact_digest"),
+            supervisor_profile_sha256=_string(value, "supervisor_profile_sha256"),
+            supervisor_script_digests=_string_map(value, "supervisor_script_digests"),
+            systemd_unit_digests=_string_map(value, "systemd_unit_digests"),
+            systemd_unit_set_digest=_string(value, "systemd_unit_set_digest"),
+            supervisor_predecessor_kind=_string(value, "supervisor_predecessor_kind"),
+            supervisor_predecessor_digest=_string(value, "supervisor_predecessor_digest"),
+            supervisor_predecessor_pointer_digest=_string(
+                value, "supervisor_predecessor_pointer_digest"
+            ),
+            supervisor_predecessor_unit_sha256=_string_map(
+                value, "supervisor_predecessor_unit_sha256"
+            ),
+            supervisor_predecessor_unit_set_digest=_string(
+                value, "supervisor_predecessor_unit_set_digest"
+            ),
+            supervisor_predecessor_live_evidence_digest=_string(
+                value, "supervisor_predecessor_live_evidence_digest"
+            ),
+            supervisor_predecessor_pending_transition_digest=_string(
+                value, "supervisor_predecessor_pending_transition_digest"
+            ),
+            supervisor_transition_digest=_string(value, "supervisor_transition_digest"),
             check_implementation_digests=_string_map(value, "check_implementation_digests"),
             evidence_hashes=_string_map(value, "evidence_hashes"),
             protected_baseline_digest=_string(value, "protected_baseline_digest"),
@@ -591,6 +789,125 @@ def _string_map(value: Mapping[str, object], key: str) -> dict[str, str]:
     ):
         raise ValueError(f"final gate plan {key} must be a string map")
     return dict(found)
+
+
+def _parse_systemd_evidence(value: Mapping[str, object]) -> _SystemdEvidence:
+    unit_digests = value.get("unit-digests")
+    supervisor_unit_digests = value.get("supervisor-unit-digests")
+    failed_units = value.get("failed-units")
+    script_digests = value.get("supervisor-script-digests")
+    unit_count = value.get("unit-count")
+    strings = {
+        "supervisor_artifact_digest": value.get("supervisor-artifact-digest"),
+        "supervisor_profile_sha256": value.get("supervisor-profile-sha256"),
+        "supervisor_unit_set_digest": value.get("supervisor-unit-set-digest"),
+        "systemd_unit_set_digest": value.get("unit-set-digest"),
+    }
+    calculated_unit_set_digest = (
+        hashlib.sha256(
+            json.dumps(
+                {"failed": {}, "units": dict(unit_digests)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        if isinstance(unit_digests, Mapping)
+        else None
+    )
+    if (
+        not isinstance(unit_digests, Mapping)
+        or not isinstance(supervisor_unit_digests, Mapping)
+        or not isinstance(script_digests, Mapping)
+        or not isinstance(failed_units, Mapping)
+        or failed_units
+        or type(unit_count) is not int
+        or unit_count != len(unit_digests)
+        or not unit_digests
+        or not script_digests
+        or any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(item, str)
+            or _SHA256_RE.fullmatch(item) is None
+            for values in (unit_digests, supervisor_unit_digests, script_digests)
+            for key, item in values.items()
+        )
+        or any(
+            not isinstance(item, str) or _SHA256_RE.fullmatch(item) is None
+            for item in strings.values()
+        )
+        or strings["systemd_unit_set_digest"] != calculated_unit_set_digest
+        or dict(supervisor_unit_digests)
+        != {name: digest for name, digest in unit_digests.items() if name not in UNIT_PATHS}
+        or external_supervisor_unit_set_digest(supervisor_unit_digests)
+        != strings["supervisor_unit_set_digest"]
+    ):
+        raise ValueError("final gate systemd evidence is invalid")
+    return {
+        "supervisor_artifact_digest": cast(str, strings["supervisor_artifact_digest"]),
+        "supervisor_profile_sha256": cast(str, strings["supervisor_profile_sha256"]),
+        "supervisor_script_digests": dict(script_digests),
+        "supervisor_unit_digests": dict(supervisor_unit_digests),
+        "supervisor_unit_set_digest": strings["supervisor_unit_set_digest"],
+        "systemd_unit_digests": dict(unit_digests),
+        "systemd_unit_set_digest": cast(str, strings["systemd_unit_set_digest"]),
+    }
+
+
+def _parse_external_supervisor_predecessor_evidence(
+    value: Mapping[str, object],
+) -> _PredecessorEvidence:
+    expected_fields = {
+        "authority-kind",
+        "authority-digest",
+        "pointer-digest",
+        "unit-digests",
+        "unit-set-digest",
+        "live-evidence-digest",
+        "pending-transition-digest",
+        "transition-clear",
+        "runtime-ready",
+    }
+    units = value.get("unit-digests")
+    strings = {
+        "kind": value.get("authority-kind"),
+        "authority_digest": value.get("authority-digest"),
+        "pointer_digest": value.get("pointer-digest"),
+        "unit_set_digest": value.get("unit-set-digest"),
+        "live_evidence_digest": value.get("live-evidence-digest"),
+        "pending_transition_digest": value.get("pending-transition-digest"),
+    }
+    if (
+        set(value) != expected_fields
+        or strings["kind"] not in {"legacy-manifest", "canonical"}
+        or not isinstance(units, Mapping)
+        or not units
+        or value.get("transition-clear") is not True
+        or value.get("runtime-ready") is not True
+        or any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(digest, str)
+            or _SHA256_RE.fullmatch(digest) is None
+            for name, digest in units.items()
+        )
+        or any(
+            not isinstance(item, str) or _SHA256_RE.fullmatch(item) is None
+            for name, item in strings.items()
+            if name != "kind"
+        )
+        or external_supervisor_unit_set_digest(units) != strings["unit_set_digest"]
+    ):
+        raise ValueError("final gate external supervisor predecessor evidence is invalid")
+    return {
+        "kind": strings["kind"],
+        "authority_digest": cast(str, strings["authority_digest"]),
+        "pointer_digest": cast(str, strings["pointer_digest"]),
+        "unit_sha256": dict(units),
+        "unit_set_digest": strings["unit_set_digest"],
+        "live_evidence_digest": cast(str, strings["live_evidence_digest"]),
+        "pending_transition_digest": cast(str, strings["pending_transition_digest"]),
+    }
 
 
 def _hash_json(value: Mapping[str, object]) -> str:

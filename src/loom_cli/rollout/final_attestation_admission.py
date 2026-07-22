@@ -27,7 +27,7 @@ _BASELINE_CHECKS = frozenset(
     }
 )
 
-_DRIFT_EVIDENCE_CHECKS = frozenset(
+_POST_APPLY_DRIFT_EVIDENCE_CHECKS = frozenset(
     {
         "candidate.identity",
         "runner.install",
@@ -37,6 +37,9 @@ _DRIFT_EVIDENCE_CHECKS = frozenset(
         "gb10.host-readiness",
     }
 )
+_PRE_APPLY_DRIFT_EVIDENCE_CHECKS = _POST_APPLY_DRIFT_EVIDENCE_CHECKS | {
+    "external-supervisor.predecessor"
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +126,7 @@ def validate_final_attestation(
     tier0 = tuple(execution for execution in executions if execution.tier == 0)
     tier2 = tuple(execution for execution in executions if execution.tier == 2)
     if (
-        not _DRIFT_EVIDENCE_CHECKS <= by_id.keys()
+        not _PRE_APPLY_DRIFT_EVIDENCE_CHECKS <= by_id.keys()
         or set(execution.check_id for execution in tier2) != _BASELINE_CHECKS
         or any(not execution.passed for execution in executions)
         or any(
@@ -162,6 +165,24 @@ def validate_final_attestation(
         evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
         evidence("gb10.host-readiness", "inventory-digest") == bindings.gb10_inventory_digest,
         string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
+        evidence("external-supervisor.predecessor", "authority-kind")
+        == bindings.supervisor_predecessor_kind,
+        evidence("external-supervisor.predecessor", "authority-digest")
+        == bindings.supervisor_predecessor_digest,
+        evidence("external-supervisor.predecessor", "pointer-digest")
+        == bindings.supervisor_predecessor_pointer_digest,
+        string_map("external-supervisor.predecessor", "unit-digests")
+        == dict(bindings.supervisor_predecessor_unit_sha256),
+        evidence("external-supervisor.predecessor", "unit-set-digest")
+        == bindings.supervisor_predecessor_unit_set_digest,
+        evidence("external-supervisor.predecessor", "live-evidence-digest")
+        == bindings.supervisor_predecessor_live_evidence_digest,
+        evidence("external-supervisor.predecessor", "pending-transition-digest")
+        == bindings.supervisor_predecessor_pending_transition_digest,
+        evidence("external-supervisor.predecessor", "transition-clear") is True,
+        evidence("external-supervisor.predecessor", "runtime-ready") is True,
+        by_id["external-supervisor.predecessor"].evidence_hash
+        == attestation.evidence_hashes.get("external-supervisor.predecessor"),
     )
     if not all(exact_evidence):
         raise ValueError("final admission drift-sensitive evidence changed")
@@ -215,7 +236,7 @@ def validate_post_apply_attestation_drift(
     available = {
         check.spec.check_id: check for check in plan.registry.checks if check.spec.tier == 0
     }
-    selected_ids = set(_DRIFT_EVIDENCE_CHECKS)
+    selected_ids = set(_POST_APPLY_DRIFT_EVIDENCE_CHECKS)
     pending = list(selected_ids)
     while pending:
         check_id = pending.pop()
@@ -234,13 +255,13 @@ def validate_post_apply_attestation_drift(
         now=lambda: now,
     )
     by_id = {execution.check_id: execution for execution in executions}
-    if not _DRIFT_EVIDENCE_CHECKS <= by_id.keys() or any(
+    if not _POST_APPLY_DRIFT_EVIDENCE_CHECKS <= by_id.keys() or any(
         not execution.passed for execution in executions
     ):
         raise ValueError("post-apply drift evidence is incomplete")
     selected = tuple(
         sorted(
-            (by_id[check_id] for check_id in _DRIFT_EVIDENCE_CHECKS),
+            (by_id[check_id] for check_id in _POST_APPLY_DRIFT_EVIDENCE_CHECKS),
             key=lambda execution: execution.check_id,
         )
     )

@@ -28,7 +28,7 @@ from .candidate import (
     bind_configured_candidate,
     verify_bound_candidate,
 )
-from .config import ConfigError, OperatorConfig
+from .config import ConfigError, OperatorConfig, candidate_sha_from_runner_repo
 from .envelope import fixed_operator_config_path
 from .installed_preflight_commands import InstalledPreflightCommands
 from .model import CandidateBinding
@@ -75,11 +75,28 @@ def publish_installed_candidate_source(
     if operation not in {"prepare", "check"}:
         raise CandidateSourcePublicationError("candidate source operation is invalid")
     service_uid = _service_uid(config)
+    try:
+        configured_sha = candidate_sha_from_runner_repo(config.runner_repo)
+    except ConfigError as exc:
+        raise CandidateSourcePublicationError("candidate source runtime path is invalid") from exc
     resolved_tree = candidate.resolved_tree or candidate_tree
     if (
         config.environment != "staging"
         or config.namespace != "loom-staging"
         or candidate.source_mode != config.source_mode
+        or candidate.resolved_sha != configured_sha
+        or (
+            candidate.resolved_tree is not None
+            and candidate_tree not in {None, candidate.resolved_tree}
+        )
+        or (
+            config.source_mode == "sealed-cumulative"
+            and (
+                config.source_commit_sha != candidate.resolved_sha
+                or config.source_tree_sha != candidate.resolved_tree
+                or config.source_base_sha != candidate.approved_base_sha
+            )
+        )
         or resolved_tree is None
         or len(resolved_tree) != 40
         or any(character not in "0123456789abcdef" for character in resolved_tree)
@@ -88,27 +105,41 @@ def publish_installed_candidate_source(
     destination = _repo_path(candidate)
     try:
         if operation == "prepare":
-            record = materialize(
+            raw_record = materialize(
                 repo_dir=destination,
                 source_repo=config.runner_repo,
                 resolved_sha=candidate.resolved_sha,
                 expected_ref=candidate.image_tag,
             )
         else:
-            record = verify(
+            raw_record = verify(
                 repo_dir=destination,
                 resolved_sha=candidate.resolved_sha,
                 expected_ref=candidate.image_tag,
             )
-    except (ExternalSlurmPrereqMaterializationError, OSError, ValueError) as exc:
+        record = dict(raw_record)
+    except (ExternalSlurmPrereqMaterializationError, OSError, TypeError, ValueError) as exc:
         raise CandidateSourcePublicationError("candidate source publication failed safely") from exc
     action = record.get("repo_action")
+    group_id = record.get("repo_group_id")
+    allowed_actions = {"created", "matched"} if operation == "prepare" else {"matched"}
     if (
-        action not in {"created", "matched"}
+        set(record)
+        != {
+            "repo_action",
+            "repo_dir",
+            "repo_group_id",
+            "repo_head",
+            "repo_mode",
+            "repo_status",
+        }
+        or action not in allowed_actions
+        or record.get("repo_dir") != str(destination)
         or record.get("repo_head") != candidate.resolved_sha
         or record.get("repo_status") != "clean"
         or record.get("repo_mode") != "0750"
-        or type(record.get("repo_group_id")) is not int
+        or type(group_id) is not int
+        or group_id <= 0
     ):
         raise CandidateSourcePublicationError("candidate source publication evidence is invalid")
     evidence = {

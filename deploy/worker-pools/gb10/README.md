@@ -120,7 +120,8 @@ Both operations derive and send only public keys; they do not copy or print a
 private key. Normal verification uses the service identity:
 
 ```bash
-sudo /opt/loom-staging-runner/venv/bin/python \
+CANDIDATE_SHA=<exact-40-character-candidate-sha>
+sudo "/opt/loom-staging-runner/candidates/${CANDIDATE_SHA}/venv/bin/python" \
   /usr/local/libexec/loom-staging-rollout-gb10-trust check
 
 loom-staging-rollout start --dry-run
@@ -224,8 +225,8 @@ Each environment's env-state profile carries an
 entrypoint `scripts/ops/worker_pool_autoscaler_external_once.py` for one pool.
 `loom admin environment-state apply` writes the unit files under
 `~/.config/systemd/user`, and `check` reports drift when a unit is missing,
-points at a stale checkout, omits `--pool-name`, or is not enabled/active as
-declared.
+points at a stale checkout, omits the exact `--environment` or `--pool-name`
+binding, or is not enabled/active as declared.
 
 Each supervisor tunnels to the environment's Postgres on a reserved local port,
 so no two supervisors on one host collide. The `--db-local-port` scheme is:
@@ -239,7 +240,9 @@ Supporting layout, shared across environments:
 
 - Runner checkout and virtualenv: `/opt/loom-<environment>-runner/repo` and
   `/opt/loom-<environment>-runner/venv`.
-- Kubeconfig: `/etc/loom/kubeconfig/<environment>.yaml`.
+- Kubeconfig: the environment runner's least-privilege kubeconfig. Staging uses
+  `/var/lib/loom-staging-rollout/kubeconfig`; other environments retain their
+  explicitly configured `/etc/loom/kubeconfig/<environment>.yaml` authority.
 - Health check: `systemctl --user is-active loom-autoscaler-gb10-<env>.timer`.
 
 The staging GB10 supervisor ships `enabled=true` and `active=true`: applying the

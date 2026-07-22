@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-SSH_CONFIG_PATH = Path("/opt/loom-staging-runner/repo/deploy/worker-pools/gb10/ssh_config")
 KNOWN_HOSTS_PATH = Path("/etc/loom/staging-rollout-gb10-known-hosts")
 SSH_BINARY = Path("/usr/bin/ssh")
 SSH_KEYGEN_BINARY = Path("/usr/bin/ssh-keygen")
@@ -44,6 +43,10 @@ _EXPECTED_HOSTNAMES = (
 _EXPECTED_PORTS = (2221,) + (22,) * 14
 _EXPECTED_REMOTE_USER = "qianyi"
 _SAFE_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,63}$")
+_CANDIDATE_SSH_CONFIG_RE = re.compile(
+    r"^/opt/loom-staging-runner/candidates/[0-9a-f]{40}/repo/"
+    r"deploy/worker-pools/gb10/ssh_config$"
+)
 _PUBLIC_KEY_MAX_BYTES = 16 * 1024
 _BOOTSTRAP_ENVELOPE_MAX_BYTES = 32 * 1024
 _KNOWN_HOSTS_MAX_BYTES = 64 * 1024
@@ -1466,6 +1469,11 @@ def revoke_trust(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument(
+        "--ssh-config",
+        type=Path,
+        help="exact candidate-bound GB10 SSH config authority",
+    )
     subparsers = parser.add_subparsers(dest="operation", required=True)
     bootstrap = subparsers.add_parser("bootstrap", allow_abbrev=False)
     bootstrap.add_argument("--bootstrap-identity", type=Path, required=True)
@@ -1494,7 +1502,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     run: Runner = _subprocess_runner,
-    ssh_config_path: Path = SSH_CONFIG_PATH,
+    ssh_config_path: Path | None = None,
     known_hosts_path: Path = KNOWN_HOSTS_PATH,
     public_key_path: Path = SERVICE_PUBLIC_KEY_PATH,
     ledger_path: Path = REVOCATION_LEDGER_PATH,
@@ -1505,6 +1513,18 @@ def main(
     _installer_lock_authority: bool = False,
 ) -> int:
     args = _parser().parse_args(argv)
+    requested_config = args.ssh_config
+    if requested_config is not None:
+        if _CANDIDATE_SSH_CONFIG_RE.fullmatch(requested_config.as_posix()) is None:
+            print("error: GB10 SSH config is not bound to an exact candidate", file=sys.stderr)
+            return 2
+        if ssh_config_path is not None and ssh_config_path != requested_config:
+            print("error: GB10 SSH config authority is ambiguous", file=sys.stderr)
+            return 2
+        ssh_config_path = requested_config
+    if ssh_config_path is None:
+        print("error: exact-candidate GB10 SSH config is required", file=sys.stderr)
+        return 2
     if not _lock_held:
         raw_inherited_fd = os.environ.get(_INHERITED_LOCK_FD_ENV)
         inherited_fd: int | None = None

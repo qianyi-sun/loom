@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import replace
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,14 @@ import yaml  # type: ignore[import-untyped]
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
+from loom_cli.rollout.external_supervisor_readiness import (
+    REHEARSAL_KUBECONFIG as EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
+)
+from loom_cli.rollout.external_supervisor_readiness import (
+    ExternalSupervisorArtifact,
+    build_external_supervisor_artifact,
+    staging_working_directory,
+)
 from loom_cli.rollout.production_defaults_readiness import (
     ProductionDefaultsArtifact,
     ProviderPricingDefault,
@@ -32,7 +41,10 @@ from loom_cli.rollout.rehearsal_browser import (
 from loom_cli.rollout.rehearsal_executor import (
     IsolatedRehearsalExecutor,
     _api_smoke_failure,
+    _default_external_supervisor_artifact,
     _default_stream_run,
+    _external_supervisor_validation_expected_properties,
+    _external_supervisor_validation_unit,
     _namespace_manifest,
 )
 from loom_cli.rollout.rehearsal_release import RehearsalReleaseArtifact
@@ -43,8 +55,22 @@ from tests.loom_cli.rollout.rehearsal_fixtures import (
     passing_gb10_transport_factory,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@cache
+def _external_supervisor_artifact() -> ExternalSupervisorArtifact:
+    return build_external_supervisor_artifact(
+        REPO_ROOT,
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        image_tag="staging-aaaaaaaa",
+        environment="staging",
+    )
+
 
 def _plan() -> RehearsalPlan:
+    supervisor = _external_supervisor_artifact()
     return RehearsalPlan(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
@@ -85,6 +111,10 @@ def _plan() -> RehearsalPlan:
         manifest_artifact_sha256="7" * 64,
         rendered_manifest_sha256="8" * 64,
         production_defaults_sha256="9" * 64,
+        external_supervisor_artifact_sha256=supervisor.artifact_digest,
+        external_supervisor_profile_sha256=supervisor.profile_sha256,
+        external_supervisor_script_sha256=supervisor.script_sha256,
+        external_supervisor_unit_sha256=supervisor.unit_sha256,
         migration_plan_sha256="3" * 64,
         migration_target_revision="0067",
         browser_report_schema_sha256="4" * 64,
@@ -776,6 +806,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     plan = _plan()
     release = _release_artifact(plan)
     secrets = _secret_artifact(plan)
+    supervisor_artifact = _external_supervisor_artifact()
     resources = {
         (item["kind"], item["metadata"]["name"]): item
         for item in yaml.safe_load_all(release.payload)
@@ -790,6 +821,11 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
         if command[:3] == ("kind", "load", "docker-image"):
             return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+        if command[:3] == ("systemctl", "--user", "show"):
+            assert command[-2:] == ("--property=LoadState", "--value")
+            return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+        if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if "apply" in command:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if "secret" in command and "get" in command:
@@ -846,15 +882,17 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         run=run,
         release_artifacts=lambda _plan: release,
         secret_artifacts=lambda _plan: secrets,
+        external_supervisor_artifacts=lambda _plan: supervisor_artifact,
         runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.release", plan)
 
     assert outcome.passed
-    assert outcome.details == {
-        "manifest-sha256": release.artifact_sha256,
-        "secret-artifact-sha256": secrets.artifact_sha256,
-        "status": "ready",
-    }
+    assert outcome.details["manifest-sha256"] == release.artifact_sha256
+    assert outcome.details["secret-artifact-sha256"] == secrets.artifact_sha256
+    assert outcome.details["status"] == "ready"
+    validation_digest = outcome.details["external-supervisor-validation-sha256"]
+    assert len(validation_digest) == 64
+    assert set(validation_digest) <= set("0123456789abcdef")
     kind_load = next(command for command, _payload in calls if command[:2] == ("kind", "load"))
     assert kind_load[-2:] == ("--name", plan.cluster_name)
     assert set(kind_load[3:-2]) == {
@@ -864,6 +902,160 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     }
     secret_apply = next(payload for _command, payload in calls if payload == secrets.payload)
     assert secret_apply == secrets.payload
+    secret_apply_index = next(
+        index for index, (_command, payload) in enumerate(calls) if payload == secrets.payload
+    )
+    secret_readback_indexes = [
+        index
+        for index, (command, _payload) in enumerate(calls)
+        if "get" in command and "secret" in command
+    ]
+    validation_index, validation_argv = next(
+        (index, command)
+        for index, (command, _payload) in enumerate(calls)
+        if command[:4] == ("systemd-run", "--user", "--wait", "--collect")
+    )
+    release_apply_index = next(
+        index for index, (_command, payload) in enumerate(calls) if payload == release.payload
+    )
+    assert len(secret_readback_indexes) == len(secrets.secret_names)
+    assert secret_apply_index < min(secret_readback_indexes)
+    assert max(secret_readback_indexes) < validation_index < release_apply_index
+
+    supervisor = supervisor_artifact.supervisors[0]
+    working_directory = staging_working_directory(plan.candidate_sha)
+    separator = validation_argv.index("--")
+    assert validation_argv[:4] == ("systemd-run", "--user", "--wait", "--collect")
+    assert f"--property=WorkingDirectory={working_directory}" in validation_argv
+    assert (
+        f"--property=Environment=PYTHONPATH={working_directory}/src PYTHONDONTWRITEBYTECODE=1"
+    ) in validation_argv
+    assert "--property=TimeoutStartSec=180s" in validation_argv
+    assert "--property=RuntimeMaxSec=180s" in validation_argv
+    assert "--property=KillMode=control-group" in validation_argv
+    assert (
+        validation_argv[separator + 1 :]
+        == supervisor_artifact.validation_argv(
+            plan.resources.namespace,
+            EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
+        )[supervisor.name]
+    )
+    assert validation_argv[-1] == "--validate-only"
+
+
+def test_external_supervisor_default_rebuilds_only_from_fixed_staging_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan()
+    artifact = _external_supervisor_artifact()
+    captured: dict[str, object] = {}
+
+    def build(candidate_root: Path, **kwargs: object) -> ExternalSupervisorArtifact:
+        captured["candidate_root"] = candidate_root
+        captured.update(kwargs)
+        return artifact
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_executor.build_external_supervisor_artifact",
+        build,
+    )
+
+    assert _default_external_supervisor_artifact(plan) is artifact
+    assert captured == {
+        "candidate_root": Path(staging_working_directory(plan.candidate_sha)),
+        "candidate_sha": plan.candidate_sha,
+        "candidate_tree": plan.candidate_tree,
+        "environment": "staging",
+        "image_tag": plan.image_tag,
+    }
+
+
+def test_release_rejects_external_supervisor_artifact_drift_after_secret_readback() -> None:
+    plan = replace(_plan(), external_supervisor_artifact_sha256="0" * 64)
+    release = _release_artifact(plan)
+    secrets = _secret_artifact(plan)
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    def run(argv, payload, _timeout):
+        command = tuple(argv)
+        calls.append((command, payload))
+        if command[:3] == ("docker", "image", "inspect"):
+            name = command[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if command[:3] == ("kind", "load", "docker-image"):
+            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+        if payload == secrets.payload:
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        if "secret" in command and "get" in command:
+            name = command[command.index("secret") + 1]
+            return subprocess.CompletedProcess(argv, 0, f"{name}\t{plan.plan_digest}\n", "")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        secret_artifacts=lambda _plan: secrets,
+        external_supervisor_artifacts=lambda _plan: _external_supervisor_artifact(),
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.release", plan)
+
+    assert outcome.blockers == {"release": "external-supervisor-artifact-drift"}
+    assert any(payload == secrets.payload for _command, payload in calls)
+    assert sum("secret" in command and "get" in command for command, _payload in calls) == len(
+        secrets.secret_names
+    )
+    assert all(command[0] != "systemd-run" for command, _payload in calls)
+    assert all(payload != release.payload for _command, payload in calls)
+
+
+def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest() -> None:
+    plan = _plan()
+    release = _release_artifact(plan)
+    secrets = _secret_artifact(plan)
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    def run(argv, payload, _timeout):
+        command = tuple(argv)
+        calls.append((command, payload))
+        if command[:3] == ("docker", "image", "inspect"):
+            name = command[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
+        if command[:3] == ("kind", "load", "docker-image"):
+            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+        if command[:3] == ("systemctl", "--user", "show"):
+            return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+        if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
+            return subprocess.CompletedProcess(argv, 1, "", "token=must-not-leak")
+        if payload == secrets.payload:
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        if "secret" in command and "get" in command:
+            name = command[command.index("secret") + 1]
+            return subprocess.CompletedProcess(argv, 0, f"{name}\t{plan.plan_digest}\n", "")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        release_artifacts=lambda _plan: release,
+        secret_artifacts=lambda _plan: secrets,
+        external_supervisor_artifacts=lambda _plan: _external_supervisor_artifact(),
+        runtime_image_resolver=_runtime_images,
+    ).execute("rehearsal.release", plan)
+
+    assert outcome.blockers == {"release": "external-supervisor-validation-failed"}
+    assert outcome.details == {"status": "blocked"}
+    assert "token" not in str(outcome)
+    assert all(payload != release.payload for _command, payload in calls)
+    validation_index = next(
+        index for index, (command, _payload) in enumerate(calls) if command[0] == "systemd-run"
+    )
+    assert (
+        max(
+            index
+            for index, (command, _payload) in enumerate(calls)
+            if "secret" in command and "get" in command
+        )
+        < validation_index
+    )
 
 
 def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
@@ -1598,6 +1790,65 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
     delete = next(command for command, _payload in calls if "--raw" in command)
     assert delete[-2:] == ("-f", "-")
     assert plan.resources.namespace in delete[-3]
+
+
+def test_cleanup_retires_only_exact_external_supervisor_validation_unit() -> None:
+    plan = _plan()
+    service_name = _external_supervisor_artifact().supervisors[0].service_name
+    validation_unit = _external_supervisor_validation_unit(plan, service_name)
+    validation_active = True
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _payload, _timeout):
+        nonlocal validation_active
+        command = tuple(argv)
+        calls.append(command)
+        if command[:3] == ("systemctl", "--user", "show"):
+            unit = command[3]
+            if unit == plan.resources.systemd_unit:
+                if command[-1] == "--value":
+                    return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+                return subprocess.CompletedProcess(argv, 4, "", "")
+            assert unit == validation_unit
+            if command[-1] == "--value":
+                state = "loaded" if validation_active else "not-found"
+                return subprocess.CompletedProcess(argv, 0, state + "\n", "")
+            properties = _external_supervisor_validation_expected_properties(
+                plan,
+                service_name,
+            )
+            output = "".join(f"{name}={value}\n" for name, value in properties.items())
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        if command[:3] == ("systemctl", "--user", "stop"):
+            assert command[3] == validation_unit
+            validation_active = False
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if command[:3] == ("systemctl", "--user", "reset-failed"):
+            assert command[3] == validation_unit
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "get" in command and "namespace" in command:
+            assert "--ignore-not-found=true" in command
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    assert outcome.passed and outcome.cleanup_verified
+    assert not validation_active
+    assert ("systemctl", "--user", "stop", validation_unit) in calls
+    assert ("systemctl", "--user", "reset-failed", validation_unit) in calls
+    assert (
+        sum(
+            command[:4] == ("systemctl", "--user", "show", validation_unit)
+            and command[-1] == "--value"
+            for command in calls
+        )
+        >= 3
+    )
+    assert all(service_name not in command for command in calls)
 
 
 @pytest.mark.parametrize(

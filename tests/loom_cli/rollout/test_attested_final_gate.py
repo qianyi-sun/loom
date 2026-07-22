@@ -12,9 +12,11 @@ from loom_cli.rollout.final_gate_readiness import (
     FinalGateResult,
 )
 from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     AttestationBindings,
     CheckOperation,
     PreflightAttestation,
+    external_supervisor_unit_set_digest,
 )
 from loom_cli.rollout.preflight_coverage import (
     DEFAULT_COVERAGE_MANIFEST,
@@ -27,6 +29,10 @@ ATTESTATION = "f" * 64
 
 
 def _bindings() -> AttestationBindings:
+    predecessor_units = {
+        "loom-autoscaler-gb10-staging.service": "d" * 64,
+        "loom-autoscaler-gb10-staging.timer": "e" * 64,
+    }
     return AttestationBindings(
         candidate_sha=CANDIDATE,
         candidate_tree="b" * 40,
@@ -54,13 +60,23 @@ def _bindings() -> AttestationBindings:
         gb10_unit_digest="b" * 64,
         browser_image_digest="sha256:" + "c" * 64,
         browser_report_schema="v3",
+        supervisor_predecessor_kind="legacy-manifest",
+        supervisor_predecessor_digest="f" * 64,
+        supervisor_predecessor_pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        supervisor_predecessor_unit_sha256=predecessor_units,
+        supervisor_predecessor_unit_set_digest=external_supervisor_unit_set_digest(
+            predecessor_units
+        ),
+        supervisor_predecessor_live_evidence_digest="1" * 64,
+        supervisor_predecessor_pending_transition_digest="2" * 64,
+        supervisor_transition_digest="3" * 64,
     )
 
 
 def _attestation(*, expires_at: datetime | None = None) -> PreflightAttestation:
     prefinal = {entry.check_id for entry in load_coverage_manifest().checks if entry.tier < 4}
     return PreflightAttestation(
-        schema_version=1,
+        schema_version=2,
         bindings=_bindings(),
         registry_digest="d" * 64,
         coverage_digest=hashlib.sha256(DEFAULT_COVERAGE_MANIFEST.read_bytes()).hexdigest(),

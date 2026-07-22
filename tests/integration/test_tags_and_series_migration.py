@@ -19,21 +19,24 @@ def _alembic_cfg(db_url: str) -> Config:
     return cfg
 
 
-def _engine(postgres_url: str) -> Engine:
-    return create_engine(postgres_url, future=True)
+def _engine(db_url: str) -> Engine:
+    return create_engine(db_url, future=True)
 
 
 @pytest.fixture
-def at_0013(postgres_url: str) -> Engine:
+def at_0013(isolated_migration_postgres_url: str) -> Engine:
     """Roll back to 0013 (the migration immediately before 0014)
     before each test so we can exercise the upgrade path freshly."""
-    cfg = _alembic_cfg(postgres_url)
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.downgrade(cfg, "0013")
-    return _engine(postgres_url)
+    return _engine(isolated_migration_postgres_url)
 
 
-def test_0014_adds_tags_and_series(at_0013: Engine, postgres_url: str) -> None:
-    cfg = _alembic_cfg(postgres_url)
+def test_0014_adds_tags_and_series(
+    at_0013: Engine,
+    isolated_migration_postgres_url: str,
+) -> None:
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0014")
     insp = inspect(at_0013)
     task_cols = {c["name"] for c in insp.get_columns("tasks")}
@@ -47,22 +50,26 @@ def test_0014_adds_tags_and_series(at_0013: Engine, postgres_url: str) -> None:
 
 
 def test_0014_tags_defaults_to_empty_object(
-    at_0013: Engine, postgres_url: str,
+    at_0013: Engine,
+    isolated_migration_postgres_url: str,
 ) -> None:
     """Existing tasks (before this migration) must come back with
     tags={} — readers shouldn't have to special-case the absent column."""
-    cfg = _alembic_cfg(postgres_url)
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     # Insert a row at 0013 (no tags column yet).
     with at_0013.begin() as conn:
-        conn.execute(text(
-            "INSERT INTO tasks (id, checksum, config) "
-            "VALUES ('legacy-task', '00', '{}')",
-        ))
+        conn.execute(
+            text(
+                "INSERT INTO tasks (id, checksum, config) VALUES ('legacy-task', '00', '{}')",
+            )
+        )
     command.upgrade(cfg, "0014")
     with at_0013.begin() as conn:
-        row = conn.execute(text(
-            "SELECT tags FROM tasks WHERE id='legacy-task'",
-        )).fetchone()
+        row = conn.execute(
+            text(
+                "SELECT tags FROM tasks WHERE id='legacy-task'",
+            )
+        ).fetchone()
     assert row is not None
     assert row[0] == {}
     # Cleanup so other tests don't see the row.
@@ -71,9 +78,10 @@ def test_0014_tags_defaults_to_empty_object(
 
 
 def test_0014_downgrade_restores_pre_0014_shape(
-    at_0013: Engine, postgres_url: str,
+    at_0013: Engine,
+    isolated_migration_postgres_url: str,
 ) -> None:
-    cfg = _alembic_cfg(postgres_url)
+    cfg = _alembic_cfg(isolated_migration_postgres_url)
     command.upgrade(cfg, "0014")
     command.downgrade(cfg, "0013")
     insp = inspect(at_0013)

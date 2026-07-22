@@ -16,8 +16,11 @@ _TABLES = (
     "batches",
     "data_lifecycle_authorities",
     "data_lifecycle_objects",
+    "gb10_worker_node_statuses",
+    "gb10_worker_pool_desired_states",
     "llm_calls",
     "provider_models_cache",
+    "slurm_worker_jobs",
     "staging_lifecycle_capacity",
     "staging_mutation_epochs",
     "tasks",
@@ -25,6 +28,8 @@ _TABLES = (
     "trial_events",
     "trials",
     "users",
+    "worker_pool_autoscaler_policies",
+    "workers",
 )
 
 

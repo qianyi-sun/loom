@@ -9,11 +9,14 @@ import pytest
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
 from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     CheckContext,
     CheckExecution,
     CheckOperation,
     CheckOutcome,
     StageCapability,
+    external_supervisor_transition_digest,
+    external_supervisor_unit_set_digest,
 )
 
 NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
@@ -39,6 +42,14 @@ def _execution(check_id: str, evidence: dict[str, object]) -> CheckExecution:
 
 
 def _executions() -> tuple[CheckExecution, ...]:
+    predecessor_units = {
+        "loom-autoscaler-gb10-staging.service": "a" * 64,
+        "loom-autoscaler-gb10-staging.timer": "b" * 64,
+    }
+    target_units = {
+        "loom-autoscaler-gb10-staging.service": "c" * 64,
+        "loom-autoscaler-gb10-staging.timer": "d" * 64,
+    }
     return (
         _execution(
             "candidate.identity",
@@ -59,7 +70,32 @@ def _executions() -> tuple[CheckExecution, ...]:
         ),
         _execution("migration.plan", {"plan-digest": "f" * 64}),
         _execution("migration.manifest", {"artifact-digest": "0" * 64}),
-        _execution("systemd.render", {"unit-set-digest": "1" * 64}),
+        _execution(
+            "systemd.render",
+            {
+                "supervisor-artifact-digest": "5" * 64,
+                "supervisor-profile-sha256": "6" * 64,
+                "supervisor-script-digests": {
+                    "scripts/ops/worker_pool_autoscaler_external_once.py": "7" * 64
+                },
+                "supervisor-unit-digests": target_units,
+                "supervisor-unit-set-digest": external_supervisor_unit_set_digest(target_units),
+            },
+        ),
+        _execution(
+            "external-supervisor.predecessor",
+            {
+                "authority-kind": "legacy-manifest",
+                "authority-digest": "8" * 64,
+                "pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                "unit-digests": predecessor_units,
+                "unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
+                "live-evidence-digest": "9" * 64,
+                "pending-transition-digest": "0" * 64,
+                "transition-clear": True,
+                "runtime-ready": True,
+            },
+        ),
         _execution("gb10.shared-mount", {"mount-digest": "2" * 64}),
         _execution("gb10.candidate-source", {"source-digest": "1" * 64}),
         _execution(
@@ -84,6 +120,7 @@ def _context(*, candidate_sha: str = "a" * 40) -> CheckContext:
     return CheckContext(
         {
             "candidate.sha": candidate_sha,
+            "candidate.tree": "b" * 40,
             "runner.config.sha256": "5" * 64,
             "staging.mutation-epoch": 7,
             "backup.lease.sha256": "6" * 64,
@@ -111,6 +148,32 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
     assert bindings.backup_manifest_sha256 == "7" * 64
     assert bindings.backup_component_set_digest == "8" * 64
     assert bindings.object_inventory_root == "9" * 64
+    assert bindings.supervisor_predecessor_kind == "legacy-manifest"
+    assert bindings.supervisor_predecessor_unit_set_digest == (
+        external_supervisor_unit_set_digest(bindings.supervisor_predecessor_unit_sha256)
+    )
+    systemd = next(
+        execution for execution in _executions() if execution.check_id == "systemd.render"
+    )
+    assert bindings.supervisor_transition_digest == external_supervisor_transition_digest(
+        candidate_sha=bindings.candidate_sha,
+        candidate_tree=bindings.candidate_tree,
+        environment=bindings.environment,
+        predecessor_kind=bindings.supervisor_predecessor_kind,
+        predecessor_digest=bindings.supervisor_predecessor_digest,
+        predecessor_pointer_digest=bindings.supervisor_predecessor_pointer_digest,
+        predecessor_unit_sha256=bindings.supervisor_predecessor_unit_sha256,
+        predecessor_unit_set_digest=bindings.supervisor_predecessor_unit_set_digest,
+        predecessor_live_evidence_digest=(bindings.supervisor_predecessor_live_evidence_digest),
+        predecessor_pending_transition_digest=(
+            bindings.supervisor_predecessor_pending_transition_digest
+        ),
+        target_artifact_digest=str(systemd.evidence["supervisor-artifact-digest"]),
+        target_profile_sha256=str(systemd.evidence["supervisor-profile-sha256"]),
+        target_script_sha256=systemd.evidence["supervisor-script-digests"],  # type: ignore[arg-type]
+        target_unit_sha256=systemd.evidence["supervisor-unit-digests"],  # type: ignore[arg-type]
+        target_unit_set_digest=str(systemd.evidence["supervisor-unit-set-digest"]),
+    )
 
 
 def test_restore_verified_lease_overrides_prebackup_reuse_evidence() -> None:
@@ -154,4 +217,32 @@ def test_rejects_candidate_drift_and_incomplete_cleanup() -> None:
         evidence=MappingProxyType({"cleanup-verified": False, "protected-mutation": False}),
     )
     with pytest.raises(ValueError, match="cleanup evidence"):
+        derive_attestation_bindings(_context(), executions)
+
+
+def test_rejects_absent_external_supervisor_predecessor_evidence() -> None:
+    executions = list(_executions())
+    index = next(
+        index
+        for index, execution in enumerate(executions)
+        if execution.check_id == "external-supervisor.predecessor"
+    )
+    executions[index] = replace(
+        executions[index],
+        evidence=MappingProxyType(
+            {
+                "authority-kind": "absent",
+                "authority-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                "pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                "unit-digests": {},
+                "unit-set-digest": "0" * 64,
+                "live-evidence-digest": "9" * 64,
+                "pending-transition-digest": "0" * 64,
+                "transition-clear": True,
+                "runtime-ready": True,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not authoritative"):
         derive_attestation_bindings(_context(), executions)

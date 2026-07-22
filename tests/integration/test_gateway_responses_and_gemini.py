@@ -25,7 +25,12 @@ from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
-from tests.integration.gateway_db import delete_all_teams_and_quotas
+from tests.integration.gateway_db import (
+    delete_gateway_trial,
+    delete_team_and_quota,
+    delete_teams_and_quotas,
+    insert_gateway_trial,
+)
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
@@ -142,6 +147,10 @@ async def gateway(
 
     team_id = uuid4()
     trial_id = uuid4()
+    with session_local() as s:
+        s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        task_id = insert_gateway_trial(s, team_id=team_id, trial_id=trial_id)
+        s.commit()
     step_jwt = mint_step_jwt(
         team_id=team_id,
         trial_id=trial_id,
@@ -157,6 +166,8 @@ async def gateway(
         await async_engine.dispose()
         with session_local() as s:
             s.execute(delete(LlmCall))
+            delete_gateway_trial(s, trial_id=trial_id, task_id=task_id)
+            delete_team_and_quota(s, team_id)
             s.execute(delete(RateCard))
             s.commit()
         sync_engine.dispose()
@@ -262,6 +273,7 @@ async def gateway_with_provider_connection(
     session_local = sessionmaker(sync_engine)
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        task_id = insert_gateway_trial(s, team_id=team_id, trial_id=trial_id)
         s.execute(
             insert(ProviderConnection).values(
                 id=connection_id,
@@ -305,9 +317,10 @@ async def gateway_with_provider_connection(
         await async_engine.dispose()
         with session_local() as s:
             s.execute(delete(LlmCall))
+            delete_gateway_trial(s, trial_id=trial_id, task_id=task_id)
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
-            delete_all_teams_and_quotas(s)
+            delete_teams_and_quotas(s, (team_id,))
             s.commit()
         sync_engine.dispose()
 

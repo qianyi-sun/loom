@@ -48,21 +48,31 @@ async def issue_step_token(
 
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(
-            session, authorization, signing_key=signing_key,
+            session,
+            authorization,
+            signing_key=signing_key,
+            allow_family_orchestrator=True,
         )
     explicit_provider = "provider_connection_id" in payload.model_fields_set
     family_evolver_request = payload.step_id == "family_evolver"
     if ctx is None:
         raise HTTPException(
-            status_code=403, detail="missing step-token scope",
+            status_code=403,
+            detail="missing step-token scope",
         )
     if family_evolver_request:
-        if "family:evolve" not in ctx.scopes or not explicit_provider:
+        if (
+            ctx.type != "family_orchestrator"
+            or ctx.team_id is not None
+            or ctx.user_id is not None
+            or ctx.scopes != ["family:evolve"]
+            or not explicit_provider
+        ):
             raise HTTPException(
                 status_code=403,
                 detail=(
-                    "family_evolver step tokens require family:evolve and an "
-                    "explicit provider_connection_id field"
+                    "family_evolver step tokens require the dedicated principal and "
+                    "an explicit provider_connection_id field"
                 ),
             )
     elif explicit_provider or "worker:report" not in ctx.scopes:
@@ -82,20 +92,23 @@ async def issue_step_token(
     # the platform route); the CP still authorizes a configured override
     # against the authoritative trial team before minting the JWT.
     async with request.app.state.session_factory() as session:
-        trial_row = (await session.execute(
-            select(TrialRow.team_id, TrialRow.provider_connection_id)
-            .where(TrialRow.id == payload.trial_id),
-        )).one_or_none()
+        trial_row = (
+            await session.execute(
+                select(TrialRow.team_id, TrialRow.provider_connection_id).where(
+                    TrialRow.id == payload.trial_id
+                ),
+            )
+        ).one_or_none()
     if trial_row is None:
         raise HTTPException(
-            status_code=404, detail=f"trial {payload.trial_id} not found",
+            status_code=404,
+            detail=f"trial {payload.trial_id} not found",
         )
     trial_team, trial_provider_connection_id = trial_row
     if trial_team != payload.team_id:
         raise HTTPException(
             status_code=400,
-            detail=f"team_id {payload.team_id} does not own trial "
-                   f"{payload.trial_id}",
+            detail=f"team_id {payload.team_id} does not own trial {payload.trial_id}",
         )
 
     effective_provider_connection_id = trial_provider_connection_id
@@ -103,27 +116,33 @@ async def issue_step_token(
         effective_provider_connection_id = payload.provider_connection_id
         if effective_provider_connection_id is not None:
             async with request.app.state.session_factory() as provider_session:
-                connection_team = (await provider_session.execute(
-                    select(ProviderConnection.team_id).where(
-                        ProviderConnection.id == effective_provider_connection_id,
-                        ProviderConnection.deleted_at.is_(None),
-                    ),
-                )).scalar_one_or_none()
+                connection_team = (
+                    await provider_session.execute(
+                        select(ProviderConnection.team_id).where(
+                            ProviderConnection.id == effective_provider_connection_id,
+                            ProviderConnection.deleted_at.is_(None),
+                        ),
+                    )
+                ).scalar_one_or_none()
                 if connection_team is None:
                     raise HTTPException(
-                        status_code=404, detail="provider_connection not found",
+                        status_code=404,
+                        detail="provider_connection not found",
                     )
                 if connection_team != trial_team:
-                    shared = (await provider_session.execute(
-                        select(ProviderConnectionShare.provider_connection_id).where(
-                            ProviderConnectionShare.provider_connection_id
-                            == effective_provider_connection_id,
-                            ProviderConnectionShare.target_team_id == trial_team,
-                        ),
-                    )).scalar_one_or_none()
+                    shared = (
+                        await provider_session.execute(
+                            select(ProviderConnectionShare.provider_connection_id).where(
+                                ProviderConnectionShare.provider_connection_id
+                                == effective_provider_connection_id,
+                                ProviderConnectionShare.target_team_id == trial_team,
+                            ),
+                        )
+                    ).scalar_one_or_none()
                     if shared is None:
                         raise HTTPException(
-                            status_code=404, detail="provider_connection not found",
+                            status_code=404,
+                            detail="provider_connection not found",
                         )
 
     token = mint_step_jwt(

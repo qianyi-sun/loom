@@ -80,6 +80,14 @@ def test_role_bootstrap_is_exact_select_only_and_idempotent() -> None:
         "trials",
     ):
         assert f"'{execution_table}'" in sql
+    for pool_identity_table in (
+        "gb10_worker_node_statuses",
+        "gb10_worker_pool_desired_states",
+        "slurm_worker_jobs",
+        "worker_pool_autoscaler_policies",
+        "workers",
+    ):
+        assert f"'{pool_identity_table}'" in sql
     assert sql.count("a" * 64) == 1
 
 

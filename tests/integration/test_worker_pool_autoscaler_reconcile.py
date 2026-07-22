@@ -144,7 +144,9 @@ async def test_reconcile_marks_one_idle_excess_worker_draining(
             await s.commit()
 
         async with session_factory() as s:
-            results = await reconcile_worker_pool_autoscaler_once(s, now=now)
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="production", now=now
+            )
             await s.commit()
 
         assert len(results) == 1
@@ -224,6 +226,7 @@ async def test_reconcile_submits_slurm_jobs_for_scale_up_deficit(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )
@@ -304,6 +307,7 @@ async def test_reconcile_clamps_scale_up_slots_to_max_slots(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )
@@ -381,7 +385,9 @@ async def test_reconcile_clamp_uses_ceiling_not_bankers_rounding(
 
         runner = FakeSlurmRunner()
         async with session_factory() as s:
-            results = await reconcile_worker_pool_autoscaler_once(s, now=now, slurm_runner=runner)
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="production", now=now, slurm_runner=runner
+            )
             await s.commit()
 
         assert results[0].action == "scale_up"
@@ -451,7 +457,9 @@ async def test_reconcile_qos_is_per_submission_and_prefers_qos_normal(
 
         runner = FakeSlurmRunner()
         async with session_factory() as s:
-            results = await reconcile_worker_pool_autoscaler_once(s, now=now, slurm_runner=runner)
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="production", now=now, slurm_runner=runner
+            )
             await s.commit()
 
         assert results[0].action == "scale_up"
@@ -527,6 +535,7 @@ async def test_reconcile_clamps_resource_aware_scale_up_to_max_slots(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )
@@ -590,6 +599,7 @@ async def test_reconcile_persists_no_safe_slurm_node_blocker(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )
@@ -704,6 +714,7 @@ async def test_reconcile_submits_gb10_capacity_through_slurm_partition(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )
@@ -790,6 +801,7 @@ async def test_control_plane_reconcile_skips_external_slurm_runner_policies(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )
@@ -861,6 +873,7 @@ async def test_submit_host_reconcile_processes_external_slurm_runner_policies(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
                 include_external_policies=True,
@@ -926,6 +939,7 @@ async def test_external_slurm_runner_reconcile_can_be_scoped_to_one_pool(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
                 include_external_policies=True,
@@ -941,6 +955,121 @@ async def test_external_slurm_runner_reconcile_can_be_scoped_to_one_pool(
             jobs = (await s.execute(select(SlurmWorkerJob))).scalars().all()
 
         assert [job.pool_name for job in jobs] == ["oldlab"]
+    finally:
+        await engine.dispose()
+
+
+async def test_external_reconcile_never_executes_same_pool_from_foreign_environment(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            for environment, node in (
+                ("production", "foreign-oldlab-1"),
+                ("staging", "staging-oldlab-1"),
+            ):
+                await s.execute(
+                    insert(WorkerPoolAutoscalerPolicy).values(
+                        environment=environment,
+                        pool_name="oldlab",
+                        actuator="slurm",
+                        enabled=True,
+                        min_slots=1,
+                        max_slots=1,
+                        scale_up_threshold_slots=1,
+                        scale_down_idle_seconds=600,
+                        scale_up_cooldown_seconds=60,
+                        scale_down_cooldown_seconds=300,
+                        drain_timeout_seconds=600,
+                        actuator_config={
+                            "backend": "docker",
+                            "cpu_arch": "x86_64",
+                            "external_runner": True,
+                            "allowed_nodes": [node],
+                            "env_file": "/secure/.env.remote-worker",
+                            "repo_dir": "/opt/loom",
+                            "requested_cpus": 2,
+                            "requested_memory_mib": 8000,
+                            "requested_concurrency": 1,
+                            "max_jobs": 1,
+                            "pending_job_cap": 1,
+                            "time_limit": "04:00:00",
+                        },
+                    )
+                )
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            only_foreign = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="development",
+                now=now,
+                slurm_runner=runner,
+                include_external_policies=True,
+                external_only=True,
+                pool_names=("oldlab",),
+            )
+            await s.commit()
+
+        assert only_foreign == []
+        assert runner.submitted_nodes == []
+
+        async with session_factory() as s:
+            before = (
+                (
+                    await s.execute(
+                        select(WorkerPoolAutoscalerPolicy).order_by(
+                            WorkerPoolAutoscalerPolicy.environment
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [(row.environment, row.last_decision) for row in before] == [
+            ("production", None),
+            ("staging", None),
+        ]
+
+        async with session_factory() as s:
+            intended = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+                include_external_policies=True,
+                external_only=True,
+                pool_names=("oldlab",),
+            )
+            await s.commit()
+
+        assert [decision.action for decision in intended] == ["scale_up"]
+        assert runner.submitted_nodes == ["staging-oldlab-1"]
+
+        async with session_factory() as s:
+            after = (
+                (
+                    await s.execute(
+                        select(WorkerPoolAutoscalerPolicy).order_by(
+                            WorkerPoolAutoscalerPolicy.environment
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            jobs = (await s.execute(select(SlurmWorkerJob))).scalars().all()
+        assert [(row.environment, row.last_decision) for row in after] == [
+            ("production", None),
+            ("staging", "scale_up"),
+        ]
+        assert [(job.environment, job.nodelist) for job in jobs] == [
+            ("staging", "staging-oldlab-1")
+        ]
     finally:
         await engine.dispose()
 
@@ -1027,6 +1156,7 @@ async def test_external_slurm_runner_reconcile_refreshes_known_job_state(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
                 include_external_policies=True,
@@ -1128,6 +1258,7 @@ async def test_reconcile_releases_drained_slurm_worker_job(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )
@@ -1226,6 +1357,7 @@ async def test_reconcile_does_not_cancel_unlinked_slurm_job_by_hostname(
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )
@@ -1320,6 +1452,7 @@ async def test_reconcile_drains_and_cancels_running_job_outside_allowed_nodes(
         async with session_factory() as s:
             first = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="staging",
                 now=now,
                 slurm_runner=runner,
             )
@@ -1342,6 +1475,7 @@ async def test_reconcile_drains_and_cancels_running_job_outside_allowed_nodes(
         async with session_factory() as s:
             second = await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="staging",
                 now=now + timedelta(seconds=1),
                 slurm_runner=runner,
             )
@@ -1438,7 +1572,9 @@ async def test_reconcile_sets_gb10_host_intent_to_draining(
             await s.commit()
 
         async with session_factory() as s:
-            results = await reconcile_worker_pool_autoscaler_once(s, now=now)
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="production", now=now
+            )
             await s.commit()
 
         assert results[0].action == "request_drain"
@@ -1526,7 +1662,9 @@ async def test_reconcile_sets_gb10_host_intent_by_hostname_when_worker_id_missin
             await s.commit()
 
         async with session_factory() as s:
-            results = await reconcile_worker_pool_autoscaler_once(s, now=now)
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="production", now=now
+            )
             await s.commit()
 
         assert results[0].action == "request_drain"
@@ -1602,7 +1740,9 @@ async def test_reconcile_sets_gb10_stopped_hosts_active_for_scale_up(
             await s.commit()
 
         async with session_factory() as s:
-            results = await reconcile_worker_pool_autoscaler_once(s, now=now)
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="production", now=now
+            )
             await s.commit()
 
         assert results[0].action == "scale_up"
@@ -1690,7 +1830,9 @@ async def test_reconcile_only_marks_selected_gb10_hosts_active_for_scale_up(
             await s.commit()
 
         async with session_factory() as s:
-            results = await reconcile_worker_pool_autoscaler_once(s, now=now)
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="production", now=now
+            )
             await s.commit()
 
         assert results[0].action == "scale_up"
@@ -1770,6 +1912,7 @@ async def test_reconcile_records_slurm_actuator_failure_on_policy(
         async with session_factory() as s:
             await reconcile_worker_pool_autoscaler_once(
                 s,
+                environment="production",
                 now=now,
                 slurm_runner=runner,
             )

@@ -1375,11 +1375,13 @@ The in-pod Control Plane autoscaler loop skips `external_runner` policies, so
 it does not repeatedly fail on missing `sbatch`. Run the reconciler on the
 Slurm submit host with the same deployed code and a local Control Plane DB
 port-forward. The supported one-shot entrypoint is
-`scripts/ops/worker_pool_autoscaler_external_once.py --pool-name <pool>`, which
-passes `include_external_policies=True`, `external_only=True`, and a pool filter
-to `reconcile_worker_pool_autoscaler_once`. This keeps policy, status, and API
-visibility in the Control Plane while executing Slurm commands only where the
-cluster credentials exist and only for the intended pool.
+`scripts/ops/worker_pool_autoscaler_external_once.py --environment
+<environment> --pool-name <pool>`, which passes the exact environment and pool
+filters together with `include_external_policies=True` and
+`external_only=True` to `reconcile_worker_pool_autoscaler_once`. This keeps
+policy, status, and API visibility in the Control Plane while executing Slurm
+commands only where the cluster credentials exist and only for the intended
+environment/pool authority.
 
 For GB10, use the same Slurm actuator rather than the legacy `gb10` actuator
 for normal capacity. The backend remains `docker` because each worker runs

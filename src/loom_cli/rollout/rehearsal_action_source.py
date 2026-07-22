@@ -14,6 +14,12 @@ from typing import Protocol
 from loom_cli.rollout.admin_smoke_contract import (
     AdminSmokeAuthority as RehearsalSmokeAuthority,
 )
+from loom_cli.rollout.external_supervisor_readiness import (
+    SCRIPT_PATH as EXTERNAL_SUPERVISOR_SCRIPT_PATH,
+)
+from loom_cli.rollout.external_supervisor_readiness import (
+    ExternalSupervisorArtifact,
+)
 from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ImageArtifactSet
 from loom_cli.rollout.manifest_readiness import ManifestArtifact
@@ -107,6 +113,10 @@ class RehearsalPlan:
     manifest_artifact_sha256: str
     rendered_manifest_sha256: str
     production_defaults_sha256: str
+    external_supervisor_artifact_sha256: str
+    external_supervisor_profile_sha256: str
+    external_supervisor_script_sha256: Mapping[str, str]
+    external_supervisor_unit_sha256: Mapping[str, str]
     migration_plan_sha256: str
     migration_target_revision: str
     browser_report_schema_sha256: str
@@ -116,6 +126,8 @@ class RehearsalPlan:
 
     def __post_init__(self) -> None:
         image_digests = dict(self.image_digests)
+        supervisor_script_sha256 = dict(self.external_supervisor_script_sha256)
+        supervisor_unit_sha256 = dict(self.external_supervisor_unit_sha256)
         if (
             len(self.candidate_sha) not in {40, 64}
             or any(character not in "0123456789abcdef" for character in self.candidate_sha)
@@ -135,6 +147,8 @@ class RehearsalPlan:
                     self.manifest_artifact_sha256,
                     self.rendered_manifest_sha256,
                     self.production_defaults_sha256,
+                    self.external_supervisor_artifact_sha256,
+                    self.external_supervisor_profile_sha256,
                     self.migration_plan_sha256,
                     self.browser_report_schema_sha256,
                 )
@@ -168,10 +182,29 @@ class RehearsalPlan:
                 not name or not digest.startswith("sha256:")
                 for name, digest in image_digests.items()
             )
+            or set(supervisor_script_sha256) != {EXTERNAL_SUPERVISOR_SCRIPT_PATH}
+            or not supervisor_unit_sha256
+            or any(
+                _SHA256_RE.fullmatch(digest) is None for digest in supervisor_script_sha256.values()
+            )
+            or any(
+                not name or "/" in name or "\\" in name or _SHA256_RE.fullmatch(digest) is None
+                for name, digest in supervisor_unit_sha256.items()
+            )
         ):
             raise ValueError("rehearsal plan identity is invalid")
         self.resources.require_isolated()
         object.__setattr__(self, "image_digests", MappingProxyType(image_digests))
+        object.__setattr__(
+            self,
+            "external_supervisor_script_sha256",
+            MappingProxyType(dict(sorted(supervisor_script_sha256.items()))),
+        )
+        object.__setattr__(
+            self,
+            "external_supervisor_unit_sha256",
+            MappingProxyType(dict(sorted(supervisor_unit_sha256.items()))),
+        )
 
     @property
     def plan_digest(self) -> str:
@@ -197,6 +230,10 @@ class RehearsalPlan:
             "image_artifact_sha256": self.image_artifact_sha256,
             "image_digests": dict(self.image_digests),
             "image_tag": self.image_tag,
+            "external_supervisor_artifact_sha256": self.external_supervisor_artifact_sha256,
+            "external_supervisor_profile_sha256": self.external_supervisor_profile_sha256,
+            "external_supervisor_script_sha256": dict(self.external_supervisor_script_sha256),
+            "external_supervisor_unit_sha256": dict(self.external_supervisor_unit_sha256),
             "manifest_artifact_sha256": self.manifest_artifact_sha256,
             "migration_plan_sha256": self.migration_plan_sha256,
             "migration_target_revision": self.migration_target_revision,
@@ -214,7 +251,7 @@ class RehearsalPlan:
             "production_defaults_path": str(self.production_defaults_path),
             "production_defaults_sha256": self.production_defaults_sha256,
             "schema_revision": self.schema_revision,
-            "schema_version": 5,
+            "schema_version": 6,
             "smoke_authority": self.smoke_authority.to_record(),
         }
 
@@ -233,6 +270,10 @@ class RehearsalPlan:
             "checkpoint_manifest_path",
             "checkpoint_manifest_sha256",
             "db_snapshot_identity",
+            "external_supervisor_artifact_sha256",
+            "external_supervisor_profile_sha256",
+            "external_supervisor_script_sha256",
+            "external_supervisor_unit_sha256",
             "gb10_authority",
             "image_artifact_sha256",
             "image_digests",
@@ -254,20 +295,29 @@ class RehearsalPlan:
         resources = value.get("resources")
         smoke_authority = value.get("smoke_authority")
         image_digests = value.get("image_digests")
+        supervisor_script_sha256 = value.get("external_supervisor_script_sha256")
+        supervisor_unit_sha256 = value.get("external_supervisor_unit_sha256")
         mutation_epoch = value.get("mutation_epoch")
         if (
             set(value) != expected
             or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 5
+            or value.get("schema_version") != 6
             or type(mutation_epoch) is not int
             or not isinstance(resources, Mapping)
             or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
             or not isinstance(image_digests, Mapping)
+            or not isinstance(supervisor_script_sha256, Mapping)
+            or not isinstance(supervisor_unit_sha256, Mapping)
             or not isinstance(smoke_authority, Mapping)
             or not image_digests
             or any(
                 not isinstance(key, str) or not isinstance(item, str)
-                for key, item in image_digests.items()
+                for values in (
+                    image_digests,
+                    supervisor_script_sha256,
+                    supervisor_unit_sha256,
+                )
+                for key, item in values.items()
             )
         ):
             raise ValueError("rehearsal plan schema is invalid")
@@ -283,6 +333,8 @@ class RehearsalPlan:
             "checkpoint_manifest_path",
             "checkpoint_manifest_sha256",
             "db_snapshot_identity",
+            "external_supervisor_artifact_sha256",
+            "external_supervisor_profile_sha256",
             "image_artifact_sha256",
             "image_tag",
             "manifest_artifact_sha256",
@@ -322,6 +374,16 @@ class RehearsalPlan:
             manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
             rendered_manifest_sha256=str(value["rendered_manifest_sha256"]),
             production_defaults_sha256=str(value["production_defaults_sha256"]),
+            external_supervisor_artifact_sha256=str(value["external_supervisor_artifact_sha256"]),
+            external_supervisor_profile_sha256=str(value["external_supervisor_profile_sha256"]),
+            external_supervisor_script_sha256={
+                str(key): str(item)
+                for key, item in _mapping_field(value, "external_supervisor_script_sha256").items()
+            },
+            external_supervisor_unit_sha256={
+                str(key): str(item)
+                for key, item in _mapping_field(value, "external_supervisor_unit_sha256").items()
+            },
             migration_plan_sha256=str(value["migration_plan_sha256"]),
             migration_target_revision=str(value["migration_target_revision"]),
             browser_report_schema_sha256=str(value["browser_report_schema_sha256"]),
@@ -363,6 +425,7 @@ class RehearsalActionSource:
     manifest_artifacts: Callable[[], ManifestArtifact]
     migration_artifacts: Callable[[], MigrationManifestArtifact]
     production_defaults_artifacts: Callable[[], ProductionDefaultsArtifact]
+    external_supervisor_artifacts: Callable[[], ExternalSupervisorArtifact]
     artifact_store: PreflightArtifactStore
     migration_plan_sha256: str
     migration_target_revision: str
@@ -393,6 +456,7 @@ class RehearsalActionSource:
         manifests = self.manifest_artifacts()
         migration = self.migration_artifacts()
         production_defaults = self.production_defaults_artifacts()
+        external_supervisor = self.external_supervisor_artifacts()
         isolation_id = self._isolation_id(
             candidate,
             checkpoint,
@@ -400,6 +464,7 @@ class RehearsalActionSource:
             manifests,
             migration,
             production_defaults,
+            external_supervisor,
         )
         plan = self._plan(
             candidate,
@@ -409,6 +474,7 @@ class RehearsalActionSource:
             manifests=manifests,
             migration=migration,
             production_defaults=production_defaults,
+            external_supervisor=external_supervisor,
         )
         return isolation_id, plan.plan_digest
 
@@ -429,6 +495,7 @@ class RehearsalActionSource:
             manifests=self.manifest_artifacts(),
             migration=self.migration_artifacts(),
             production_defaults=self.production_defaults_artifacts(),
+            external_supervisor=self.external_supervisor_artifacts(),
         )
         if plan.plan_digest != expected_digest:
             raise ValueError("rehearsal plan identity drifted")
@@ -464,11 +531,16 @@ class RehearsalActionSource:
         manifests: ManifestArtifact,
         migration: MigrationManifestArtifact,
         production_defaults: ProductionDefaultsArtifact,
+        external_supervisor: ExternalSupervisorArtifact,
     ) -> RehearsalPlan:
         if (
             checkpoint.environment != "staging"
             or checkpoint.namespace != "loom-staging"
             or candidate.resolved_tree is None
+            or external_supervisor.candidate_sha != candidate.resolved_sha
+            or external_supervisor.candidate_tree != candidate.resolved_tree
+            or external_supervisor.image_tag != candidate.image_tag
+            or external_supervisor.environment != checkpoint.environment
         ):
             raise ValueError("rehearsal candidate or checkpoint authority is invalid")
         resources = RehearsalResources.derive(isolation_id, route_origin=self.route_origin)
@@ -506,6 +578,10 @@ class RehearsalActionSource:
             manifest_artifact_sha256=publication.manifest_artifact_sha256,
             rendered_manifest_sha256=publication.rendered_manifest_sha256,
             production_defaults_sha256=publication.production_defaults_sha256,
+            external_supervisor_artifact_sha256=external_supervisor.artifact_digest,
+            external_supervisor_profile_sha256=external_supervisor.profile_sha256,
+            external_supervisor_script_sha256=external_supervisor.script_sha256,
+            external_supervisor_unit_sha256=external_supervisor.unit_sha256,
             migration_plan_sha256=self.migration_plan_sha256,
             migration_target_revision=self.migration_target_revision,
             browser_report_schema_sha256=self.browser_report_schema_sha256,
@@ -522,6 +598,7 @@ class RehearsalActionSource:
         manifests: ManifestArtifact,
         migration: MigrationManifestArtifact,
         production_defaults: ProductionDefaultsArtifact,
+        external_supervisor: ExternalSupervisorArtifact,
     ) -> str:
         payload = {
             "browser_report_schema_sha256": self.browser_report_schema_sha256,
@@ -535,6 +612,10 @@ class RehearsalActionSource:
             "manifest_artifact_sha256": manifests.artifact_digest,
             "rendered_manifest_sha256": manifests.rendered_sha256,
             "production_defaults_sha256": production_defaults.artifact_digest,
+            "external_supervisor_artifact_sha256": external_supervisor.artifact_digest,
+            "external_supervisor_profile_sha256": external_supervisor.profile_sha256,
+            "external_supervisor_script_sha256": dict(external_supervisor.script_sha256),
+            "external_supervisor_unit_sha256": dict(external_supervisor.unit_sha256),
             "migration_plan_sha256": self.migration_plan_sha256,
             "migration_manifest_artifact_sha256": migration.artifact_digest,
             "migration_manifest_sha256": migration.rendered_sha256,
@@ -542,7 +623,7 @@ class RehearsalActionSource:
             "route_origin": self.route_origin,
             "gb10_authority": self.gb10_authority.to_record(),
             "smoke_authority": self.smoke_authority.to_record(),
-            "schema_version": 5,
+            "schema_version": 6,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

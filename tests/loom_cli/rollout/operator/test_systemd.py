@@ -20,6 +20,10 @@ from loom_cli.rollout.operator.systemd import (
 )
 
 SERVICE_UID = 2222
+CANDIDATE_SHA = "a" * 40
+CANDIDATE_RUNTIME = Path(f"/opt/loom-staging-runner/candidates/{CANDIDATE_SHA}")
+CANDIDATE_REPO = CANDIDATE_RUNTIME / "repo"
+CANDIDATE_VENV = CANDIDATE_RUNTIME / "venv"
 
 
 def make_config() -> OperatorConfig:
@@ -29,14 +33,12 @@ def make_config() -> OperatorConfig:
         operator_group="loom-staging-operators",
         remote_url="https://github.com/qianyi-sun/loom.git",
         target_ref="refs/heads/dev",
-        runner_repo=Path("/opt/loom-staging-runner/repo"),
+        runner_repo=CANDIDATE_REPO,
         state_root=Path("/var/lib/loom-staging-rollout"),
         runtime_root=Path("/run/loom-staging-rollout"),
         rollout_root=Path("/data/loom-staging"),
         kubeconfig_path=Path("/var/lib/loom-staging-rollout/kubeconfig"),
-        cluster_config_path=Path(
-            "/opt/loom-staging-runner/repo/deploy/environments/staging.cluster.toml"
-        ),
+        cluster_config_path=CANDIDATE_REPO / "deploy/environments/staging.cluster.toml",
         admin_token_source="file:/var/lib/loom-staging-rollout/credentials/admin-token",
         worker_token_source="file:/var/lib/loom-staging-rollout/credentials/worker-token",
         service_token_source="file:/var/lib/loom-staging-rollout/credentials/service-token",
@@ -210,14 +212,14 @@ def test_transient_service_builder_and_probe_share_exact_launch_prefix() -> None
     clock = iter((0.0, 0.011, 0.011, 0.020))
     evidence = probe_transient_launch_cancel(
         run,
-        candidate_sha="a" * 40,
-        working_directory=Path("/opt/loom-staging-runner/repo"),
+        candidate_sha=CANDIDATE_SHA,
+        working_directory=CANDIDATE_REPO,
         monotonic=lambda: next(clock),
     )
 
     expected = transient_service_argv(
         unit_name=calls[1][5],
-        working_directory=Path("/opt/loom-staging-runner/repo"),
+        working_directory=CANDIDATE_REPO,
         command=("/usr/bin/sleep", "300"),
     )
     assert calls[1] == tuple(expected)
@@ -242,8 +244,8 @@ def test_transient_probe_failure_attempts_only_exact_cleanup() -> None:
     with pytest.raises(UnitLaunchError, match="launch failed"):
         probe_transient_launch_cancel(
             run,
-            candidate_sha="a" * 40,
-            working_directory=Path("/opt/loom-staging-runner/repo"),
+            candidate_sha=CANDIDATE_SHA,
+            working_directory=CANDIDATE_REPO,
             monotonic=lambda: 0.0,
         )
 
@@ -294,13 +296,14 @@ def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
         "--property",
         "UMask=0077",
         "--property",
-        "WorkingDirectory=/opt/loom-staging-runner/repo",
+        f"WorkingDirectory={CANDIDATE_REPO}",
         "/usr/bin/env",
         "-i",
         "HOME=/var/lib/loom-staging-rollout",
         "USER=loom-rollout",
         "LOGNAME=loom-rollout",
-        "PATH=/opt/loom-staging-runner/venv/bin:/usr/local/bin:/usr/bin:/bin",
+        f"PATH={CANDIDATE_VENV}/bin:/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE=1",
         f"XDG_RUNTIME_DIR=/run/user/{SERVICE_UID}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{SERVICE_UID}/bus",
         "KUBECONFIG=/var/lib/loom-staging-rollout/kubeconfig",
@@ -309,7 +312,7 @@ def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
         "GIT_CONFIG_GLOBAL=/dev/null",
         "GIT_TERMINAL_PROMPT=0",
         "LOOM_STAGING_ROLLOUT_CONFIG=/etc/loom/staging-rollout.toml",
-        "/opt/loom-staging-runner/venv/bin/python",
+        str(CANDIDATE_VENV / "bin/python"),
         "-m",
         "loom_cli.rollout.operator.worker",
         "run-attempt",

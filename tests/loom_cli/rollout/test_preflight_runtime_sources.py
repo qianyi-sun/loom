@@ -12,7 +12,11 @@ from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
 from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
-from loom_cli.rollout.preflight_registered_checks import CredentialProbeSource
+from loom_cli.rollout.preflight_contract import EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+from loom_cli.rollout.preflight_registered_checks import (
+    CredentialProbeSource,
+    ExternalSupervisorPredecessorSnapshot,
+)
 from loom_cli.rollout.preflight_runtime_sources import (
     GB10_CANDIDATE_SOURCE_CONCURRENCY,
     GB10_PREFLIGHT_FLEET_CONCURRENCY,
@@ -138,6 +142,22 @@ def test_sources_build_complete_exact_registry_without_running_probes(
             schema_revision="0066",
             object_inventory_root="3" * 64,
         ),
+        external_supervisor_predecessor_source=lambda _context: (
+            ExternalSupervisorPredecessorSnapshot(
+                kind="legacy-manifest",
+                authority_digest="a" * 64,
+                pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                unit_sha256={
+                    "loom-autoscaler-gb10-staging.service": "b" * 64,
+                    "loom-autoscaler-gb10-staging.timer": "c" * 64,
+                },
+                live_evidence_digest="d" * 64,
+                pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+                transition_clear=True,
+                runtime_ready=True,
+                pool_identity_digest="e" * 64,
+            )
+        ),
         systemd_run=command,
         gb10_run=command,
         gb10_targets=(
@@ -196,12 +216,14 @@ def test_sources_build_complete_exact_registry_without_running_probes(
         "candidate.identity",
         "readonly.authority",
         "backup.lease-eligibility",
+        "external-supervisor.predecessor",
         "images.build",
         "staging.release-baseline",
         "rehearsal.cleanup",
     }
     assert plan.context.bindings["staging.mutation-epoch"] == 9
     assert plan.context.bindings["backup.source-request"] == "fresh-checkpoint"
+    assert plan.context.bindings["candidate.image-tag"] == candidate.image_tag
     assert gb10_concurrency == {
         "build_gb10_candidate_source_check": GB10_CANDIDATE_SOURCE_CONCURRENCY,
         "build_gb10_host_readiness_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
@@ -80,6 +81,29 @@ def test_protected_apply_baseline_binds_all_readonly_tier2_evidence() -> None:
     assert ProtectedApplyBaseline.from_dict(baseline.to_dict()) == baseline
     assert set(baseline.resource_digests) == set(CHECK_IDS)
     assert baseline.mutation_epoch == 7
+
+
+def test_protected_apply_baseline_ignores_named_tier_zero_live_readonly_checks() -> None:
+    original = _attestation()
+    executions = _baseline_executions()
+    tier0_predecessor = replace(
+        executions[0],
+        check_id="external-supervisor.predecessor",
+        failure_code="external-supervisor.predecessor.drift",
+        tier=0,
+    )
+    all_executions = (*executions, tier0_predecessor)
+    enriched = type(original).issue(
+        bindings=original.bindings,
+        executions=all_executions,
+        issued_at=NOW,
+        registry_digest=original.registry_digest,
+        coverage_digest=original.coverage_digest,
+    )
+
+    baseline = ProtectedApplyBaseline.from_executions(enriched, all_executions)
+
+    assert set(baseline.resource_digests) == set(CHECK_IDS)
 
 
 def test_protected_apply_baseline_rejects_missing_or_epoch_drifted_evidence() -> None:

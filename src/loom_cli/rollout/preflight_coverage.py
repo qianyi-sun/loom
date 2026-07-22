@@ -133,6 +133,14 @@ class CoverageEntry:
         tier = value["tier"]
         if type(tier) is not int:
             raise ValueError("coverage tier must be an integer")
+        stage_tiers = {
+            StageCapability.STATIC: {0, 1},
+            StageCapability.BASELINE_LIVE_READONLY: {0, 2},
+            StageCapability.ISOLATED_REHEARSAL: {3},
+            StageCapability.FINAL_ONLY: {4},
+        }
+        if tier not in stage_tiers[stage]:
+            raise ValueError("coverage tier does not match stage capability")
         if stage is StageCapability.FINAL_ONLY:
             if tier != 4 or justification is None or len(justification.strip()) < 20:
                 raise ValueError("final-only coverage requires a technical justification")

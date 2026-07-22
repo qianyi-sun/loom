@@ -29,22 +29,30 @@ import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-try:
+if TYPE_CHECKING:
     from scripts.ops.staging_rollout_sealed_source import (
         MAX_CUMULATIVE_COMMITS,
         SealedSource,
         SealedSourceError,
         validate_sealed_source,
     )
-except ModuleNotFoundError:  # direct execution from scripts/ops
-    from staging_rollout_sealed_source import (
-        MAX_CUMULATIVE_COMMITS,
-        SealedSource,
-        SealedSourceError,
-        validate_sealed_source,
-    )  # type: ignore[import-not-found, no-redef]
+else:
+    try:
+        from scripts.ops.staging_rollout_sealed_source import (
+            MAX_CUMULATIVE_COMMITS,
+            SealedSource,
+            SealedSourceError,
+            validate_sealed_source,
+        )
+    except ModuleNotFoundError:  # direct execution from scripts/ops
+        from staging_rollout_sealed_source import (
+            MAX_CUMULATIVE_COMMITS,
+            SealedSource,
+            SealedSourceError,
+            validate_sealed_source,
+        )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_ROOT = REPO_ROOT / "deploy" / "staging-rollout"
@@ -66,8 +74,13 @@ RUNNER_ROOT = Path("/opt/loom-staging-runner")
 INSTALL_SOURCE = RUNNER_ROOT / "source"
 SHARED_WORK2_MOUNT_HELPER = INSTALL_SOURCE / "scripts/ops/staging_rollout_shared_work2.py"
 SHARED_WORKER_REPO_HELPER = INSTALL_SOURCE / "scripts/ops/staging_rollout_shared_repo.py"
-CANDIDATE_REPO = RUNNER_ROOT / "repo"
-VENV = RUNNER_ROOT / "venv"
+# The pre-canonical #907 supervisor still executes from this checkout.  Keep it
+# frozen while a replacement installer publishes and validates its own exact
+# source.  Canonical supervisors switch to the separately verified shared
+# candidate checkout during the protected transition.
+LEGACY_CANDIDATE_REPO = RUNNER_ROOT / "repo"
+CANDIDATE_RUNTIME_ROOT = RUNNER_ROOT / "candidates"
+LEGACY_VENV = RUNNER_ROOT / "venv"
 STATE_ROOT = Path("/var/lib/loom-staging-rollout")
 ACTIVE_POINTER = STATE_ROOT / "active.json"
 GENERATED_ROOT = STATE_ROOT / "generated"
@@ -120,6 +133,8 @@ DATA_DIRECTORIES = (
 
 _FINGERPRINT_TOKEN = "__ADMIN_TOKEN_FINGERPRINT__"
 _TEAM_TOKEN = "__SMOKE_ON_BEHALF_TEAM_ID__"
+_SOURCE_SHA_TOKEN = "__SOURCE_SHA__"
+_CANDIDATE_VENV_TOKEN = "__CANDIDATE_VENV__"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_PROTECTED_INPUT_BYTES = 4 << 20
 _MAX_KUBECONFIG_BYTES = 1 << 20
@@ -164,6 +179,30 @@ _REQUIRED_GB10_ENV_KEYS = frozenset(
 
 class InstallError(RuntimeError):
     """Fail-closed installation or convergence error."""
+
+
+def _candidate_repo_path(source_sha: str) -> Path:
+    """Return the immutable local checkout namespace for one exact source."""
+    if _SHA_RE.fullmatch(source_sha) is None:
+        raise InstallError("candidate checkout SHA is invalid")
+    return CANDIDATE_RUNTIME_ROOT / source_sha / "repo"
+
+
+def _candidate_venv_path(source_sha: str) -> Path:
+    """Return the immutable local Python environment for one exact source."""
+    if _SHA_RE.fullmatch(source_sha) is None:
+        raise InstallError("candidate runtime SHA is invalid")
+    return CANDIDATE_RUNTIME_ROOT / source_sha / "venv"
+
+
+def _candidate_ssh_config_path(source_sha: str) -> Path:
+    """Return the checked-in GB10 SSH authority for one exact candidate."""
+    return _candidate_repo_path(source_sha) / "deploy/worker-pools/gb10/ssh_config"
+
+
+def _candidate_trust_tool_path(source_sha: str) -> Path:
+    """Return the GB10 trust implementation from one exact candidate."""
+    return _candidate_repo_path(source_sha) / "scripts/ops/staging_rollout_gb10_trust.py"
 
 
 _INSTALL_ATTESTATION_ASSETS = frozenset(
@@ -1396,6 +1435,7 @@ class HostSystem:
             "PATH": _ROOT_PATH,
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "HOME": str(STATE_ROOT),
             "USER": SERVICE_USER,
             "LOGNAME": SERVICE_USER,
@@ -2160,6 +2200,29 @@ class HostSystem:
             check=check,
         )
 
+    def _root_git(self, *arguments: str, check: bool = True) -> CommandResult:
+        """Run candidate publication Git without granting runtime write authority."""
+        return self.runner.run(
+            [
+                "/usr/bin/env",
+                "-i",
+                "HOME=/root",
+                "PATH=/usr/bin:/bin",
+                "GIT_CONFIG_NOSYSTEM=1",
+                "GIT_CONFIG_GLOBAL=/dev/null",
+                "GIT_NO_REPLACE_OBJECTS=1",
+                "GIT_OPTIONAL_LOCKS=0",
+                "GIT_TERMINAL_PROMPT=0",
+                str(SYSTEM_SHELL),
+                "-c",
+                'umask 022; exec "$@"',
+                "loom-staging-root-git",
+                str(SYSTEM_GIT),
+                *arguments,
+            ],
+            check=check,
+        )
+
     def _validate_candidate_sealed_identity(
         self,
         expected_sha: str,
@@ -2169,22 +2232,23 @@ class HostSystem:
     ) -> None:
         if _SHA_RE.fullmatch(source_tree_sha) is None or _SHA_RE.fullmatch(source_base_sha) is None:
             raise InstallError("candidate sealed source binding is invalid")
-        observed_tree = self._service_git(
+        candidate_repo = _candidate_repo_path(expected_sha)
+        observed_tree = self._root_git(
             "-C",
-            str(CANDIDATE_REPO),
+            str(candidate_repo),
             "rev-parse",
             f"{expected_sha}^{{tree}}",
         ).stdout.strip()
-        merge_base = self._service_git(
+        merge_base = self._root_git(
             "-C",
-            str(CANDIDATE_REPO),
+            str(candidate_repo),
             "merge-base",
             source_base_sha,
             expected_sha,
         ).stdout.strip()
-        history = self._service_git(
+        history = self._root_git(
             "-C",
-            str(CANDIDATE_REPO),
+            str(candidate_repo),
             "rev-list",
             "--reverse",
             "--parents",
@@ -2212,52 +2276,51 @@ class HostSystem:
         source_tree_sha: str | None = None,
         source_base_sha: str | None = None,
     ) -> bool:
-        if _SHA_RE.fullmatch(expected_sha) is None:
-            raise InstallError("candidate checkout SHA is invalid")
+        candidate_repo = _candidate_repo_path(expected_sha)
         sealed = source_tree_sha is not None or source_base_sha is not None
         if sealed and (source_tree_sha is None or source_base_sha is None):
             raise InstallError("candidate sealed source binding is incomplete")
         changed = False
-        service_uid, service_gid = self._service_ids()
-        if self._probe(["test", "-d", str(CANDIDATE_REPO / ".git")]).returncode != 0:
+        installer_uid, installer_gid = os.geteuid(), os.getegid()
+        if self._probe(["test", "-d", str(candidate_repo / ".git")]).returncode != 0:
             if sealed:
-                self._service_git("init", str(CANDIDATE_REPO))
-                self._service_git(
+                self._root_git("init", str(candidate_repo))
+                self._root_git(
                     "-C",
-                    str(CANDIDATE_REPO),
+                    str(candidate_repo),
                     "remote",
                     "add",
                     "origin",
                     REMOTE_URL,
                 )
             else:
-                self._service_git("clone", "--origin", "origin", REMOTE_URL, str(CANDIDATE_REPO))
+                self._root_git("clone", "--origin", "origin", REMOTE_URL, str(candidate_repo))
             refresh = True
             changed = True
         _validate_git_checkout_tree(
-            CANDIDATE_REPO,
-            expected_uid=service_uid,
-            expected_gid=service_gid,
+            candidate_repo,
+            expected_uid=installer_uid,
+            expected_gid=installer_gid,
             require_nonwritable=False,
         )
         changed = (
             _harden_owned_tree(
-                CANDIDATE_REPO,
-                expected_uid=service_uid,
-                expected_gid=service_gid,
+                candidate_repo,
+                expected_uid=installer_uid,
+                expected_gid=installer_gid,
             )
             or changed
         )
-        remotes = self._service_git("-C", str(CANDIDATE_REPO), "remote").stdout.splitlines()
-        urls = self._service_git(
-            "-C", str(CANDIDATE_REPO), "config", "--get-all", "remote.origin.url"
+        remotes = self._root_git("-C", str(candidate_repo), "remote").stdout.splitlines()
+        urls = self._root_git(
+            "-C", str(candidate_repo), "config", "--get-all", "remote.origin.url"
         ).stdout.splitlines()
         if remotes != ["origin"] or urls != [REMOTE_URL]:
             raise InstallError("candidate checkout origin is not approved")
         if (
-            self._service_git(
+            self._root_git(
                 "-C",
-                str(CANDIDATE_REPO),
+                str(candidate_repo),
                 "config",
                 "--get-all",
                 "remote.origin.pushurl",
@@ -2266,22 +2329,22 @@ class HostSystem:
             == 0
         ):
             raise InstallError("candidate checkout must not define a push URL")
-        dirty = self._service_git(
+        dirty = self._root_git(
             "-C",
-            str(CANDIDATE_REPO),
+            str(candidate_repo),
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
         ).stdout
         if dirty:
             raise InstallError("candidate checkout is dirty")
-        head_result = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD", check=False)
+        head_result = self._root_git("-C", str(candidate_repo), "rev-parse", "HEAD", check=False)
         head = head_result.stdout.strip() if head_result.returncode == 0 else ""
         if refresh or head != expected_sha:
             if sealed:
-                self._service_git(
+                self._root_git(
                     "-C",
-                    str(CANDIDATE_REPO),
+                    str(candidate_repo),
                     "fetch",
                     "--no-tags",
                     "--no-recurse-submodules",
@@ -2290,17 +2353,17 @@ class HostSystem:
                     expected_sha,
                 )
             else:
-                self._service_git(
+                self._root_git(
                     "-C",
-                    str(CANDIDATE_REPO),
+                    str(candidate_repo),
                     "fetch",
                     "--prune",
                     "origin",
                     f"{FETCH_REF}:refs/remotes/origin/dev",
                 )
-            self._service_git(
+            self._root_git(
                 "-C",
-                str(CANDIDATE_REPO),
+                str(candidate_repo),
                 "checkout",
                 "--detach",
                 expected_sha,
@@ -2308,13 +2371,13 @@ class HostSystem:
             changed = True
         changed = (
             _harden_owned_tree(
-                CANDIDATE_REPO,
-                expected_uid=service_uid,
-                expected_gid=service_gid,
+                candidate_repo,
+                expected_uid=installer_uid,
+                expected_gid=installer_gid,
             )
             or changed
         )
-        head = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD").stdout.strip()
+        head = self._root_git("-C", str(candidate_repo), "rev-parse", "HEAD").stdout.strip()
         if head != expected_sha:
             raise InstallError("candidate checkout did not converge to the installed source SHA")
         if sealed:
@@ -2334,48 +2397,52 @@ class HostSystem:
         source_tree_sha: str | None = None,
         source_base_sha: str | None = None,
     ) -> bool:
+        try:
+            candidate_repo = _candidate_repo_path(expected_sha)
+        except InstallError:
+            return False
         sealed = source_tree_sha is not None or source_base_sha is not None
         if sealed and (source_tree_sha is None or source_base_sha is None):
             return False
-        if self._probe(["test", "-d", str(CANDIDATE_REPO / ".git")]).returncode != 0:
+        if self._probe(["test", "-d", str(candidate_repo / ".git")]).returncode != 0:
             return False
         try:
-            service_uid, service_gid = self._service_ids()
+            installer_uid, installer_gid = os.geteuid(), os.getegid()
             _validate_git_checkout_tree(
-                CANDIDATE_REPO,
-                expected_uid=service_uid,
-                expected_gid=service_gid,
+                candidate_repo,
+                expected_uid=installer_uid,
+                expected_gid=installer_gid,
             )
         except InstallError:
             return False
-        remotes = self._service_git(
-            "-C", str(CANDIDATE_REPO), "remote", check=False
+        remotes = self._root_git(
+            "-C", str(candidate_repo), "remote", check=False
         ).stdout.splitlines()
-        urls = self._service_git(
+        urls = self._root_git(
             "-C",
-            str(CANDIDATE_REPO),
+            str(candidate_repo),
             "config",
             "--get-all",
             "remote.origin.url",
             check=False,
         ).stdout.splitlines()
-        pushurl = self._service_git(
+        pushurl = self._root_git(
             "-C",
-            str(CANDIDATE_REPO),
+            str(candidate_repo),
             "config",
             "--get-all",
             "remote.origin.pushurl",
             check=False,
         )
-        dirty = self._service_git(
+        dirty = self._root_git(
             "-C",
-            str(CANDIDATE_REPO),
+            str(candidate_repo),
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             check=False,
         )
-        head = self._service_git("-C", str(CANDIDATE_REPO), "rev-parse", "HEAD", check=False)
+        head = self._root_git("-C", str(candidate_repo), "rev-parse", "HEAD", check=False)
         ready = bool(
             remotes == ["origin"]
             and urls == [REMOTE_URL]
@@ -2400,15 +2467,15 @@ class HostSystem:
                 return False
         return True
 
-    def venv_ready(self) -> bool:
-        if not os.path.lexists(VENV):
+    def venv_ready(self, venv: Path) -> bool:
+        if not os.path.lexists(venv):
             return False
         system_python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
         self._validate_system_python_version(system_python)
-        metadata = self._probe(["stat", "-c", "%F:%U:%G:%a", str(VENV)])
+        metadata = self._probe(["stat", "-c", "%F:%U:%G:%a", str(venv)])
         if metadata.stdout.strip() != "directory:root:root:755":
             raise InstallError("root venv metadata is unsafe")
-        python = VENV / "bin/python"
+        python = venv / "bin/python"
         allowed_external_targets: tuple[Path, ...] = ()
         if os.path.lexists(python) and python.is_symlink():
             try:
@@ -2422,7 +2489,7 @@ class HostSystem:
                 raise InstallError("root venv Python link is unsafe")
             allowed_external_targets = (target,)
         _validate_owned_tree(
-            VENV,
+            venv,
             expected_uid=0,
             expected_gid=0,
             allowed_external_symlink_targets=allowed_external_targets,
@@ -2443,10 +2510,15 @@ class HostSystem:
             raise InstallError("root venv Python authority is unsafe")
         return True
 
-    def _venv_lock_metadata(self, *, allow_absent: bool) -> os.stat_result | None:
+    def _venv_lock_metadata(
+        self,
+        *,
+        allow_absent: bool,
+        venv: Path,
+    ) -> os.stat_result | None:
         """Return safe uv lock metadata without accepting a replaceable venv root."""
         try:
-            venv_metadata = os.lstat(VENV)
+            venv_metadata = os.lstat(venv)
         except FileNotFoundError:
             if allow_absent:
                 return None
@@ -2462,7 +2534,7 @@ class HostSystem:
         ):
             raise InstallError("root venv metadata is unsafe")
 
-        lock_path = VENV / ".lock"
+        lock_path = venv / ".lock"
         try:
             path_metadata = os.lstat(lock_path)
         except FileNotFoundError:
@@ -2480,18 +2552,18 @@ class HostSystem:
             raise InstallError("root venv lock authority is unsafe")
         return path_metadata
 
-    def venv_lock_requires_hardening(self) -> bool:
+    def venv_lock_requires_hardening(self, venv: Path) -> bool:
         """Detect the one safe, installer-owned venv drift that may be repaired."""
-        metadata = self._venv_lock_metadata(allow_absent=True)
+        metadata = self._venv_lock_metadata(allow_absent=True, venv=venv)
         return bool(metadata is not None and stat.S_IMODE(metadata.st_mode) != 0o600)
 
-    def harden_venv_lock(self) -> None:
+    def harden_venv_lock(self, venv: Path) -> None:
         """Converge uv's synchronization lock before validating venv authority."""
-        path_metadata = self._venv_lock_metadata(allow_absent=False)
+        path_metadata = self._venv_lock_metadata(allow_absent=False, venv=venv)
         if path_metadata is None:  # pragma: no cover - allow_absent=False owns this invariant
             raise InstallError("root venv lock is unavailable")
 
-        lock_path = VENV / ".lock"
+        lock_path = venv / ".lock"
         flags = (
             os.O_RDONLY
             | getattr(os, "O_CLOEXEC", 0)
@@ -2535,12 +2607,12 @@ class HostSystem:
         if close_error is not None:
             raise InstallError("root venv lock close failed") from close_error
 
-    def sync_venv(self, source_root: Path) -> None:
+    def sync_venv(self, source_root: Path, *, venv: Path) -> None:
         system_python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
         uv = _safe_root_executable(UV_BINARY, label="uv")
         self._validate_system_python_version(system_python)
         environment = {"PATH": _ROOT_PATH, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
-        environment["UV_PROJECT_ENVIRONMENT"] = str(VENV)
+        environment["UV_PROJECT_ENVIRONMENT"] = str(venv)
         self.runner.run(
             [
                 str(uv),
@@ -2559,13 +2631,13 @@ class HostSystem:
             ],
             env=environment,
         )
-        self.harden_venv_lock()
-        if not self.venv_ready():  # pragma: no cover - venv_ready either succeeds or raises
+        self.harden_venv_lock(venv)
+        if not self.venv_ready(venv):  # pragma: no cover - venv_ready either succeeds or raises
             raise InstallError("root venv installation did not converge")
-        if not self.package_runtime_ready():
+        if not self.package_runtime_ready(venv):
             raise InstallError("root venv broker import probe failed")
 
-    def _runtime_probe(self, program: str) -> bool:
+    def _runtime_probe(self, program: str, *, venv: Path) -> bool:
         service_uid, _service_gid = self._service_ids()
         result = self.runner.run(
             [
@@ -2579,14 +2651,15 @@ class HostSystem:
                 f"HOME={STATE_ROOT}",
                 f"USER={SERVICE_USER}",
                 f"LOGNAME={SERVICE_USER}",
-                f"PATH={VENV / 'bin'}:{_ROOT_PATH}",
+                f"PATH={venv / 'bin'}:{_ROOT_PATH}",
                 "LANG=C.UTF-8",
                 "LC_ALL=C.UTF-8",
+                "PYTHONDONTWRITEBYTECODE=1",
                 f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
                 f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
                 f"KUBECONFIG={KUBECONFIG_PATH}",
                 f"LOOM_STAGING_ROLLOUT_CONFIG={CONFIG_PATH}",
-                str(VENV / "bin/python"),
+                str(venv / "bin/python"),
                 "-I",
                 "-B",
                 "-c",
@@ -2596,17 +2669,19 @@ class HostSystem:
         )
         return result.returncode == 0
 
-    def package_runtime_ready(self) -> bool:
+    def package_runtime_ready(self, venv: Path) -> bool:
         """Import the broker and render packaged assets as the service user."""
-        return self._runtime_probe(_PACKAGE_RUNTIME_PROBE)
+        return self._runtime_probe(_PACKAGE_RUNTIME_PROBE, venv=venv)
 
-    def broker_runtime_ready(self) -> bool:
+    def broker_runtime_ready(self, venv: Path) -> bool:
         """Exercise packaged assets and load the protected broker config."""
-        return self._runtime_probe(_BROKER_RUNTIME_PROBE)
+        return self._runtime_probe(_BROKER_RUNTIME_PROBE, venv=venv)
 
     def _candidate_source_publication(
         self,
         operation: str,
+        *,
+        venv: Path,
     ) -> dict[str, object] | None:
         """Run the fixed service-user candidate checkout publication boundary."""
         if operation not in {"prepare", "check"}:
@@ -2624,14 +2699,15 @@ class HostSystem:
                 f"HOME={STATE_ROOT}",
                 f"USER={SERVICE_USER}",
                 f"LOGNAME={SERVICE_USER}",
-                f"PATH={VENV / 'bin'}:{_ROOT_PATH}",
+                f"PATH={venv / 'bin'}:{_ROOT_PATH}",
                 "LANG=C.UTF-8",
                 "LC_ALL=C.UTF-8",
+                "PYTHONDONTWRITEBYTECODE=1",
                 f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
                 f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
                 f"KUBECONFIG={KUBECONFIG_PATH}",
                 f"LOOM_STAGING_ROLLOUT_CONFIG={CONFIG_PATH}",
-                str(VENV / "bin/python"),
+                str(venv / "bin/python"),
                 "-I",
                 "-B",
                 "-m",
@@ -2683,18 +2759,18 @@ class HostSystem:
             raise InstallError("candidate source publication evidence digest is invalid")
         return dict(payload)
 
-    def preflight_candidate_source_ready(self) -> bool:
+    def preflight_candidate_source_ready(self, venv: Path) -> bool:
         """Verify the exact immutable shared checkout without changing it."""
-        report = self._candidate_source_publication("check")
+        report = self._candidate_source_publication("check", venv=venv)
         return report is not None and report.get("action") == "matched"
 
-    def ensure_preflight_candidate_source(self) -> bool:
+    def ensure_preflight_candidate_source(self, venv: Path) -> bool:
         """Publish the exact immutable shared checkout without activating GB10."""
-        before = self.preflight_candidate_source_ready()
-        report = self._candidate_source_publication("prepare")
+        before = self.preflight_candidate_source_ready(venv)
+        report = self._candidate_source_publication("prepare", venv=venv)
         if report is None:  # pragma: no cover - prepare raises on failure
             raise InstallError("candidate source publication failed safely")
-        if not self.preflight_candidate_source_ready():
+        if not self.preflight_candidate_source_ready(venv):
             raise InstallError("candidate source publication did not converge")
         return not before or report.get("action") == "created"
 
@@ -3273,13 +3349,15 @@ class HostSystem:
             raise InstallError("loom-staging kubeconfig export is empty")
         return result.stdout.encode("utf-8")
 
-    def preflight_credentials_ready(self) -> bool:
+    def preflight_credentials_ready(self, venv: Path) -> bool:
         """Probe the exact installed credential authority without exposing tokens."""
-        if not (VENV / "bin/python").is_file():
+        if not (venv / "bin/python").is_file():
             return False
         result = self._probe(
             [
-                str(VENV / "bin/python"),
+                str(venv / "bin/python"),
+                "-I",
+                "-B",
                 "-m",
                 "loom_cli.rollout.operator.preflight_credential_installer",
                 "check",
@@ -3293,13 +3371,20 @@ class HostSystem:
             return False
         return isinstance(payload, dict) and payload.get("ok") is True
 
-    def ensure_preflight_credentials(self, team_id: str) -> bool:
+    def ensure_preflight_credentials(
+        self,
+        team_id: str,
+        *,
+        venv: Path,
+    ) -> bool:
         """Apply fixed RBAC and publish fresh bounded TokenRequest kubeconfigs."""
         _validate_team_id(team_id)
-        before = self.preflight_credentials_ready()
+        before = self.preflight_credentials_ready(venv)
         result = self.runner.run(
             [
-                str(VENV / "bin/python"),
+                str(venv / "bin/python"),
+                "-I",
+                "-B",
                 "-m",
                 "loom_cli.rollout.operator.preflight_credential_installer",
                 "install",
@@ -3310,6 +3395,7 @@ class HostSystem:
                 "HOME": "/root",
                 "LANG": "C.UTF-8",
                 "LC_ALL": "C.UTF-8",
+                "PYTHONDONTWRITEBYTECODE": "1",
                 "PATH": _ROOT_PATH,
                 "USER": "root",
                 "LOGNAME": "root",
@@ -3324,7 +3410,7 @@ class HostSystem:
         changed = payload.get("changed")
         if not isinstance(changed, list) or any(not isinstance(path, str) for path in changed):
             raise InstallError("preflight credential install ledger is invalid")
-        if not self.preflight_credentials_ready():
+        if not self.preflight_credentials_ready(venv):
             raise InstallError("preflight credential authority did not converge")
         return not before or bool(changed)
 
@@ -3396,11 +3482,15 @@ class HostSystem:
         current = self._probe(["stat", "-c", stat_format, str(path)]).stdout.strip()
         return current == expected
 
-    def gb10_trust_ready(self) -> bool:
+    def gb10_trust_ready(self, venv: Path, source_sha: str) -> bool:
         result = self.runner.run(
             [
-                str(VENV / "bin/python"),
-                str(TRUST_TOOL_PATH),
+                str(venv / "bin/python"),
+                "-I",
+                "-B",
+                str(_candidate_trust_tool_path(source_sha)),
+                "--ssh-config",
+                str(_candidate_ssh_config_path(source_sha)),
                 "check",
             ],
             check=False,
@@ -3410,7 +3500,7 @@ class HostSystem:
 
     def prepare_gb10_trust_ledger(
         self,
-        source_root: Path,
+        source_sha: str,
         *,
         mode: str,
         previous_source_sha: str | None,
@@ -3423,6 +3513,8 @@ class HostSystem:
         operation = operations.get(mode)
         if operation is None:
             raise InstallError("GB10 trust ledger preparation mode is invalid")
+        candidate_tool = _candidate_trust_tool_path(source_sha)
+        candidate_config = _candidate_ssh_config_path(source_sha)
         system_python = _safe_root_executable(SYSTEM_PYTHON, label="system Python")
         self._validate_system_python_version(system_python)
         if mode == "legacy":
@@ -3441,7 +3533,10 @@ class HostSystem:
                     [
                         str(system_python),
                         "-I",
-                        str(source_root / "scripts/ops/staging_rollout_gb10_trust.py"),
+                        "-B",
+                        str(candidate_tool),
+                        "--ssh-config",
+                        str(candidate_config),
                         "validate-legacy-topology",
                         "--previous-config",
                         str(path),
@@ -3452,17 +3547,24 @@ class HostSystem:
             [
                 str(system_python),
                 "-I",
-                str(source_root / "scripts/ops/staging_rollout_gb10_trust.py"),
+                "-B",
+                str(candidate_tool),
+                "--ssh-config",
+                str(candidate_config),
                 operation,
             ],
             **self._trust_command_kwargs(),
         )
 
-    def require_gb10_revocation_complete(self) -> None:
+    def require_gb10_revocation_complete(self, venv: Path, source_sha: str) -> None:
         self.runner.run(
             [
-                str(VENV / "bin/python"),
-                str(TRUST_TOOL_PATH),
+                str(venv / "bin/python"),
+                "-I",
+                "-B",
+                str(_candidate_trust_tool_path(source_sha)),
+                "--ssh-config",
+                str(_candidate_ssh_config_path(source_sha)),
                 "finalize-check",
             ],
             **self._trust_command_kwargs(),
@@ -3557,6 +3659,7 @@ class HostSystem:
         source_base_sha: str | None = None,
     ) -> list[str]:
         failures: list[str] = []
+        candidate_venv = _candidate_venv_path(expected_sha)
         operator_group = self._probe(["getent", "group", OPERATOR_GROUP])
         if operator_group.returncode != 0:
             failures.append("operator-group")
@@ -3669,14 +3772,14 @@ class HostSystem:
         config_links = self._probe(["stat", "-c", "%h", str(CONFIG_PATH)])
         if config_links.returncode != 0 or config_links.stdout.strip() != "1":
             failures.append(f"metadata-links:{CONFIG_PATH}")
-        venv_ready = self.venv_ready()
+        venv_ready = self.venv_ready(candidate_venv)
         if not venv_ready:
             failures.append("root-venv")
         elif not service_account_ready:
             failures.append("broker-runtime")
         else:
             try:
-                broker_ready = self.broker_runtime_ready()
+                broker_ready = self.broker_runtime_ready(candidate_venv)
             except InstallError:
                 broker_ready = False
             if not broker_ready:
@@ -3687,7 +3790,7 @@ class HostSystem:
             failures.append("service-key")
         if not Path(f"/var/lib/systemd/linger/{SERVICE_USER}").is_file():
             failures.append("linger")
-        if not self.gb10_trust_ready():
+        if not self.gb10_trust_ready(candidate_venv, expected_sha):
             failures.append("gb10-trust")
         return failures
 
@@ -3832,11 +3935,15 @@ class HostSystem:
         if Path(f"/var/lib/systemd/linger/{SERVICE_USER}").exists():
             self.runner.run(["loginctl", "disable-linger", SERVICE_USER])
 
-    def revoke_gb10_trust(self) -> None:
+    def revoke_gb10_trust(self, venv: Path, source_sha: str) -> None:
         self.runner.run(
             [
-                str(VENV / "bin/python"),
-                str(TRUST_TOOL_PATH),
+                str(venv / "bin/python"),
+                "-I",
+                "-B",
+                str(_candidate_trust_tool_path(source_sha)),
+                "--ssh-config",
+                str(_candidate_ssh_config_path(source_sha)),
                 "revoke",
             ],
             **self._trust_command_kwargs(),
@@ -3913,14 +4020,26 @@ class HostInstaller:
         return self.system.source_file(self.source_root, self.source_sha, relative_path)
 
     def _asset(self, name: str) -> bytes:
-        return self._source_file(f"deploy/staging-rollout/{name}")
+        payload = self._source_file(f"deploy/staging-rollout/{name}")
+        marker = _CANDIDATE_VENV_TOKEN.encode()
+        if marker not in payload:
+            return payload
+        if self.source_sha is None or payload.count(marker) != 2:
+            raise InstallError("staging rollout runtime template markers are invalid")
+        return payload.replace(marker, str(_candidate_venv_path(self.source_sha)).encode())
 
     def _render_config(self, team_id: str, admin_token: bytes) -> bytes:
         template = self._asset("staging-rollout.toml").decode("utf-8")
-        if template.count(_FINGERPRINT_TOKEN) != 1 or template.count(_TEAM_TOKEN) != 1:
+        if (
+            template.count(_FINGERPRINT_TOKEN) != 1
+            or template.count(_TEAM_TOKEN) != 1
+            or template.count(_SOURCE_SHA_TOKEN) != 2
+            or self.source_sha is None
+        ):
             raise InstallError("staging rollout config template markers are invalid")
         rendered = template.replace(_FINGERPRINT_TOKEN, _token_fingerprint(admin_token))
         rendered = rendered.replace(_TEAM_TOKEN, _validate_team_id(team_id))
+        rendered = rendered.replace(_SOURCE_SHA_TOKEN, self.source_sha)
         if self.source_mode == "sealed-cumulative":
             if (
                 self.source_sha is None
@@ -3939,7 +4058,7 @@ class HostInstaller:
         self._validate_rendered_config(
             payload,
             team_id,
-            source_sha=self.source_sha if self.source_mode == "sealed-cumulative" else None,
+            source_sha=self.source_sha,
             source_tree_sha=self.source_tree_sha,
             source_base_sha=self.source_base_sha,
         )
@@ -3998,12 +4117,18 @@ class HostInstaller:
             "operator_group": OPERATOR_GROUP,
             "remote_url": REMOTE_URL,
             "target_ref": FETCH_REF,
-            "runner_repo": str(CANDIDATE_REPO),
+            "runner_repo": (
+                str(_candidate_repo_path(source_sha)) if source_sha is not None else None
+            ),
             "state_root": str(STATE_ROOT),
             "runtime_root": str(RUNTIME_ROOT),
             "rollout_root": "/data/loom-staging",
             "kubeconfig_path": str(KUBECONFIG_PATH),
-            "cluster_config_path": str(CANDIDATE_REPO / "deploy/environments/staging.cluster.toml"),
+            "cluster_config_path": (
+                str(_candidate_repo_path(source_sha) / "deploy/environments/staging.cluster.toml")
+                if source_sha is not None
+                else None
+            ),
             "admin_token_source": f"file:{PROTECTED_INPUTS[0]}",
             "worker_token_source": f"file:{PROTECTED_INPUTS[2]}",
             "service_token_source": f"file:{PROTECTED_INPUTS[1]}",
@@ -4018,6 +4143,8 @@ class HostInstaller:
             "backup_max_objects": 1_000_000,
             "backup_max_entries": 16_000_000,
         }
+        if source_sha is None or _SHA_RE.fullmatch(source_sha) is None:
+            raise InstallError("rendered staging config source binding is invalid")
         if any(raw.get(key) != value for key, value in literals.items()):
             raise InstallError("rendered staging config policy is invalid")
         if sealed and (
@@ -4115,15 +4242,15 @@ class HostInstaller:
         service_key = ("user", SERVICE_USER)
         if set(adjustments) & set(snapshot_adjustments):
             raise InstallError("install record ACL ledgers overlap")
-        for grant, adjustment in adjustments.items():
+        for grant, mask_adjustment in adjustments.items():
             before = _acl_snapshot_map(
-                adjustment.before_acl,
+                mask_adjustment.before_acl,
                 allow_empty=grant.default,
             )
             if service_key not in before and grant not in grants:
                 raise InstallError("install record ACL ledgers are inconsistent")
-        for grant, adjustment in snapshot_adjustments.items():
-            before = _acl_snapshot_map(adjustment.before_acl, allow_empty=False)
+        for grant, snapshot_adjustment in snapshot_adjustments.items():
+            before = _acl_snapshot_map(snapshot_adjustment.before_acl, allow_empty=False)
             if service_key not in before and grant not in grants:
                 raise InstallError("install record ACL ledgers are inconsistent")
 
@@ -4277,6 +4404,9 @@ class HostInstaller:
         source_sha = self.source_sha
         if source_sha is None:  # pragma: no cover - prepare_install_source owns this
             raise InstallError("root installation source SHA is unavailable")
+        candidate_repo = _candidate_repo_path(source_sha)
+        candidate_venv = _candidate_venv_path(source_sha)
+        candidate_runtime = candidate_repo.parent
         if sealed_source is None:
             self.system.validate_invocation_merged(invocation_head, source_sha)
         self.system.validate_assets(self.source_root, source_sha)
@@ -4284,6 +4414,9 @@ class HostInstaller:
         root_directories = (
             Path("/etc/loom"),
             RUNNER_ROOT,
+            CANDIDATE_RUNTIME_ROOT,
+            candidate_runtime,
+            candidate_repo,
             Path("/usr/local/libexec"),
             Path("/usr/local/bin"),
             SUDOERS_PATH.parent,
@@ -4473,19 +4606,20 @@ class HostInstaller:
             if previous_adjustment is not None and previous_adjustment != adjustment:
                 raise InstallError("ACL mask ledger conflicts with the live baseline")
             mask_adjustments[plan.grant] = adjustment
-        for grant, adjustment in mask_adjustments.items():
-            state = self.system.acl_adjustment_state(adjustment)
-            live_plan = acl_plan_by_grant.get(grant)
-            if state == "drift" or (
-                state == "before" and (live_plan is None or live_plan.mask_adjustment != adjustment)
-            ):
-                raise InstallError("ACL mask ledger does not match the live ACL")
-        for grant, adjustment in snapshot_adjustments.items():
-            state = self.system.acl_adjustment_state(adjustment)
+        for grant, mask_adjustment in mask_adjustments.items():
+            state = self.system.acl_adjustment_state(mask_adjustment)
             live_plan = acl_plan_by_grant.get(grant)
             if state == "drift" or (
                 state == "before"
-                and (live_plan is None or live_plan.snapshot_adjustment != adjustment)
+                and (live_plan is None or live_plan.mask_adjustment != mask_adjustment)
+            ):
+                raise InstallError("ACL mask ledger does not match the live ACL")
+        for grant, snapshot_adjustment in snapshot_adjustments.items():
+            state = self.system.acl_adjustment_state(snapshot_adjustment)
+            live_plan = acl_plan_by_grant.get(grant)
+            if state == "drift" or (
+                state == "before"
+                and (live_plan is None or live_plan.snapshot_adjustment != snapshot_adjustment)
             ):
                 raise InstallError("ACL snapshot ledger does not match the live ACL")
         previous_fingerprint = (
@@ -4610,7 +4744,6 @@ class HostInstaller:
                 (GENERATED_ROOT, 0o700),
                 (PREFLIGHT_CREDENTIAL_ROOT, 0o700),
                 (REHEARSAL_STATE_ROOT, 0o700),
-                (CANDIDATE_REPO, 0o700),
             )
         )
         if self.source_mode == "sealed-cumulative":
@@ -4626,13 +4759,15 @@ class HostInstaller:
             and shared_work2_mount_ready
             and self.system.shared_worker_repo_root_ready()
         )
-        venv_lock_requires_hardening = self.system.venv_lock_requires_hardening()
-        venv_ready = not venv_lock_requires_hardening and self.system.venv_ready()
+        venv_lock_requires_hardening = self.system.venv_lock_requires_hardening(candidate_venv)
+        venv_ready = not venv_lock_requires_hardening and self.system.venv_ready(candidate_venv)
         package_runtime_ready = (
-            not service_user_missing and venv_ready and self.system.package_runtime_ready()
+            not service_user_missing
+            and venv_ready
+            and self.system.package_runtime_ready(candidate_venv)
         )
         preflight_credentials_ready = (
-            package_runtime_ready and self.system.preflight_credentials_ready()
+            package_runtime_ready and self.system.preflight_credentials_ready(candidate_venv)
         )
         installed_files_ready = all(
             self.filesystem.file_matches(
@@ -4651,13 +4786,15 @@ class HostInstaller:
             for destination, payload, mode, owner, group in installed_files
         )
         broker_runtime_ready = (
-            package_runtime_ready and installed_files_ready and self.system.broker_runtime_ready()
+            package_runtime_ready
+            and installed_files_ready
+            and self.system.broker_runtime_ready(candidate_venv)
         )
         inotify_capacity_ready = self.system.inotify_capacity_ready()
         preflight_candidate_source_ready = bool(
             broker_runtime_ready
             and shared_worker_repo_ready
-            and self.system.preflight_candidate_source_ready()
+            and self.system.preflight_candidate_source_ready(candidate_venv)
         )
         runtime_ready = not service_user_missing and self.system.runtime_directory_ready()
         kubeconfig_ready = (
@@ -4818,7 +4955,6 @@ class HostInstaller:
             (GENERATED_ROOT, 0o700),
             (PREFLIGHT_CREDENTIAL_ROOT, 0o700),
             (REHEARSAL_STATE_ROOT, 0o700),
-            (CANDIDATE_REPO, 0o700),
         ):
             if self.system.ensure_owned_directory(directory, owner=SERVICE_USER, mode=mode):
                 changes.append(f"directory:{directory}")
@@ -4864,16 +5000,16 @@ class HostInstaller:
         if candidate_changed:
             changes.append("candidate-checkout")
         if venv_lock_requires_hardening:
-            self.system.harden_venv_lock()
+            self.system.harden_venv_lock(candidate_venv)
             changes.append("venv-lock")
         if (
             refresh_runtime
-            or not self.system.venv_ready()
-            or not self.system.package_runtime_ready()
+            or not self.system.venv_ready(candidate_venv)
+            or not self.system.package_runtime_ready(candidate_venv)
         ):
-            self.system.sync_venv(self.source_root)
+            self.system.sync_venv(self.source_root, venv=candidate_venv)
             changes.append("venv")
-        if self.system.ensure_preflight_credentials(team_id):
+        if self.system.ensure_preflight_credentials(team_id, venv=candidate_venv):
             changes.append("preflight-credentials")
         if self.system.ensure_service_key():
             created_service_key = True
@@ -4895,7 +5031,7 @@ class HostInstaller:
         if ledger_mode == "legacy" and previous_source_sha is None:
             raise InstallError("legacy GB10 trust source binding is unavailable")
         self.system.prepare_gb10_trust_ledger(
-            self.source_root,
+            source_sha,
             mode=ledger_mode,
             previous_source_sha=previous_source_sha,
         )
@@ -4921,9 +5057,9 @@ class HostInstaller:
                 changes.append(f"ownership:{destination}")
         if self.system.ensure_inotify_capacity():
             changes.append("sysctl:fs.inotify.max_user_instances")
-        if not self.system.broker_runtime_ready():
+        if not self.system.broker_runtime_ready(candidate_venv):
             raise InstallError("installed broker config probe failed")
-        if self.system.ensure_preflight_candidate_source():
+        if self.system.ensure_preflight_candidate_source(candidate_venv):
             changes.append("candidate-source-publication")
         if self.system.create_runtime_directory():
             changes.append(f"directory:{RUNTIME_ROOT}")
@@ -4987,7 +5123,7 @@ class HostInstaller:
         if transaction_active:
             self.system.end_maintenance()
             maintenance_enabled = False
-        trust_ready = self.system.gb10_trust_ready()
+        trust_ready = self.system.gb10_trust_ready(candidate_venv, source_sha)
         post_install_preflight: dict[str, object] | None = None
         if trust_ready and changes:
             post_install_preflight = self.system.run_post_install_preflight()
@@ -5084,12 +5220,7 @@ class HostInstaller:
                 self._validate_rendered_config(
                     config_payload,
                     team_id,
-                    source_sha=(
-                        record_source_sha
-                        if record.get("source_mode") == "sealed-cumulative"
-                        and isinstance(record_source_sha, str)
-                        else None
-                    ),
+                    source_sha=(record_source_sha if isinstance(record_source_sha, str) else None),
                     source_tree_sha=(
                         record_source_tree_sha if isinstance(record_source_tree_sha, str) else None
                     ),
@@ -5138,11 +5269,15 @@ class HostInstaller:
                 )
             ):
                 failures.append(str(INSTALL_ATTESTATION))
+        source_sha = record.get("source_sha")
+        if not isinstance(source_sha, str):  # _bind_existing_source has already validated this
+            raise InstallError("install record source SHA is invalid")
+        candidate_venv = _candidate_venv_path(source_sha)
         if not self.filesystem.exists(KUBECONFIG_PATH):
             failures.append(str(KUBECONFIG_PATH))
-        if not self.system.preflight_credentials_ready():
+        if not self.system.preflight_credentials_ready(candidate_venv):
             failures.append("preflight-credentials")
-        if not self.system.preflight_candidate_source_ready():
+        if not self.system.preflight_candidate_source_ready(candidate_venv):
             failures.append("candidate-source-publication")
         if not self.filesystem.exists(SERVICE_KEY):
             failures.append(str(SERVICE_KEY))
@@ -5157,9 +5292,6 @@ class HostInstaller:
             for path in generated_env_templates
         ):
             failures.append("generated-gb10-worker-env-template")
-        source_sha = record.get("source_sha")
-        if not isinstance(source_sha, str):  # _bind_existing_source has already validated this
-            raise InstallError("install record source SHA is invalid")
         if record.get("source_mode") == "sealed-cumulative":
             source_tree_sha = record.get("source_tree_sha")
             source_base_sha = record.get("source_base_sha")
@@ -5174,12 +5306,12 @@ class HostInstaller:
             )
         else:
             failures.extend(self.system.check_runtime(source_sha))
-        for grant, adjustment in mask_adjustments.items():
-            if self.system.acl_adjustment_state(adjustment) != "after":
+        for grant, mask_adjustment in mask_adjustments.items():
+            if self.system.acl_adjustment_state(mask_adjustment) != "after":
                 namespace = "default" if grant.default else "access"
                 failures.append(f"acl-mask:{namespace}:{grant.path}")
-        for grant, adjustment in snapshot_adjustments.items():
-            if self.system.acl_adjustment_state(adjustment) != "after":
+        for grant, snapshot_adjustment in snapshot_adjustments.items():
+            if self.system.acl_adjustment_state(snapshot_adjustment) != "after":
                 failures.append(f"acl-snapshot:access:{grant.path}")
         return {"ok": not failures, "failures": failures}
 
@@ -5267,6 +5399,9 @@ class HostInstaller:
         if record is None:
             raise InstallError("uninstall requires a valid install record")
         self._bind_existing_source(record)
+        if self.source_sha is None:  # pragma: no cover - _bind_existing_source owns this
+            raise InstallError("install record source SHA is invalid")
+        candidate_venv = _candidate_venv_path(self.source_sha)
         grants = self._record_grants(record)
         mask_adjustments = self._record_mask_adjustments(record)
         snapshot_adjustments = self._record_snapshot_adjustments(record)
@@ -5350,8 +5485,8 @@ class HostInstaller:
                 raise InstallError("refusing uninstall while a rollout is active")
             maintenance_enabled = True
         if trust_requires_revocation:
-            self.system.revoke_gb10_trust()
-            self.system.require_gb10_revocation_complete()
+            self.system.revoke_gb10_trust(candidate_venv, self.source_sha)
+            self.system.require_gb10_revocation_complete(candidate_venv, self.source_sha)
         ledger_path = self.filesystem.path(TRUST_REVOCATION_LEDGER)
         ledger_tombstone = self.filesystem.path(TRUST_REVOCATION_TOMBSTONE)
         ledger_present = ledger_path.exists() or ledger_path.is_symlink()

@@ -49,9 +49,14 @@ from loom_cli.rollout.preflight_artifact_store import (
     LoadedPreflightArtifacts,
     PreflightArtifactStore,
 )
-from loom_cli.rollout.preflight_contract import RegisteredCheck, SafeValue
+from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
+    RegisteredCheck,
+    SafeValue,
+)
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
+    ExternalSupervisorPredecessorSource,
     build_backup_lease_eligibility_check,
     build_backup_rotation_capacity_check,
     build_browser_runtime_check,
@@ -59,6 +64,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_credentials_metadata_check,
     build_docker_runtime_check,
+    build_external_supervisor_predecessor_check,
     build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
     build_gb10_shared_mount_check,
@@ -218,6 +224,7 @@ class PreflightRuntimeSources:
     readonly_authority_source: Callable[[], ReadonlyAuthorityEvidence]
     capacity_source: Callable[[], StagingCapacity]
     backup_authority: BackupAdmissionAuthority
+    external_supervisor_predecessor_source: ExternalSupervisorPredecessorSource
     systemd_run: SystemdCommandRunner
     gb10_run: SystemdCommandRunner
     gb10_targets: tuple[GB10ProbeTarget, ...]
@@ -436,6 +443,9 @@ class PreflightRuntimeSources:
                 expected_rotation_digest=authority.expected_rotation_digest,
             ),
             systemd_check,
+            build_external_supervisor_predecessor_check(
+                self.external_supervisor_predecessor_source
+            ),
             build_gb10_ssh_topology_check(
                 self.gb10_run,
                 targets=self.gb10_targets,
@@ -532,6 +542,9 @@ class PreflightRuntimeSources:
                 self.systemd_analyze_run,
                 candidate_root=self.candidate_root,
                 expected_candidate_sha=self.candidate.resolved_sha,
+                expected_candidate_tree=self.candidate.resolved_tree or "",
+                expected_image_tag=self.candidate.image_tag,
+                expected_environment=self.config.environment,
             ),
             build_production_defaults_plan_check(
                 profile_path=self.candidate_root / "deploy/environment-state/staging.toml",
@@ -587,12 +600,14 @@ class PreflightRuntimeSources:
             "backup.source-request": authority.source_request_id,
             "browser.report-schema.sha256": browser_report_schema_digest(),
             "candidate.base.sha": self.candidate.approved_base_sha or "none",
+            "candidate.image-tag": self.candidate.image_tag,
             "candidate.sha": self.candidate.resolved_sha,
             "candidate.tree": self.candidate.resolved_tree or "none",
             "candidate.source-mode": self.candidate.source_mode,
             "capacity.policy.sha256": staging_capacity_policy_digest(),
             "db.snapshot-identity": authority.db_snapshot_identity,
             "environment": self.config.environment,
+            "external-supervisor.unit-directory": EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
             "gb10.identity.metadata-fingerprint": self.gb10_identity_metadata_fingerprint,
             "gb10.inventory-digest": gb10_target_inventory_digest(self.gb10_targets),
             "gb10.mount-binding.sha256": self.gb10_mount_binding_digest,

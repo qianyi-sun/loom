@@ -36,7 +36,12 @@ from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
 from tests.loom_cli.rollout.operator.test_final_gate_plan import (
     _attestation as binding_attestation,
 )
-from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope, _lease
+from tests.loom_cli.rollout.operator.test_final_gate_plan import (
+    _envelope,
+    _lease,
+    _predecessor_evidence,
+    _systemd_evidence,
+)
 from tests.loom_cli.rollout.operator.test_final_gate_runner import _admission
 from tests.loom_cli.rollout.operator.test_protected_apply_baseline import (
     _baseline_executions,
@@ -108,6 +113,88 @@ def _execution(publication, *, image_digest: str | None = None):
     )[0]
 
 
+def _systemd_execution():
+    evidence = _systemd_evidence()
+    check = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="systemd.render",
+            failure_code="systemd.render.invalid",
+            tier=1,
+            stage=StageCapability.STATIC,
+            dependencies=(),
+            mutation_class=MutationClass.NONE,
+            input_keys=("candidate.sha",),
+            evidence_schema=(
+                EvidenceField("failed-units", "string-map"),
+                EvidenceField("supervisor-artifact-digest", "sha256"),
+                EvidenceField("supervisor-profile-sha256", "sha256"),
+                EvidenceField("supervisor-script-digests", "string-map"),
+                EvidenceField("supervisor-unit-digests", "string-map"),
+                EvidenceField("supervisor-unit-set-digest", "sha256"),
+                EvidenceField("unit-count", "integer"),
+                EvidenceField("unit-digests", "string-map"),
+                EvidenceField("unit-set-digest", "sha256"),
+            ),
+            timeout_seconds=5,
+            freshness_ttl_seconds=600,
+            remediation="restore exact candidate systemd unit rendering",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="test-v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: CheckProbe(
+                passed=True,
+                evidence=evidence,  # type: ignore[arg-type]
+            )
+        },
+    )
+    return PreflightDag((check,)).run(
+        CheckContext({"candidate.sha": "a" * 40}),
+        now=lambda: NOW,
+    )[0]
+
+
+def _predecessor_execution():
+    evidence = _predecessor_evidence()
+    check = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="external-supervisor.predecessor",
+            failure_code="external-supervisor.predecessor.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=(),
+            mutation_class=MutationClass.NONE,
+            input_keys=("candidate.sha",),
+            evidence_schema=(
+                EvidenceField("authority-kind", "string"),
+                EvidenceField("authority-digest", "sha256"),
+                EvidenceField("pointer-digest", "sha256"),
+                EvidenceField("unit-digests", "string-map"),
+                EvidenceField("unit-set-digest", "sha256"),
+                EvidenceField("live-evidence-digest", "sha256"),
+                EvidenceField("pending-transition-digest", "sha256"),
+                EvidenceField("transition-clear", "boolean"),
+                EvidenceField("runtime-ready", "boolean"),
+            ),
+            timeout_seconds=5,
+            freshness_ttl_seconds=600,
+            remediation="restore exact external supervisor predecessor authority",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="test-v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: CheckProbe(
+                passed=True,
+                evidence=evidence,  # type: ignore[arg-type]
+            )
+        },
+    )
+    return PreflightDag((check,)).run(
+        CheckContext({"candidate.sha": "a" * 40}),
+        now=lambda: NOW,
+    )[0]
+
+
 def _authority(tmp_path: Path, *, tamper: bool = False):
     state = tmp_path / "state"
     artifact_store = PreflightArtifactStore(state)
@@ -129,11 +216,13 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
         browser_report_schema_sha256="8" * 64,
     )
     execution = _execution(publication, image_digest="f" * 64 if tamper else None)
+    systemd_execution = _systemd_execution()
+    predecessor_execution = _predecessor_execution()
     baseline_executions = _baseline_executions()
     base = binding_attestation()
     attestation = PreflightAttestation.issue(
         bindings=base.bindings,
-        executions=(execution, *baseline_executions),
+        executions=(execution, systemd_execution, predecessor_execution, *baseline_executions),
         issued_at=NOW,
         registry_digest="9" * 64,
         coverage_digest="a" * 64,
@@ -141,7 +230,7 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
     rehearsal = PreflightRehearsal.from_executions(
         registry_digest=attestation.registry_digest,
         coverage_digest=attestation.coverage_digest,
-        executions=(execution, *baseline_executions),
+        executions=(execution, systemd_execution, predecessor_execution, *baseline_executions),
     )
     attempt = state / "requests" / "req-alpha" / "attempts" / "1"
     attempt.mkdir(parents=True, mode=0o700)
@@ -200,6 +289,7 @@ def test_final_gate_action_source_uses_attested_bundle_and_fixed_helper(tmp_path
     assert calls[0][0].endswith("final-helper")
     plan = FinalGatePlanStore(tmp_path / "state", request_id="req-alpha", attempt_number=1).read()
     assert plan.artifact_bundle_digest == Path(plan.artifact_descriptor_path).parent.name
+    assert plan.supervisor_artifact_digest == "4" * 64
     assert calls[0][calls[0].index("--plan-sha256") + 1] == plan.plan_digest
 
 

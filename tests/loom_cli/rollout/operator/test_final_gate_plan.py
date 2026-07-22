@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from dataclasses import replace
@@ -18,6 +19,7 @@ from loom_cli.rollout.operator.model import DriverEnvelope, driver_envelope_sha2
 from loom_cli.rollout.operator.protected_apply_baseline import ProtectedApplyBaseline
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     AttestationBindings,
     CheckContext,
     CheckOperation,
@@ -30,7 +32,10 @@ from loom_cli.rollout.preflight_contract import (
     RegisteredCheck,
     SecretRedactionPolicy,
     StageCapability,
+    external_supervisor_transition_digest,
+    external_supervisor_unit_set_digest,
 )
+from loom_cli.rollout.systemd_unit_readiness import UNIT_PATHS
 
 NOW = datetime(2026, 7, 19, 21, tzinfo=UTC)
 
@@ -82,6 +87,8 @@ def _attestation() -> PreflightAttestation:
         now=lambda: NOW,
     )
     lease = _lease()
+    systemd = _systemd_evidence()
+    predecessor = _predecessor_evidence()
     bindings = AttestationBindings(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
@@ -116,6 +123,40 @@ def _attestation() -> PreflightAttestation:
         gb10_unit_digest="7" * 64,
         browser_image_digest="sha256:" + "8" * 64,
         browser_report_schema="8" * 64,
+        supervisor_predecessor_kind="legacy-manifest",
+        supervisor_predecessor_digest=str(predecessor["authority-digest"]),
+        supervisor_predecessor_pointer_digest=str(predecessor["pointer-digest"]),
+        supervisor_predecessor_unit_sha256=dict(
+            predecessor["unit-digests"]  # type: ignore[arg-type]
+        ),
+        supervisor_predecessor_unit_set_digest=str(predecessor["unit-set-digest"]),
+        supervisor_predecessor_live_evidence_digest=str(predecessor["live-evidence-digest"]),
+        supervisor_predecessor_pending_transition_digest=str(
+            predecessor["pending-transition-digest"]
+        ),
+        supervisor_transition_digest=external_supervisor_transition_digest(
+            candidate_sha="a" * 40,
+            candidate_tree="b" * 40,
+            environment="staging",
+            predecessor_kind="legacy-manifest",
+            predecessor_digest=str(predecessor["authority-digest"]),
+            predecessor_pointer_digest=str(predecessor["pointer-digest"]),
+            predecessor_unit_sha256=dict(
+                predecessor["unit-digests"]  # type: ignore[arg-type]
+            ),
+            predecessor_unit_set_digest=str(predecessor["unit-set-digest"]),
+            predecessor_live_evidence_digest=str(predecessor["live-evidence-digest"]),
+            predecessor_pending_transition_digest=str(predecessor["pending-transition-digest"]),
+            target_artifact_digest=str(systemd["supervisor-artifact-digest"]),
+            target_profile_sha256=str(systemd["supervisor-profile-sha256"]),
+            target_script_sha256=dict(
+                systemd["supervisor-script-digests"]  # type: ignore[arg-type]
+            ),
+            target_unit_sha256=dict(
+                systemd["supervisor-unit-digests"]  # type: ignore[arg-type]
+            ),
+            target_unit_set_digest=str(systemd["supervisor-unit-set-digest"]),
+        ),
     )
     return PreflightAttestation.issue(
         bindings=bindings,
@@ -212,10 +253,61 @@ def _baseline() -> ProtectedApplyBaseline:
     )
 
 
+def _systemd_evidence() -> dict[str, object]:
+    supervisor_units = {
+        "loom-autoscaler-gb10-staging.service": "2" * 64,
+        "loom-autoscaler-gb10-staging.timer": "3" * 64,
+    }
+    units = {**{path: "1" * 64 for path in UNIT_PATHS}, **supervisor_units}
+    return {
+        "failed-units": {},
+        "supervisor-artifact-digest": "4" * 64,
+        "supervisor-profile-sha256": "5" * 64,
+        "supervisor-script-digests": {
+            "scripts/ops/worker_pool_autoscaler_external_once.py": "6" * 64,
+        },
+        "supervisor-unit-digests": supervisor_units,
+        "supervisor-unit-set-digest": external_supervisor_unit_set_digest(supervisor_units),
+        "unit-count": len(units),
+        "unit-digests": units,
+        "unit-set-digest": hashlib.sha256(
+            json.dumps(
+                {"failed": {}, "units": units},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    }
+
+
+def _predecessor_evidence() -> dict[str, object]:
+    units = {
+        "loom-autoscaler-gb10-staging.service": "7" * 64,
+        "loom-autoscaler-gb10-staging.timer": "8" * 64,
+    }
+    return {
+        "authority-kind": "legacy-manifest",
+        "authority-digest": "9" * 64,
+        "pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        "unit-digests": units,
+        "unit-set-digest": external_supervisor_unit_set_digest(units),
+        "live-evidence-digest": "a" * 64,
+        "pending-transition-digest": hashlib.sha256(b"{}").hexdigest(),
+        "transition-clear": True,
+        "runtime-ready": True,
+    }
+
+
 def _plan(tmp_path: Path) -> FinalGatePlan:
     attestation = _attestation()
     return FinalGatePlan.build(
-        _envelope(attestation), attestation, _artifacts(tmp_path), _lease(), _baseline()
+        _envelope(attestation),
+        attestation,
+        _artifacts(tmp_path),
+        _lease(),
+        _baseline(),
+        _systemd_evidence(),
+        _predecessor_evidence(),
     )
 
 
@@ -223,6 +315,7 @@ def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Pa
     plan = _plan(tmp_path)
 
     assert FinalGatePlan.from_dict(plan.to_dict()) == plan
+    assert plan.schema_version == 3
     assert plan.candidate_tree == "b" * 40
     assert plan.request_envelope_sha256 == driver_envelope_sha256(_envelope(_attestation()))
     assert plan.artifact_bundle_digest == "e" * 64
@@ -249,11 +342,60 @@ def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None
             _artifacts(tmp_path),
             _lease(),
             _baseline(),
+            _systemd_evidence(),
+            _predecessor_evidence(),
+        )
+
+    drifted_systemd = _systemd_evidence()
+    drifted_systemd["unit-set-digest"] = "0" * 64
+    with pytest.raises(ValueError, match="systemd evidence is invalid"):
+        FinalGatePlan.build(
+            envelope,
+            attestation,
+            _artifacts(tmp_path),
+            _lease(),
+            _baseline(),
+            drifted_systemd,
+            _predecessor_evidence(),
+        )
+
+    unpaired_systemd = _systemd_evidence()
+    unpaired_units = dict(unpaired_systemd["unit-digests"])  # type: ignore[arg-type]
+    unpaired_units["loom-other.timer"] = unpaired_units.pop("loom-autoscaler-gb10-staging.timer")
+    unpaired_systemd["unit-digests"] = unpaired_units
+    unpaired_systemd["unit-set-digest"] = hashlib.sha256(
+        json.dumps(
+            {"failed": {}, "units": unpaired_units},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="systemd evidence is invalid"):
+        FinalGatePlan.build(
+            envelope,
+            attestation,
+            _artifacts(tmp_path),
+            _lease(),
+            _baseline(),
+            unpaired_systemd,
+            _predecessor_evidence(),
         )
 
     payload = _plan(tmp_path).to_dict()
     payload["starting_mutation_epoch"] = 8
     with pytest.raises(ValueError, match="content digest drifted"):
+        FinalGatePlan.from_dict(payload)
+
+    payload = _plan(tmp_path).to_dict()
+    payload["supervisor_transition_digest"] = "0" * 64
+    payload["plan_digest"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "plan_digest"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="transition identity drifted"):
         FinalGatePlan.from_dict(payload)
 
 

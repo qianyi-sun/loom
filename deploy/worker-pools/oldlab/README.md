@@ -72,9 +72,10 @@ For staging release gates, supervise OLDLAB through the
 `deploy/environment-state/staging.toml`. `loom admin environment-state
 apply` writes the user systemd service/timer on the Slurm submit host and
 `check` fails if the timer is inactive, the unit points at a stale rollout
-checkout, or the ExecStart command omits `--pool-name oldlab`. Do not leave a
-free-floating ops script as the timer target; use the repo entrypoint
-`scripts/ops/worker_pool_autoscaler_external_once.py --pool-name oldlab`.
+checkout, or the ExecStart command omits the exact environment and pool
+bindings. Do not leave a free-floating ops script as the timer target; use the
+repo entrypoint `scripts/ops/worker_pool_autoscaler_external_once.py
+--environment <environment> --pool-name oldlab`.
 
 The remote-worker env file and Loom checkout path must be readable from every
 included Slurm node. For OLDLAB 4/5, do not use a control-node-local checkout
@@ -105,8 +106,8 @@ Each environment's env-state profile carries an
 entrypoint `scripts/ops/worker_pool_autoscaler_external_once.py` for one pool.
 `loom admin environment-state apply` writes the unit files under
 `~/.config/systemd/user`, and `check` reports drift when a unit is missing,
-points at a stale checkout, omits `--pool-name`, or is not enabled/active as
-declared.
+points at a stale checkout, omits the exact `--environment` or `--pool-name`
+binding, or is not enabled/active as declared.
 
 Each supervisor tunnels to the environment's Postgres on a reserved local port,
 so no two supervisors on one host collide. The `--db-local-port` scheme is:

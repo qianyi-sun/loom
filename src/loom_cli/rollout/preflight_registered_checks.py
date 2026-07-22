@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.browser_runtime_readiness import (
@@ -25,6 +26,10 @@ from loom_cli.rollout.credential_authority import (
 )
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
+from loom_cli.rollout.external_supervisor_readiness import (
+    build_external_supervisor_artifact,
+    verify_external_supervisor_artifact,
+)
 from loom_cli.rollout.final_gate_readiness import (
     PROTECTED_MUTATION_CHECK_IDS,
     FinalGateAction,
@@ -93,6 +98,8 @@ from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.operator.systemd import SystemdLaunchCancelEvidence
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+    EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
     CheckContext,
     CheckOperation,
     CheckProbe,
@@ -102,6 +109,7 @@ from loom_cli.rollout.preflight_contract import (
     RegisteredCheck,
     SecretRedactionPolicy,
     StageCapability,
+    external_supervisor_unit_set_digest,
 )
 from loom_cli.rollout.production_defaults_readiness import (
     ProductionDefaultsArtifact,
@@ -138,6 +146,8 @@ from loom_cli.rollout.systemd_unit_readiness import (
     inspect_systemd_units,
 )
 
+_CLEAR_EXTERNAL_SUPERVISOR_TRANSITION_DIGEST = hashlib.sha256(b"{}").hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class CredentialProbeSource:
@@ -166,6 +176,72 @@ class CredentialProbeSource:
             or len(self.expected_content_fingerprint) > 96
         ):
             raise ValueError("credential expected fingerprint is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalSupervisorPredecessorSnapshot:
+    """Secret-free read-only snapshot of the active supervisor authority."""
+
+    kind: str
+    authority_digest: str
+    pointer_digest: str
+    unit_sha256: Mapping[str, str]
+    live_evidence_digest: str
+    pending_transition_digest: str
+    transition_clear: bool
+    runtime_ready: bool
+    pool_identity_digest: str
+
+    def __post_init__(self) -> None:
+        units = dict(self.unit_sha256)
+        try:
+            external_supervisor_unit_set_digest(units)
+        except ValueError as exc:
+            raise ValueError("external supervisor predecessor snapshot is invalid") from exc
+        if (
+            self.kind not in {"legacy-manifest", "canonical"}
+            or not units
+            or any(
+                len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
+                for value in (
+                    self.authority_digest,
+                    self.pointer_digest,
+                    self.live_evidence_digest,
+                    self.pending_transition_digest,
+                    self.pool_identity_digest,
+                )
+            )
+            or type(self.transition_clear) is not bool
+            or type(self.runtime_ready) is not bool
+            or self.authority_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            or (
+                self.kind == "legacy-manifest"
+                and self.pointer_digest != EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            )
+            or (
+                self.kind == "canonical"
+                and self.pointer_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            )
+            or (
+                self.transition_clear
+                and self.pending_transition_digest != _CLEAR_EXTERNAL_SUPERVISOR_TRANSITION_DIGEST
+            )
+        ):
+            raise ValueError("external supervisor predecessor snapshot is invalid")
+        object.__setattr__(
+            self,
+            "unit_sha256",
+            MappingProxyType(dict(sorted(units.items()))),
+        )
+
+    @property
+    def unit_set_digest(self) -> str:
+        return external_supervisor_unit_set_digest(self.unit_sha256)
+
+
+ExternalSupervisorPredecessorSource = Callable[
+    [CheckContext], ExternalSupervisorPredecessorSnapshot
+]
 
 
 def build_candidate_identity_check(
@@ -776,6 +852,102 @@ def _empty_readonly_authority_probe(policy_digest: str) -> CheckProbe:
             "policy-digest": policy_digest,
             "authority-digest": "0" * 64,
             "capability-source-digest": "0" * 64,
+        },
+    )
+
+
+def build_external_supervisor_predecessor_check(
+    source: ExternalSupervisorPredecessorSource,
+) -> RegisteredCheck:
+    """Bind the live #907/canonical predecessor before any protected mutation."""
+
+    def probe(context: CheckContext) -> CheckProbe:
+        if (
+            context.bindings["environment"] != "staging"
+            or context.bindings["external-supervisor.unit-directory"]
+            != EXTERNAL_SUPERVISOR_UNIT_DIRECTORY
+        ):
+            return _empty_external_supervisor_predecessor_probe()
+        try:
+            snapshot = source(context)
+        except Exception:
+            return _empty_external_supervisor_predecessor_probe()
+        return CheckProbe(
+            passed=(
+                snapshot.kind in {"legacy-manifest", "canonical"}
+                and snapshot.transition_clear
+                and snapshot.runtime_ready
+            ),
+            evidence={
+                "authority-kind": snapshot.kind,
+                "authority-digest": snapshot.authority_digest,
+                "pointer-digest": snapshot.pointer_digest,
+                "unit-digests": dict(snapshot.unit_sha256),
+                "unit-set-digest": snapshot.unit_set_digest,
+                "live-evidence-digest": snapshot.live_evidence_digest,
+                "pending-transition-digest": snapshot.pending_transition_digest,
+                "transition-clear": snapshot.transition_clear,
+                "runtime-ready": snapshot.runtime_ready,
+                "pool-identity-digest": snapshot.pool_identity_digest,
+            },
+        )
+
+    return RegisteredCheck(
+        spec=CheckSpec(
+            check_id="external-supervisor.predecessor",
+            failure_code="external-supervisor.predecessor.drift",
+            tier=0,
+            stage=StageCapability.BASELINE_LIVE_READONLY,
+            dependencies=("candidate.identity", "systemd.user-manager"),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "candidate.sha",
+                "candidate.tree",
+                "environment",
+                "external-supervisor.unit-directory",
+                "runner.config.sha256",
+                "schema.revision",
+                "service.uid",
+            ),
+            evidence_schema=(
+                EvidenceField("authority-kind", "string"),
+                EvidenceField("authority-digest", "sha256"),
+                EvidenceField("pointer-digest", "sha256"),
+                EvidenceField("unit-digests", "string-map"),
+                EvidenceField("unit-set-digest", "sha256"),
+                EvidenceField("live-evidence-digest", "sha256"),
+                EvidenceField("pending-transition-digest", "sha256"),
+                EvidenceField("transition-clear", "boolean"),
+                EvidenceField("runtime-ready", "boolean"),
+                EvidenceField("pool-identity-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=120,
+            remediation=(
+                "restore the checked-in #907 or active canonical supervisor authority, "
+                "clear every durable transition, and re-run read-only admission"
+            ),
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: probe},
+    )
+
+
+def _empty_external_supervisor_predecessor_probe() -> CheckProbe:
+    return CheckProbe(
+        passed=False,
+        evidence={
+            "authority-kind": "unavailable",
+            "authority-digest": "0" * 64,
+            "pointer-digest": "0" * 64,
+            "unit-digests": {},
+            "unit-set-digest": "0" * 64,
+            "live-evidence-digest": "0" * 64,
+            "pending-transition-digest": "0" * 64,
+            "transition-clear": False,
+            "runtime-ready": False,
+            "pool-identity-digest": "0" * 64,
         },
     )
 
@@ -1927,23 +2099,64 @@ def build_systemd_render_check(
     *,
     candidate_root: Path,
     expected_candidate_sha: str,
+    expected_candidate_tree: str,
+    expected_image_tag: str,
+    expected_environment: str,
 ) -> RegisteredCheck:
-    """Build the Tier 1 exact unit source and systemd-analyze invariant."""
+    """Build the Tier 1 fixed and environment-derived systemd unit invariant."""
 
     def probe(context: CheckContext) -> CheckProbe:
-        if context.bindings["candidate.sha"] != expected_candidate_sha:
+        if (
+            context.bindings["candidate.sha"] != expected_candidate_sha
+            or context.bindings["candidate.tree"] != expected_candidate_tree
+            or context.bindings["candidate.image-tag"] != expected_image_tag
+            or context.bindings["environment"] != expected_environment
+        ):
             return _empty_systemd_render_probe()
         try:
-            evidence = inspect_systemd_units(candidate_root, run=run)
+            fixed = inspect_systemd_units(candidate_root, run=run)
+            supervisor_artifact = build_external_supervisor_artifact(
+                candidate_root,
+                candidate_sha=expected_candidate_sha,
+                candidate_tree=expected_candidate_tree,
+                image_tag=expected_image_tag,
+                environment=expected_environment,
+            )
+            supervisor = verify_external_supervisor_artifact(supervisor_artifact, run)
         except (OSError, RuntimeError, ValueError):
             return _empty_systemd_render_probe()
+        if set(fixed.unit_sha256) & set(supervisor_artifact.unit_sha256):
+            return _empty_systemd_render_probe()
+        unit_digests = {
+            **fixed.unit_sha256,
+            **supervisor.unit_sha256,
+        }
+        failed_units = {
+            **fixed.failed_units,
+            **supervisor.failed_units,
+        }
+        unit_set_digest = hashlib.sha256(
+            json.dumps(
+                {"failed": failed_units, "units": unit_digests},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        supervisor_unit_set_digest = external_supervisor_unit_set_digest(
+            supervisor_artifact.unit_sha256
+        )
         return CheckProbe(
-            passed=evidence.ready,
+            passed=fixed.ready and supervisor.ready,
             evidence={
-                "unit-digests": dict(evidence.unit_sha256),
-                "failed-units": dict(evidence.failed_units),
-                "unit-count": len(evidence.unit_sha256),
-                "unit-set-digest": evidence.unit_set_digest,
+                "supervisor-artifact-digest": supervisor.artifact_digest,
+                "supervisor-profile-sha256": supervisor_artifact.profile_sha256,
+                "supervisor-script-digests": dict(supervisor_artifact.script_sha256),
+                "supervisor-unit-digests": dict(supervisor_artifact.unit_sha256),
+                "supervisor-unit-set-digest": supervisor_unit_set_digest,
+                "unit-digests": dict(unit_digests),
+                "failed-units": dict(failed_units),
+                "unit-count": len(unit_digests),
+                "unit-set-digest": unit_set_digest,
             },
         )
 
@@ -1955,8 +2168,19 @@ def build_systemd_render_check(
             stage=StageCapability.STATIC,
             dependencies=("candidate.identity", "systemd.user-manager"),
             mutation_class=MutationClass.NONE,
-            input_keys=("candidate.sha", "runner.config.sha256"),
+            input_keys=(
+                "candidate.image-tag",
+                "candidate.sha",
+                "candidate.tree",
+                "environment",
+                "runner.config.sha256",
+            ),
             evidence_schema=(
+                EvidenceField("supervisor-artifact-digest", "sha256"),
+                EvidenceField("supervisor-profile-sha256", "sha256"),
+                EvidenceField("supervisor-script-digests", "string-map"),
+                EvidenceField("supervisor-unit-digests", "string-map"),
+                EvidenceField("supervisor-unit-set-digest", "sha256"),
                 EvidenceField("unit-digests", "string-map"),
                 EvidenceField("failed-units", "string-map"),
                 EvidenceField("unit-count", "integer"),
@@ -1964,10 +2188,13 @@ def build_systemd_render_check(
             ),
             timeout_seconds=30,
             freshness_ttl_seconds=3600,
-            remediation="restore exact safe candidate units and pass static systemd verification",
+            remediation=(
+                "restore exact safe candidate units, staging supervisor profile and script, "
+                "then pass static systemd verification"
+            ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v3",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -1976,6 +2203,11 @@ def _empty_systemd_render_probe() -> CheckProbe:
     return CheckProbe(
         passed=False,
         evidence={
+            "supervisor-artifact-digest": "0" * 64,
+            "supervisor-profile-sha256": "0" * 64,
+            "supervisor-script-digests": {},
+            "supervisor-unit-digests": {},
+            "supervisor-unit-set-digest": "0" * 64,
             "unit-digests": {},
             "failed-units": {"candidate-units": "unavailable"},
             "unit-count": 0,
@@ -2271,7 +2503,13 @@ def build_preflight_artifact_publication_check(
     expected_migration_policy_sha256: str,
     browser_report_schema_sha256: str,
 ) -> RegisteredCheck:
-    """Publish the exact Tier 1 outputs consumed by the detached worker."""
+    """Publish the exact Tier 1 outputs consumed by the detached worker.
+
+    ``systemd.render`` stays in immutable check evidence rather than this
+    artifact store: the attestation binds that evidence hash and the detached
+    rehearsal/final plans consume the exact execution directly. Duplicating it
+    here would create a second artifact authority without improving ordering.
+    """
 
     def probe(context: CheckContext) -> CheckProbe:
         if (
@@ -2746,7 +2984,11 @@ def build_rehearsal_checks(
             "gb10.candidate-source",
         ),
         "rehearsal.migration": ("rehearsal.db-clone", "migration.plan"),
-        "rehearsal.release": ("rehearsal.migration", "images.contract"),
+        "rehearsal.release": (
+            "rehearsal.migration",
+            "rehearsal.systemd-launch",
+            "images.contract",
+        ),
         "rehearsal.production-defaults": ("rehearsal.release", "production-defaults.plan"),
         "rehearsal.api-smoke": ("rehearsal.production-defaults",),
         "rehearsal.browser": ("rehearsal.api-smoke", "browser.runtime"),
@@ -3022,6 +3264,8 @@ def _empty_final_gate_probe() -> CheckProbe:
 
 __all__ = [
     "CredentialProbeSource",
+    "ExternalSupervisorPredecessorSnapshot",
+    "ExternalSupervisorPredecessorSource",
     "build_backup_lease_eligibility_check",
     "build_backup_rotation_capacity_check",
     "build_browser_runtime_check",
@@ -3029,6 +3273,7 @@ __all__ = [
     "build_capacity_high_water_check",
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
+    "build_external_supervisor_predecessor_check",
     "build_final_gate_checks",
     "build_gb10_candidate_source_check",
     "build_gb10_host_readiness_check",
