@@ -732,6 +732,157 @@ def test_runtime_image_binding_rejects_kind_tag_drift() -> None:
     assert IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,)) is None
 
 
+def _runtime_binding_run(
+    *,
+    plan,
+    name,
+    expected,
+    reference,
+    manifest_digest,
+    config_digest,
+    import_index,
+    repo_digests,
+):
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if "images" in command and "list" in command:
+            value = (
+                "REF TYPE DIGEST SIZE PLATFORMS LABELS\n"
+                f"{reference} application/vnd.oci.image.index.v1+json "
+                f"{expected} 1MiB linux/amd64 managed\n"
+            )
+        elif "content" in command and command[-1] == expected:
+            value = json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.index.v1+json",
+                    "manifests": [
+                        {
+                            "digest": manifest_digest,
+                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "platform": {"architecture": "amd64", "os": "linux"},
+                        }
+                    ],
+                }
+            )
+        elif "content" in command and command[-1] == manifest_digest:
+            value = json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "config": {
+                        "digest": config_digest,
+                        "mediaType": "application/vnd.oci.image.config.v1+json",
+                    },
+                }
+            )
+        elif "content" in command and command[-1] in import_index:
+            value = json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.index.v1+json",
+                    "manifests": [
+                        {
+                            "digest": expected,
+                            "mediaType": "application/vnd.oci.image.index.v1+json",
+                            "annotations": {
+                                "io.containerd.image.name": reference,
+                                "org.opencontainers.image.ref.name": plan.image_tag,
+                            },
+                        }
+                    ],
+                }
+            )
+        elif "crictl" in command:
+            value = json.dumps(
+                {
+                    "status": {
+                        "id": config_digest,
+                        "repoTags": [reference],
+                        "repoDigests": list(repo_digests),
+                    },
+                    "info": {
+                        "imageSpec": {
+                            "architecture": "amd64",
+                            "os": "linux",
+                            "config": {
+                                "Labels": {
+                                    "org.opencontainers.image.revision": plan.candidate_sha
+                                }
+                            },
+                        }
+                    },
+                }
+            )
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(argv, 0, value, "")
+
+    return run
+
+
+def test_runtime_image_binding_tolerates_multiday_import_aliases() -> None:
+    # A rehearsal image re-imported on more than one calendar day carries one
+    # ``import-YYYY-MM-DD`` repoDigest per import, all pinning the SAME content
+    # digest. The resolver must accept those duplicate aliases. Regression for
+    # the #838 pre-launch backup that failed with runtime-image-binding-failed
+    # once the postgres rehearsal image was imported on a second day.
+    plan = _plan()
+    name = "loom-control-plane"
+    expected = plan.image_digests[name]
+    reference = f"docker.io/library/{name}:{plan.image_tag}"
+    manifest_digest = "sha256:" + "c" * 64
+    config_digest = "sha256:" + "d" * 64
+    import_digest = "sha256:" + "f" * 64
+
+    run = _runtime_binding_run(
+        plan=plan,
+        name=name,
+        expected=expected,
+        reference=reference,
+        manifest_digest=manifest_digest,
+        config_digest=config_digest,
+        import_index={import_digest},
+        repo_digests=(
+            f"docker.io/library/import-2026-07-20@{import_digest}",
+            f"docker.io/library/import-2026-07-21@{import_digest}",
+        ),
+    )
+
+    resolved = IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,))
+
+    assert resolved == {name: (config_digest, manifest_digest, import_digest)}
+
+
+def test_runtime_image_binding_rejects_divergent_import_digests() -> None:
+    # Two repoDigests pinning DIFFERENT content digests keep the runtime image
+    # identity ambiguous and must still be rejected.
+    plan = _plan()
+    name = "loom-control-plane"
+    expected = plan.image_digests[name]
+    reference = f"docker.io/library/{name}:{plan.image_tag}"
+    manifest_digest = "sha256:" + "c" * 64
+    config_digest = "sha256:" + "d" * 64
+    import_digest_a = "sha256:" + "f" * 64
+    import_digest_b = "sha256:" + "a" * 64
+
+    run = _runtime_binding_run(
+        plan=plan,
+        name=name,
+        expected=expected,
+        reference=reference,
+        manifest_digest=manifest_digest,
+        config_digest=config_digest,
+        import_index={import_digest_a, import_digest_b},
+        repo_digests=(
+            f"docker.io/library/import-2026-07-20@{import_digest_a}",
+            f"docker.io/library/import-2026-07-21@{import_digest_b}",
+        ),
+    )
+
+    assert IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,)) is None
+
+
 def test_migration_runs_exact_candidate_against_restored_database() -> None:
     plan = _plan()
     revision = plan.schema_revision
