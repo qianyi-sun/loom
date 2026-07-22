@@ -55,6 +55,13 @@ describe("RootErrorBoundary", () => {
         </RootErrorBoundary>,
       );
 
+      // Assert within-window suppression immediately after the boundary
+      // commits — the claim window is a real 50ms timer, so the slower
+      // interaction/assertions below can otherwise expire it under CI load.
+      const callsAfterBoundary = consoleSink.mock.calls.length;
+      console.error(BROKEN_ROOT_ERROR);
+      expect(consoleSink).toHaveBeenCalledTimes(callsAfterBoundary);
+
       const alert = screen.getByRole("alert");
       expect(alert).toHaveTextContent("Loom could not display this page");
       const referenceId = alert.textContent?.match(/WEB-[0-9A-F]{8}/u)?.[0];
@@ -74,9 +81,6 @@ describe("RootErrorBoundary", () => {
       ]);
       expect(JSON.stringify(reports)).not.toContain("signature");
       expect(JSON.stringify(reports)).not.toContain("raw-root");
-      const callsAfterBoundary = consoleSink.mock.calls.length;
-      console.error(BROKEN_ROOT_ERROR);
-      expect(consoleSink).toHaveBeenCalledTimes(callsAfterBoundary);
       await new Promise((resolve) => window.setTimeout(resolve, 75));
       console.error(BROKEN_ROOT_ERROR);
       expect(consoleSink.mock.calls.at(-1)).toEqual([
