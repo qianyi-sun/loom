@@ -131,7 +131,7 @@ def _capacity() -> tuple[dict[str, object], ReadonlyDatabaseEvidence]:
         "observed_at_epoch": int(datetime(2026, 7, 20, 0, 0, 0, 640068, tzinfo=UTC).timestamp()),
     }
     database = ReadonlyDatabaseEvidence(
-        schema_revision="0069",
+        schema_revision="0070",
         mutation_epoch=8,
         epoch_authority="staging-mutation-epoch-v1",
         baseline_counts={

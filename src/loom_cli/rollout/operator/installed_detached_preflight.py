@@ -16,6 +16,7 @@ from .deep_preflight_authority import DeepPreflightAuthority
 from .detached_preflight_runner import DetachedPreflightBackupRunner
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
 from .model import PreflightRequest
+from .readonly_capacity_client import verify_installed_immutable_objects
 from .readonly_database_client import InstalledReadonlyDatabaseEvidenceSource
 from .store import RequestStore
 
@@ -41,6 +42,10 @@ def build_installed_detached_preflight_runner(
     inventory_source = ReadonlyLifecycleInventoryProvider(
         config,
         evidence_source=database_evidence,
+        object_verifier=lambda objects: verify_installed_immutable_objects(
+            objects,
+            service_uid=service_uid,
+        ),
     )
     creator = BackupCreator(
         config,

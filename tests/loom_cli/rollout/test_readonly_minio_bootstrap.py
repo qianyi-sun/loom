@@ -13,22 +13,28 @@ from loom_cli.rollout.readonly_minio_bootstrap import (
 )
 
 
-def test_readonly_minio_policy_has_exact_list_only_staging_authority() -> None:
+def test_readonly_minio_policy_has_exact_non_mutating_staging_authority() -> None:
     policy = readonly_minio_policy()
-    statement = policy["Statement"][0]
+    bucket_statement, object_statement = policy["Statement"]
 
-    assert statement["Effect"] == "Allow"
-    assert statement["Action"] == [
+    assert bucket_statement["Effect"] == "Allow"
+    assert bucket_statement["Action"] == [
         "s3:GetBucketLocation",
         "s3:GetBucketVersioning",
         "s3:ListBucket",
         "s3:ListBucketVersions",
     ]
-    assert statement["Resource"] == [f"arn:aws:s3:::{bucket}" for bucket in READONLY_MINIO_BUCKETS]
-    assert not any(
-        word in json.dumps(policy).lower()
-        for word in ("deleteobject", "getobject", "putobject", "*")
-    )
+    assert bucket_statement["Resource"] == [
+        f"arn:aws:s3:::{bucket}" for bucket in READONLY_MINIO_BUCKETS
+    ]
+    assert object_statement == {
+        "Effect": "Allow",
+        "Action": ["s3:GetObjectVersion"],
+        "Resource": [f"arn:aws:s3:::{bucket}/*" for bucket in READONLY_MINIO_BUCKETS],
+    }
+    rendered = json.dumps(policy).lower()
+    assert "deleteobject" not in rendered
+    assert "putobject" not in rendered
     assert len(readonly_minio_policy_digest()) == 64
 
 

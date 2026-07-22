@@ -73,7 +73,7 @@ class Runner:
             assert input_payload is not None
         else:
             self.calls.append("migration-wait")
-            self.revision = "0071"
+            self.revision = "0072"
 
     def run_status(self, argv, *, env, input_payload, timeout_seconds):
         assert env == self.environment
@@ -192,8 +192,8 @@ def _plan(tmp_path: Path):
     )
     return replace(
         plan,
-        schema_revision="0068",
-        migration_target_revision="0071",
+        schema_revision="0069",
+        migration_target_revision="0072",
         service_token_source=f"file:{token_path}",
         secret_metadata_fingerprints={
             **plan.secret_metadata_fingerprints,
@@ -216,7 +216,7 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     state = tmp_path / "state"
     _attempt(state)
     plan = _plan(tmp_path)
-    runner = Runner(revision="0068", epoch=7)
+    runner = Runner(revision="0069", epoch=7)
     runner.plan_digest = plan.plan_digest
     supervisors = ExternalSupervisors()
     executor = MigrationEpochProtectedApplyExecutor(
@@ -250,7 +250,7 @@ def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
     state = tmp_path / "state"
     _attempt(state)
     plan = _plan(tmp_path)
-    runner = Runner(revision="0068", epoch=7)
+    runner = Runner(revision="0069", epoch=7)
     runner.plan_digest = plan.plan_digest
     supervisors = ExternalSupervisors(fail_reconcile=True)
     executor = MigrationEpochProtectedApplyExecutor(
@@ -307,7 +307,7 @@ def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
     executor = MigrationEpochProtectedApplyExecutor(
         state_root=tmp_path,
         service_uid=os.geteuid(),
-        runner=Runner(revision="0068", epoch=7),
+        runner=Runner(revision="0069", epoch=7),
         gb10_transport=GB10Fleet(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(),
@@ -320,7 +320,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     state = tmp_path / "state"
     _attempt(state)
     plan = _plan(tmp_path)
-    runner = Runner(revision="0068", epoch=7)
+    runner = Runner(revision="0069", epoch=7)
     runner.plan_digest = plan.plan_digest
     gb10 = GB10Fleet()
     supervisors = ExternalSupervisors()
@@ -358,7 +358,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
 
 def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
-    runner = Runner(revision="0068", epoch=9)
+    runner = Runner(revision="0069", epoch=9)
     runner.plan_digest = plan.plan_digest
     runner.manifest_status = 1
 
@@ -386,7 +386,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
 def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -> None:
     executor = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
-        runner=Runner(revision="0071", epoch=8),
+        runner=Runner(revision="0072", epoch=8),
         gb10_transport=GB10Fleet(exact=True),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(exact=True),

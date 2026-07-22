@@ -22,8 +22,8 @@ from tests.loom_cli.rollout.test_preflight_artifact_store import (
 def _plan(tmp_path: Path):  # type: ignore[no-untyped-def]
     return replace(
         _base_plan(tmp_path),
-        schema_revision="0068",
-        migration_target_revision="0071",
+        schema_revision="0069",
+        migration_target_revision="0072",
     )
 
 
@@ -45,7 +45,7 @@ class Runner:
             assert timeout_seconds == 60.0
         else:
             assert timeout_seconds == 660.0
-            self.revision = "0071"
+            self.revision = "0072"
 
 
 def _published_plan(tmp_path: Path):
@@ -56,7 +56,7 @@ def _published_plan(tmp_path: Path):
         images,
         candidate_tree="b" * 40,
         migration_plan_sha256="4" * 64,
-        migration_target_revision="0071",
+        migration_target_revision="0072",
     )
     publication = PreflightArtifactStore(state).publish(
         candidate_sha="a" * 40,
@@ -67,7 +67,7 @@ def _published_plan(tmp_path: Path):
         migration=migration,
         production_defaults=_production_defaults(candidate_tree="b" * 40),
         migration_plan_sha256="4" * 64,
-        migration_target_revision="0071",
+        migration_target_revision="0072",
         browser_report_schema_sha256="8" * 64,
     )
     return replace(
@@ -88,7 +88,7 @@ def _published_plan(tmp_path: Path):
 
 def test_migration_component_converges_exact_published_job(tmp_path: Path) -> None:
     plan = _published_plan(tmp_path)
-    runner = Runner("0068")
+    runner = Runner("0069")
     authority = KubernetesProtectedMigrationComponent(
         runner=runner,
         environment={"KUBECONFIG": "/exact"},
@@ -142,7 +142,7 @@ def test_migration_component_rechecks_schema_immediately_before_apply(tmp_path: 
             self.revision = "0065"
             return super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
 
-    runner = RacingRunner("0068")
+    runner = RacingRunner("0069")
     authority = KubernetesProtectedMigrationComponent(
         runner=runner,
         environment={"KUBECONFIG": "/exact"},

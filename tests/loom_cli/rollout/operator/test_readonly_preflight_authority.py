@@ -52,7 +52,7 @@ def _write_authority(tmp_path: Path) -> tuple[Path, Path]:
 def _database() -> ReadonlyDatabaseEvidence:
     capacity = StagingCapacity(1, 2, 80, 90)
     return ReadonlyDatabaseEvidence(
-        schema_revision="0069",
+        schema_revision="0070",
         mutation_epoch=11,
         epoch_authority="staging-mutation-epoch-v1",
         baseline_counts={
@@ -80,7 +80,7 @@ def _database() -> ReadonlyDatabaseEvidence:
 
 def _mutation_epoch() -> ReadonlyMutationEpochEvidence:
     return ReadonlyMutationEpochEvidence(
-        schema_revision="0069",
+        schema_revision="0070",
         mutation_epoch=11,
         epoch_authority="staging-mutation-epoch-v1",
         evidence_sha256="d" * 64,
@@ -197,14 +197,14 @@ def test_authority_exposes_no_database_credential_in_evidence(tmp_path: Path) ->
     assert "password" not in repr(authority.capacity()).lower()
 
 
-def test_authority_uses_fresh_live_capacity_before_schema_0069(tmp_path: Path) -> None:
+def test_authority_uses_fresh_live_capacity_before_schema_0070(tmp_path: Path) -> None:
     config = _config(tmp_path)
     cluster, _token = _write_authority(tmp_path)
     object.__setattr__(config, "cluster_config_path", cluster)
     legacy = ReadonlyDatabaseEvidence(
         schema_revision="0065",
         mutation_epoch=0,
-        epoch_authority="legacy-pre-0068",
+        epoch_authority="legacy-pre-0069",
         baseline_counts={
             "agents": 0,
             "provider_models": 0,
@@ -225,7 +225,7 @@ def test_authority_uses_fresh_live_capacity_before_schema_0069(tmp_path: Path) -
         mutation_epoch_evidence=lambda: ReadonlyMutationEpochEvidence(
             schema_revision="0065",
             mutation_epoch=0,
-            epoch_authority="legacy-pre-0068",
+            epoch_authority="legacy-pre-0069",
             evidence_sha256="d" * 64,
         ),
         capacity_source=lambda: calls.append(object()) or live,
@@ -242,7 +242,7 @@ def test_baseline_factory_reports_only_storage_when_capacity_is_missing(tmp_path
     cluster, _token = _write_authority(tmp_path)
     object.__setattr__(config, "cluster_config_path", cluster)
     database = ReadonlyDatabaseEvidence(
-        schema_revision="0069",
+        schema_revision="0070",
         mutation_epoch=11,
         epoch_authority="staging-mutation-epoch-v1",
         baseline_counts={

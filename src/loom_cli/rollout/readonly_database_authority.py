@@ -18,9 +18,9 @@ from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReferenc
 
 _REVISION_RE = re.compile(r"^[0-9]{4}$")
 _ROLE = "loom_rollout_readonly"
-_LEGACY_LAST_REVISION = 67
-_EPOCH_FIRST_REVISION = 68
-_CAPACITY_FIRST_REVISION = 69
+_LEGACY_LAST_REVISION = 68
+_EPOCH_FIRST_REVISION = 69
+_CAPACITY_FIRST_REVISION = 70
 _INVENTORY_PAGE_SIZE = 1024
 
 _AUTHORITY_SQL = """
@@ -107,12 +107,12 @@ class ReadonlyMutationEpochEvidence:
         if (
             _REVISION_RE.fullmatch(self.schema_revision) is None
             or self.mutation_epoch < 0
-            or self.epoch_authority not in {"legacy-pre-0068", "staging-mutation-epoch-v1"}
+            or self.epoch_authority not in {"legacy-pre-0069", "staging-mutation-epoch-v1"}
             or len(self.evidence_sha256) != 64
         ):
             raise ValueError("readonly mutation epoch evidence is invalid")
         if int(self.schema_revision) < _EPOCH_FIRST_REVISION:
-            if self.mutation_epoch != 0 or self.epoch_authority != "legacy-pre-0068":
+            if self.mutation_epoch != 0 or self.epoch_authority != "legacy-pre-0069":
                 raise ValueError("legacy database epoch authority is invalid")
         elif self.epoch_authority != "staging-mutation-epoch-v1":
             raise ValueError("database epoch authority is invalid")
@@ -137,7 +137,7 @@ class ReadonlyDatabaseEvidence:
         if (
             _REVISION_RE.fullmatch(self.schema_revision) is None
             or self.mutation_epoch < 0
-            or self.epoch_authority not in {"legacy-pre-0068", "staging-mutation-epoch-v1"}
+            or self.epoch_authority not in {"legacy-pre-0069", "staging-mutation-epoch-v1"}
             or set(counts) != {"agents", "provider_models", "tasks", "teams", "users"}
             or any(type(value) is not int or value < 0 for value in counts.values())
             or len(self.evidence_sha256) != 64
@@ -146,7 +146,7 @@ class ReadonlyDatabaseEvidence:
         ):
             raise ValueError("readonly database evidence is invalid")
         if int(self.schema_revision) < _EPOCH_FIRST_REVISION:
-            if self.mutation_epoch != 0 or self.epoch_authority != "legacy-pre-0068":
+            if self.mutation_epoch != 0 or self.epoch_authority != "legacy-pre-0069":
                 raise ValueError("legacy database epoch authority is invalid")
             if self.immutable_objects:
                 raise ValueError("legacy database immutable object authority is invalid")
@@ -317,7 +317,7 @@ def probe_readonly_mutation_epoch(query: DatabaseQuery) -> ReadonlyMutationEpoch
 
     if revision_number < _EPOCH_FIRST_REVISION:
         epoch = 0
-        epoch_authority = "legacy-pre-0068"
+        epoch_authority = "legacy-pre-0069"
     else:
         epoch_row = _one(query, _EPOCH_SQL, label="epoch")
         if (
@@ -351,7 +351,7 @@ def _probe_readonly_database(
     *,
     include_immutable_inventory: bool,
 ) -> ReadonlyDatabaseEvidence:
-    """Probe current staging without assuming migrations 0068/0069 already exist.
+    """Probe current staging without assuming migrations 0069/0070 already exist.
 
     ``query`` must execute every statement in the same PostgreSQL
     REPEATABLE READ, READ ONLY transaction. The first statements reuse the

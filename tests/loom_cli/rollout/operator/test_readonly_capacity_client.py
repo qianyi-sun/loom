@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -15,7 +17,9 @@ from loom_cli.rollout.operator.readonly_capacity_client import (
     open_readonly_minio_client,
     probe_installed_readonly_object_store_health,
     probe_installed_staging_capacity,
+    verify_installed_immutable_objects,
 )
+from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReference
 from loom_cli.rollout.readonly_minio_bootstrap import (
     READONLY_MINIO_ACCESS_KEY,
     READONLY_MINIO_BUCKETS,
@@ -158,7 +162,12 @@ def test_probe_counts_exact_execution_buckets_and_host_capacity(tmp_path: Path) 
 
 
 def test_object_store_health_uses_only_fixed_list_authority() -> None:
-    client = S3()
+    class HealthS3(S3):
+        def get_bucket_versioning(self, **kwargs: str) -> dict[str, object]:
+            assert kwargs["Bucket"] in READONLY_MINIO_BUCKETS
+            return {"Status": "Enabled"}
+
+    client = HealthS3()
 
     @contextmanager
     def context(*, service_uid: int) -> Iterator[S3]:
@@ -172,6 +181,102 @@ def test_object_store_health_uses_only_fixed_list_authority() -> None:
 
     assert evidence.ready
     assert len(evidence.evidence_sha256) == 64
+
+
+def _immutable_object(body: bytes, *, version_id: str = "v1") -> ImmutableObjectReference:
+    return ImmutableObjectReference(
+        authoritative_source="catalog:sha256:" + "d" * 64,
+        bucket="loom-staging-artifacts",
+        content_sha256=hashlib.sha256(body).hexdigest(),
+        data_class="benchmark",
+        object_key="benchmarks/example",
+        size_bytes=len(body),
+        version_id=version_id,
+    )
+
+
+def test_checkpoint_verifier_hashes_exact_version_and_normalizes_legacy_null() -> None:
+    body = b"recoverable pinned object"
+    legacy = _immutable_object(
+        body,
+        version_id="content-sha256:" + hashlib.sha256(body).hexdigest(),
+    )
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class RecoveryS3(S3):
+        def get_bucket_versioning(self, **kwargs: str) -> dict[str, object]:
+            return {"Status": "Enabled"}
+
+        def head_object(self, **kwargs: str) -> dict[str, object]:
+            calls.append(("head", kwargs))
+            return {"ContentLength": len(body), "VersionId": "null"}
+
+        def get_object(self, **kwargs: str) -> dict[str, object]:
+            calls.append(("get", kwargs))
+            return {"Body": BytesIO(body)}
+
+    @contextmanager
+    def context(*, service_uid: int) -> Iterator[RecoveryS3]:
+        assert service_uid == os.getuid()
+        yield RecoveryS3()
+
+    verified = verify_installed_immutable_objects(
+        (legacy,),
+        service_uid=os.getuid(),
+        client_context=context,
+        read_chunk_bytes=3,
+    )
+
+    assert verified[0].version_id == "null"
+    assert calls == [
+        (
+            "head",
+            {
+                "Bucket": legacy.bucket,
+                "Key": legacy.object_key,
+                "VersionId": "null",
+            },
+        ),
+        (
+            "get",
+            {
+                "Bucket": legacy.bucket,
+                "Key": legacy.object_key,
+                "VersionId": "null",
+            },
+        ),
+    ]
+
+
+def test_checkpoint_verifier_rejects_unversioned_or_drifted_object() -> None:
+    body = b"recoverable pinned object"
+    item = _immutable_object(body)
+
+    class RecoveryS3(S3):
+        status = "Enabled"
+
+        def get_bucket_versioning(self, **kwargs: str) -> dict[str, object]:
+            return {"Status": self.status}
+
+        def head_object(self, **kwargs: str) -> dict[str, object]:
+            return {"ContentLength": len(body), "VersionId": "v1"}
+
+        def get_object(self, **kwargs: str) -> dict[str, object]:
+            return {"Body": BytesIO(b"drifted")}
+
+    client = RecoveryS3()
+
+    @contextmanager
+    def context(*, service_uid: int) -> Iterator[RecoveryS3]:
+        yield client
+
+    client.status = "Suspended"
+    with pytest.raises(ValueError, match="versioning must be enabled"):
+        verify_installed_immutable_objects((item,), service_uid=os.getuid(), client_context=context)
+
+    client.status = "Enabled"
+    with pytest.raises(ValueError, match="digest drifted"):
+        verify_installed_immutable_objects((item,), service_uid=os.getuid(), client_context=context)
 
 
 def test_source_is_single_flight_under_concurrent_dag(tmp_path: Path) -> None:

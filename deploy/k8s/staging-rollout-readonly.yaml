@@ -51,8 +51,8 @@ rules:
     verbs: [get, list, watch]
   # A TokenRequest bearer may open only the exact PostgreSQL and MinIO pod
   # transports. Database authorization is independently SELECT-only and the
-  # MinIO credential is independently list-only; this subresource permission
-  # cannot create or update a Kubernetes object.
+  # MinIO credential is independently non-mutating and may read only exact
+  # staging object versions; this permission cannot mutate Kubernetes state.
   - apiGroups: [""]
     resources: [pods/portforward]
     resourceNames: [loom-minio-0, loom-postgres-0]

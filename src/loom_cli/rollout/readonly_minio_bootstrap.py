@@ -1,4 +1,4 @@
-"""Exact list-only MinIO authority for staging capacity preflight."""
+"""Exact read-only MinIO authority for staging preflight and checkpoints."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ _SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
 
 def readonly_minio_policy() -> dict[str, object]:
-    """Return the sole S3 authority required by exact capacity inventory."""
+    """Return exact list and immutable-version read authority."""
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -31,7 +31,12 @@ def readonly_minio_policy() -> dict[str, object]:
                     "s3:ListBucketVersions",
                 ],
                 "Resource": [f"arn:aws:s3:::{bucket}" for bucket in READONLY_MINIO_BUCKETS],
-            }
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["s3:GetObjectVersion"],
+                "Resource": [f"arn:aws:s3:::{bucket}/*" for bucket in READONLY_MINIO_BUCKETS],
+            },
         ],
     }
 
@@ -48,7 +53,7 @@ def readonly_minio_policy_digest() -> str:
 
 @dataclass(frozen=True, slots=True)
 class ReadonlyMinioCredential:
-    """Private static key whose server policy permits list-only inventory."""
+    """Private static key whose server policy cannot mutate object state."""
 
     access_key: str
     secret_key: str

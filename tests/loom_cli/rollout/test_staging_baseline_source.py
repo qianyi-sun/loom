@@ -198,7 +198,7 @@ def _database_evidence() -> ReadonlyDatabaseEvidence:
     return ReadonlyDatabaseEvidence(
         schema_revision="0065",
         mutation_epoch=0,
-        epoch_authority="legacy-pre-0068",
+        epoch_authority="legacy-pre-0069",
         baseline_counts={
             "agents": 2,
             "provider_models": 3,
@@ -250,7 +250,7 @@ def test_cross_version_baseline_aggregates_public_and_object_blockers() -> None:
 
 def test_cross_version_baseline_localizes_missing_capacity_to_storage() -> None:
     database = ReadonlyDatabaseEvidence(
-        schema_revision="0069",
+        schema_revision="0070",
         mutation_epoch=9,
         epoch_authority="staging-mutation-epoch-v1",
         baseline_counts={

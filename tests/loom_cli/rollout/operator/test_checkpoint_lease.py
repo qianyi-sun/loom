@@ -198,7 +198,7 @@ def test_checkpoint_rejects_noncanonical_inventory_path(tmp_path: Path) -> None:
         {"object_inventory_root": "1" * 64},
         {"checkpoint_evidence_sha256": "2" * 64},
         {"environment": "staging-other"},
-        {"schema_revision": "0068"},
+        {"schema_revision": "0069"},
     ],
 )
 def test_restore_evidence_must_match_every_checkpoint_field(

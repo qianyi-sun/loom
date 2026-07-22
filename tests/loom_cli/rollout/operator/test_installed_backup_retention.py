@@ -120,7 +120,7 @@ def _stranded_activation_service(
         namespace="loom-staging",
         mutation_epoch=17,
         db_snapshot_identity="pgdump-sha256:" + "1" * 64,
-        schema_revision="0071",
+        schema_revision="0072",
         object_inventory_root="2" * 64,
         created_at=datetime(2026, 7, 19, 12, tzinfo=UTC),
         restore_verified_at=datetime(2026, 7, 19, 12, 5, tzinfo=UTC),

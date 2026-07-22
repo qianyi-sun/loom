@@ -7,7 +7,7 @@ SCOPE = GcScope(environment="staging", namespace="loom-staging")
 
 
 def test_empty_post_migration_database_is_bootstrap_applicable() -> None:
-    plan = build_lifecycle_bootstrap_plan(scope=SCOPE, schema_revision="0068")
+    plan = build_lifecycle_bootstrap_plan(scope=SCOPE, schema_revision="0069")
 
     plan.require_applicable_or_converged()
     assert plan.applicable
@@ -17,13 +17,13 @@ def test_empty_post_migration_database_is_bootstrap_applicable() -> None:
 def test_pre_lifecycle_revision_is_not_bootstrap_applicable() -> None:
     plan = build_lifecycle_bootstrap_plan(scope=SCOPE, schema_revision="0067")
 
-    assert plan.blockers == ("lifecycle bootstrap requires schema revision 0068 or later",)
+    assert plan.blockers == ("lifecycle bootstrap requires schema revision 0069 or later",)
 
 
 def test_exact_bootstrap_row_is_idempotently_converged() -> None:
     plan = build_lifecycle_bootstrap_plan(
         scope=SCOPE,
-        schema_revision="0068",
+        schema_revision="0069",
         epoch_rows=(("staging", "loom-staging", 0, "bootstrap", None, None),),
     )
 
@@ -35,7 +35,7 @@ def test_exact_bootstrap_row_is_idempotently_converged() -> None:
 def test_registry_or_existing_nonbootstrap_epoch_blocks_initialization() -> None:
     plan = build_lifecycle_bootstrap_plan(
         scope=SCOPE,
-        schema_revision="0068",
+        schema_revision="0069",
         epoch_rows=(("staging", "loom-staging", 1, "lifecycle_gc", "req-gc0000000", "a" * 64),),
         authority_count=1,
     )
@@ -49,10 +49,10 @@ def test_registry_or_existing_nonbootstrap_epoch_blocks_initialization() -> None
 
 
 def test_digest_binds_revision_and_classified_counts() -> None:
-    baseline = build_lifecycle_bootstrap_plan(scope=SCOPE, schema_revision="0068")
+    baseline = build_lifecycle_bootstrap_plan(scope=SCOPE, schema_revision="0069")
     changed = build_lifecycle_bootstrap_plan(
         scope=SCOPE,
-        schema_revision="0068",
+        schema_revision="0069",
         classified_row_counts=(("trials", 1),),
     )
 
@@ -63,7 +63,7 @@ def test_digest_binds_revision_and_classified_counts() -> None:
 def test_bootstrap_rejects_an_alternate_staging_namespace() -> None:
     plan = build_lifecycle_bootstrap_plan(
         scope=GcScope(environment="staging", namespace="another-staging"),
-        schema_revision="0068",
+        schema_revision="0069",
     )
 
     assert plan.blockers == ("lifecycle bootstrap is fixed to staging/loom-staging",)

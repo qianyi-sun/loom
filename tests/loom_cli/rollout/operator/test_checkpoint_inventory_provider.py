@@ -51,7 +51,7 @@ def test_provider_builds_sorted_exact_inventory_without_object_payloads(
     tmp_path: Path,
 ) -> None:
     evidence = ReadonlyDatabaseEvidence(
-        schema_revision="0068",
+        schema_revision="0069",
         mutation_epoch=11,
         epoch_authority="staging-mutation-epoch-v1",
         baseline_counts={"agents": 1, "provider_models": 1, "tasks": 1, "teams": 1, "users": 1},
@@ -69,24 +69,27 @@ def test_provider_builds_sorted_exact_inventory_without_object_payloads(
             ),
         ),
     )
+    verified: list[tuple[ImmutableObjectReference, ...]] = []
     provider = ReadonlyLifecycleInventoryProvider(
         _config(tmp_path),
         evidence_source=lambda: evidence,
+        object_verifier=lambda objects: verified.append(tuple(objects)) or objects,
     )
 
     inventory = provider(NOW)
 
     assert inventory.mutation_epoch == 11
-    assert inventory.schema_revision == "0068"
+    assert inventory.schema_revision == "0069"
     assert inventory.objects[0].object_key == "benchmarks/b"
     assert inventory.objects == evidence.immutable_objects
+    assert verified == [evidence.immutable_objects]
 
 
 def test_provider_binds_legacy_empty_inventory_to_shared_snapshot(tmp_path: Path) -> None:
     evidence = ReadonlyDatabaseEvidence(
         schema_revision="0065",
         mutation_epoch=0,
-        epoch_authority="legacy-pre-0068",
+        epoch_authority="legacy-pre-0069",
         baseline_counts={"agents": 1, "provider_models": 1, "tasks": 1, "teams": 1, "users": 1},
         capacity=None,
         evidence_sha256="e" * 64,
@@ -94,6 +97,7 @@ def test_provider_binds_legacy_empty_inventory_to_shared_snapshot(tmp_path: Path
     provider = ReadonlyLifecycleInventoryProvider(
         _config(tmp_path),
         evidence_source=lambda: evidence,
+        object_verifier=lambda objects: objects,
     )
 
     inventory = provider(NOW)

@@ -1,4 +1,4 @@
-"""Migration 0068 adds fail-closed staging lifecycle authority."""
+"""Migration 0069 adds fail-closed staging lifecycle authority."""
 
 from __future__ import annotations
 

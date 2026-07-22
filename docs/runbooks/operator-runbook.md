@@ -1908,11 +1908,11 @@ attestation retains only metadata fingerprints and evidence hashes, never a
 token value.
 
 The same install transaction creates or reuses a separate root-owned MinIO
-credential and converges one fixed list-only policy for
+credential and converges one fixed non-mutating policy for
 `loom-staging-trajectories` and `loom-staging-artifacts`. The service copy is a
 single-link mode-0600 file under the credential directory. Its policy permits
-only bucket location/versioning and object/version enumeration; object reads,
-writes and deletes are absent. The readonly TokenRequest may port-forward only
+only bucket location/versioning, object/version enumeration, and exact-version
+reads; writes and deletes are absent. The readonly TokenRequest may port-forward only
 to `loom-minio-0` and `loom-postgres-0`. `check` independently compares the
 server-side policy document and user binding, and Tier 0 then proves it by
 enumerating the exact buckets and measuring `/data/loom-staging/minio` as

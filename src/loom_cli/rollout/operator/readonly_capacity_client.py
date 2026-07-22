@@ -1,4 +1,4 @@
-"""Bounded list-only MinIO and filesystem capacity source for Tier 0."""
+"""Bounded read-only MinIO and filesystem sources for rollout preflight."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
@@ -30,6 +31,8 @@ from loom_cli.rollout.readonly_minio_bootstrap import (
     ReadonlyMinioCredential,
 )
 from loom_cli.rollout.staging_baseline_source import ObjectStoreBaselineEvidence
+
+from .rollout_checkpoint import ImmutableObjectReference
 
 _NAMESPACE = "loom-staging"
 _POD = "loom-minio-0"
@@ -57,6 +60,10 @@ class TunnelProcess(Protocol):
 
 class S3Client(Protocol):
     def get_bucket_versioning(self, **kwargs: str) -> Mapping[str, object]: ...
+
+    def head_object(self, **kwargs: str) -> Mapping[str, object]: ...
+
+    def get_object(self, **kwargs: str) -> Mapping[str, object]: ...
 
     def close(self) -> None: ...
 
@@ -149,7 +156,7 @@ def open_readonly_minio_client(
     allocate_port: PortAllocator = _allocate_port,
     wait_ready: WaitReady = _wait_ready,
 ) -> Iterator[S3Client]:
-    """Yield one list-only client over one exact localhost transport."""
+    """Yield one non-mutating client over one exact localhost transport."""
     if (
         service_uid < 1
         or not kubeconfig_path.is_absolute()
@@ -230,7 +237,7 @@ def probe_installed_readonly_object_store_health(
     buckets: Sequence[str] = READONLY_MINIO_BUCKETS,
     client_context: Callable[..., Any] = open_readonly_minio_client,
 ) -> ObjectStoreBaselineEvidence:
-    """Prove exact bucket reachability through the fixed list-only authority."""
+    """Prove exact bucket reachability and durable versioning."""
     exact_buckets = tuple(buckets)
     if exact_buckets != READONLY_MINIO_BUCKETS:
         raise ValueError("readonly object-store bucket authority drifted")
@@ -241,8 +248,8 @@ def probe_installed_readonly_object_store_health(
             if not isinstance(response, Mapping):
                 raise ValueError("readonly object-store response is invalid")
             status = response.get("Status", "unversioned")
-            if status not in {"unversioned", "Enabled", "Suspended"}:
-                raise ValueError("readonly object-store versioning state is invalid")
+            if status != "Enabled":
+                raise ValueError("readonly object-store versioning must be enabled")
             statuses[bucket] = str(status)
     digest = hashlib.sha256(
         json.dumps(
@@ -256,6 +263,68 @@ def probe_installed_readonly_object_store_health(
         ).encode()
     ).hexdigest()
     return ObjectStoreBaselineEvidence(True, digest)
+
+
+def verify_installed_immutable_objects(
+    objects: Sequence[ImmutableObjectReference],
+    *,
+    service_uid: int,
+    client_context: Callable[..., Any] = open_readonly_minio_client,
+    read_chunk_bytes: int = 1024 * 1024,
+) -> tuple[ImmutableObjectReference, ...]:
+    """Prove every DB-referenced pinned object version and exact bytes."""
+    if service_uid < 1 or read_chunk_bytes <= 0:
+        raise ValueError("readonly checkpoint verifier authority is invalid")
+    exact_objects = tuple(objects)
+    if any(item.bucket not in READONLY_MINIO_BUCKETS for item in exact_objects):
+        raise ValueError("readonly checkpoint bucket authority drifted")
+    verified: list[ImmutableObjectReference] = []
+    with client_context(service_uid=service_uid) as client:
+        for bucket in sorted({item.bucket for item in exact_objects}):
+            response = client.get_bucket_versioning(Bucket=bucket)
+            if not isinstance(response, Mapping) or response.get("Status") != "Enabled":
+                raise ValueError("readonly checkpoint bucket versioning must be enabled")
+        for item in exact_objects:
+            legacy_version = f"content-sha256:{item.content_sha256}"
+            version_id = "null" if item.version_id == legacy_version else item.version_id
+            params = {
+                "Bucket": item.bucket,
+                "Key": item.object_key,
+                "VersionId": version_id,
+            }
+            head = client.head_object(**params)
+            if not isinstance(head, Mapping) or type(head.get("ContentLength")) is not int:
+                raise ValueError("readonly checkpoint object metadata is invalid")
+            if head["ContentLength"] != item.size_bytes:
+                raise ValueError("readonly checkpoint object size drifted")
+            observed_version = head.get("VersionId")
+            if version_id == "null":
+                if observed_version not in {None, "null"}:
+                    raise ValueError("readonly checkpoint object version drifted")
+            elif observed_version != version_id:
+                raise ValueError("readonly checkpoint object version drifted")
+            response = client.get_object(**params)
+            if not isinstance(response, Mapping):
+                raise ValueError("readonly checkpoint object response is invalid")
+            body = response.get("Body")
+            if body is None or not callable(getattr(body, "read", None)):
+                raise ValueError("readonly checkpoint object body is invalid")
+            digest = hashlib.sha256()
+            observed_size = 0
+            try:
+                while chunk := body.read(read_chunk_bytes):
+                    if not isinstance(chunk, bytes):
+                        raise ValueError("readonly checkpoint object body is invalid")
+                    digest.update(chunk)
+                    observed_size += len(chunk)
+            finally:
+                close = getattr(body, "close", None)
+                if callable(close):
+                    close()
+            if observed_size != item.size_bytes or digest.hexdigest() != item.content_sha256:
+                raise ValueError("readonly checkpoint object digest drifted")
+            verified.append(replace(item, version_id=version_id))
+    return tuple(sorted(verified, key=lambda item: item.identity))
 
 
 class InstalledReadonlyCapacitySource:
@@ -307,4 +376,5 @@ __all__ = [
     "open_readonly_minio_client",
     "probe_installed_readonly_object_store_health",
     "probe_installed_staging_capacity",
+    "verify_installed_immutable_objects",
 ]

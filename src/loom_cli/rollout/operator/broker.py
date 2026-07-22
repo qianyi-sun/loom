@@ -61,6 +61,7 @@ from .model import (
 )
 from .policy import PolicyError, caller_from_sudo, sanitized_child_environment
 from .preflight import PreflightReport, catalog_secret_values, collect_preflight
+from .readonly_capacity_client import verify_installed_immutable_objects
 from .readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
     probe_installed_readonly_database_baseline,
@@ -1474,6 +1475,10 @@ def _default_dependencies() -> BrokerDependencies:
     inventory_provider = ReadonlyLifecycleInventoryProvider(
         config,
         evidence_source=InstalledReadonlyDatabaseEvidenceSource(service_uid=service_uid),
+        object_verifier=lambda objects: verify_installed_immutable_objects(
+            objects,
+            service_uid=service_uid,
+        ),
     )
 
     def clock() -> datetime:

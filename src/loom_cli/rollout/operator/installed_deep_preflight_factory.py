@@ -68,6 +68,7 @@ from .protected_external_supervisor_transport import (
 from .readonly_capacity_client import (
     InstalledReadonlyCapacitySource,
     probe_installed_readonly_object_store_health,
+    verify_installed_immutable_objects,
 )
 from .readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
@@ -359,6 +360,10 @@ def build_installed_deep_preflight_composition(
     inventory_source = ReadonlyLifecycleInventoryProvider(
         config,
         evidence_source=checkpoint_database_evidence,
+        object_verifier=lambda objects: verify_installed_immutable_objects(
+            objects,
+            service_uid=service_uid,
+        ),
     )
     readonly = ReadonlyPreflightAuthority(
         config,

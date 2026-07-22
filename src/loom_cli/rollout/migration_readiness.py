@@ -51,7 +51,7 @@ def _load_policy(path: Path) -> tuple[dict[str, object], str]:
         or set(value) != expected
         or value["schema_version"] != 1
         or value["environment"] != "staging"
-        or value["graph_policy"] != "single-linear-head"
+        or value["graph_policy"] != "single-head-closed-dag"
         or value["protected_apply_requires_rehearsal"] is not True
         or not all(
             isinstance(value[name], str) and 3 <= len(value[name]) <= 80
@@ -67,7 +67,7 @@ def inspect_migration_plan(
     *,
     policy_path: Path = DEFAULT_MIGRATION_POLICY,
 ) -> MigrationPlanEvidence:
-    """Inspect one exact linear graph without connecting to a database."""
+    """Inspect one exact single-head migration DAG without a database."""
     policy, policy_digest = _load_policy(policy_path)
     try:
         if (
@@ -107,11 +107,18 @@ def inspect_migration_plan(
             if script.revision != bases[0]:
                 raise ValueError("Alembic migration graph has an unexpected base")
             continue
-        if not isinstance(down, str) or down not in by_revision:
-            raise ValueError("Alembic migration graph is not a closed linear chain")
-        children[down] += 1
-    if any(count != (0 if revision == heads[0] else 1) for revision, count in children.items()):
-        raise ValueError("Alembic migration graph branches or merges")
+        parents = (down,) if isinstance(down, str) else down
+        if (
+            not isinstance(parents, tuple)
+            or not parents
+            or len(parents) != len(set(parents))
+            or any(parent not in by_revision for parent in parents)
+        ):
+            raise ValueError("Alembic migration graph is not a closed DAG")
+        for parent in parents:
+            children[parent] += 1
+    if any(count == 0 and revision != heads[0] for revision, count in children.items()):
+        raise ValueError("Alembic migration graph has a disconnected revision")
 
     revision_hashes: dict[str, str] = {}
     for revision, script in sorted(by_revision.items()):
