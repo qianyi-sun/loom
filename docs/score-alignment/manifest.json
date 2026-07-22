@@ -785,26 +785,87 @@
       }
     },
     {
-      "benchmark_id": "terminal-bench-2",
+      "benchmark_id": "terminal-bench-2@tb2.1-r6",
       "canonical_reference": {
-        "source_type": "upstream_repository",
-        "title": "Terminal-Bench 2.0",
-        "url": "https://github.com/laude-institute/terminal-bench",
-        "version_or_revision": "91e10457 / v0.1.1 task set",
-        "justification": "Terminal-Bench 2.0 is scored by task-specific terminal verifier success under the pinned upstream task set."
+        "source_type": "harbor_hub_dataset",
+        "title": "Terminal-Bench 2.1 Harbor Hub revision 6 physical profile",
+        "url": "https://hub.harborframework.com/datasets/terminal-bench/terminal-bench-2-1/6",
+        "version_or_revision": "terminal-bench/terminal-bench-2-1@6 / sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+        "justification": "This immutable physical profile contains exactly the 89 Harbor Hub revision-6 packages used for execution and scoring."
       },
       "harbor_support": {
-        "status": "not_supported",
-        "parity_target": "The canonical upstream Terminal-Bench 2 (laude-institute) test runner is the parity target. Real Harbor (harbor-framework/harbor) IS descended from terminal-bench, but at commit 2ead3f1f the `adapters/` directory ships no terminal-bench-2 adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md) — TB-2 is Harbor's host benchmark framework itself, not an adapted external benchmark.",
-        "decision": "Real Harbor (harbor-framework/harbor at 2ead3f1f) ships no terminal-bench-2 adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md) because TB-2 is the host framework Harbor is built on, not an external benchmark Harbor adapts. Loom's TB-2 adapter wraps the upstream TB-2 test runner verbatim, so Loom's verifier IS the canonical TB-2 scorer by construction. Equivalence is proven by replay, not paired-runtime comparison."
+        "status": "supported",
+        "parity_target": "The native verifier and reward-file contract in all 89 packages from Harbor Hub terminal-bench/terminal-bench-2-1@6 is the parity target.",
+        "decision": "Activation requires a fresh 89/89 audit of Hub digests, native contracts, bundle/verifier checksums, architecture/image inputs, and private verifier-driver isolation."
       },
       "score_semantics": {
-        "task_set": "Terminal-Bench 2.0 tasks from the pinned sibling adapter package.",
-        "denominator": "number of runnable terminal-bench-2 task ids",
-        "task_reward": "1.0 when the task verifier reports success; 0.0 otherwise unless the upstream verifier emits a fractional numeric reward",
-        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "task_set": "Exactly 89 locked Harbor Hub revision-6 packages under physical profile terminal-bench-2@tb2.1-r6.",
+        "denominator": "all 89 distinct physical task ids for full-profile acceptance",
+        "task_reward": "the finite numeric native reward, including 0; missing, malformed, non-finite, or timed-out reward evidence is a platform/verifier failure",
+        "aggregation": "arithmetic mean of native numeric task_reward over the complete 89-task profile after platform failures are resolved",
         "displayed_metric": "accuracy / mean task reward",
-        "partial_credit": "allowed only when the upstream verifier emits a fractional numeric reward"
+        "partial_credit": "preserved exactly when the native rev-6 verifier emits a fractional numeric reward"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "terminal-bench-2-r6-task-success",
+            "input_kind": "terminal_artifact",
+            "reference": "locked Harbor Hub rev-6 native verifier output",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known successful artifact through the preserved native tests/test.sh in a fresh verifier-only driver."
+          }
+        ]
+      },
+      "layer2_evidence": {
+        "status": "replay_validated",
+        "parity_kind": "harbor_hub_native_contract",
+        "replay_tests": [
+          {
+            "case_id": "tb21-hub-rev6-lock",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_tb21_lock.py::test_lock_is_exact_rev6_89_task_hub_authority",
+            "asserts": "Hub revision, metadata version, and exactly 89 package digests are immutable execution authority"
+          },
+          {
+            "case_id": "tb21-native-contract-preserved",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_preserves_native_bytes_modes_and_supported_contract",
+            "asserts": "native image/build, architecture, environment, timeout, solution, test, and verifier semantics survive conversion"
+          },
+          {
+            "case_id": "tb21-reward-contract",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_verifier_shim_contract.py",
+            "asserts": "finite zero is valid and missing or invalid reward evidence fails the verifier boundary"
+          },
+          {
+            "case_id": "tb21-provenance-separation",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_report_shape.py::test_native_report_records_execution_and_runtime_provenance_separately",
+            "asserts": "execution and runtime provenance remain distinct"
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "terminal-bench-2",
+      "canonical_reference": {
+        "source_type": "harbor_hub_dataset",
+        "title": "Terminal-Bench 2.1 Harbor Hub revision 6",
+        "url": "https://hub.harborframework.com/datasets/terminal-bench/terminal-bench-2-1/6",
+        "version_or_revision": "terminal-bench/terminal-bench-2-1@6 / sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+        "justification": "Harbor Hub revision 6 and its 89 immutable package digests are the execution and scoring authority for physical profile terminal-bench-2@tb2.1-r6. The fixed Git snapshot is provenance only and its one reviewed digest divergence cannot replace Hub content."
+      },
+      "harbor_support": {
+        "status": "supported",
+        "parity_target": "The native verifier and reward-file contract in all 89 packages from Harbor Hub terminal-bench/terminal-bench-2-1@6 is the parity target.",
+        "decision": "Loom converts the locked Harbor-native schema-1.1 packages into physical profile terminal-bench-2@tb2.1-r6 while preserving upstream-task.toml, native tests, solution, image/build, architecture, environment, and verifier semantics. Fresh 89/89 audit plus isolated verifier execution gates activation; there is no TB2.0 or reduced-task fallback."
+      },
+      "score_semantics": {
+        "task_set": "Exactly 89 locked Harbor Hub revision-6 packages under physical profile terminal-bench-2@tb2.1-r6.",
+        "denominator": "all 89 distinct terminal-bench-2@tb2.1-r6/<task> ids for full-profile acceptance",
+        "task_reward": "the finite numeric native reward, including 0; missing, malformed, non-finite, or timed-out reward evidence is a platform/verifier failure and never becomes zero",
+        "aggregation": "arithmetic mean of native numeric task_reward over the complete 89-task physical profile after platform failures are resolved",
+        "displayed_metric": "accuracy / mean task reward",
+        "partial_credit": "preserved exactly when the native rev-6 verifier emits a fractional numeric reward"
       },
       "layer1_evidence": {
         "status": "replay_defined",
@@ -812,9 +873,9 @@
           {
             "case_id": "terminal-bench-2-task-success",
             "input_kind": "terminal_artifact",
-            "reference": "pinned Terminal-Bench 2.0 evaluator output for one task",
+            "reference": "locked Harbor Hub rev-6 native verifier output for one physical-profile task",
             "expected_reward": 1.0,
-            "replay_method": "Replay a known successful task artifact through Loom and the pinned Terminal-Bench evaluator."
+            "replay_method": "Replay a known successful artifact through the preserved native tests/test.sh in a fresh verifier-only driver and compare the finite reward evidence."
           }
         ]
       },
@@ -823,31 +884,36 @@
         "parity_kind": "upstream_canonical_by_construction",
         "replay_tests": [
           {
-            "case_id": "tb2-oracle-solution-staged",
-            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_copies_reference_solution_for_oracle_smoke",
-            "asserts": "the upstream `reference.sh` is staged + wired into `solve.sh` for oracle agents, so oracle trials execute the upstream-supplied canonical solution against the verifier"
+            "case_id": "tb21-hub-rev6-lock",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_tb21_lock.py::test_lock_is_exact_rev6_89_task_hub_authority",
+            "asserts": "Hub revision, metadata version, and exactly 89 package digests are immutable execution authority"
           },
           {
-            "case_id": "tb2-oracle-yaml-solution-executes",
-            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_renders_solution_yaml_for_oracle_smoke",
-            "asserts": "the YAML-solution oracle path EXECUTES end-to-end (`subprocess.run(['bash', solve.sh], check=True)` + asserts the output file matches expected content). Stronger live-runtime evidence than the by-construction benchmarks above — the actual oracle script runs in CI"
+            "case_id": "tb21-native-contract-preserved",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_preserves_native_bytes_modes_and_supported_contract",
+            "asserts": "schema-1.1 source bytes/modes and supported native image, build, architecture, environment, test, solution, timeout, and verifier fields survive conversion"
           },
           {
-            "case_id": "tb2-verifier-shim-emits-loom-result",
-            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_generated_verifier_shim_emits_loom_verifier_result",
-            "asserts": "the verifier shim emits a well-formed VerifierResult JSON that Loom's verifier machinery can ingest, proving the TB2-to-Loom result-shape mapping is sound"
+            "case_id": "tb21-zero-reward-valid",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_verifier_shim_contract.py::test_shim_keeps_zero_reward_as_a_successful_verifier_result",
+            "asserts": "finite numeric reward zero remains a successful verifier result"
           },
           {
-            "case_id": "tb2-verifier-shim-wraps-upstream-tests",
-            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_writes_verifier_shim",
-            "asserts": "the verifier shim's TEST_DIR defaults to `/app/environment/tb2-tests` (the upstream TB2 test location) so the shim runs the upstream test suite verbatim, not a Loom-built proxy"
+            "case_id": "tb21-invalid-reward-platform-failure",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_verifier_shim_contract.py::test_shim_turns_invalid_reward_evidence_into_verifier_failure",
+            "asserts": "missing or invalid native reward evidence fails the verifier boundary instead of fabricating zero"
+          },
+          {
+            "case_id": "tb21-report-provenance-separation",
+            "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_report_shape.py::test_native_report_records_execution_and_runtime_provenance_separately",
+            "asserts": "physical profile, Hub package, bundle, and verifier provenance remain distinct from agent runtime/image provenance"
           }
         ]
       },
       "layer3_evidence": {
         "status": "preliminary_pending_terminus_2_rerun",
         "canonical_acceptance_status": "pending_terminus_2_rerun",
-        "acceptance_caveat": "Preliminary checked-in evidence only: not canonical acceptance for #222. The historical 35/86 headline counts reward-positive rows, but only 33/86 are clean state=succeeded,reward=1.0 rows because two reward-positive trials ended as trajectory_flush_failed. Canonical acceptance still requires a Terminus-2 rerun/live validation.",
+        "acceptance_caveat": "Historical TB2.0 preliminary checked-in evidence only: this 86-task run is not rev-6 profile evidence and not canonical acceptance for #222 or #749. The historical 35/86 headline counts reward-positive rows, but only 33/86 are clean state=succeeded,reward=1.0 rows because two reward-positive trials ended as trajectory_flush_failed. Canonical acceptance requires a new Terminal-Bench 2.1 rev-6 Terminus-2 run/live validation.",
         "runs": [
           {
             "case_id": "tb2-claude-code-haiku-4-5-preliminary-86",

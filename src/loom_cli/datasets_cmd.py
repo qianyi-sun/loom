@@ -11,7 +11,8 @@ Subcommands:
 - publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
 - register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
 - verify <slug> [--limit --minio-* --bucket --seed]
-- audit [--all | <slug>] [--db-url] [--json]
+- audit [--all | <slug>] [--db-url] [--json] [--tb21-audit-json PATH]
+- activate terminal-bench-2 --profile terminal-bench-2@tb2.1-r6 --audit-json PATH --minio-*
 - hf-boundary-evidence <slug> --environment staging --output PATH
 - sync-mirror [--source-* ...] [--dest-* ...] [--prefix ...] [--dry-run]
 
@@ -82,7 +83,9 @@ def _add_import_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--bucket", default="loom-benchmarks")
     p.add_argument(
-        "--cache-dir", type=Path, default=Path("/tmp/loom-benchmark-cache"),
+        "--cache-dir",
+        type=Path,
+        default=Path("/tmp/loom-benchmark-cache"),
     )
     p.add_argument("--limit", type=int, default=None)
     p.add_argument(
@@ -109,11 +112,13 @@ def _add_publish_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
-        "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
+        "--hf-org",
+        default=os.environ.get("LOOM_HF_ORG", "PRHW"),
         help="HF namespace to publish under (default: env LOOM_HF_ORG, falling back to 'PRHW').",
     )
     p.add_argument(
-        "--hf-token", default=os.environ.get("HF_TOKEN"),
+        "--hf-token",
+        default=os.environ.get("HF_TOKEN"),
         help="HF write token (env: HF_TOKEN). Required when --target=hf.",
     )
     p.add_argument(
@@ -140,10 +145,12 @@ def _add_publish_args(p: argparse.ArgumentParser) -> None:
         help="Target bucket for --target=object-store.",
     )
     p.add_argument(
-        "--cache-dir", type=Path,
+        "--cache-dir",
+        type=Path,
         default=Path(
             os.environ.get(
-                "LOOM_BENCHMARK_CACHE", "/tmp/loom-benchmark-cache",
+                "LOOM_BENCHMARK_CACHE",
+                "/tmp/loom-benchmark-cache",
             ),
         ),
     )
@@ -174,10 +181,12 @@ def _add_register_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
-        "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
+        "--hf-org",
+        default=os.environ.get("LOOM_HF_ORG", "PRHW"),
     )
     p.add_argument(
-        "--hf-token", default=os.environ.get("HF_TOKEN"),
+        "--hf-token",
+        default=os.environ.get("HF_TOKEN"),
         help="HF read token (optional for public datasets).",
     )
     p.add_argument(
@@ -275,6 +284,15 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--all", dest="all_benchmarks", action="store_true")
     p.add_argument("--json", dest="as_json", action="store_true")
     p.add_argument(
+        "--tb21-audit-json",
+        type=Path,
+        default=None,
+        help=(
+            "Write the complete immutable Terminal-Bench 2.1 rev-6 audit "
+            "evidence used by `datasets activate`. Requires the exact physical profile."
+        ),
+    )
+    p.add_argument(
         "--db-url",
         default=_target_db_url(),
         help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
@@ -299,6 +317,20 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
         "--minio-secret-key",
         default=_target_minio_env("SECRET_KEY"),
     )
+
+
+def _add_activate_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("benchmark")
+    p.add_argument("--profile", required=True)
+    p.add_argument("--audit-json", required=True, type=Path)
+    p.add_argument(
+        "--db-url",
+        default=_target_db_url(),
+        help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
+    )
+    p.add_argument("--minio-endpoint", default=_target_minio_env("ENDPOINT"))
+    p.add_argument("--minio-access-key", default=_target_minio_env("ACCESS_KEY"))
+    p.add_argument("--minio-secret-key", default=_target_minio_env("SECRET_KEY"))
 
 
 def _add_hf_boundary_evidence_args(p: argparse.ArgumentParser) -> None:
@@ -336,8 +368,7 @@ def _add_hf_boundary_evidence_args(p: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help=(
-            "Release-gate GB10 status artifact path, kept with generated "
-            "evidence for traceability."
+            "Release-gate GB10 status artifact path, kept with generated evidence for traceability."
         ),
     )
     p.add_argument("--ssh-timeout-sec", type=float, default=60.0)
@@ -347,10 +378,7 @@ def _add_hf_boundary_evidence_args(p: argparse.ArgumentParser) -> None:
 
 
 def _source_env(name: str) -> str | None:
-    return (
-        os.environ.get(f"LOOM_CATALOG_SOURCE_{name}")
-        or os.environ.get(f"LOOM_SOURCE_{name}")
-    )
+    return os.environ.get(f"LOOM_CATALOG_SOURCE_{name}") or os.environ.get(f"LOOM_SOURCE_{name}")
 
 
 def _add_provision_catalog_provision_args(p: argparse.ArgumentParser) -> None:
@@ -445,8 +473,7 @@ def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
         "--minio-endpoint",
         default=_target_minio_env("ENDPOINT"),
         help=(
-            "Target object-store endpoint (env LOOM_MINIO_ENDPOINT, then "
-            "LOOM_SVC_MINIO_ENDPOINT)."
+            "Target object-store endpoint (env LOOM_MINIO_ENDPOINT, then LOOM_SVC_MINIO_ENDPOINT)."
         ),
     )
     p.add_argument(
@@ -621,74 +648,104 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("refresh-catalog")
 
     # Folded-in benchmark-tool subcommands.
-    _add_import_args(sub.add_parser(
-        "import",
-        help="Convert a benchmark's tasks + upload to MinIO + insert task rows.",
-    ))
-    _add_publish_args(sub.add_parser(
-        "publish",
-        help="Convert + push a benchmark to a HuggingFace dataset repo (Loom-team operation).",
-    ))
-    _add_register_args(sub.add_parser(
-        "register",
-        help=(
-            "Read a benchmark's HF manifest and upsert task rows; optionally "
-            "mirror bundles into internal object storage."
-        ),
-    ))
-    _add_verify_args(sub.add_parser(
-        "verify",
-        help="Sample tasks from a benchmark + run the oracle agent end-to-end.",
-    ))
-    _add_audit_args(sub.add_parser(
-        "audit",
-        help="Inspect benchmark readiness from registered catalog/task rows.",
-    ))
-    _add_hf_boundary_evidence_args(sub.add_parser(
-        "hf-boundary-evidence",
-        help="Generate secret-safe HF mirror/token-boundary release evidence.",
-    ))
-    _add_provision_catalog_provision_args(sub.add_parser(
-        "provision-catalog",
-        help=(
-            "Copy runnable benchmark/task rows, supported agent rows, and "
-            "their S3 bundles from a source environment into staging."
-        ),
-    ))
+    _add_import_args(
+        sub.add_parser(
+            "import",
+            help="Convert a benchmark's tasks + upload to MinIO + insert task rows.",
+        )
+    )
+    _add_publish_args(
+        sub.add_parser(
+            "publish",
+            help="Convert + push a benchmark to a HuggingFace dataset repo (Loom-team operation).",
+        )
+    )
+    _add_register_args(
+        sub.add_parser(
+            "register",
+            help=(
+                "Read a benchmark's HF manifest and upsert task rows; optionally "
+                "mirror bundles into internal object storage."
+            ),
+        )
+    )
+    _add_verify_args(
+        sub.add_parser(
+            "verify",
+            help="Sample tasks from a benchmark + run the oracle agent end-to-end.",
+        )
+    )
+    _add_audit_args(
+        sub.add_parser(
+            "audit",
+            help="Inspect benchmark readiness from registered catalog/task rows.",
+        )
+    )
+    _add_activate_args(
+        sub.add_parser(
+            "activate",
+            help="Atomically activate a fully audited immutable benchmark profile.",
+        )
+    )
+    _add_hf_boundary_evidence_args(
+        sub.add_parser(
+            "hf-boundary-evidence",
+            help="Generate secret-safe HF mirror/token-boundary release evidence.",
+        )
+    )
+    _add_provision_catalog_provision_args(
+        sub.add_parser(
+            "provision-catalog",
+            help=(
+                "Copy runnable benchmark/task rows, supported agent rows, and "
+                "their S3 bundles from a source environment into staging."
+            ),
+        )
+    )
 
-    _add_validate_local_args(sub.add_parser(
-        "validate-local",
-        aliases=["validate"],
-        help="Validate a local user-owned benchmark folder and print a registry snippet.",
-    ))
+    _add_validate_local_args(
+        sub.add_parser(
+            "validate-local",
+            aliases=["validate"],
+            help="Validate a local user-owned benchmark folder and print a registry snippet.",
+        )
+    )
 
-    _add_publish_local_args(sub.add_parser(
-        "publish-local",
-        help="Upload a validated local benchmark folder to object storage and register it.",
-    ))
+    _add_publish_local_args(
+        sub.add_parser(
+            "publish-local",
+            help="Upload a validated local benchmark folder to object storage and register it.",
+        )
+    )
 
-    _add_sync_mirror_args(sub.add_parser(
-        "sync-mirror",
-        help=(
-            "One-way sync every object from a source object-store bucket "
-            "(e.g. in-cluster MinIO) to a destination bucket (e.g. Cloudflare R2). "
-            "Idempotent: skips objects already present at the destination with "
-            "matching size. See #804."
-        ),
-    ))
+    _add_sync_mirror_args(
+        sub.add_parser(
+            "sync-mirror",
+            help=(
+                "One-way sync every object from a source object-store bucket "
+                "(e.g. in-cluster MinIO) to a destination bucket (e.g. Cloudflare R2). "
+                "Idempotent: skips objects already present at the destination with "
+                "matching size. See #804."
+            ),
+        )
+    )
 
     p_sync = sub.add_parser(
         "sync-config",
         help="Sync config/benchmarks.toml into the benchmarks + tasks tables (issue #234).",
     )
     p_sync.add_argument(
-        "--config", type=Path, default=None,
+        "--config",
+        type=Path,
+        default=None,
         help="Path to benchmarks.toml. Defaults to "
         "$LOOM_BENCHMARKS_CONFIG_PATH, then ./config/benchmarks.toml, "
         "then /etc/loom/benchmarks.toml.",
     )
     p_sync.add_argument(
-        "--fixtures-root", type=Path, default=None,
+        "--fixtures-root",
+        type=Path,
+        default=None,
         help="Override the worker fixtures_root used to resolve "
         "[[local]] entries. Defaults to $LOOM_WORKER_FIXTURES_ROOT.",
     )
@@ -698,7 +755,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
     )
     p_sync.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Compute the plan + print it without writing to the DB.",
     )
 
@@ -723,7 +781,8 @@ def _gather(
         catalog = []
     remote = (
         remote_mod.load_remote_entries(server_url=server_url, token=token)
-        if only in (None, "remote") else []
+        if only in (None, "remote")
+        else []
     )
     return union_entries(builtin=builtin, catalog=catalog, remote=remote)
 
@@ -737,8 +796,10 @@ def _cmd_list(args: argparse.Namespace) -> int:
     elif args.remote:
         only = "remote"
     entries = _gather(
-        only=only, catalog_url=args.catalog_url,
-        server_url=args.server_url, token=args.token,
+        only=only,
+        catalog_url=args.catalog_url,
+        server_url=args.server_url,
+        token=args.token,
     )
     if args.as_json:
         print(render_datasets_json(entries))
@@ -749,8 +810,10 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 def _cmd_show(args: argparse.Namespace) -> int:
     entries = _gather(
-        only=None, catalog_url=args.catalog_url,
-        server_url=args.server_url, token=args.token,
+        only=None,
+        catalog_url=args.catalog_url,
+        server_url=args.server_url,
+        token=args.token,
     )
     match = next((e for e in entries if e.slug == args.slug), None)
     if match is None:
@@ -773,14 +836,15 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 def _cmd_install(args: argparse.Namespace) -> int:
     entries = _gather(
-        only=None, catalog_url=args.catalog_url,
-        server_url=None, token=None,
+        only=None,
+        catalog_url=args.catalog_url,
+        server_url=None,
+        token=None,
     )
     match = next((e for e in entries if e.slug == args.slug), None)
     if match is None or not match.available_pip_spec:
         print(
-            f"error: dataset {args.slug!r} not found in catalog "
-            "(no pip spec available)",
+            f"error: dataset {args.slug!r} not found in catalog (no pip spec available)",
             file=sys.stderr,
         )
         return 2
@@ -804,24 +868,23 @@ def _cmd_import(args: argparse.Namespace) -> int:
     from loom_benchmark_tool.import_cmd import run_import
 
     missing = [
-        f for f, v in (
+        f
+        for f, v in (
             ("--db-url / LOOM_DB_URL / LOOM_SVC_DB_URL", args.db_url),
             (
-                "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
-                "LOOM_SVC_MINIO_ENDPOINT",
+                "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT",
                 args.minio_endpoint,
             ),
             (
-                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
-                "LOOM_SVC_MINIO_ACCESS_KEY",
+                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY",
                 args.minio_access_key,
             ),
             (
-                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
-                "LOOM_SVC_MINIO_SECRET_KEY",
+                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY",
                 args.minio_secret_key,
             ),
-        ) if not v
+        )
+        if not v
     ]
     if missing:
         print(f"error: import requires: {', '.join(missing)}", file=sys.stderr)
@@ -832,17 +895,19 @@ def _cmd_import(args: argparse.Namespace) -> int:
         secret_key=args.minio_secret_key,
     )
     try:
-        stats = asyncio.run(run_import(
-            benchmark=args.benchmark,
-            db_url=args.db_url,
-            object_store=store,
-            bucket=args.bucket,
-            cache_dir=args.cache_dir,
-            limit=args.limit,
-            instance_ids=set(args.instance_ids) if args.instance_ids else None,
-            imported_by=args.imported_by,
-            refresh=args.refresh,
-        ))
+        stats = asyncio.run(
+            run_import(
+                benchmark=args.benchmark,
+                db_url=args.db_url,
+                object_store=store,
+                bucket=args.bucket,
+                cache_dir=args.cache_dir,
+                limit=args.limit,
+                instance_ids=set(args.instance_ids) if args.instance_ids else None,
+                imported_by=args.imported_by,
+                refresh=args.refresh,
+            )
+        )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -865,23 +930,22 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             return 2
     else:  # target == "object-store"
         missing = [
-            flag for flag, value in (
+            flag
+            for flag, value in (
                 (
-                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
-                    "LOOM_SVC_MINIO_ENDPOINT",
+                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT",
                     args.minio_endpoint,
                 ),
                 (
-                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
-                    "LOOM_SVC_MINIO_ACCESS_KEY",
+                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY",
                     args.minio_access_key,
                 ),
                 (
-                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
-                    "LOOM_SVC_MINIO_SECRET_KEY",
+                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY",
                     args.minio_secret_key,
                 ),
-            ) if not value
+            )
+            if not value
         ]
         if missing:
             print(
@@ -895,19 +959,21 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             secret_key=args.minio_secret_key,
         )
     try:
-        result = asyncio.run(run_publish(
-            benchmark=args.benchmark,
-            target=args.target,
-            hf_org=args.hf_org,
-            hf_token=args.hf_token,
-            cache_dir=args.cache_dir,
-            limit=args.limit,
-            instance_ids=set(args.instance_ids) if args.instance_ids else None,
-            private=args.private,
-            refresh=args.refresh,
-            object_store=object_store,
-            bucket=args.bucket,
-        ))
+        result = asyncio.run(
+            run_publish(
+                benchmark=args.benchmark,
+                target=args.target,
+                hf_org=args.hf_org,
+                hf_token=args.hf_token,
+                cache_dir=args.cache_dir,
+                limit=args.limit,
+                instance_ids=set(args.instance_ids) if args.instance_ids else None,
+                private=args.private,
+                refresh=args.refresh,
+                object_store=object_store,
+                bucket=args.bucket,
+            )
+        )
     except ValueError as exc:
         print(f"error: {redact_text(str(exc))}", file=sys.stderr)
         return 2
@@ -937,42 +1003,34 @@ def _cmd_register(args: argparse.Namespace) -> int:
 
     if not args.db_url:
         print(
-            "error: register requires --db-url / env LOOM_DB_URL "
-            "or LOOM_SVC_DB_URL",
+            "error: register requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
             file=sys.stderr,
         )
         return 2
 
-    needs_object_store = (
-        args.source == "object-store" or args.mirror_to_object_store
-    )
+    needs_object_store = args.source == "object-store" or args.mirror_to_object_store
     object_store = None
     if needs_object_store:
         missing = [
-            f for f, v in (
+            f
+            for f, v in (
                 (
-                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
-                    "LOOM_SVC_MINIO_ENDPOINT",
+                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT",
                     args.minio_endpoint,
                 ),
                 (
-                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
-                    "LOOM_SVC_MINIO_ACCESS_KEY",
+                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY",
                     args.minio_access_key,
                 ),
                 (
-                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
-                    "LOOM_SVC_MINIO_SECRET_KEY",
+                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY",
                     args.minio_secret_key,
                 ),
-            ) if not v
+            )
+            if not v
         ]
         if missing:
-            reason = (
-                "--source=object-store"
-                if args.source == "object-store"
-                else "register mirror"
-            )
+            reason = "--source=object-store" if args.source == "object-store" else "register mirror"
             print(f"error: {reason} requires: {', '.join(missing)}", file=sys.stderr)
             return 2
         object_store = MinioObjectStore(
@@ -981,9 +1039,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
             secret_key=args.minio_secret_key,
         )
 
-    if args.source == "object-store" and (
-        not args.revision or args.revision == "main"
-    ):
+    if args.source == "object-store" and (not args.revision or args.revision == "main"):
         print(
             "error: --source=object-store requires --revision "
             "(the content-addressed revision emitted by publish)",
@@ -991,20 +1047,22 @@ def _cmd_register(args: argparse.Namespace) -> int:
         )
         return 2
 
-    result = asyncio.run(run_register(
-        benchmark=args.benchmark,
-        source=args.source,
-        hf_org=args.hf_org,
-        hf_token=args.hf_token,
-        db_url=args.db_url,
-        revision=args.revision,
-        registered_by=args.registered_by,
-        mirror_to_object_store=args.mirror_to_object_store,
-        object_store=object_store,
-        bucket=args.bucket,
-        chunk_size=args.chunk_size,
-        chunk_sleep_secs=args.chunk_sleep_secs,
-    ))
+    result = asyncio.run(
+        run_register(
+            benchmark=args.benchmark,
+            source=args.source,
+            hf_org=args.hf_org,
+            hf_token=args.hf_token,
+            db_url=args.db_url,
+            revision=args.revision,
+            registered_by=args.registered_by,
+            mirror_to_object_store=args.mirror_to_object_store,
+            object_store=object_store,
+            bucket=args.bucket,
+            chunk_size=args.chunk_size,
+            chunk_sleep_secs=args.chunk_sleep_secs,
+        )
+    )
     parts = [
         f"register {args.benchmark}:",
         f"source={result['source']}",
@@ -1013,11 +1071,13 @@ def _cmd_register(args: argparse.Namespace) -> int:
         f"skipped={result['skipped']}",
     ]
     if args.mirror_to_object_store:
-        parts.extend([
-            f"mirrored={result['mirrored']}",
-            f"mirror_uploaded={result['mirror_uploaded']}",
-            f"mirror_skipped={result['mirror_skipped']}",
-        ])
+        parts.extend(
+            [
+                f"mirrored={result['mirrored']}",
+                f"mirror_uploaded={result['mirror_uploaded']}",
+                f"mirror_skipped={result['mirror_skipped']}",
+            ]
+        )
     parts.extend([f"repo={result['repo_id']}", f"rev={result['revision']}"])
     print(" ".join(parts))
     return 0
@@ -1028,23 +1088,22 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     from loom_benchmark_tool.verify_cmd import run_verify
 
     missing = [
-        f for f, v in (
+        f
+        for f, v in (
             (
-                "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
-                "LOOM_SVC_MINIO_ENDPOINT",
+                "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT",
                 args.minio_endpoint,
             ),
             (
-                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
-                "LOOM_SVC_MINIO_ACCESS_KEY",
+                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY",
                 args.minio_access_key,
             ),
             (
-                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
-                "LOOM_SVC_MINIO_SECRET_KEY",
+                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY",
                 args.minio_secret_key,
             ),
-        ) if not v
+        )
+        if not v
     ]
     if missing:
         print(f"error: verify requires: {', '.join(missing)}", file=sys.stderr)
@@ -1054,13 +1113,15 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         access_key=args.minio_access_key,
         secret_key=args.minio_secret_key,
     )
-    report = asyncio.run(run_verify(
-        benchmark=args.benchmark,
-        object_store=store,
-        bucket=args.bucket,
-        limit=args.limit,
-        seed=args.seed,
-    ))
+    report = asyncio.run(
+        run_verify(
+            benchmark=args.benchmark,
+            object_store=store,
+            bucket=args.bucket,
+            limit=args.limit,
+            seed=args.seed,
+        )
+    )
     print(
         f"verify {args.benchmark}: "
         f"total={report['total']} "
@@ -1082,12 +1143,19 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_audit(args: argparse.Namespace) -> int:
+    from loom_benchmark_terminal_bench_2.upstream import TB21_TASK_COUNT
+
     from loom.trajectory.storage import MinioObjectStore
+    from loom_benchmark_tool.audit_cmd import (
+        TB21_PROFILE_ID,
+        AuditResult,
+        ProfileActivationError,
+        audit_tb21_profile,
+    )
 
     if not args.db_url:
         print(
-            "error: audit requires --db-url / env LOOM_DB_URL "
-            "or LOOM_SVC_DB_URL",
+            "error: audit requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
             file=sys.stderr,
         )
         return 2
@@ -1104,26 +1172,89 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         )
         return 2
 
+    if args.tb21_audit_json is not None:
+        if args.all_benchmarks or args.benchmark != TB21_PROFILE_ID:
+            print(
+                f"error: --tb21-audit-json requires benchmark {TB21_PROFILE_ID!r}",
+                file=sys.stderr,
+            )
+            return 2
+        missing = [
+            flag
+            for flag, value in (
+                ("--minio-endpoint", args.minio_endpoint),
+                ("--minio-access-key", args.minio_access_key),
+                ("--minio-secret-key", args.minio_secret_key),
+            )
+            if not value
+        ]
+        if missing:
+            print(
+                "error: TB2.1 audit requires current object-store access: " + ", ".join(missing),
+                file=sys.stderr,
+            )
+            return 2
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from loom_benchmark_tool.db_url import normalize_db_url
+
+        tb21_object_store = MinioObjectStore(
+            endpoint_url=args.minio_endpoint,
+            access_key=args.minio_access_key,
+            secret_key=args.minio_secret_key,
+        )
+
+        async def _audit_tb21() -> AuditResult:
+            engine = create_async_engine(normalize_db_url(args.db_url))
+            try:
+                async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                    return await audit_tb21_profile(
+                        session,
+                        object_store=tb21_object_store,
+                    )
+            finally:
+                await engine.dispose()
+
+        try:
+            audit = asyncio.run(_audit_tb21())
+            args.tb21_audit_json.write_text(
+                json.dumps(audit.to_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            audit.require_exact_profile(TB21_PROFILE_ID, task_count=TB21_TASK_COUNT)
+        except ProfileActivationError as exc:
+            print(f"error: TB2.1 audit rejected: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"error: TB2.1 audit failed: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"TB2.1 audit: profile={audit.profile} "
+            f"verified_bundles={audit.verified_bundles} "
+            f"snapshot={audit.snapshot_id} evidence={args.tb21_audit_json}",
+        )
+        return 0
+
     object_store = None
     if args.verify_bundles:
         missing = [
-            f for f, v in (
+            f
+            for f, v in (
                 (
-                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
-                    "LOOM_SVC_MINIO_ENDPOINT",
+                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT",
                     args.minio_endpoint,
                 ),
                 (
-                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
-                    "LOOM_SVC_MINIO_ACCESS_KEY",
+                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY",
                     args.minio_access_key,
                 ),
                 (
-                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
-                    "LOOM_SVC_MINIO_SECRET_KEY",
+                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY",
                     args.minio_secret_key,
                 ),
-            ) if not v
+            )
+            if not v
         ]
         if missing:
             print(f"error: audit --verify-bundles requires: {', '.join(missing)}", file=sys.stderr)
@@ -1134,18 +1265,22 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             secret_key=args.minio_secret_key,
         )
 
-    items = asyncio.run(run_readiness_audit(
-        db_url=args.db_url,
-        benchmark=None if args.all_benchmarks else args.benchmark,
-    ))
+    items = asyncio.run(
+        run_readiness_audit(
+            db_url=args.db_url,
+            benchmark=None if args.all_benchmarks else args.benchmark,
+        )
+    )
     bundle_report = None
     if args.verify_bundles:
         assert object_store is not None
-        bundle_report = asyncio.run(run_bundle_presence_audit(
-            db_url=args.db_url,
-            object_store=object_store,
-            benchmark=None if args.all_benchmarks else args.benchmark,
-        ))
+        bundle_report = asyncio.run(
+            run_bundle_presence_audit(
+                db_url=args.db_url,
+                object_store=object_store,
+                benchmark=None if args.all_benchmarks else args.benchmark,
+            )
+        )
     if args.as_json:
         payload = json.loads(render_readiness_json(items))
         if bundle_report is not None:
@@ -1172,6 +1307,88 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_activate(args: argparse.Namespace) -> int:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom.trajectory.storage import MinioObjectStore
+    from loom_benchmark_tool.audit_cmd import (
+        TB21_PROFILE_ID,
+        TB21_PUBLIC_ALIAS,
+        AuditResult,
+        ProfileActivationError,
+        activate_tb21_alias,
+    )
+    from loom_benchmark_tool.db_url import normalize_db_url
+
+    if args.benchmark != TB21_PUBLIC_ALIAS:
+        print(
+            f"error: activate currently supports only {TB21_PUBLIC_ALIAS!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.profile != TB21_PROFILE_ID:
+        print(
+            f"error: {TB21_PUBLIC_ALIAS!r} must activate {TB21_PROFILE_ID!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.db_url:
+        print(
+            "error: activate requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
+            file=sys.stderr,
+        )
+        return 2
+    missing_minio = [
+        flag
+        for flag, value in (
+            ("--minio-endpoint", args.minio_endpoint),
+            ("--minio-access-key", args.minio_access_key),
+            ("--minio-secret-key", args.minio_secret_key),
+        )
+        if not value
+    ]
+    if missing_minio:
+        print(
+            "error: activate requires current object-store access: " + ", ".join(missing_minio),
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        audit = AuditResult.from_json_file(args.audit_json)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"error: invalid TB2.1 audit JSON: {exc}", file=sys.stderr)
+        return 2
+
+    object_store = MinioObjectStore(
+        endpoint_url=args.minio_endpoint,
+        access_key=args.minio_access_key,
+        secret_key=args.minio_secret_key,
+    )
+
+    async def _activate() -> None:
+        engine = create_async_engine(normalize_db_url(args.db_url))
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                await activate_tb21_alias(
+                    session,
+                    object_store=object_store,
+                    audit_evidence=audit,
+                )
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_activate())
+    except ProfileActivationError as exc:
+        print(f"error: TB2.1 activation rejected: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"error: TB2.1 activation failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"activated {TB21_PUBLIC_ALIAS} -> {TB21_PROFILE_ID}")
+    return 0
+
+
 def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
     from loom_cli.catalog_provision import (
         Boto3CatalogObjectStore,
@@ -1194,8 +1411,7 @@ def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
         present=bool(args.target_db_url),
     )
     require_present(
-        "--source-minio-endpoint / LOOM_CATALOG_SOURCE_MINIO_ENDPOINT / "
-        "LOOM_SOURCE_MINIO_ENDPOINT",
+        "--source-minio-endpoint / LOOM_CATALOG_SOURCE_MINIO_ENDPOINT / LOOM_SOURCE_MINIO_ENDPOINT",
         present=bool(args.source_minio_endpoint),
     )
     require_present(
@@ -1213,13 +1429,11 @@ def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
         present=bool(args.target_minio_endpoint),
     )
     require_present(
-        "--target-minio-access-key / LOOM_MINIO_ACCESS_KEY / "
-        "LOOM_SVC_MINIO_ACCESS_KEY",
+        "--target-minio-access-key / LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY",
         present=bool(args.target_minio_access_key),
     )
     require_present(
-        "--target-minio-secret-key / LOOM_MINIO_SECRET_KEY / "
-        "LOOM_SVC_MINIO_SECRET_KEY",
+        "--target-minio-secret-key / LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY",
         present=bool(args.target_minio_secret_key),
     )
     if missing:
@@ -1241,14 +1455,16 @@ def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
         access_key=args.target_minio_access_key,
         secret_key=args.target_minio_secret_key,
     )
-    stats = asyncio.run(provision_ready_benchmark_catalog(
-        source_catalog=source_catalog,
-        target_catalog=target_catalog,
-        source_objects=source_objects,
-        target_objects=target_objects,
-        target_bucket=args.target_bucket,
-        imported_by=args.imported_by,
-    ))
+    stats = asyncio.run(
+        provision_ready_benchmark_catalog(
+            source_catalog=source_catalog,
+            target_catalog=target_catalog,
+            source_objects=source_objects,
+            target_objects=target_objects,
+            target_bucket=args.target_bucket,
+            imported_by=args.imported_by,
+        )
+    )
     print(
         "staging-catalog: "
         f"ready_agents={stats.ready_agents} "
@@ -1344,24 +1560,23 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
         return 2
 
     missing = [
-        f for f, v in (
+        f
+        for f, v in (
             ("--db-url / LOOM_DB_URL / LOOM_SVC_DB_URL", db_url),
             (
-                "--minio-endpoint / LOOM_MINIO_ENDPOINT / "
-                "LOOM_SVC_MINIO_ENDPOINT",
+                "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT",
                 args.minio_endpoint,
             ),
             (
-                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / "
-                "LOOM_SVC_MINIO_ACCESS_KEY",
+                "--minio-access-key / LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY",
                 minio_access_key,
             ),
             (
-                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / "
-                "LOOM_SVC_MINIO_SECRET_KEY",
+                "--minio-secret-key / LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY",
                 minio_secret_key,
             ),
-        ) if not v
+        )
+        if not v
     ]
     if missing:
         print(
@@ -1381,19 +1596,21 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
         secret_key=minio_secret_key,
     )
     try:
-        stats = asyncio.run(publish_local_benchmark(
-            args.path,
-            db_url=db_url,
-            object_store=store,
-            bucket=args.bucket,
-            benchmark_id=args.benchmark_id,
-            display_name=args.display_name,
-            series=args.series,
-            license_spdx=args.license_spdx,
-            source_subdir=args.source_subdir,
-            imported_by=args.imported_by,
-            compat_flatten_environment=args.compat_flatten_environment,
-        ))
+        stats = asyncio.run(
+            publish_local_benchmark(
+                args.path,
+                db_url=db_url,
+                object_store=store,
+                bucket=args.bucket,
+                benchmark_id=args.benchmark_id,
+                display_name=args.display_name,
+                series=args.series,
+                license_spdx=args.license_spdx,
+                source_subdir=args.source_subdir,
+                imported_by=args.imported_by,
+                compat_flatten_environment=args.compat_flatten_environment,
+            )
+        )
     except LocalBenchmarkValidationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.exit_code
@@ -1415,32 +1632,36 @@ def _cmd_sync_mirror(args: argparse.Namespace) -> int:
     from loom_benchmark_tool.sync_cmd import run_sync_mirror
 
     missing = [
-        flag for flag, value in (
+        flag
+        for flag, value in (
             ("--source-endpoint / LOOM_MINIO_ENDPOINT", args.source_endpoint),
             ("--source-access-key / LOOM_MINIO_ACCESS_KEY", args.source_access_key),
             ("--source-secret-key / LOOM_MINIO_SECRET_KEY", args.source_secret_key),
             ("--dest-endpoint / LOOM_R2_ENDPOINT", args.dest_endpoint),
             ("--dest-access-key / LOOM_R2_ACCESS_KEY", args.dest_access_key),
             ("--dest-secret-key / LOOM_R2_SECRET_KEY", args.dest_secret_key),
-        ) if not value
+        )
+        if not value
     ]
     if missing:
         print(f"error: sync-mirror requires: {', '.join(missing)}", file=sys.stderr)
         return 2
 
     try:
-        stats = asyncio.run(run_sync_mirror(
-            source_endpoint=args.source_endpoint,
-            source_access_key=args.source_access_key,
-            source_secret_key=args.source_secret_key,
-            source_bucket=args.source_bucket,
-            dest_endpoint=args.dest_endpoint,
-            dest_access_key=args.dest_access_key,
-            dest_secret_key=args.dest_secret_key,
-            dest_bucket=args.dest_bucket,
-            prefix=args.prefix,
-            dry_run=args.dry_run,
-        ))
+        stats = asyncio.run(
+            run_sync_mirror(
+                source_endpoint=args.source_endpoint,
+                source_access_key=args.source_access_key,
+                source_secret_key=args.source_secret_key,
+                source_bucket=args.source_bucket,
+                dest_endpoint=args.dest_endpoint,
+                dest_access_key=args.dest_access_key,
+                dest_secret_key=args.dest_secret_key,
+                dest_bucket=args.dest_bucket,
+                prefix=args.prefix,
+                dry_run=args.dry_run,
+            )
+        )
     except Exception as exc:
         print(f"error: sync-mirror failed: {exc}", file=sys.stderr)
         return 1
@@ -1502,8 +1723,7 @@ def _cmd_sync_config(args: argparse.Namespace) -> int:
 
     if not args.db_url:
         print(
-            "error: sync-config requires --db-url / env LOOM_DB_URL "
-            "or LOOM_SVC_DB_URL",
+            "error: sync-config requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
             file=sys.stderr,
         )
         return 2
@@ -1527,10 +1747,7 @@ def _cmd_sync_config(args: argparse.Namespace) -> int:
         finally:
             await engine.dispose()
 
-        banner = (
-            "DRY RUN — no DB writes" if args.dry_run
-            else f"synced {config_path}"
-        )
+        banner = "DRY RUN — no DB writes" if args.dry_run else f"synced {config_path}"
         print(banner)
         print(render_plan_table(plan))
         if plan.tasks:
@@ -1567,6 +1784,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "register": _cmd_register,
     "verify": _cmd_verify,
     "audit": _cmd_audit,
+    "activate": _cmd_activate,
     "hf-boundary-evidence": _cmd_hf_boundary_evidence,
     "provision-catalog": _cmd_provision_catalog_provision,
     "validate-local": _cmd_validate_local,

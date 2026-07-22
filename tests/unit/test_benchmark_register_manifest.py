@@ -1,16 +1,167 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from loom.trajectory.storage import (
+    BUNDLE_FILE_METADATA_NAME,
+    bundle_file_metadata_sha256,
+    write_bundle_file_metadata_sidecar,
+)
+from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY
 from loom_benchmark_tool.register_cmd import (
+    _copy_hf_snapshot_bundle_for_registration,
     mirror_manifest_task_bundle,
     run_register,
     task_config_from_manifest_entry,
 )
+
+
+def test_hf_snapshot_copy_restores_mode_without_mutating_symlink_blob(
+    tmp_path: Path,
+) -> None:
+    published = tmp_path / "published"
+    (published / "verifier").mkdir(parents=True)
+    (published / "task.toml").write_text("[task]\nid='x'\n")
+    published_verifier = published / "verifier" / "run.sh"
+    published_verifier.write_text("#!/bin/sh\n")
+    published_verifier.chmod(0o755)
+    expected = bundle_file_metadata_sha256(published)
+    write_bundle_file_metadata_sidecar(published)
+
+    cache = tmp_path / "cache"
+    (cache / "task" / "verifier").mkdir(parents=True)
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    task_blob = blobs / "task.toml"
+    task_blob.write_bytes((published / "task.toml").read_bytes())
+    task_blob.chmod(0o644)
+    verifier_blob = blobs / "run.sh"
+    verifier_blob.write_bytes(published_verifier.read_bytes())
+    verifier_blob.chmod(0o644)
+    sidecar_blob = blobs / "metadata.json"
+    sidecar_blob.write_bytes((published / BUNDLE_FILE_METADATA_NAME).read_bytes())
+    (cache / "task" / "task.toml").symlink_to(task_blob)
+    (cache / "task" / "verifier" / "run.sh").symlink_to(verifier_blob)
+    (cache / "task" / BUNDLE_FILE_METADATA_NAME).symlink_to(sidecar_blob)
+    owned = tmp_path / "owned"
+
+    _copy_hf_snapshot_bundle_for_registration(
+        snapshot_root=cache,
+        hf_path="task/",
+        out_root=owned,
+        expected_metadata_sha256=expected,
+        require_sidecar=True,
+    )
+
+    restored = owned / "task" / "verifier" / "run.sh"
+    assert not restored.is_symlink()
+    assert restored.stat().st_mode & 0o777 == 0o755
+    assert verifier_blob.stat().st_mode & 0o777 == 0o644
+    assert not (owned / "task" / BUNDLE_FILE_METADATA_NAME).exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "tampered", "unsafe", "path-mismatch"])
+async def test_hf_snapshot_sidecar_failures_are_rejected_before_db_or_s3_write(
+    tmp_path: Path,
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot" / "task"
+    snapshot.mkdir(parents=True)
+    (snapshot / "task.toml").write_text("[task]\nid='x'\n")
+    checksum = _bundle_checksum(snapshot)
+    expected = bundle_file_metadata_sha256(snapshot)
+    write_bundle_file_metadata_sidecar(snapshot)
+    sidecar = snapshot / BUNDLE_FILE_METADATA_NAME
+    if case == "missing":
+        sidecar.unlink()
+    elif case == "tampered":
+        sidecar.write_bytes(sidecar.read_bytes() + b"\n")
+    else:
+        raw = json.loads(sidecar.read_bytes())
+        if case == "unsafe":
+            raw["files"]["../escape"] = {"mode": "0755"}
+        else:
+            raw["files"]["missing.txt"] = {"mode": "0644"}
+        sidecar.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+        expected = "sha256:" + hashlib.sha256(sidecar.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError):
+        _copy_hf_snapshot_bundle_for_registration(
+            snapshot_root=tmp_path / "snapshot",
+            hf_path="task/",
+            out_root=tmp_path / "owned",
+            expected_metadata_sha256=expected,
+            require_sidecar=True,
+        )
+
+    assert not (tmp_path / "owned" / "task" / "task.toml").exists()
+
+    task_id = "terminal-bench-2@tb2.1-r6/task"
+    manifest = {
+        "benchmark_id": "terminal-bench-2@tb2.1-r6",
+        "display_name": "Terminal-Bench 2.1",
+        "upstream_kind": "harbor-package",
+        "upstream_locator": "terminal-bench/terminal-bench-2-1",
+        "upstream_revision": "6",
+        "license_spdx": "Apache-2.0",
+        "license_url": "https://example.test/license",
+        "splits": ["test"],
+        "benchmark_profile_provenance": {
+            "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
+        },
+        "tasks": [
+            {
+                "task_id": task_id,
+                "hf_path": "task/",
+                "checksum": checksum,
+                "task_config": _valid_task_config(task_id),
+                "source_provenance": {
+                    "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
+                    "verifier_asset": {
+                        "script_path": "/workspace/verifier/run.sh",
+                        "sha256": "sha256:" + "a" * 64,
+                        "mode": "0755",
+                    },
+                    "bundle_file_metadata_sha256": expected,
+                },
+            }
+        ],
+    }
+
+    async def fake_download(**_kwargs: object) -> Path:
+        return tmp_path / "snapshot"
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd._download_hf_bundle_snapshot",
+        fake_download,
+    )
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd.create_async_engine",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("DB engine must not be created"),
+        ),
+    )
+
+    class _NoWriteStore:
+        def __getattr__(self, _name: str):  # type: ignore[no-untyped-def]
+            raise AssertionError("object store must not be called")
+
+    with pytest.raises(ValueError):
+        await run_register(
+            benchmark="terminal-bench-2",
+            hf_org="test-org",
+            hf_token=None,
+            db_url="postgresql://unused/test",
+            manifest=manifest,
+            mirror_to_object_store=True,
+            object_store=_NoWriteStore(),  # type: ignore[arg-type]
+        )
 
 
 def _valid_task_config(task_id: str = "fake-bench/task-001") -> dict[str, object]:
@@ -90,6 +241,10 @@ async def test_mirror_manifest_task_bundle_uploads_hf_files_to_internal_store(
     (bundle / ".gitignore").write_text("*.pt\n")
     (bundle / "solution" / "solve.sh").write_text("echo ok\n")
     checksum = _bundle_checksum(bundle)
+    metadata_sha256 = bundle_file_metadata_sha256(bundle)
+    object_prefix = (
+        f"fake-bench/PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/{metadata_sha256}/"
+    )
 
     store = FakeObjectStore()
 
@@ -104,36 +259,39 @@ async def test_mirror_manifest_task_bundle_uploads_hf_files_to_internal_store(
         bucket="loom-benchmarks",
     )
 
-    assert result.source == (
-        "s3://loom-benchmarks/fake-bench/"
-        f"PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/"
-    )
+    assert result.source == (f"s3://loom-benchmarks/{object_prefix}")
     assert result.uploaded == 3
     assert result.skipped == 0
     assert result.bytes_uploaded == (
         len("[task]\nid='fake-bench/task-001'\n") + len("*.pt\n") + len("echo ok\n")
     )
-    assert store.objects[
-        (
-            "loom-benchmarks",
-            "fake-bench/PRHW__loom-benchmark-fake/7908700/"
-            f"task-001/{checksum}/.gitignore",
-        )
-    ] == b"*.pt\n"
-    assert store.objects[
-        (
-            "loom-benchmarks",
-            "fake-bench/PRHW__loom-benchmark-fake/7908700/"
-            f"task-001/{checksum}/task.toml",
-        )
-    ] == b"[task]\nid='fake-bench/task-001'\n"
-    assert store.objects[
-        (
-            "loom-benchmarks",
-            "fake-bench/PRHW__loom-benchmark-fake/7908700/"
-            f"task-001/{checksum}/solution/solve.sh",
-        )
-    ] == b"echo ok\n"
+    assert (
+        store.objects[
+            (
+                "loom-benchmarks",
+                f"{object_prefix}.gitignore",
+            )
+        ]
+        == b"*.pt\n"
+    )
+    assert (
+        store.objects[
+            (
+                "loom-benchmarks",
+                f"{object_prefix}task.toml",
+            )
+        ]
+        == b"[task]\nid='fake-bench/task-001'\n"
+    )
+    assert (
+        store.objects[
+            (
+                "loom-benchmarks",
+                f"{object_prefix}solution/solve.sh",
+            )
+        ]
+        == b"echo ok\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -174,6 +332,52 @@ async def test_mirror_manifest_task_bundle_skips_matching_internal_objects(
 
 
 @pytest.mark.asyncio
+async def test_same_bytes_with_different_modes_use_disjoint_mirror_prefixes(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "repo" / "task-001"
+    (bundle / "verifier").mkdir(parents=True)
+    (bundle / "task.toml").write_text("[task]\nid='fake-bench/task-001'\n")
+    script = bundle / "verifier" / "run.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o644)
+    checksum = _bundle_checksum(bundle)
+    store = FakeObjectStore()
+
+    ordinary = await mirror_manifest_task_bundle(
+        repo_id="PRHW/loom-benchmark-fake",
+        revision="7908700",
+        task_id="fake-bench/task-001",
+        checksum=checksum,
+        hf_path="task-001/",
+        snapshot_root=tmp_path / "repo",
+        object_store=store,
+        bucket="loom-benchmarks",
+    )
+    script.chmod(0o755)
+    executable = await mirror_manifest_task_bundle(
+        repo_id="PRHW/loom-benchmark-fake",
+        revision="7908700",
+        task_id="fake-bench/task-001",
+        checksum=checksum,
+        hf_path="task-001/",
+        snapshot_root=tmp_path / "repo",
+        object_store=store,
+        bucket="loom-benchmarks",
+    )
+
+    assert ordinary.source != executable.source
+    assert any(
+        key.startswith(ordinary.source.removeprefix("s3://loom-benchmarks/"))
+        for _, key in store.objects
+    )
+    assert any(
+        key.startswith(executable.source.removeprefix("s3://loom-benchmarks/"))
+        for _, key in store.objects
+    )
+
+
+@pytest.mark.asyncio
 async def test_mirror_manifest_task_bundle_rejects_checksum_drift(
     tmp_path: Path,
 ) -> None:
@@ -202,8 +406,7 @@ async def test_mirror_manifest_task_bundle_rejects_unsafe_dockerfile(
     (bundle / "environment").mkdir(parents=True)
     (bundle / "task.toml").write_text("[task]\nid='fake-bench/task-001'\n")
     (bundle / "environment" / "Dockerfile").write_text(
-        "FROM node:18-bookworm\n"
-        "RUN npm install -g npm@latest\n",
+        "FROM node:18-bookworm\nRUN npm install -g npm@latest\n",
     )
     checksum = _bundle_checksum(bundle)
 
@@ -229,6 +432,7 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
     bundle.mkdir(parents=True)
     (bundle / "task.toml").write_text("[task]\nid='fake-bench/task-001'\n")
     checksum = _bundle_checksum(bundle)
+    metadata_sha256 = bundle_file_metadata_sha256(bundle)
     manifest = {
         "benchmark_id": "fake-bench",
         "display_name": "Fake Bench",
@@ -249,6 +453,7 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
             }
         ],
     }
+
     class FakeExcluded:
         def __getattr__(self, name: str) -> str:
             return f"excluded.{name}"
@@ -277,7 +482,20 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def execute(self, statement: FakeInsert) -> None:
+        def begin(self):  # type: ignore[no-untyped-def]
+            class _Transaction:
+                async def __aenter__(self) -> None:
+                    return None
+
+                async def __aexit__(self, *_args: object) -> None:
+                    return None
+
+            return _Transaction()
+
+        async def scalar(self, _statement: object) -> None:
+            return None
+
+        async def execute(self, statement: FakeInsert, *_args: object) -> None:
             executed.append(statement)
 
         async def commit(self) -> None:
@@ -326,7 +544,7 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
     assert isinstance(tags, dict)
     assert task_insert.payload["source"] == (
         "s3://loom-benchmarks/fake-bench/"
-        f"PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/"
+        f"PRHW__loom-benchmark-fake/7908700/task-001/{checksum}/{metadata_sha256}/"
     )
     assert tags == {
         "split": "test",
@@ -456,9 +674,7 @@ class ManifestFakeObjectStore:
         try:
             return self.objects[(bucket, key)]
         except KeyError as exc:
-            raise FileNotFoundError(
-                f"missing object s3://{bucket}/{key}"
-            ) from exc
+            raise FileNotFoundError(f"missing object s3://{bucket}/{key}") from exc
 
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
         self.objects[(bucket, key)] = body
@@ -479,9 +695,7 @@ async def test_read_manifest_from_object_store_returns_parsed_dict() -> None:
     }
     store = ManifestFakeObjectStore(
         objects={
-            ("loom-benchmarks", "fake-bench/rev-abc/manifest.json"): _json.dumps(
-                manifest
-            ).encode(),
+            ("loom-benchmarks", "fake-bench/rev-abc/manifest.json"): _json.dumps(manifest).encode(),
         },
     )
     got = await _read_manifest_from_object_store(
@@ -604,6 +818,9 @@ async def test_run_register_source_object_store_writes_s3_task_rows(
 
         async def __aexit__(self, *_args: object) -> None:
             return None
+
+        def begin(self) -> FakeSession:
+            return self
 
         async def execute(self, statement: FakeInsert) -> None:
             executed.append(statement)

@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
+from loom_benchmarks.util import sha256_of_dir
 
 from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
@@ -60,7 +61,12 @@ from loom.startup_retry import (
 )
 from loom.task_bundle_compat import validate_task_dir_compatibility
 from loom.trajectory.cp_event_sink import CpEventSink
-from loom.trajectory.storage import MinioObjectStore, ObjectStore
+from loom.trajectory.storage import (
+    MinioObjectStore,
+    ObjectStore,
+    bundle_file_metadata_sha256,
+)
+from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY, WorkspaceStagingPolicy
 from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
 from loom.verifier.script_verifier import ScriptVerifier
@@ -106,6 +112,28 @@ _VERIFIER_CTORS: dict[str, Callable[..., Verifier]] = {
     "pytest": PytestVerifier,
     "script": ScriptVerifier,
 }
+
+
+def _tb21_workspace_staging_policy_from_provenance(
+    raw_policy: object,
+) -> WorkspaceStagingPolicy:
+    """Parse only the reviewed TB2.1 rev-6 workspace boundary.
+
+    WorkspaceStagingPolicy intentionally supports future benchmark-specific
+    layouts.  The physical TB2.1 profile is stricter: its four private paths
+    are part of the reviewed immutable contract, so a merely valid alternate
+    policy must fail before materialization or driver startup.
+    """
+    if not isinstance(raw_policy, dict):
+        raise ValueError("TB2.1 task is missing canonical private workspace isolation policy")
+    try:
+        policy = WorkspaceStagingPolicy.from_provenance(raw_policy)
+    except ValueError as exc:
+        raise ValueError("TB2.1 task has invalid private workspace isolation policy") from exc
+    canonical = WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
+    if policy != canonical:
+        raise ValueError("TB2.1 task requires the canonical private workspace isolation policy")
+    return policy
 
 
 def _host_cpu_arch() -> str:
@@ -234,8 +262,7 @@ def _docker_registry_auth_summary(
         summary["auth_registries"] = sorted(str(key) for key in auths)
     cred_helpers = data.get("credHelpers")
     summary["uses_credential_store"] = bool(
-        data.get("credsStore")
-        or (isinstance(cred_helpers, dict) and cred_helpers)
+        data.get("credsStore") or (isinstance(cred_helpers, dict) and cred_helpers)
     )
     return summary
 
@@ -492,6 +519,7 @@ def _run_orphan_sandbox_cleanup(
     whose worker went away, and the next startup will retry the sweep.
     """
     import docker as _docker
+
     try:
         client = _docker.from_env()
     except Exception:
@@ -516,6 +544,7 @@ def _run_trial_cache_eviction(settings: WorkerSettings) -> None:
     (trial_cache_min_free_gb). Docker errors are logged and swallowed —
     eviction is opportunistic and must not fail worker boot."""
     import docker as _docker
+
     try:
         client = _docker.from_env()
         evict_stale_cache(client, settings)
@@ -622,7 +651,9 @@ async def _prepare_family_state_mount_if_any(
     )
     mount_path = family_run_spec.get("mount_path") or "/root/.skills"
     timeout_sec = getattr(
-        settings, "family_state_download_timeout_sec", 120.0,
+        settings,
+        "family_state_download_timeout_sec",
+        120.0,
     )
     mount: FamilyStateMount = await prepare_family_state_mount(
         trial_id=str(trial_id),
@@ -704,6 +735,20 @@ async def _spawn_trial(
             bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
             task_config = TaskConfig.model_validate(bundle["config"])
             task_checksum = str(bundle["checksum"])
+            raw_provenance = bundle.get("source_provenance")
+            provenance = raw_provenance if isinstance(raw_provenance, dict) else {}
+            raw_policy = provenance.get("workspace_staging_policy")
+            workspace_staging_policy: WorkspaceStagingPolicy | None
+            if task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"):
+                workspace_staging_policy = _tb21_workspace_staging_policy_from_provenance(
+                    raw_policy,
+                )
+            else:
+                workspace_staging_policy = (
+                    WorkspaceStagingPolicy.from_provenance(raw_policy)
+                    if isinstance(raw_policy, dict)
+                    else None
+                )
 
             # Plan 13 Task 3: materialize the fixture content from
             # bundle["source"] when it's an s3:// URL (benchmark-imported
@@ -718,6 +763,12 @@ async def _spawn_trial(
                 benchmark_cache=settings.benchmark_cache,
                 timeout_sec=settings.task_materialize_timeout_sec,
             )
+            if task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"):
+                _verify_materialized_tb21_bundle_checksum(
+                    task_dir=task_dir,
+                    expected_checksum=task_checksum,
+                    source_provenance=provenance,
+                )
             validate_task_dir_compatibility(task_dir)
             # #275: serialize concurrent task-image builds so a burst of
             # trials cannot fan out unbounded apt-get / dpkg / build
@@ -731,7 +782,9 @@ async def _spawn_trial(
                 task_checksum=task_checksum,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 build_slot_provider=lambda: _daemon_build_slot(
-                    cp_client, settings, worker_id,
+                    cp_client,
+                    settings,
+                    worker_id,
                 ),
             )
             # #317 Phase 1: if the chosen agent declares an
@@ -755,9 +808,7 @@ async def _spawn_trial(
                 worker_id=worker_id,
                 detail=str(exc),
                 diagnostic_detail=getattr(exc, "diagnostic_detail", None),
-                setup_diagnostics_root=(
-                    settings.trajectory_cache_dir / "setup-diagnostics"
-                ),
+                setup_diagnostics_root=(settings.trajectory_cache_dir / "setup-diagnostics"),
                 retry_policy=trial_config.retry if trial_config is not None else None,
                 attempt_count=attempt_count,
             )
@@ -815,9 +866,7 @@ async def _spawn_trial(
 
         subprocess_gateway_url = getattr(settings, "subprocess_gateway_url", None)
         subprocess_gateway_url_str = (
-            str(subprocess_gateway_url)
-            if subprocess_gateway_url is not None
-            else None
+            str(subprocess_gateway_url) if subprocess_gateway_url is not None else None
         )
 
         # #672 PR-3: when the CP claim payload carries a family_state_uri,
@@ -897,6 +946,7 @@ async def _spawn_trial(
             sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
             sandbox_extra_hosts=_sandbox_extra_hosts_for_url(subprocess_gateway_url_str),
             family_state_volumes=family_state_volumes,
+            workspace_staging_policy=workspace_staging_policy,
             # #896: per-container hard caps for non-exclusive (packed)
             # workers. 0/unset = unbounded (default), keeping exclusive
             # GB10 pools unchanged. Applied to both the trial container
@@ -914,7 +964,9 @@ async def _spawn_trial(
                 container_memory_mib=settings.container_memory_mib,
                 container_pids=settings.container_pids,
                 setup_slot_provider=lambda: _daemon_build_slot(
-                    cp_client, settings, worker_id,
+                    cp_client,
+                    settings,
+                    worker_id,
                 ),
             ),
         )
@@ -929,8 +981,7 @@ async def _spawn_trial(
         multiplier = settings.trial_hard_deadline_multiplier
         if multiplier > 0:
             hard_deadline_sec = (
-                task_config.agent.timeout_sec * multiplier
-                + settings.trial_hard_deadline_grace_sec
+                task_config.agent.timeout_sec * multiplier + settings.trial_hard_deadline_grace_sec
             )
         try:
             await run_with_watchdog(
@@ -957,9 +1008,7 @@ async def _spawn_trial(
                 worker_id=worker_id,
                 detail=str(exc),
                 diagnostic_detail=getattr(exc, "diagnostic_detail", None),
-                setup_diagnostics_root=(
-                    settings.trajectory_cache_dir / "setup-diagnostics"
-                ),
+                setup_diagnostics_root=(settings.trajectory_cache_dir / "setup-diagnostics"),
                 retry_policy=trial_config.retry,
                 attempt_count=attempt_count,
             )
@@ -1163,9 +1212,7 @@ def _format_setup_failure_detail(
 ) -> str:
     safe_detail = redact_text(detail).strip()
     diagnostic_path_line = (
-        f"\nfull_setup_diagnostic_path: {diagnostic_path}"
-        if diagnostic_path is not None
-        else ""
+        f"\nfull_setup_diagnostic_path: {diagnostic_path}" if diagnostic_path is not None else ""
     )
     if len(safe_detail) + len(diagnostic_path_line) <= _SETUP_FAILURE_MESSAGE_LIMIT:
         if diagnostic_path_line:
@@ -1179,16 +1226,10 @@ def _format_setup_failure_detail(
     head = _setup_failure_diagnostic_head(safe_detail, max_head_budget)
     if diagnostic_path_line:
         head = f"{head}{diagnostic_path_line}"
-        if len(head) + len(_SETUP_FAILURE_TRUNCATION_MARKER) >= (
-            _SETUP_FAILURE_MESSAGE_LIMIT
-        ):
-            head_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(
-                _SETUP_FAILURE_TRUNCATION_MARKER
-            ) - 1
+        if len(head) + len(_SETUP_FAILURE_TRUNCATION_MARKER) >= (_SETUP_FAILURE_MESSAGE_LIMIT):
+            head_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(_SETUP_FAILURE_TRUNCATION_MARKER) - 1
             head = head[:head_budget].rstrip()
-    tail_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(head) - len(
-        _SETUP_FAILURE_TRUNCATION_MARKER
-    )
+    tail_budget = _SETUP_FAILURE_MESSAGE_LIMIT - len(head) - len(_SETUP_FAILURE_TRUNCATION_MARKER)
     tail = safe_detail[-tail_budget:].lstrip()
     first_newline = tail.find("\n")
     if 0 < first_newline < len(tail) - 1:
@@ -1211,20 +1252,13 @@ def _classify_setup_failure(detail: str) -> FailureReason:
         return FailureReason.NODE_SETUP_HEALTH
     if "TASK_COMPAT_" in detail:
         return FailureReason.TASK_COMPATIBILITY
-    if (
-        "building Docker image" in detail
-        and " from " in detail
-        and " exceeded " in detail
-    ):
+    if "building Docker image" in detail and " from " in detail and " exceeded " in detail:
         return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
     lowered = detail.lower()
-    if (
-        "failed to build layered image" in lowered
-        and (
-            "temporary failure resolving" in lowered
-            or "could not resolve host" in lowered
-            or "name or service not known" in lowered
-        )
+    if "failed to build layered image" in lowered and (
+        "temporary failure resolving" in lowered
+        or "could not resolve host" in lowered
+        or "name or service not known" in lowered
     ):
         return FailureReason.TASK_COMPATIBILITY
     return FailureReason.INTERNAL_ERROR
@@ -1315,6 +1349,34 @@ def _source_scheme_for_diagnostic(source: object) -> str:
     if not sep or not scheme:
         return "unknown"
     return scheme
+
+
+def _verify_materialized_tb21_bundle_checksum(
+    *,
+    task_dir: Path,
+    expected_checksum: str,
+    source_provenance: dict[str, Any],
+) -> None:
+    """Fail closed when current object-store bytes differ from the audited row.
+
+    The physical mirror prefix is content-addressed, but object storage cannot
+    be treated as immutable merely because the catalog transaction was locked.
+    Rehashing the worker's own materialized directory closes the audit-to-run
+    time-of-check/time-of-use window before image build or driver startup.
+    """
+    actual_checksum = sha256_of_dir(task_dir)
+    if expected_checksum.removeprefix("sha256:") != actual_checksum:
+        raise ValueError(
+            "materialized TB2.1 bundle checksum mismatch "
+            f"expected={expected_checksum} actual=sha256:{actual_checksum}",
+        )
+    actual_metadata_digest = bundle_file_metadata_sha256(task_dir)
+    if source_provenance.get("bundle_file_metadata_sha256") != actual_metadata_digest:
+        raise ValueError(
+            "materialized TB2.1 bundle file mode metadata mismatch "
+            f"expected={source_provenance.get('bundle_file_metadata_sha256')} "
+            f"actual={actual_metadata_digest}",
+        )
 
 
 def _default_agent_factory(

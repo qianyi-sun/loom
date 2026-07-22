@@ -106,6 +106,9 @@ async def test_docker_driver_passes_dns_and_tmpfs_to_container_create(
         options=StartOptions(
             dns=("192.0.2.1", "198.51.100.1"),
             tmpfs=("/root:size=100M,mode=755", "/run"),
+            cpus=2,
+            memory_mb=4096,
+            storage_mb=10240,
         )
     )
 
@@ -115,6 +118,9 @@ async def test_docker_driver_passes_dns_and_tmpfs_to_container_create(
         "/root": "size=100M,mode=755",
         "/run": "",
     }
+    assert create_kwargs["nano_cpus"] == 2_000_000_000
+    assert create_kwargs["mem_limit"] == "4096m"
+    assert create_kwargs["storage_opt"] == {"size": "10240M"}
     assert "remove" not in create_kwargs
     assert container.started is True
 

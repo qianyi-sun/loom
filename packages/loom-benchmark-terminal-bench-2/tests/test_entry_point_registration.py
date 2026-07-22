@@ -13,5 +13,5 @@ def test_terminal_bench_2_entry_point_registered() -> None:
     by_name = {ep.name: ep for ep in eps}
     assert "terminal-bench-2" in by_name, sorted(by_name)
     loaded = by_name["terminal-bench-2"].load()
-    assert loaded.name == "terminal-bench-2"
+    assert loaded.name == "terminal-bench-2@tb2.1-r6"
     assert loaded.license_spdx == "Apache-2.0"

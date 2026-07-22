@@ -88,18 +88,17 @@ BenchmarkInstance(
 
 Resolution order in `task_provides_capability("solution_solve_sh", …)`:
 
-1. Task uses the `pytest` verifier → eligible (pytest adapters co-emit
-   `solution/solve.sh` next to `solution/_reference.py`).
-2. Explicit `oracle_eligible="true"` or `"false"` tag → wins over the
-   task-id prefix fallback.
-3. Task id matches a known adapter prefix (e.g. `terminal-bench-2/`) whose
-   adapter unconditionally emits `solution/solve.sh` → eligible.
-4. Otherwise → not eligible; the batch preflight excludes the task and
+1. Explicit `oracle_eligible="true"` or `"false"` tag → authoritative.
+2. Otherwise, a task using the `pytest` verifier is eligible because current
+   pytest adapters co-emit `solution/solve.sh` next to
+   `solution/_reference.py`.
+3. Otherwise → not eligible; the batch preflight excludes the task and
    surfaces a count + concrete example in the API response.
 
-Hand-authored `task.toml` bundles don't need the tag — the pytest-verifier
-rule already covers the common case. Add the tag only when an adapter
-produces a mixed slate where some instances lack an upstream `solve.sh`.
+Hand-authored `task.toml` bundles don't need the tag when the pytest convention
+is accurate. Adapters with mixed slates must emit the tag on every instance.
+No task-id or benchmark prefix grants capability; in particular, historical
+`terminal-bench-2/<task>` rows cannot become Oracle-eligible by name.
 
 ## Verifier choices
 
@@ -321,9 +320,26 @@ There are three supported task-registration shapes today:
   `task.toml` and prints the `[[local]]` snippet to add to the registry.
 - Adapter-backed benchmarks should go through
   `loom datasets publish` followed by `loom datasets register`.
-  Publish validates each generated `task.toml`, writes a schema v3
-  manifest with per-task `task_config`, and register persists that
-  config into `tasks.config`.
+  Publish validates each generated `task.toml`, writes a schema v4
+  manifest with per-task `task_config` and optional source provenance, and
+  register persists that config and provenance into `tasks`.
+  Terminal-Bench 2.1 rev-6 publication additionally records a private
+  workspace policy: normal agents do not receive `solution/`, `tests/`,
+  `verifier/`, or `upstream-task.toml`; those files are staged only in a
+  fresh verifier-only driver after the agent driver has completed. Public
+  agent output crosses that boundary as one validated workspace snapshot,
+  preserving directories, executable modes, safe workspace-relative symlinks,
+  and hardlinks. Absolute or escaping links, private targets, devices, FIFOs,
+  sockets, and archive traversal fail the trial instead of reaching the
+  verifier. Verifier-driver teardown is also cancellation-safe: cancellation
+  is re-raised only after the sandbox stop finishes. Its
+  provenance also records the configured script-verifier path and content
+  checksum so public activation can attest to the executable that will run.
+  Its physical profile stays `pending` after register or re-register: direct
+  profile selection cannot create a batch until a fresh full audit atomically
+  promotes it to `runnable` and publishes the alias. Workers rehash the
+  materialized bundle against the stored checksum before execution, so an
+  object-store mutation after audit fails closed.
 
 For a one-off local fixture, use `scripts/seed_test_data.py` as a
 template:

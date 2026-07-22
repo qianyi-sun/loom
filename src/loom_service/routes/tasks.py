@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.benchmark_profiles import resolve_benchmark_selectors
 from loom.db.schema import Task, TaskSet
 from loom_service.dependencies import SessionAndCtx
 from loom_service.task_config_validation import split_valid_task_configs
@@ -108,7 +109,12 @@ async def list_tasks(
     # rather than COUNT over an ordered subquery).
     conds: list[Any] = []
     if benchmark_id is not None:
-        conds.append(Task.benchmark_id == benchmark_id)
+        resolved = await resolve_benchmark_selectors(
+            s,
+            [benchmark_id],
+            require_runnable=False,
+        )
+        conds.append(Task.benchmark_id.in_(resolved.physical_ids))
     if q:
         # `ilike` with explicit '%' wrapping. Postgres LIKE
         # patterns treat `%` and `_` as metacharacters, but a

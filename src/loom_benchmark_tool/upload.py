@@ -6,12 +6,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from loom.trajectory.storage import ObjectStore
+from loom.trajectory.storage import (
+    BUNDLE_FILE_METADATA_NAME,
+    ObjectStore,
+    upload_bundle_file_metadata,
+)
 from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 
 
 async def upload_task_dir(
-    *, store: ObjectStore, bucket: str, prefix: str, task_dir: Path,
+    *,
+    store: ObjectStore,
+    bucket: str,
+    prefix: str,
+    task_dir: Path,
 ) -> int:
     """Returns the number of objects uploaded.
 
@@ -26,8 +34,7 @@ async def upload_task_dir(
         )
     if ".." in Path(prefix).parts or prefix.startswith("/"):
         raise ValueError(
-            f"upload_task_dir prefix {prefix!r} contains traversal or "
-            f"absolute root; reject",
+            f"upload_task_dir prefix {prefix!r} contains traversal or absolute root; reject",
         )
     if not prefix.endswith("/"):
         prefix = prefix + "/"
@@ -37,8 +44,18 @@ async def upload_task_dir(
         if path.is_dir():
             continue
         rel = path.relative_to(task_dir).as_posix()
+        if rel == BUNDLE_FILE_METADATA_NAME:
+            continue
         await store.put_object(
-            bucket=bucket, key=prefix + rel, body=path.read_bytes(),
+            bucket=bucket,
+            key=prefix + rel,
+            body=path.read_bytes(),
         )
         count += 1
+    await upload_bundle_file_metadata(
+        store=store,
+        bucket=bucket,
+        prefix=prefix,
+        task_dir=task_dir,
+    )
     return count

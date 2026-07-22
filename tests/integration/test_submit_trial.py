@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamQuota, Token, Trial, User
+from loom.db.schema import Benchmark, Task, Team, TeamQuota, Token, Trial, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -23,34 +23,48 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
     raw = f"loom_team_{uuid4().hex}"
     with session_factory() as s:
         s.execute(insert(Team).values(id=team_id, name=f"sub-{team_id}"))
-        s.execute(insert(User).values(
-            id=user_id,
-            username=username,
-            username_normalized=username.casefold(),
-            status="active",
-            is_platform_admin=False,
-        ))
+        s.execute(
+            insert(User).values(
+                id=user_id,
+                username=username,
+                username_normalized=username.casefold(),
+                status="active",
+                is_platform_admin=False,
+            )
+        )
         s.execute(insert(TeamQuota).values(team_id=team_id))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_id,
-            created_by_user_id=user_id,
-            issued_at=datetime.now(UTC), expires_at=None,
-        ))
-        s.execute(insert(Task).values(
-            id="hello", checksum="0" * 64,
-            config={
-                "schema_version": "1",
-                "task": {"id": "hello", "name": "hello"},
-                "environment": {"os": "linux", "docker_image": "alpine"},
-                "agent": {"name": "oracle"},
-                "verifier": {"name": "pytest"},
-                "steps": [{"name": "main"}],
-            },
-        ))
-        s.execute(insert(Task).values(
-            id="broken-config", checksum="1" * 64, config={},
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_id,
+                created_by_user_id=user_id,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="hello",
+                checksum="0" * 64,
+                config={
+                    "schema_version": "1",
+                    "task": {"id": "hello", "name": "hello"},
+                    "environment": {"os": "linux", "docker_image": "alpine"},
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "pytest"},
+                    "steps": [{"name": "main"}],
+                },
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="broken-config",
+                checksum="1" * 64,
+                config={},
+            )
+        )
         s.commit()
     try:
         yield team_id, raw
@@ -68,7 +82,8 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
 
 @pytest.fixture
 def app(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
     seed_team: tuple[UUID, str],
 ):
     for k, v in {
@@ -98,18 +113,25 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
 
 
 def test_submit_rejects_legacy_team_token_without_user_owner(
-    app, seed_team, postgres_url: str,  # type: ignore[no-untyped-def]
+    app,
+    seed_team,
+    postgres_url: str,  # type: ignore[no-untyped-def]
 ) -> None:
     team_id, _raw = seed_team
     legacy_raw = f"loom_team_{uuid4().hex}"
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     with session_factory() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_id,
-            issued_at=datetime.now(UTC), expires_at=None,
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(legacy_raw.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
         s.commit()
     engine.dispose()
 
@@ -150,9 +172,81 @@ def test_submit_rejects_invalid_task_config(app, seed_team):  # type: ignore[no-
         assert "broken-config" in r.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    ("execution_state", "reason"),
+    [("pending", "benchmark_not_runnable"), ("historical", "benchmark_retired")],
+)
+def test_submit_rejects_non_runnable_benchmark_task(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+    execution_state: str,
+    reason: str,
+) -> None:
+    _, raw = seed_team
+    profile_id = f"trial-submit-{execution_state}-{uuid4().hex}"
+    task_id = f"{profile_id}/task"
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    try:
+        with session_factory() as s:
+            s.execute(
+                insert(Benchmark).values(
+                    id=profile_id,
+                    display_name=profile_id,
+                    upstream_kind="test",
+                    upstream_locator="test",
+                    upstream_revision="1",
+                    license_spdx="MIT",
+                    license_url="https://example.test/license",
+                    splits=["test"],
+                    execution_state=execution_state,
+                )
+            )
+            s.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="2" * 64,
+                    benchmark_id=profile_id,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {"os": "linux", "docker_image": "alpine"},
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                        "steps": [{"name": "main"}],
+                    },
+                )
+            )
+            s.commit()
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "task_id": task_id,
+                    "config": {"agent_name": "oracle", "agent_model": None},
+                },
+            )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["reason"] == reason
+        assert response.json()["detail"]["benchmark_profile"] == profile_id
+    finally:
+        with session_factory() as s:
+            s.execute(delete(Task).where(Task.id == task_id))
+            s.execute(delete(Benchmark).where(Benchmark.id == profile_id))
+            s.commit()
+        engine.dispose()
+
+
 def test_submit_rejects_unauth(app, seed_team):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
-        r = client.post("/trials", json={"task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None}})
+        r = client.post(
+            "/trials",
+            json={"task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None}},
+        )
         assert r.status_code == 401
 
 
@@ -171,16 +265,22 @@ def _fetch_trial_config(postgres_url: str, trial_id: str) -> dict:
     engine = create_engine(postgres_url)
     try:
         with sessionmaker(engine)() as s:
-            row = s.execute(
-                Trial.__table__.select().where(Trial.id == UUID(trial_id)),
-            ).mappings().one()
+            row = (
+                s.execute(
+                    Trial.__table__.select().where(Trial.id == UUID(trial_id)),
+                )
+                .mappings()
+                .one()
+            )
             return row["config"]
     finally:
         engine.dispose()
 
 
 def test_submit_snapshots_retry_defaults_when_absent(
-    app, seed_team, postgres_url: str,
+    app,
+    seed_team,
+    postgres_url: str,
 ):  # type: ignore[no-untyped-def]
     """#401: submitter omits `retry` → deployment defaults snapshotted."""
     _, raw = seed_team
@@ -198,16 +298,21 @@ def test_submit_snapshots_retry_defaults_when_absent(
     retry = cfg["retry"]
     assert retry["max_attempts"] == 3
     assert set(retry["retry_on"]) == {
-        "gateway_error", "provider_transport_disconnect",
+        "gateway_error",
+        "provider_transport_disconnect",
     }
     assert retry["backoff"] == {
-        "base_sec": 30.0, "max_sec": 600.0,
-        "multiplier": 2.0, "jitter": 0.2,
+        "base_sec": 30.0,
+        "max_sec": 600.0,
+        "multiplier": 2.0,
+        "jitter": 0.2,
     }
 
 
 def test_submit_clamps_max_attempts_to_team_ceiling(
-    app, seed_team, postgres_url: str,
+    app,
+    seed_team,
+    postgres_url: str,
 ):  # type: ignore[no-untyped-def]
     """#401: submitter requests 10, team ceiling is 2 → snapshot stores 2."""
     team_id, raw = seed_team
@@ -242,7 +347,9 @@ def test_submit_clamps_max_attempts_to_team_ceiling(
 
 
 def test_submit_preserves_explicit_retry_below_ceiling(
-    app, seed_team, postgres_url: str,
+    app,
+    seed_team,
+    postgres_url: str,
 ):  # type: ignore[no-untyped-def]
     """#401: submitter's explicit retry passes through when under ceiling."""
     _, raw = seed_team

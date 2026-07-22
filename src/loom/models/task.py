@@ -67,6 +67,14 @@ class EnvironmentConfig(BaseModel):
     skills_dir: PurePosixPath | None = None
     mcp_servers: list[MCPConnection] = []
     build_timeout_sec: float = Field(default=1200, gt=0)
+    # Runtime resource contract. These values are optional for ordinary Loom
+    # tasks, but audited benchmark profiles preserve their native limits here
+    # so drivers can enforce them instead of treating provenance-only TOML as
+    # executable policy.
+    cpus: float | None = Field(default=None, gt=0)
+    memory_mb: int | None = Field(default=None, gt=0)
+    storage_mb: int | None = Field(default=None, gt=0)
+    gpus: int = Field(default=0, ge=0)
     sidecars: list[TaskSidecarConfig] = []
 
 

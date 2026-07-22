@@ -20,13 +20,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-# Heuristic key: tasks whose verifier is `pytest` are produced by adapters
-# that always co-emit `solution/solve.sh` next to a `solution/_reference.py`
-# (the post-#388/#414 stub layout). Terminal-Bench-2 is the known V1
-# exception: it uses the script verifier, but its adapter wraps upstream
-# `solution.sh` / `solution.yaml` as `solution/solve.sh`.
+# Convention: current pytest adapters co-emit `solution/solve.sh` next to a
+# `solution/_reference.py` (the post-#388/#414 stub layout). Mixed adapters
+# must publish an explicit per-task eligibility tag.
 _PYTEST_VERIFIER = "pytest"
-_TASK_ID_SOLUTION_SOLVE_SH_PREFIXES = ("terminal-bench-2/",)
 _ORACLE_ELIGIBLE_TAG = "oracle_eligible"
 
 
@@ -39,14 +36,12 @@ def task_provides_capability(
     """Best-effort derivation: does the materialized bundle expose
     the named agent capability?
 
-    `solution_solve_sh` is granted when (a) the task's verifier is `pytest`,
-    (b) the per-task `oracle_eligible` tag is `"true"`, or (c) the task id
-    matches a known adapter prefix whose adapter unconditionally emits
-    `solution/solve.sh`. An explicit `oracle_eligible="false"` tag wins
-    over the prefix fallback so a heterogeneous oracle slate (e.g.
-    SkillLearnBench: 73 of 100 upstream tasks ship `solve.sh`, or
-    Terminal-Bench-2 tasks that lack upstream `solution.sh`/
-    `solution.yaml`) is honored once the adapter starts emitting tags.
+    `solution_solve_sh` is granted when (a) the per-task
+    `oracle_eligible` tag is `"true"`, or (b) the task's verifier is
+    `pytest`. An explicit `oracle_eligible="false"` tag wins over the
+    pytest convention so a heterogeneous oracle slate (for example,
+    SkillLearnBench or Terminal-Bench-2 tasks that lack an upstream
+    solution) is honored.
     A future adapter that breaks the convention should add an explicit
     capability marker instead of broadening every script verifier task.
 
@@ -55,22 +50,16 @@ def task_provides_capability(
     everything.
     """
     if capability == "solution_solve_sh":
-        verifier = task_config.get("verifier") or {}
-        if isinstance(verifier, Mapping):
-            if verifier.get("name") == _PYTEST_VERIFIER:
-                return True
         if tags is not None:
             tag_value = tags.get(_ORACLE_ELIGIBLE_TAG)
             if tag_value == "true":
                 return True
             if tag_value == "false":
                 return False
-        task = task_config.get("task") or {}
-        task_id = task.get("id") if isinstance(task, Mapping) else None
-        if isinstance(task_id, str) and task_id.startswith(
-            _TASK_ID_SOLUTION_SOLVE_SH_PREFIXES,
-        ):
-            return True
+        verifier = task_config.get("verifier") or {}
+        if isinstance(verifier, Mapping):
+            if verifier.get("name") == _PYTEST_VERIFIER:
+                return True
         return False
     return False
 

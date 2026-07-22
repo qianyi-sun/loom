@@ -17,9 +17,11 @@ import pytest
 from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
 from loom_benchmarks.util import sha256_of_dir
 
+from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom_benchmark_tool.publish_cmd import (
     MANIFEST_SCHEMA_VERSION,
     _bundle_checksum,
+    _prepare_adapter_source,
     _safe_dirname,
     repo_id_for,
 )
@@ -106,6 +108,62 @@ def test_manifest_schema_version_is_int() -> None:
     assert MANIFEST_SCHEMA_VERSION >= 3
 
 
+def test_prepare_adapter_source_fetches_independent_audit_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = tmp_path / "execution"
+    execution.mkdir()
+    audit = tmp_path / "audit-fetch" / "repo"
+    manifest = audit / "tasks" / "dataset.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[dataset]\nname='terminal-bench/terminal-bench-2-1'\n")
+    execution_source = UpstreamSource(
+        kind="harbor-package",
+        locator="terminal-bench/terminal-bench-2-1",
+        revision="6",
+    )
+    audit_source = UpstreamSource(
+        kind="git",
+        locator="https://example.test/tb21.git",
+        revision="d" * 40,
+    )
+    calls: list[UpstreamSource] = []
+
+    def fake_fetch(
+        source: UpstreamSource,
+        *,
+        cache_root: Path,
+        refresh: bool,
+    ) -> Path:
+        assert cache_root == tmp_path / "cache"
+        assert refresh is True
+        calls.append(source)
+        return execution if source is execution_source else audit.parent
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.publish_cmd.fetch_upstream",
+        fake_fetch,
+    )
+    adapter = SimpleNamespace(
+        upstream_source=execution_source,
+        audit_source=audit_source,
+        audit_manifest_source="tasks/dataset.toml",
+    )
+
+    result = _prepare_adapter_source(
+        adapter=adapter,
+        cache_dir=tmp_path / "cache",
+        refresh=True,
+    )
+
+    assert result == execution
+    assert calls == [execution_source, audit_source]
+    assert (execution / "audit" / "tasks" / "dataset.toml").read_bytes() == (
+        manifest.read_bytes()
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_publish_includes_valid_task_config_in_manifest(
     monkeypatch: pytest.MonkeyPatch,
@@ -155,6 +213,7 @@ async def test_run_publish_includes_valid_task_config_in_manifest(
 
     captured_manifest: dict[str, Any] = {}
     captured_bundle_checksums: dict[str, str] = {}
+    captured_sidecars: dict[str, bytes] = {}
 
     class FakeHfApi:
         def __init__(self, *, token: str) -> None:
@@ -168,7 +227,11 @@ async def test_run_publish_includes_valid_task_config_in_manifest(
             captured_manifest.update(
                 json.loads((folder / "manifest.json").read_text()),
             )
-            captured_bundle_checksums["task-001"] = sha256_of_dir(folder / "task-001")
+            bundle = folder / "task-001"
+            sidecar = bundle / BUNDLE_FILE_METADATA_NAME
+            captured_sidecars["task-001"] = sidecar.read_bytes()
+            sidecar.unlink()
+            captured_bundle_checksums["task-001"] = sha256_of_dir(bundle)
 
         def list_repo_refs(self, **_kwargs: object) -> object:
             return SimpleNamespace(
@@ -195,6 +258,7 @@ async def test_run_publish_includes_valid_task_config_in_manifest(
     assert captured_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
     task = cast(dict[str, Any], captured_manifest["tasks"][0])
     assert task["checksum"] == captured_bundle_checksums["task-001"]
+    assert captured_sidecars["task-001"]
     assert task["task_config"]["task"]["id"] == "fake-bench/task-001"
     assert task["task_config"]["environment"]["docker_image"] == "python:3.12-slim"
     assert task["tags"] == {
@@ -270,6 +334,7 @@ def test_run_publish_rejects_unsafe_converted_dockerfile(
 
     with pytest.raises(ValueError, match="package-specific pip index"):
         import asyncio
+
         asyncio.run(
             publish_cmd.run_publish(
                 benchmark="fake-bench",
@@ -415,6 +480,27 @@ def test_object_store_revision_differs_on_content_change() -> None:
     assert _object_store_revision(base) != _object_store_revision(perturbed)
 
 
+def test_object_store_revision_differs_on_file_mode_change() -> None:
+    """Same bundle bytes with different executable modes need distinct prefixes."""
+    from loom_benchmark_tool.publish_cmd import _object_store_revision
+
+    base = [
+        {
+            "task_id": "fake/a",
+            "checksum": "aa" * 32,
+            "source_provenance": {"bundle_file_metadata_sha256": "sha256:" + "1" * 64},
+        }
+    ]
+    changed = [
+        {
+            "task_id": "fake/a",
+            "checksum": "aa" * 32,
+            "source_provenance": {"bundle_file_metadata_sha256": "sha256:" + "2" * 64},
+        }
+    ]
+    assert _object_store_revision(base) != _object_store_revision(changed)
+
+
 @pytest.mark.asyncio
 async def test_run_publish_target_object_store_uploads_manifest_and_bundles(
     monkeypatch: pytest.MonkeyPatch,
@@ -490,9 +576,9 @@ async def test_run_publish_target_object_store_uploads_manifest_and_bundles(
 
     # Manifest lands at the revision root.
     manifest_key = f"fake-bench/{revision}/manifest.json"
-    assert (
-        ("loom-benchmarks", manifest_key) in store.objects
-    ), f"expected manifest at {manifest_key}, got {sorted(store.objects)}"
+    assert ("loom-benchmarks", manifest_key) in store.objects, (
+        f"expected manifest at {manifest_key}, got {sorted(store.objects)}"
+    )
     manifest = json.loads(store.objects[("loom-benchmarks", manifest_key)])
     assert manifest["task_count"] == 2
     assert manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
@@ -500,11 +586,10 @@ async def test_run_publish_target_object_store_uploads_manifest_and_bundles(
     # Each task's bundle files land under {benchmark_id}/{revision}/{safe_id}/.
     for task_entry in manifest["tasks"]:
         safe = task_entry["hf_path"].rstrip("/")
-        for filename in ("task.toml", "solution.py"):
+        assert task_entry["source_provenance"]["bundle_file_metadata_sha256"].startswith("sha256:")
+        for filename in ("task.toml", "solution.py", BUNDLE_FILE_METADATA_NAME):
             key = f"fake-bench/{revision}/{safe}/{filename}"
-            assert (
-                ("loom-benchmarks", key) in store.objects
-            ), f"expected {key} in uploaded objects"
+            assert ("loom-benchmarks", key) in store.objects, f"expected {key} in uploaded objects"
 
 
 @pytest.mark.asyncio

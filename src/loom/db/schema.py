@@ -447,6 +447,11 @@ class Task(Base):
     tags: Mapped[dict[str, str]] = mapped_column(
         JSONB, nullable=False, server_default="{}",
     )
+    # Immutable upstream identity for benchmark-imported tasks. Legacy tasks
+    # default to an empty object; profile-specific importers populate it.
+    source_provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+    )
     registered_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
@@ -470,10 +475,42 @@ class Benchmark(Base):
     series: Mapped[str | None] = mapped_column(
         String(64), nullable=True,
     )
+    # Physical profile state. Historical profiles remain readable but cannot
+    # be selected for new execution.
+    execution_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'runnable'"),
+        default="runnable",
+    )
+    profile_provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
     imported_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
     imported_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BenchmarkAlias(Base):
+    """Public selector for a runnable immutable benchmark profile."""
+
+    __tablename__ = "benchmark_aliases"
+
+    alias: Mapped[str] = mapped_column(Text, primary_key=True)
+    benchmark_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("benchmarks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    activated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
 
 
 class TaskSet(Base):
@@ -1307,6 +1344,9 @@ class Batch(Base):
     family_run_spec: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True,
     )
+    # NULL keeps pre-profile batches on their original selector semantics.
+    # Non-empty lists are an immutable task-selection snapshot for new batches.
+    resolved_task_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     @property
     def failure_reason(self) -> str | None:

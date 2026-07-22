@@ -27,28 +27,39 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from loom_benchmarks.util import sha256_of_dir
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
-from loom.trajectory.storage import ObjectStore
+from loom.trajectory.storage import (
+    BUNDLE_FILE_METADATA_NAME,
+    ObjectStore,
+    bundle_file_metadata_body,
+    bundle_file_metadata_sha256,
+    restore_bundle_file_metadata_sidecar,
+)
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 from loom_benchmark_tool.manifest import (
     MANIFEST_FILENAME,
     read_manifest_from_hf,
     repo_id_for,
+    tb21_workspace_policy_isolated,
 )
 
 RegisterSource = Literal["hf", "object-store"]
+_TB21_PROFILE_ID = "terminal-bench-2@tb2.1-r6"
 
 
 def _hf_source_url(
@@ -100,8 +111,7 @@ async def _read_manifest_from_object_store(
         ) from exc
     if not isinstance(manifest, dict):
         raise ValueError(
-            f"manifest at s3://{bucket}/{key} must be a JSON object, "
-            f"got {type(manifest).__name__}",
+            f"manifest at s3://{bucket}/{key} must be a JSON object, got {type(manifest).__name__}",
         )
     if manifest.get("benchmark_id") != benchmark_id:
         raise ValueError(
@@ -118,6 +128,153 @@ class MirrorResult:
     skipped: int
     bytes_uploaded: int
     bytes_skipped: int
+
+
+@dataclass(frozen=True)
+class _PreparedTask:
+    task_id: str
+    checksum: str
+    config: dict[str, Any]
+    source: str
+    license_spdx: str
+    benchmark_id: str
+    tags: dict[str, str]
+    source_provenance: dict[str, Any]
+    file_metadata_sha256: str | None = None
+
+
+def _immutable_profile_provenance(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, item in value.items() if key != "activation_audit"}
+
+
+def _stable_runtime_tags(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): str(item) for key, item in value.items() if key != "runtime_source_mirrored_at"
+    }
+
+
+def _assert_existing_tb21_profile_is_immutable(
+    *,
+    benchmark: Benchmark,
+    task_rows: list[TaskRow],
+    manifest: dict[str, Any],
+    prepared_tasks: list[_PreparedTask],
+) -> None:
+    """Allow exact idempotence while rejecting in-place physical-profile drift."""
+    expected_benchmark = {
+        "display_name": manifest["display_name"],
+        "upstream_kind": manifest["upstream_kind"],
+        "upstream_locator": manifest["upstream_locator"],
+        "upstream_revision": manifest.get("upstream_revision", ""),
+        "license_spdx": manifest["license_spdx"],
+        "license_url": manifest.get("license_url", ""),
+        "splits": list(manifest.get("splits", ["test"])),
+        "series": manifest.get("series"),
+        "profile_provenance": _immutable_profile_provenance(
+            manifest.get("benchmark_profile_provenance") or {},
+        ),
+    }
+    observed_benchmark = {
+        "display_name": benchmark.display_name,
+        "upstream_kind": benchmark.upstream_kind,
+        "upstream_locator": benchmark.upstream_locator,
+        "upstream_revision": benchmark.upstream_revision,
+        "license_spdx": benchmark.license_spdx,
+        "license_url": benchmark.license_url,
+        "splits": list(benchmark.splits),
+        "series": benchmark.series,
+        "profile_provenance": _immutable_profile_provenance(
+            benchmark.profile_provenance,
+        ),
+    }
+    drift: list[str] = []
+    if observed_benchmark != expected_benchmark:
+        drift.append("benchmark identity/provenance")
+
+    observed_by_id = {row.id: row for row in task_rows}
+    expected_by_id = {task.task_id: task for task in prepared_tasks}
+    if set(observed_by_id) != set(expected_by_id):
+        drift.append("task set")
+    for task_id in sorted(set(observed_by_id) & set(expected_by_id)):
+        row = observed_by_id[task_id]
+        expected = expected_by_id[task_id]
+        observed_identity = {
+            "checksum": row.checksum,
+            "config": row.config,
+            "source": row.source,
+            "license": row.license,
+            "benchmark_id": row.benchmark_id,
+            "tags": _stable_runtime_tags(row.tags),
+            "source_provenance": row.source_provenance,
+        }
+        expected_identity = {
+            "checksum": expected.checksum,
+            "config": expected.config,
+            "source": expected.source,
+            "license": expected.license_spdx,
+            "benchmark_id": expected.benchmark_id,
+            "tags": _stable_runtime_tags(expected.tags),
+            "source_provenance": expected.source_provenance,
+        }
+        if observed_identity != expected_identity:
+            drift.append(f"task {task_id}")
+    if drift:
+        raise ValueError(
+            "immutable TB2.1 physical profile drift detected in "
+            f"{', '.join(drift)}; publish a new physical profile ID instead",
+        )
+
+
+async def _locked_tb21_registration_preflight(
+    session: AsyncSession,
+    *,
+    manifest: dict[str, Any],
+    prepared_tasks: list[_PreparedTask],
+) -> bool:
+    """Return True for an exact existing profile; False when absent.
+
+    Call inside a transaction. The advisory lock serializes absent-row checks,
+    while row locks make the existing identity snapshot stable for comparison.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:profile_id))"),
+        {"profile_id": _TB21_PROFILE_ID},
+    )
+    existing_benchmark = await session.scalar(
+        select(Benchmark).where(Benchmark.id == _TB21_PROFILE_ID).with_for_update(),
+    )
+    existing_tasks = list(
+        (
+            await session.scalars(
+                select(TaskRow)
+                .where(TaskRow.benchmark_id == _TB21_PROFILE_ID)
+                .order_by(TaskRow.id)
+                .with_for_update(),
+            )
+        ).all()
+    )
+    if existing_benchmark is not None:
+        _assert_existing_tb21_profile_is_immutable(
+            benchmark=existing_benchmark,
+            task_rows=existing_tasks,
+            manifest=manifest,
+            prepared_tasks=prepared_tasks,
+        )
+        return True
+    colliding = await session.scalar(
+        select(TaskRow.id).where(
+            TaskRow.id.in_([task.task_id for task in prepared_tasks]),
+        )
+    )
+    if colliding is not None:
+        raise ValueError(
+            "immutable TB2.1 task ID collision detected; publish a new physical profile ID instead",
+        )
+    return False
 
 
 def _safe_key_part(value: str) -> str:
@@ -138,6 +295,56 @@ def _bundle_checksum(bundle_dir: Path) -> str:
     return cast(str, sha256_of_dir(bundle_dir))
 
 
+def _copy_hf_snapshot_bundle_for_registration(
+    *,
+    snapshot_root: Path,
+    hf_path: str,
+    out_root: Path,
+    expected_metadata_sha256: str | None,
+    require_sidecar: bool,
+) -> Path:
+    """Copy HF cache bytes into an owned tree, then restore trusted modes.
+
+    HF snapshot entries may be symlinks into a process-shared blob cache. We
+    intentionally read each file's bytes and create a new regular file before
+    validating or chmodding, so registration cannot mutate shared cache state.
+    """
+    relative_prefix = _validate_relative_prefix(hf_path, label="hf_path")
+    source = snapshot_root / relative_prefix
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError(f"HF bundle path is missing or not a regular directory: {hf_path!r}")
+    destination = out_root / relative_prefix
+    if destination.exists():
+        raise ValueError(f"duplicate HF bundle path in manifest: {hf_path!r}")
+    try:
+        for path in sorted(source.rglob("*")):
+            rel = path.relative_to(source)
+            target = destination / rel
+            if path.is_dir():
+                if path.is_symlink():
+                    raise ValueError(f"HF bundle contains a symlink directory: {rel.as_posix()!r}")
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not path.is_file():
+                raise ValueError(f"HF bundle contains a non-file entry: {rel.as_posix()!r}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+            target.chmod(0o644)
+        sidecar = destination / BUNDLE_FILE_METADATA_NAME
+        if sidecar.exists():
+            restore_bundle_file_metadata_sidecar(
+                destination,
+                expected_sha256=expected_metadata_sha256,
+                remove=True,
+            )
+        elif require_sidecar:
+            raise ValueError("HF bundle file metadata sidecar is required")
+        return destination
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
 def _mirror_prefix(
     *,
     repo_id: str,
@@ -145,6 +352,7 @@ def _mirror_prefix(
     task_id: str,
     checksum: str,
     hf_path: str,
+    file_metadata_sha256: str,
 ) -> str:
     benchmark_id = task_id.split("/", 1)[0]
     return (
@@ -153,6 +361,7 @@ def _mirror_prefix(
         f"{_safe_key_part(revision)}/"
         f"{_validate_relative_prefix(hf_path, label='hf_path')}/"
         f"{_safe_key_part(checksum)}/"
+        f"{_safe_key_part(file_metadata_sha256)}/"
     )
 
 
@@ -166,6 +375,7 @@ async def mirror_manifest_task_bundle(
     snapshot_root: Path,
     object_store: ObjectStore,
     bucket: str,
+    expected_file_metadata_sha256: str | None = None,
 ) -> MirrorResult:
     """Mirror one manifest task bundle from a local HF snapshot into S3/MinIO.
 
@@ -184,6 +394,16 @@ async def mirror_manifest_task_bundle(
             "HF bundle checksum mismatch for "
             f"{task_id}: manifest={checksum} actual={actual_checksum}",
         )
+    actual_metadata_sha256 = bundle_file_metadata_sha256(bundle_dir)
+    if (
+        expected_file_metadata_sha256 is not None
+        and actual_metadata_sha256 != expected_file_metadata_sha256
+    ):
+        raise ValueError(
+            "HF bundle file mode metadata mismatch for "
+            f"{task_id}: manifest={expected_file_metadata_sha256} "
+            f"actual={actual_metadata_sha256}",
+        )
     validate_task_dir_dockerfiles(bundle_dir)
 
     await object_store.ensure_bucket(bucket)
@@ -193,6 +413,7 @@ async def mirror_manifest_task_bundle(
         task_id=task_id,
         checksum=checksum,
         hf_path=hf_path,
+        file_metadata_sha256=actual_metadata_sha256,
     )
     uploaded = 0
     skipped = 0
@@ -202,6 +423,8 @@ async def mirror_manifest_task_bundle(
         if path.is_dir():
             continue
         rel = path.relative_to(bundle_dir).as_posix()
+        if rel == BUNDLE_FILE_METADATA_NAME:
+            continue
         key = f"{target_prefix}{rel}"
         body = path.read_bytes()
         try:
@@ -215,6 +438,22 @@ async def mirror_manifest_task_bundle(
         await object_store.put_object(bucket=bucket, key=key, body=body)
         uploaded += 1
         bytes_uploaded += len(body)
+
+    metadata_key = f"{target_prefix}{BUNDLE_FILE_METADATA_NAME}"
+    metadata_body = bundle_file_metadata_body(bundle_dir)
+    try:
+        existing_metadata = await object_store.get_object(
+            bucket=bucket,
+            key=metadata_key,
+        )
+    except Exception:
+        existing_metadata = None
+    if existing_metadata != metadata_body:
+        await object_store.put_object(
+            bucket=bucket,
+            key=metadata_key,
+            body=metadata_body,
+        )
 
     if uploaded + skipped == 0:
         raise FileNotFoundError(f"HF bundle path {relative_prefix!r} has no files")
@@ -250,8 +489,7 @@ async def _download_hf_bundle_snapshot(
     from huggingface_hub import snapshot_download
 
     patterns = [
-        f"{_validate_relative_prefix(str(task['hf_path']), label='hf_path')}/*"
-        for task in tasks
+        f"{_validate_relative_prefix(str(task['hf_path']), label='hf_path')}/*" for task in tasks
     ]
 
     if chunk_size is None or chunk_size <= 0 or len(patterns) <= chunk_size:
@@ -285,8 +523,7 @@ async def _download_hf_bundle_snapshot(
         )
         if batch_idx < total_batches - 1 and chunk_sleep_secs > 0:
             print(
-                f"mirror snapshot: sleeping {chunk_sleep_secs}s "
-                "to stay under HF resolve budget",
+                f"mirror snapshot: sleeping {chunk_sleep_secs}s to stay under HF resolve budget",
                 flush=True,
             )
             await asyncio.sleep(chunk_sleep_secs)
@@ -329,6 +566,8 @@ async def run_register(
     bucket: str = "loom-benchmarks",
     chunk_size: int | None = None,
     chunk_sleep_secs: float = 300.0,
+    manifest: dict[str, Any] | None = None,
+    activate_alias: bool = False,
 ) -> dict[str, Any]:
     """Read manifest from the selected source, upsert Benchmark + Task
     rows. Returns `{"registered": N, "skipped": M, "source": str,
@@ -346,6 +585,8 @@ async def run_register(
       required. `mirror_to_object_store` is a no-op (the bundles are
       already in the bucket).
     """
+    if activate_alias:
+        raise ValueError("register never activates benchmark aliases; run datasets activate")
     if source == "hf":
         if not hf_org:
             raise ValueError("source='hf' requires hf_org")
@@ -368,7 +609,7 @@ async def run_register(
     benchmark_id_hint = benchmark  # publish uses adapter.name; matches for our built-in adapters
     if source == "hf":
         repo_id = repo_id_for(hf_org, benchmark)
-        manifest = read_manifest_from_hf(
+        manifest = manifest or read_manifest_from_hf(
             hf_org=hf_org,
             benchmark=benchmark,
             hf_token=hf_token,
@@ -376,7 +617,7 @@ async def run_register(
         )
     else:
         assert object_store is not None
-        manifest = await _read_manifest_from_object_store(
+        manifest = manifest or await _read_manifest_from_object_store(
             object_store=object_store,
             bucket=bucket,
             benchmark_id=benchmark_id_hint,
@@ -385,6 +626,43 @@ async def run_register(
         repo_id = f"s3://{bucket}/{manifest['benchmark_id']}"
 
     manifest_tasks = list(manifest["tasks"])
+    profile_provenance = dict(manifest.get("benchmark_profile_provenance") or {})
+    # TB2.1 is a security-sensitive physical profile.  Registration stores its
+    # immutable bytes and provenance, but cannot itself make those bytes
+    # submit-able: only the fresh object-store audit in `datasets activate`
+    # promotes the row and its public alias together.
+    execution_state = "pending" if manifest.get("benchmark_id") == _TB21_PROFILE_ID else "runnable"
+    if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
+        if source == "hf" and not mirror_to_object_store:
+            raise ValueError(
+                "TB2.1 HF registration requires mirror_to_object_store; "
+                "use source='object-store' for a direct publish",
+            )
+        if not tb21_workspace_policy_isolated(
+            profile_provenance.get("workspace_staging_policy"),
+        ):
+            raise ValueError("TB2.1 profile is missing private workspace isolation provenance")
+        for task in manifest_tasks:
+            task_provenance = task.get("source_provenance")
+            if not isinstance(task_provenance, dict) or not tb21_workspace_policy_isolated(
+                task_provenance.get("workspace_staging_policy"),
+            ):
+                raise ValueError("TB2.1 task is missing private workspace isolation provenance")
+            verifier_asset = task_provenance.get("verifier_asset")
+            if (
+                not isinstance(verifier_asset, dict)
+                or not isinstance(verifier_asset.get("script_path"), str)
+                or not verifier_asset["script_path"].startswith("/")
+                or not isinstance(verifier_asset.get("sha256"), str)
+                or not verifier_asset["sha256"].startswith("sha256:")
+                or verifier_asset.get("mode") != "0755"
+                or not isinstance(
+                    task_provenance.get("bundle_file_metadata_sha256"),
+                    str,
+                )
+                or not task_provenance["bundle_file_metadata_sha256"].startswith("sha256:")
+            ):
+                raise ValueError("TB2.1 task is missing verifier asset provenance")
 
     snapshot_root: Path | None = None
     mirrored = 0
@@ -393,10 +671,11 @@ async def run_register(
     mirror_bytes_uploaded = 0
     mirror_bytes_skipped = 0
     mirrored_at = datetime.now(UTC).isoformat()
+    owned_snapshot_temp: tempfile.TemporaryDirectory[str] | None = None
     if source == "hf" and mirror_to_object_store:
         if object_store is None:
             raise ValueError("mirror_to_object_store requires object_store")
-        snapshot_root = await _download_hf_bundle_snapshot(
+        downloaded_snapshot_root = await _download_hf_bundle_snapshot(
             repo_id=repo_id,
             revision=revision,
             hf_token=hf_token,
@@ -404,157 +683,238 @@ async def run_register(
             chunk_size=chunk_size,
             chunk_sleep_secs=chunk_sleep_secs,
         )
-
-    engine = create_async_engine(normalize_db_url(db_url))
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        owned_snapshot_temp = tempfile.TemporaryDirectory(prefix="loom-hf-register-")
+        snapshot_root = Path(owned_snapshot_temp.name)
+        try:
+            for task in manifest_tasks:
+                provenance = task.get("source_provenance")
+                task_provenance = provenance if isinstance(provenance, dict) else {}
+                expected_metadata_sha256 = task_provenance.get(
+                    "bundle_file_metadata_sha256",
+                )
+                _copy_hf_snapshot_bundle_for_registration(
+                    snapshot_root=downloaded_snapshot_root,
+                    hf_path=task["hf_path"],
+                    out_root=snapshot_root,
+                    expected_metadata_sha256=(
+                        expected_metadata_sha256
+                        if isinstance(expected_metadata_sha256, str)
+                        else None
+                    ),
+                    require_sidecar=(manifest.get("benchmark_id") == _TB21_PROFILE_ID),
+                )
+        except BaseException:
+            owned_snapshot_temp.cleanup()
+            raise
 
     registered = 0
     legacy_placeholders = 0
     skipped = 0
-    try:
-        async with session_factory() as session:
-            # Upsert the Benchmark row from manifest metadata. Same
-            # ON CONFLICT shape as import_cmd so re-registering doesn't
-            # double-write.
-            # PR-1: `series` is added to benchmarks; manifest v2 carries
-            # it as a top-level field. v1 manifests don't include it, so
-            # default to None — `register` stays back-compat with already-
-            # published benchmarks.
-            series = manifest.get("series")
-            # ON CONFLICT update set. Critically `series` is included
-            # only when the manifest actually carries one — v1 manifests
-            # (pre-PR-1, e.g. the already-published swe-bench / osworld
-            # / humaneval) have no `series` field, so `manifest.get`
-            # returns None. If we wrote None into the SET clause we'd
-            # clobber a correct value previously written by the stub
-            # seed (which reads `series` straight off the adapter
-            # class). Skipping the key preserves the existing column.
-            update_set: dict[str, Any] = {
-                "display_name": manifest["display_name"],
-                "upstream_revision": manifest.get(
-                    "upstream_revision",
-                    "",
-                ),
-                "imported_by": (registered_by or "loom_benchmark_tool:register"),
-            }
-            if series is not None:
-                update_set["series"] = series
-            await session.execute(
-                pg_insert(Benchmark)
-                .values(
-                    id=manifest["benchmark_id"],
-                    display_name=manifest["display_name"],
-                    upstream_kind=manifest["upstream_kind"],
-                    upstream_locator=manifest["upstream_locator"],
-                    upstream_revision=manifest.get(
-                        "upstream_revision",
-                        "",
-                    ),
-                    license_spdx=manifest["license_spdx"],
-                    license_url=manifest.get("license_url", ""),
-                    splits=manifest.get("splits", ["test"]),
-                    series=series,
-                    imported_by=registered_by or "loom_benchmark_tool:register",
-                )
-                .on_conflict_do_update(
-                    index_elements=["id"],
-                    set_=update_set,
-                ),
+    prepared_tasks: list[_PreparedTask] = []
+    for task in manifest_tasks:
+        if source == "hf":
+            task_source = _hf_source_url(
+                repo_id=repo_id,
+                revision=revision,
+                hf_path=task["hf_path"],
             )
-            await session.commit()
-
-        # One row per task. We could bulk-insert but ~thousands of
-        # rows per benchmark is well within single-statement reach for
-        # postgres, and the per-row upsert lets a re-register pick up
-        # checksum drift (publish bumped → task row's checksum updated).
-        async with session_factory() as session:
-            for t in manifest_tasks:
-                if source == "hf":
-                    task_source = _hf_source_url(
-                        repo_id=repo_id,
-                        revision=revision,
-                        hf_path=t["hf_path"],
-                    )
-                else:
-                    task_source = _object_store_source_url(
-                        bucket=bucket,
-                        benchmark_id=manifest["benchmark_id"],
-                        revision=revision,
-                        hf_path=t["hf_path"],
-                    )
-                # PR-1: per-task tags from manifest v2. v1 manifests
-                # omit `tags`; treat absent + {} identically.
-                tags = dict(t.get("tags") or {})
-                config = task_config_from_manifest_entry(t)
-                if not config:
-                    legacy_placeholders += 1
-                if source == "object-store":
-                    # No mirror step needed; publish already put bytes
-                    # at exactly the URL Task.source points to.
-                    tags.update({
-                        "runtime_source_kind": "internal_object_store",
-                        "runtime_source_mirrored_at": mirrored_at,
-                    })
-                if source == "hf" and mirror_to_object_store:
-                    assert object_store is not None
-                    assert snapshot_root is not None
-                    mirror = await mirror_manifest_task_bundle(
-                        repo_id=repo_id,
-                        revision=revision,
-                        task_id=t["task_id"],
-                        checksum=t["checksum"],
-                        hf_path=t["hf_path"],
-                        snapshot_root=snapshot_root,
-                        object_store=object_store,
-                        bucket=bucket,
-                    )
-                    task_source = mirror.source
-                    mirrored += 1
-                    mirror_uploaded += mirror.uploaded
-                    mirror_skipped += mirror.skipped
-                    mirror_bytes_uploaded += mirror.bytes_uploaded
-                    mirror_bytes_skipped += mirror.bytes_skipped
-                    tags.update({
-                        "hf_repo_id": repo_id,
-                        "hf_revision": revision,
-                        "hf_path": t["hf_path"],
-                        "hf_checksum": t["checksum"],
-                        "runtime_source_kind": "internal_object_store",
-                        "runtime_source_mirrored_at": mirrored_at,
-                    })
-                await session.execute(
-                    pg_insert(TaskRow)
-                    .values(
-                        id=t["task_id"],
-                        checksum=t["checksum"],
-                        config=config,
-                        source=task_source,
-                        license=t.get(
-                            "license_spdx",
-                            manifest["license_spdx"],
-                        ),
-                        benchmark_id=manifest["benchmark_id"],
-                        tags=tags,
-                    )
-                    .on_conflict_do_update(
-                        index_elements=["id"],
-                        set_={
-                            "checksum": t["checksum"],
-                            "source": task_source,
-                            "license": t.get(
-                                "license_spdx",
-                                manifest["license_spdx"],
-                            ),
-                            "benchmark_id": manifest["benchmark_id"],
-                            "tags": tags,
-                            "config": config,
-                        },
-                    ),
+        else:
+            task_source = _object_store_source_url(
+                bucket=bucket,
+                benchmark_id=manifest["benchmark_id"],
+                revision=revision,
+                hf_path=task["hf_path"],
+            )
+        tags = dict(task.get("tags") or {})
+        source_provenance = dict(task.get("source_provenance") or {})
+        config = task_config_from_manifest_entry(task)
+        if not config:
+            legacy_placeholders += 1
+        provenance_metadata_sha256 = source_provenance.get(
+            "bundle_file_metadata_sha256",
+        )
+        file_metadata_sha256 = (
+            provenance_metadata_sha256 if isinstance(provenance_metadata_sha256, str) else None
+        )
+        if source == "object-store":
+            tags.update(
+                {
+                    "runtime_source_kind": "internal_object_store",
+                    "runtime_source_mirrored_at": mirrored_at,
+                }
+            )
+        if source == "hf" and mirror_to_object_store:
+            assert snapshot_root is not None
+            relative_prefix = _validate_relative_prefix(task["hf_path"], label="hf_path")
+            file_metadata_sha256 = bundle_file_metadata_sha256(
+                snapshot_root / relative_prefix,
+            )
+            expected_metadata_sha256 = source_provenance.get(
+                "bundle_file_metadata_sha256",
+            )
+            if (
+                expected_metadata_sha256 is not None
+                and expected_metadata_sha256 != file_metadata_sha256
+            ):
+                raise ValueError(
+                    "HF bundle file mode metadata does not match manifest provenance "
+                    f"for {task['task_id']}",
                 )
-                registered += 1
-            await session.commit()
+            target_prefix = _mirror_prefix(
+                repo_id=repo_id,
+                revision=revision,
+                task_id=task["task_id"],
+                checksum=task["checksum"],
+                hf_path=task["hf_path"],
+                file_metadata_sha256=file_metadata_sha256,
+            )
+            task_source = f"s3://{bucket}/{target_prefix}"
+            tags.update(
+                {
+                    "hf_repo_id": repo_id,
+                    "hf_revision": revision,
+                    "hf_path": task["hf_path"],
+                    "hf_checksum": task["checksum"],
+                    "runtime_source_kind": "internal_object_store",
+                    "runtime_source_mirrored_at": mirrored_at,
+                }
+            )
+        prepared_tasks.append(
+            _PreparedTask(
+                task_id=task["task_id"],
+                checksum=task["checksum"],
+                config=config,
+                source=task_source,
+                license_spdx=task.get("license_spdx", manifest["license_spdx"]),
+                benchmark_id=manifest["benchmark_id"],
+                tags=tags,
+                source_provenance=source_provenance,
+                file_metadata_sha256=file_metadata_sha256,
+            )
+        )
+
+    engine = create_async_engine(normalize_db_url(db_url))
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        exact_existing = False
+        if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
+            async with session_factory() as session, session.begin():
+                exact_existing = await _locked_tb21_registration_preflight(
+                    session,
+                    manifest=manifest,
+                    prepared_tasks=prepared_tasks,
+                )
+            if exact_existing:
+                skipped = len(prepared_tasks)
+
+        # Network I/O is deliberately outside database transactions. Prefixes
+        # are content-addressed and the profile is still absent/pending; a
+        # failed registration may leave safe orphan objects but can never
+        # rewrite an already-activated physical profile.
+        if not exact_existing and mirror_to_object_store:
+            assert object_store is not None
+            assert snapshot_root is not None
+            prepared_by_id = {task.task_id: task for task in prepared_tasks}
+            for raw_task in manifest_tasks:
+                prepared = prepared_by_id[raw_task["task_id"]]
+                mirror = await mirror_manifest_task_bundle(
+                    repo_id=repo_id,
+                    revision=revision,
+                    task_id=raw_task["task_id"],
+                    checksum=raw_task["checksum"],
+                    hf_path=raw_task["hf_path"],
+                    snapshot_root=snapshot_root,
+                    object_store=object_store,
+                    bucket=bucket,
+                    expected_file_metadata_sha256=prepared.source_provenance.get(
+                        "bundle_file_metadata_sha256",
+                    )
+                    or prepared.file_metadata_sha256,
+                )
+                mirrored += 1
+                mirror_uploaded += mirror.uploaded
+                mirror_skipped += mirror.skipped
+                mirror_bytes_uploaded += mirror.bytes_uploaded
+                mirror_bytes_skipped += mirror.bytes_skipped
+
+        if not exact_existing:
+            async with session_factory() as session, session.begin():
+                continue_writes = True
+                if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
+                    # Reacquire and recheck after object upload. A concurrent
+                    # exact registration wins idempotently; drift still fails.
+                    exact_existing = await _locked_tb21_registration_preflight(
+                        session,
+                        manifest=manifest,
+                        prepared_tasks=prepared_tasks,
+                    )
+                    continue_writes = not exact_existing
+                    if exact_existing:
+                        skipped = len(prepared_tasks)
+
+                if continue_writes:
+                    series = manifest.get("series")
+                    update_set: dict[str, Any] = {
+                        "display_name": manifest["display_name"],
+                        "upstream_revision": manifest.get("upstream_revision", ""),
+                        "imported_by": registered_by or "loom_benchmark_tool:register",
+                    }
+                    if series is not None:
+                        update_set["series"] = series
+                    if "benchmark_profile_provenance" in manifest:
+                        update_set["profile_provenance"] = profile_provenance
+                    await session.execute(
+                        pg_insert(Benchmark)
+                        .values(
+                            id=manifest["benchmark_id"],
+                            display_name=manifest["display_name"],
+                            upstream_kind=manifest["upstream_kind"],
+                            upstream_locator=manifest["upstream_locator"],
+                            upstream_revision=manifest.get("upstream_revision", ""),
+                            license_spdx=manifest["license_spdx"],
+                            license_url=manifest.get("license_url", ""),
+                            splits=manifest.get("splits", ["test"]),
+                            series=series,
+                            execution_state=execution_state,
+                            profile_provenance=profile_provenance,
+                            imported_by=registered_by or "loom_benchmark_tool:register",
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["id"],
+                            set_=update_set,
+                        ),
+                    )
+                    for task in prepared_tasks:
+                        await session.execute(
+                            pg_insert(TaskRow)
+                            .values(
+                                id=task.task_id,
+                                checksum=task.checksum,
+                                config=task.config,
+                                source=task.source,
+                                license=task.license_spdx,
+                                benchmark_id=task.benchmark_id,
+                                tags=task.tags,
+                                source_provenance=task.source_provenance,
+                            )
+                            .on_conflict_do_update(
+                                index_elements=["id"],
+                                set_={
+                                    "checksum": task.checksum,
+                                    "source": task.source,
+                                    "license": task.license_spdx,
+                                    "benchmark_id": task.benchmark_id,
+                                    "tags": task.tags,
+                                    "config": task.config,
+                                    "source_provenance": task.source_provenance,
+                                },
+                            ),
+                        )
+                        registered += 1
     finally:
         await engine.dispose()
+        if owned_snapshot_temp is not None:
+            owned_snapshot_temp.cleanup()
 
     return {
         "registered": registered,

@@ -849,10 +849,15 @@ async def run_once(
                     ]
                 work.append((b.id, rerun_pending_units))
                 continue
-            task_ids = await resolve_task_filter(
-                s,
-                b.task_filter,
-                team_id=b.team_id,
+            task_ids = (
+                list(b.resolved_task_ids)
+                if b.resolved_task_ids is not None
+                else await resolve_task_filter(
+                    s,
+                    b.task_filter,
+                    team_id=b.team_id,
+                    require_runnable=False,
+                )
             )
             task_ids, invalid_tasks = await split_valid_task_configs(
                 s, task_ids,

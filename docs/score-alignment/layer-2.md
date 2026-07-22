@@ -199,14 +199,13 @@ not by paired runtime comparison.
 ### terminal-bench-2
 
 - **Closest Harbor variant:** none — Terminal-Bench 2 is Harbor's host framework, not an adapted external benchmark. Harbor's `adapters/` directory ships nothing for TB-2.
-- **Canonical parity target:** upstream Terminal-Bench 2 (laude-institute) test runner.
-- **Loom adapter:** `packages/loom-benchmark-terminal-bench-2/` — emits a verifier shim that wraps the upstream TB-2 `tests/` directory verbatim (`TEST_DIR` defaults to `/app/environment/tb2-tests`).
+- **Canonical parity target:** Harbor Hub `terminal-bench/terminal-bench-2-1@6`, including all 89 locked native verifiers.
+- **Loom adapter:** `packages/loom-benchmark-terminal-bench-2/` — preserves native rev-6 tests and executes them through an isolated verifier driver after the agent driver exits.
 - **Parity kind:** `upstream_canonical_by_construction`.
 - **Replay tests:**
-  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_copies_reference_solution_for_oracle_smoke`
-  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_renders_solution_yaml_for_oracle_smoke` (the YAML-solution oracle path EXECUTES end-to-end in CI via `subprocess.run(['bash', solve.sh], check=True)` plus an output-file assertion — stronger live-runtime evidence than the other by-construction benchmarks here)
-  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_generated_verifier_shim_emits_loom_verifier_result`
-  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_writes_verifier_shim`
+  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py`
+  - `packages/loom-benchmark-terminal-bench-2/tests/test_tb21_lock.py`
+  - `packages/loom-benchmark-terminal-bench-2/tests/test_report_shape.py`
 - **Verdict:** credible for user-facing reporting.
 
 ### skillflow

@@ -232,12 +232,8 @@ def _verifier_steps(result: dict[str, Any] | None) -> list[dict[str, Any]]:
             "step_error": step_error if isinstance(step_error, dict) else None,
         }
         if isinstance(checks, list):
-            projected["checks"] = [
-                check for check in checks if isinstance(check, dict)
-            ]
-        steps.append(
-            projected
-        )
+            projected["checks"] = [check for check in checks if isinstance(check, dict)]
+        steps.append(projected)
     return steps
 
 
@@ -309,7 +305,7 @@ def _normalize_required_artifact_pattern(value: str, *, workdir: str = "/root") 
         return None
     workdir_prefix = workdir.rstrip("/") + "/"
     if pattern.startswith(workdir_prefix):
-        pattern = pattern[len(workdir_prefix):]
+        pattern = pattern[len(workdir_prefix) :]
     elif pattern == workdir.rstrip("/"):
         return None
     elif pattern.startswith("/"):
@@ -381,7 +377,7 @@ def _artifact_matches_required(
     parts = key_path.parts
     for idx in range(len(parts) - 1, -1, -1):
         if parts[idx] == step_name and idx + 1 < len(parts):
-            candidates.append(PurePosixPath(*parts[idx + 1:]))
+            candidates.append(PurePosixPath(*parts[idx + 1 :]))
             break
     candidates.append(PurePosixPath(key_path.name))
     return any(candidate.match(pattern) for candidate in candidates)
@@ -398,9 +394,7 @@ def _required_artifact_refs(
         trajectory_index.get("artifacts"),
         list,
     ):
-        raw_artifacts = [
-            item for item in trajectory_index["artifacts"] if isinstance(item, dict)
-        ]
+        raw_artifacts = [item for item in trajectory_index["artifacts"] if isinstance(item, dict)]
     present: list[dict[str, str]] = []
     missing: list[dict[str, str]] = []
     for required in expected:
@@ -416,13 +410,7 @@ def _required_artifact_refs(
         else:
             missing.append(required)
     return {
-        "status": (
-            "not_declared"
-            if not expected
-            else "missing"
-            if missing
-            else "complete"
-        ),
+        "status": ("not_declared" if not expected else "missing" if missing else "complete"),
         "expected": expected,
         "present": present,
         "missing": missing,
@@ -443,9 +431,8 @@ def _missing_required_artifacts_failure(
             for item in missing
             if isinstance(item, dict) and item.get("pattern")
         ]
-    message = (
-        "Verifier-required artifact evidence is incomplete"
-        + (f": {', '.join(missing_patterns)}" if missing_patterns else "")
+    message = "Verifier-required artifact evidence is incomplete" + (
+        f": {', '.join(missing_patterns)}" if missing_patterns else ""
     )
     return {
         "reason_code": "trial.missing_required_artifacts",
@@ -587,9 +574,7 @@ def _worker_projection(worker: Any, *, now: datetime) -> dict[str, Any]:
         "status": getattr(worker, "status", None),
         "last_heartbeat_at": _iso(last_seen_at),
         "heartbeat_age_sec": heartbeat_age_sec,
-        "heartbeat_fresh": (
-            heartbeat_age_sec <= 120.0 if heartbeat_age_sec is not None else None
-        ),
+        "heartbeat_fresh": (heartbeat_age_sec <= 120.0 if heartbeat_age_sec is not None else None),
     }
 
 
@@ -621,10 +606,7 @@ def _stale_decision_projection(stale_running_decision: Any) -> dict[str, Any]:
             "reason": "unrecognized_decision_payload",
             "reclaimable": None,
         }
-    return {
-        key: _iso(item) if isinstance(item, datetime) else item
-        for key, item in value.items()
-    }
+    return {key: _iso(item) if isinstance(item, datetime) else item for key, item in value.items()}
 
 
 def _task_materialization_state(task: Task | None) -> str:
@@ -990,9 +972,7 @@ def _failure_ledger(
                 "platform_outcome": classification["platform_outcome"],
                 "score_outcome": classification["score_outcome"],
                 "rerun_recommendation": classification["rerun_recommendation"],
-                "requires_operator_approval": classification[
-                    "requires_operator_approval"
-                ],
+                "requires_operator_approval": classification["requires_operator_approval"],
                 "requires_task_change": classification["requires_task_change"],
             }
         )
@@ -1138,6 +1118,8 @@ def build_batch_debug_evidence(
         "failure": _failure_for_batch(batch),
         "task_selection": {
             "task_filter": batch.task_filter,
+            "resolved_task_ids": getattr(batch, "resolved_task_ids", None),
+            "source_provenance": getattr(batch, "source_provenance", {}),
             "expected_trial_count": batch.expected_trial_count,
             "n_per_task": batch.n_per_task,
             "fanout_errors": batch.fanout_errors,

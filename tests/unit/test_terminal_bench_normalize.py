@@ -55,6 +55,99 @@ class TestIsTerminalBenchShape:
 
 
 class TestNormalizeMapping:
+    def test_normalizes_native_tb21_schema_1_1_task_toml(self) -> None:
+        """Harbor-native TB2.1 bundles use ``schema_version = \"1.1\"``
+        plus a ``[task]`` section whose name is the upstream identity, rather
+        than Loom's schema-1 task id.  The converter must be able to re-stamp
+        that identity without throwing away the supported execution contract.
+        """
+        raw = {
+            "schema_version": "1.1",
+            "artifacts": [],
+            "task": {
+                "name": "terminal-bench/adaptive-rejection-sampler",
+                "description": "Native TB2.1 task.",
+                "keywords": ["terminal", "statistics"],
+            },
+            "verifier": {
+                "timeout_sec": 900.0,
+                "env": {"KEEP_NATIVE_VERIFIER_ENV": "1"},
+            },
+            "agent": {"timeout_sec": 900.0},
+            "environment": {
+                "build_timeout_sec": 600.0,
+                "docker_image": "example/tb21:rev6",
+                "cpus": 1,
+                "memory_mb": 2048,
+                "storage_mb": 10240,
+                "gpus": 0,
+                "allow_internet": True,
+                "architecture": "x86_64",
+                "env": {"NATIVE_ENV": "preserve-supported-values"},
+            },
+            "solution": {"env": {"REFERENCE_ONLY": "true"}},
+        }
+
+        normalized = normalize_terminal_bench_task_toml(raw)
+        cfg = TaskConfig.model_validate(normalized)
+
+        assert cfg.task.id == "terminal-bench/adaptive-rejection-sampler"
+        assert cfg.task.name == "terminal-bench/adaptive-rejection-sampler"
+        assert cfg.task.description == "Native TB2.1 task."
+        assert cfg.task.labels == ["terminal", "statistics"]
+        assert cfg.environment.os == "linux"
+        assert cfg.environment.docker_image == "example/tb21:rev6"
+        assert cfg.environment.build_timeout_sec == 600.0
+        assert cfg.environment.cpus == 1
+        assert cfg.environment.memory_mb == 2048
+        assert cfg.environment.storage_mb == 10240
+        assert cfg.environment.gpus == 0
+        assert cfg.environment.workdir.as_posix() == "/app"
+        assert cfg.environment.environment == {
+            "NATIVE_ENV": "preserve-supported-values",
+        }
+        assert cfg.agent.name == "oracle"
+        assert cfg.agent.timeout_sec == 900.0
+        assert cfg.verifier.name == "script"
+        assert cfg.verifier.timeout_sec == 900.0
+        assert cfg.verifier.args == {
+            "script_path": DEFAULT_VERIFIER_SCRIPT_PATH,
+        }
+        assert cfg.steps[0].artifacts == ["logs/verifier/**"]
+        assert raw["schema_version"] == "1.1"
+        assert raw["environment"]["architecture"] == "x86_64"
+
+    def test_native_tb21_maps_no_internet_to_no_network(self) -> None:
+        raw = {
+            "schema_version": "1.1",
+            "task": {"name": "terminal-bench/offline"},
+            "environment": {
+                "docker_image": "example/tb21:rev6",
+                "allow_internet": False,
+            },
+        }
+
+        cfg = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw))
+
+        assert cfg.environment.network_policies_supported == frozenset({"no-network"})
+        assert cfg.environment.baseline_network_policy.kind == "no-network"
+
+    def test_native_tb21_appends_verifier_artifact_glob_without_replacing_source_patterns(
+        self,
+    ) -> None:
+        raw = {
+            "schema_version": "1.1",
+            "artifacts": ["result.json"],
+            "task": {"name": "terminal-bench/with-artifacts"},
+            "environment": {"docker_image": "example/tb21:rev6"},
+        }
+
+        normalized = normalize_terminal_bench_task_toml(raw)
+        cfg = TaskConfig.model_validate(normalized)
+
+        assert cfg.steps[0].artifacts == ["result.json", "logs/verifier/**"]
+        assert raw["artifacts"] == ["result.json"]
+
     def test_produces_valid_loom_taskconfig(self) -> None:
         normalized = normalize_terminal_bench_task_toml(_tb_raw())
         cfg = TaskConfig.model_validate(normalized)

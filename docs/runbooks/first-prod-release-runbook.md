@@ -559,6 +559,26 @@ Expected success output:
 Operator-free user E2E gate: PASS
 ```
 
+The fixed candidate must also carry the canonical TB2.1 rev-6 gate.
+Registering or re-registering leaves `terminal-bench-2@tb2.1-r6` `pending`;
+activate it only after a fresh 89/89 audit of Harbor Hub package digests,
+mirrored bundle checksums, architecture/image inputs, executable verifier
+assets, and the private verifier-driver boundary. There is no TB2.0 or
+reduced-task fallback. For a `full-cluster` rollout, pass an audited physical
+task ID explicitly:
+
+```bash
+loom cluster rollout staging \
+  --scope full-cluster \
+  --smoke-task-id 'terminal-bench-2@tb2.1-r6/<audited-task-name>' \
+  ...
+```
+
+The resulting evidence must keep Hub/profile/verifier provenance separate from
+agent runtime and image provenance. A finite numeric reward, including `0`,
+proves the verifier boundary completed; a missing or malformed reward is a
+platform failure and blocks promotion.
+
 Expected JSON evidence snippet:
 
 ```json

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -33,20 +34,24 @@ from loom_benchmarks.registry import REGISTRY
 from loom_benchmarks.util import sha256_of_dir
 
 from loom.license_policy import tags_with_license_execution_policy
-from loom.trajectory.storage import ObjectStore
+from loom.trajectory.storage import (
+    ObjectStore,
+    bundle_file_metadata_sha256,
+    write_bundle_file_metadata_sidecar,
+)
 from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 from loom_benchmark_tool.import_cmd import _select_instances, _validate_instance_id
 from loom_benchmark_tool.manifest import (
     MANIFEST_FILENAME,
+    MANIFEST_SCHEMA_VERSION,
     load_task_config_from_bundle,
     repo_id_for,
 )
 
-# Manifest schema version. Bump when the per-task field set changes in
-# a way the register/worker code needs to fork on. The shape:
+# Manifest shape:
 #
 # {
-#   "schema_version": int,       # 1 = legacy, 2 = series/tags, 3 = task_config
+#   "schema_version": int,       # v4 adds profile/task source provenance
 #   "benchmark_id": str,
 #   "display_name": str,
 #   "series": str | null,        # v2+: grouping label ("aime", …)
@@ -77,9 +82,39 @@ from loom_benchmark_tool.manifest import (
 # published v1/v2 manifests. Every target uses it verbatim as the
 # bundle's directory prefix inside the published tree (HF repo, or the
 # object-store `{benchmark_id}/{revision}/` root).
-MANIFEST_SCHEMA_VERSION = 3
-
 PublishTarget = Literal["hf", "object-store"]
+
+
+def _adapter_profile_provenance(adapter: object) -> dict[str, object]:
+    provider = getattr(adapter, "profile_provenance", None)
+    if provider is None:
+        return {}
+    value = provider()
+    if not isinstance(value, dict):
+        raise TypeError("adapter profile_provenance() must return an object")
+    return dict(value)
+
+
+def _adapter_task_source_provenance(
+    adapter: object,
+    *,
+    instance: object,
+    bundle_dir: Path,
+    task_config: dict[str, object],
+    checksum: str,
+) -> dict[str, object]:
+    provider = getattr(adapter, "task_source_provenance", None)
+    if provider is None:
+        return {}
+    value = provider(
+        instance=instance,
+        bundle_dir=bundle_dir,
+        task_config=task_config,
+        checksum=checksum,
+    )
+    if not isinstance(value, dict):
+        raise TypeError("adapter task_source_provenance() must return an object")
+    return dict(value)
 
 
 def _safe_dirname(instance_id: str) -> str:
@@ -100,11 +135,13 @@ def _bundle_checksum(bundle_dir: Path) -> str:
 
 def _object_store_revision(task_entries: list[dict[str, Any]]) -> str:
     """Content-addressed revision derived from the sorted per-task
-    checksums. Republishing byte-identical bundles produces the same
-    revision, so operators can safely re-run publish without churning
-    the object-store layout."""
+    byte and mode checksums. Republishing identical bundles produces the
+    same revision, while an executable-bit change gets a distinct prefix."""
     joined = "\n".join(
-        f"{entry['task_id']}:{entry['checksum']}"
+        (
+            f"{entry['task_id']}:{entry['checksum']}:"
+            f"{(entry.get('source_provenance') or {}).get('bundle_file_metadata_sha256', '')}"
+        )
         for entry in sorted(task_entries, key=lambda e: e["task_id"])
     ).encode("utf-8")
     return hashlib.sha256(joined).hexdigest()[:16]
@@ -127,9 +164,9 @@ def _stage_bundles(
     object-store consumers expect."""
     adapter = REGISTRY[benchmark]
     cache_dir.mkdir(parents=True, exist_ok=True)
-    source_dir = fetch_upstream(
-        adapter.upstream_source,
-        cache_root=cache_dir,
+    source_dir = _prepare_adapter_source(
+        adapter=adapter,
+        cache_dir=cache_dir,
         refresh=refresh,
     )
     selected_instances = _select_instances(
@@ -158,6 +195,22 @@ def _stage_bundles(
         if converted.checksum != checksum:
             stats["warnings"] += 1
         task_config = load_task_config_from_bundle(bundle_dir)
+        source_provenance = _adapter_task_source_provenance(
+            adapter,
+            instance=inst,
+            bundle_dir=bundle_dir,
+            task_config=task_config,
+            checksum=checksum,
+        )
+        metadata_sha256 = bundle_file_metadata_sha256(bundle_dir)
+        declared_metadata_sha256 = source_provenance.get(
+            "bundle_file_metadata_sha256",
+        )
+        if declared_metadata_sha256 not in {None, metadata_sha256}:
+            raise ValueError(
+                "adapter bundle file mode provenance does not match staged bundle",
+            )
+        source_provenance["bundle_file_metadata_sha256"] = metadata_sha256
         task_entries.append(
             {
                 "task_id": converted.task_id,
@@ -171,8 +224,13 @@ def _stage_bundles(
                     getattr(adapter, "license_execution_policy", None),
                 ),
                 "task_config": task_config,
+                "source_provenance": source_provenance,
             }
         )
+        # Transport inode modes separately from bundle identity. HF preserves
+        # bytes but not executable bits; direct object-store publication also
+        # carries this sidecar so both materializers enforce one contract.
+        write_bundle_file_metadata_sidecar(bundle_dir)
         stats["published"] += 1
 
     manifest = {
@@ -189,12 +247,65 @@ def _stage_bundles(
         "published_at": datetime.now(UTC).isoformat(),
         "splits": list(adapter.splits),
         "task_count": len(task_entries),
+        "benchmark_profile_provenance": _adapter_profile_provenance(adapter),
         "tasks": task_entries,
     }
     (staging_dir / MANIFEST_FILENAME).write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
     )
     return manifest, task_entries, stats
+
+
+def _prepare_adapter_source(
+    *,
+    adapter: Any,
+    cache_dir: Path,
+    refresh: bool,
+) -> Path:
+    """Fetch an adapter's execution source and any independent audit source.
+
+    Most adapters have one upstream.  Audited physical profiles may also
+    declare ``audit_source`` plus ``audit_manifest_source``.  The latter is
+    fetched independently at its immutable revision and copied beneath the
+    execution materialization's ``audit/`` directory before the adapter is
+    allowed to enumerate instances.  This keeps the generic publish command
+    usable without weakening the profile's two-authority verification gate.
+    """
+    source_dir = cast(
+        Path,
+        fetch_upstream(
+            adapter.upstream_source,
+            cache_root=cache_dir,
+            refresh=refresh,
+        ),
+    )
+    audit_source = getattr(adapter, "audit_source", None)
+    audit_manifest_source = getattr(adapter, "audit_manifest_source", None)
+    if audit_source is None and audit_manifest_source is None:
+        return source_dir
+    if audit_source is None or not isinstance(audit_manifest_source, str):
+        raise ValueError(
+            "audited benchmark adapters must declare both audit_source and "
+            "audit_manifest_source",
+        )
+    audit_root = cast(
+        Path,
+        fetch_upstream(
+            audit_source,
+            cache_root=cache_dir,
+            refresh=refresh,
+        ),
+    )
+    audit_checkout = audit_root / "repo" if audit_source.kind == "git" else audit_root
+    source_manifest = audit_checkout / audit_manifest_source
+    if not source_manifest.is_file():
+        raise ValueError(
+            f"audit source is missing required manifest {audit_manifest_source!r}",
+        )
+    target_manifest = source_dir / "audit" / audit_manifest_source
+    target_manifest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_manifest, target_manifest)
+    return source_dir
 
 
 def _publish_to_hf(
@@ -262,7 +373,9 @@ async def _publish_to_object_store(
         rel = path.relative_to(staging_dir).as_posix()
         key = f"{prefix}/{rel}"
         await object_store.put_object(
-            bucket=bucket, key=key, body=path.read_bytes(),
+            bucket=bucket,
+            key=key,
+            body=path.read_bytes(),
         )
     return revision
 
@@ -290,8 +403,8 @@ async def run_publish(
 
     For `target="object-store"`, `object_store` is required. `repo_id`
     is the flat `s3://{bucket}/{benchmark_id}` prefix and `revision`
-    is the content-addressed 16-char hash of the sorted task
-    checksums.
+    is the content-addressed 16-char hash of the sorted task byte and
+    file-mode checksums.
     """
     if target == "hf":
         if not hf_token:

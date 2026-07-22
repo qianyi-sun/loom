@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from loom.agent.base import AgentRuntime, InBoxAgentRuntime
+from loom.agent.oracle import OracleAgent
 from loom.driver.base import Driver, StartOptions
 from loom.errors import classify_failure, classify_failure_message
 from loom.models.networking import NetworkPolicy
@@ -43,7 +44,7 @@ from loom.trial.watchdog_cancellation import (
     extract_watchdog_cancellation,
     watchdog_timeout_failure_message,
 )
-from loom.trial.workspace import materialize_workspace
+from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
 from loom.verifier.base import Verifier
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,12 @@ class TrialContext:
     # endpoints on Linux Docker, where `host.docker.internal` is not
     # present unless the container is started with host-gateway mapping.
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
+    # Profile-task provenance can require private verifier assets to remain
+    # outside the normal agent workspace.  Such tasks must receive a fresh
+    # verifier-only driver; a delayed upload to the agent driver is unsafe
+    # because background processes can survive the agent phase.
+    workspace_staging_policy: WorkspaceStagingPolicy | None = None
+    verifier_driver_factory: Callable[[], Driver] | None = None
     # #5 Slice 3b: optional CP-side event sink. When set, every event
     # appended through the TrajectoryWriter is mirrored to the
     # `trial_events` table via the worker's HttpControlPlaneClient.
@@ -221,6 +228,10 @@ class Trial:
                                     }.items()
                                 )
                             ),
+                            cpus=self.ctx.task_config.environment.cpus,
+                            memory_mb=self.ctx.task_config.environment.memory_mb,
+                            storage_mb=self.ctx.task_config.environment.storage_mb,
+                            gpus=self.ctx.task_config.environment.gpus,
                             # #896: per-container caps (0 = unbounded default).
                             container_cpus=self.ctx.container_cpus,
                             container_memory_mib=self.ctx.container_memory_mib,
@@ -256,6 +267,17 @@ class Trial:
                         driver=self.ctx.driver,
                         task_dir=self.ctx.task_dir,
                         dst=workdir,
+                        policy=self.ctx.workspace_staging_policy,
+                        phase="agent",
+                        trusted_private_paths=(
+                            self.ctx.workspace_staging_policy.trusted_oracle_paths
+                            if (
+                                self.ctx.workspace_staging_policy is not None
+                                and self.ctx.trial_config.agent_name == "oracle"
+                                and isinstance(self.ctx.agent, OracleAgent)
+                            )
+                            else ()
+                        ),
                     )
                     if hasattr(self.ctx.agent, "workdir"):
                         self.ctx.agent.workdir = workdir

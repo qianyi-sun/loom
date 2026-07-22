@@ -199,6 +199,15 @@ class ModalDriver:
             raise DriverAlreadyStartedError(
                 f"ModalDriver.start() rejected in state {self._state!r}",
             )
+        opts = options or StartOptions()
+        if any(
+            value is not None
+            for value in (opts.cpus, opts.memory_mb, opts.storage_mb)
+        ) or opts.gpus:
+            raise DriverError(
+                "ModalDriver cannot enforce task resource limits through the "
+                "generic StartOptions contract; use a compatible backend instead",
+            )
         _install_handlers_once()
         block, allowlist = _policy_to_modal_kwargs(
             self.network_policy_baseline,

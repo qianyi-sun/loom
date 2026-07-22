@@ -76,18 +76,15 @@ def test_third_party_adapter_without_upstream_source_falls_back_to_none(
 
 
 def test_terminal_bench_2_surfaces_pinned_task_count() -> None:
-    """`TerminalBench2Adapter` declares `task_count = 86` (the pinned
-    upstream's official slate). Without this surfacing path,
+    """`TerminalBench2Adapter` declares the canonical 89-task Hub rev-6 slate.
+    Without this surfacing path,
     `loom datasets list` previously showed `-` for TB-2 because
     `default-catalog.json` is masked when a builtin entry-point with the
     same slug exists. Tracks G1 of #217 — the original fix mistakenly
     edited the masked catalog row."""
     entries = load_builtin_entries()
     tb2 = next(e for e in entries if e.slug == "terminal-bench-2")
-    # 86 upstream tasks minus 2 (broken-networking, extract-safely) that
-    # ship Dockerfiles which structurally cannot pass Loom's task-bundle
-    # compatibility validators — see adapter._UNSUPPORTED_INSTANCES + #760.
-    assert tb2.task_count == 84
+    assert tb2.task_count == 89
 
 
 def test_third_party_adapter_without_task_count_falls_back_to_none(

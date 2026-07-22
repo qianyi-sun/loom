@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import stat
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
 
@@ -35,6 +38,9 @@ _RETRYABLE_S3_ERROR_CODES = frozenset(
     }
 )
 _T = TypeVar("_T")
+BUNDLE_FILE_METADATA_NAME = ".loom-bundle-files.v1.json"
+_BUNDLE_FILE_METADATA_MAX_BYTES = 4 * 1024 * 1024
+_SAFE_BUNDLE_FILE_MODES = frozenset({0o644, 0o755})
 
 
 def _remove_expect_header(*, params: dict[str, Any], **_kwargs: Any) -> None:
@@ -55,6 +61,179 @@ def _has_traversal(rel: str) -> bool:
     if parts[0] in ("/", "\\") or (len(parts[0]) == 2 and parts[0][1] == ":"):
         return True
     return ".." in parts
+
+
+def _validate_bundle_relative_path(value: object) -> str:
+    if not isinstance(value, str) or not value or value.startswith(("/", "\\")):
+        raise ValueError("bundle file metadata paths must be non-empty relative strings")
+    if "\\" in value:
+        raise ValueError("bundle file metadata paths must use POSIX separators")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("bundle file metadata paths must not traverse")
+    if value == BUNDLE_FILE_METADATA_NAME:
+        raise ValueError("bundle file metadata cannot describe its reserved sidecar")
+    return value
+
+
+def bundle_file_metadata_body(task_dir: Path) -> bytes:
+    """Return canonical, content-independent file mode metadata for a bundle.
+
+    S3 stores bytes rather than POSIX inode modes.  We persist only the two
+    portable modes the runtime needs: ordinary data (0644) and executable
+    assets (0755).  set-id, sticky, and write-policy bits are never propagated.
+    The reserved sidecar is transport metadata and is intentionally excluded
+    from task checksums and materialized file counts.
+    """
+    files: dict[str, dict[str, str]] = {}
+    for path in sorted(task_dir.rglob("*")):
+        if path.is_dir():
+            continue
+        raw_rel = path.relative_to(task_dir).as_posix()
+        if raw_rel == BUNDLE_FILE_METADATA_NAME:
+            continue
+        rel = _validate_bundle_relative_path(raw_rel)
+        mode = 0o755 if stat.S_IMODE(path.stat().st_mode) & 0o111 else 0o644
+        files[rel] = {"mode": f"{mode:04o}"}
+    return json.dumps(
+        {"schema_version": 1, "files": files},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def bundle_file_metadata_sha256(task_dir: Path) -> str:
+    """Digest the canonical mode manifest for immutable provenance binding."""
+    return f"sha256:{sha256(bundle_file_metadata_body(task_dir)).hexdigest()}"
+
+
+def write_bundle_file_metadata_sidecar(task_dir: Path) -> Path:
+    """Write canonical transport metadata after bundle identity is computed."""
+    if not task_dir.is_dir():
+        raise ValueError("bundle file metadata requires an existing task directory")
+    sidecar = task_dir / BUNDLE_FILE_METADATA_NAME
+    if sidecar.exists() and (sidecar.is_symlink() or not sidecar.is_file()):
+        raise ValueError("bundle file metadata sidecar must be a regular file")
+    sidecar.write_bytes(bundle_file_metadata_body(task_dir))
+    sidecar.chmod(0o644)
+    return sidecar
+
+
+async def upload_bundle_file_metadata(
+    *,
+    store: ObjectStore,
+    bucket: str,
+    prefix: str,
+    task_dir: Path,
+) -> None:
+    """Upload the reserved mode sidecar without changing bundle file counts."""
+    if not prefix or not prefix.endswith("/"):
+        raise ValueError("bundle file metadata prefix must be non-empty and end with '/'")
+    await store.put_object(
+        bucket=bucket,
+        key=f"{prefix}{BUNDLE_FILE_METADATA_NAME}",
+        body=bundle_file_metadata_body(task_dir),
+    )
+
+
+def _parse_bundle_file_metadata(
+    body: bytes,
+    *,
+    expected_paths: set[str],
+) -> dict[str, int]:
+    if len(body) > _BUNDLE_FILE_METADATA_MAX_BYTES:
+        raise ValueError("bundle file metadata exceeds the safe size limit")
+    try:
+        raw = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("bundle file metadata must be valid UTF-8 JSON") from exc
+    if not isinstance(raw, dict) or set(raw) != {"schema_version", "files"}:
+        raise ValueError("bundle file metadata must contain the exact v1 fields")
+    if raw["schema_version"] != 1 or not isinstance(raw["files"], dict):
+        raise ValueError("bundle file metadata schema_version must be 1")
+    modes: dict[str, int] = {}
+    for raw_path, raw_entry in raw["files"].items():
+        path = _validate_bundle_relative_path(raw_path)
+        if not isinstance(raw_entry, dict) or set(raw_entry) != {"mode"}:
+            raise ValueError("bundle file metadata entries must contain only mode")
+        mode_text = raw_entry["mode"]
+        if not isinstance(mode_text, str) or mode_text not in {"0644", "0755"}:
+            raise ValueError(f"unsafe file mode in bundle metadata for {path!r}")
+        mode = int(mode_text, 8)
+        if mode not in _SAFE_BUNDLE_FILE_MODES:
+            raise ValueError(f"unsafe file mode in bundle metadata for {path!r}")
+        modes[path] = mode
+    if set(modes) != expected_paths:
+        raise ValueError("bundle file metadata paths do not exactly match stored bundle files")
+    return modes
+
+
+def _restore_bundle_file_modes(
+    *,
+    out_dir: Path,
+    modes: dict[str, int],
+) -> None:
+    root = out_dir.resolve()
+    for rel, mode in modes.items():
+        dest = out_dir / rel
+        if dest.is_symlink() or not dest.is_file() or not dest.resolve().is_relative_to(root):
+            raise ValueError(f"bundle file metadata target is not a safe regular file: {rel!r}")
+        dest.chmod(mode)
+
+
+def restore_bundle_file_metadata_sidecar(
+    task_dir: Path,
+    *,
+    expected_sha256: str | None,
+    remove: bool,
+) -> str:
+    """Validate an HF/object transport sidecar and restore safe inode modes.
+
+    The raw canonical sidecar digest is the immutable provenance value.  The
+    caller must run this only in an owned directory: shared HF cache symlinks
+    must be copied by bytes before calling, so chmod cannot mutate blob cache
+    targets used by another task or process.
+    """
+    sidecar = task_dir / BUNDLE_FILE_METADATA_NAME
+    if sidecar.is_symlink() or not sidecar.is_file():
+        raise ValueError("bundle file metadata sidecar is missing or not regular")
+    body = sidecar.read_bytes()
+    observed_sha256 = f"sha256:{sha256(body).hexdigest()}"
+    if expected_sha256 is not None and observed_sha256 != expected_sha256:
+        raise ValueError(
+            "bundle file metadata raw digest mismatch "
+            f"expected={expected_sha256} actual={observed_sha256}",
+        )
+    expected_paths: set[str] = set()
+    for path in sorted(task_dir.rglob("*")):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(task_dir).as_posix()
+        if rel == BUNDLE_FILE_METADATA_NAME:
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"bundle file metadata target is not regular: {rel!r}")
+        expected_paths.add(_validate_bundle_relative_path(rel))
+    modes = _parse_bundle_file_metadata(body, expected_paths=expected_paths)
+    canonical = json.dumps(
+        {
+            "schema_version": 1,
+            "files": {
+                rel: {"mode": f"{mode:04o}"}
+                for rel, mode in sorted(modes.items())
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if body != canonical:
+        raise ValueError("bundle file metadata sidecar is not canonical")
+    _restore_bundle_file_modes(out_dir=task_dir, modes=modes)
+    if bundle_file_metadata_sha256(task_dir) != observed_sha256:
+        raise ValueError("restored bundle file metadata digest mismatch")
+    if remove:
+        sidecar.unlink()
+    return observed_sha256
 
 
 def _is_retryable_client_error(exc: ClientError) -> bool:
@@ -257,16 +436,33 @@ class FakeObjectStore:
             )
         count = 0
         out_dir.mkdir(parents=True, exist_ok=True)
+        selected: list[tuple[str, str, bytes]] = []
+        metadata_body: bytes | None = None
         for (b, k), body in self.objects.items():
             if b != bucket or not k.startswith(prefix):
                 continue
             rel = k[len(prefix) :].lstrip("/")
             if not rel or _has_traversal(rel):
                 continue
+            if rel == BUNDLE_FILE_METADATA_NAME:
+                metadata_body = body
+                continue
+            selected.append((k, rel, body))
+        modes = (
+            _parse_bundle_file_metadata(
+                metadata_body,
+                expected_paths={rel for _key, rel, _body in selected},
+            )
+            if metadata_body is not None
+            else None
+        )
+        for _key, rel, body in selected:
             dest = out_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(body)
             count += 1
+        if modes is not None:
+            _restore_bundle_file_modes(out_dir=out_dir, modes=modes)
         return count
 
 
@@ -561,9 +757,18 @@ class MinioObjectStore:
             return objects
 
         objects = await self._run_client_call("download_prefix.list", _list)
+        metadata_keys = [key for key, rel in objects if rel == BUNDLE_FILE_METADATA_NAME]
+        data_objects = [(key, rel) for key, rel in objects if rel != BUNDLE_FILE_METADATA_NAME]
+        modes: dict[str, int] | None = None
+        if metadata_keys:
+            metadata_body = await self.get_object(bucket=bucket, key=metadata_keys[0])
+            modes = _parse_bundle_file_metadata(
+                metadata_body,
+                expected_paths={rel for _key, rel in data_objects},
+            )
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        for key, rel in objects:
+        for key, rel in data_objects:
             dest = out_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             partial = dest.with_name(f"{dest.name}.part")
@@ -582,4 +787,6 @@ class MinioObjectStore:
 
             await self._run_client_call(f"download_prefix.download:{key}", _download)
 
-        return len(objects)
+        if modes is not None:
+            _restore_bundle_file_modes(out_dir=out_dir, modes=modes)
+        return len(data_objects)

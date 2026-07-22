@@ -1,10 +1,12 @@
 """Kind-dispatched upstream fetchers (benchmark integrations spec §4).
 
-Three transports cover every adapter in the v1 slate:
+Four transports cover every adapter in the v1 slate:
 
 - `huggingface` — uses `datasets.load_dataset` and the HF cache_dir.
 - `git` — shallow clone (`--depth 1`) into `<cache>/git/<hash>/repo`.
 - `https-tarball` — single GET + extract into `<cache>/https-tarball/<hash>/`.
+- `harbor-package` — resolve a pinned Harbor Hub dataset into
+  `<cache>/harbor-package/<hash>/`.
 
 The cache key is `sha256(locator || "\\0" || (revision or "") [|| "\\0" || subset])`.
 Idempotent: a sentinel file `.fetch_complete` short-circuits redundant
@@ -13,6 +15,7 @@ downloads. `refresh=True` wipes the cache for one source.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import shutil
@@ -100,6 +103,13 @@ def fetch_upstream(
             # device nodes, parent traversal). The Python 3.14 default
             # but we set it explicitly so 3.12/3.13 also get it.
             tar.extractall(target, filter="data")
+    elif src.kind == "harbor-package":
+        # Harbor is catalog-publisher tooling, not a routine developer
+        # dependency. Keep the import and its optional dependency check on
+        # this explicit transport path.
+        from loom_benchmarks.harbor_dataset import download_harbor_dataset
+
+        asyncio.run(download_harbor_dataset(src, target))
     else:
         raise ValueError(f"unknown UpstreamSource.kind: {src.kind}")
     sentinel.write_text("ok")

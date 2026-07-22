@@ -15,8 +15,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 from loom_benchmark_terminal_bench_2.adapter import TerminalBench2Adapter
 from loom_benchmark_terminal_bench_2.report import to_tb2_report
+from loom_benchmark_terminal_bench_2.upstream import TB21LockError
 
 from loom.models.result import (
     AgentInfo,
@@ -41,7 +43,10 @@ _STUB_CONFIG = TrialConfig(
 
 
 def _trial(
-    uuid_hex: int, task: str, *, resolved: bool,
+    uuid_hex: int,
+    task: str,
+    *,
+    resolved: bool,
     fail: FailureReason | None = None,
 ) -> TrialResult:
     uuid_str = f"00000000-0000-0000-0000-{uuid_hex:012d}"
@@ -75,21 +80,21 @@ def _trial(
     )
 
 
-def test_subset_list_instances_orders_all_ten(fixtures_dir: Path) -> None:
+def test_legacy_subset_is_not_an_executable_source(fixtures_dir: Path) -> None:
     source = fixtures_dir / "tb2-subset-10"
-    adapter = TerminalBench2Adapter()
-    found = [i.instance_id for i in adapter.list_instances(
-        source_dir=source, split="test",
-    )]
-    assert len(found) == 10
-    assert found == sorted(found)
+    with pytest.raises(TB21LockError):
+        list(
+            TerminalBench2Adapter().list_instances(
+                source_dir=source,
+                split="test",
+            )
+        )
 
 
 def test_report_matches_harbor_reference(fixtures_dir: Path) -> None:
     trials = [
         _trial(1, "hello-world", resolved=True),
-        _trial(2, "chess-best-move", resolved=False,
-               fail=FailureReason.AGENT_TIMEOUT),
+        _trial(2, "chess-best-move", resolved=False, fail=FailureReason.AGENT_TIMEOUT),
         _trial(3, "blind-maze-explorer-5x5", resolved=True),
     ]
     report = to_tb2_report(trials)
@@ -99,7 +104,8 @@ def test_report_matches_harbor_reference(fixtures_dir: Path) -> None:
 
     report["results"] = sorted(report["results"], key=lambda r: r["task_id"])
     reference["results"] = sorted(
-        reference["results"], key=lambda r: r["task_id"],
+        reference["results"],
+        key=lambda r: r["task_id"],
     )
     report["resolved_ids"] = sorted(report["resolved_ids"])
     report["unresolved_ids"] = sorted(report["unresolved_ids"])

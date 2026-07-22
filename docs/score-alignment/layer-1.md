@@ -50,7 +50,7 @@ Harbor or the upstream canonical evaluator.
 | `skillflow` | SkillFlow task bundle | mean task reward | Upstream SkillFlow verifier unless Harbor support is confirmed |
 | `skilllearnbench` | SkillLearnBench | mean task reward | Upstream SkillLearnBench verifier unless Harbor support is confirmed |
 | `swe-bench-verified` | SWE-Bench Verified | resolved rate | Harbor if supported, otherwise official SWE-Bench harness |
-| `terminal-bench-2` | Terminal-Bench 2.0 | accuracy / mean task reward | Upstream Terminal-Bench evaluator unless Harbor support is confirmed |
+| `terminal-bench-2` | Terminal-Bench 2.1 Harbor Hub revision 6 | accuracy / mean task reward | Locked native rev-6 verifier contract |
 
 ## Evidence Rules
 
@@ -60,7 +60,8 @@ Examples:
 - final answer replay for AIME, GPQA, MATH-500, and MMLU-Pro;
 - code artifact replay for HumanEval, MBPP, and LiveCodeBench;
 - patch replay for SWE-Bench Verified;
-- task artifact replay for SkillFlow, SkillLearnBench, and Terminal-Bench 2.0.
+- task artifact replay for SkillFlow, SkillLearnBench, and the immutable
+  Terminal-Bench 2.1 rev-6 physical profile.
 - effective request-parameter evidence for SkillLearnBench Codex alignment reports,
   generated with
   `python scripts/alignment/skilllearnbench_effective_params.py` from redacted

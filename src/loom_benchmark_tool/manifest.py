@@ -6,8 +6,26 @@ from pathlib import Path
 from typing import Any
 
 from loom.models.task import TaskConfig
+from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY, WorkspaceStagingPolicy
 
 MANIFEST_FILENAME = "manifest.json"
+MANIFEST_SCHEMA_VERSION = 4
+
+
+def tb21_workspace_policy_isolated(value: object) -> bool:
+    """Return whether persisted provenance proves the rev-6 staging gate.
+
+    A parsed-but-different policy is not sufficient for TB2.1 activation: the
+    reviewed exclusion set is part of the immutable profile contract.
+    """
+    if not isinstance(value, dict):
+        return False
+    try:
+        policy = WorkspaceStagingPolicy.from_provenance(value)
+    except ValueError:
+        return False
+    expected = WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
+    return policy == expected
 
 
 def repo_id_for(org: str, benchmark: str) -> str:

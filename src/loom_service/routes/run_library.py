@@ -14,6 +14,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, column, false, func, literal, or_, select, true
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch, LlmCall, Team, Trial
@@ -34,6 +35,8 @@ from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
+from loom_service.task_config_validation import expected_trial_count
+from loom_service.task_filter import resolve_task_filter_with_diagnostics
 
 router = APIRouter()
 
@@ -1204,6 +1207,7 @@ def _serialize_batch_base(batch: Batch, owner_team: Team) -> dict[str, Any]:
         "visibility": batch.visibility,
         "share_status": batch.share_status,
         "source_provenance": batch.source_provenance,
+        "resolved_task_ids": batch.resolved_task_ids,
         "expected_trial_count": batch.expected_trial_count,
         "created_by_token_prefix": batch.created_by_token_prefix,
         "created_at": batch.created_at.isoformat(),
@@ -1899,6 +1903,25 @@ def _retry_default_snapshot_mismatch(
     return {"source": source_norm, "current": current}
 
 
+async def _resolve_new_batch_snapshot(
+    session: AsyncSession,
+    *,
+    task_filter: dict[str, Any],
+    team_id: UUID,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Resolve and lifecycle-check tasks before a derived batch is committed."""
+
+    result = await resolve_task_filter_with_diagnostics(
+        session,
+        task_filter,
+        team_id=team_id,
+        require_runnable=True,
+    )
+    if not result.task_ids:
+        raise HTTPException(status_code=400, detail="task filter matched zero runnable tasks")
+    return list(result.task_ids), list(result.benchmark_selection_provenance)
+
+
 @router.post("/run-library/batches/{batch_id}/clone-config", status_code=201)
 async def clone_run_library_batch_config(
     request: Request,
@@ -1926,30 +1949,47 @@ async def clone_run_library_batch_config(
             team_id=ctx.team_id,
         )
 
+    task_filter = dict(source.task_filter)
+    resolved_task_ids, benchmark_provenance = await _resolve_new_batch_snapshot(
+        session,
+        task_filter=task_filter,
+        team_id=ctx.team_id,
+    )
+    combinations = list(source.combinations or [])
+    required_worker_pools = list(source.required_worker_pools or [])
+    expected = expected_trial_count(
+        task_count=len(resolved_task_ids),
+        n_per_task=source.n_per_task,
+        combinations=combinations,
+    ) + len(required_worker_pools)
+
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
-    provenance = [
+    provenance: list[dict[str, Any]] = [
         {
             "kind": "cloned_batch_config",
             "source_batch_id": str(source.id),
             "source_team_id": str(source.team_id),
             "source_visibility": source.visibility,
-        }
+        },
+        *benchmark_provenance,
     ]
     clone = Batch(
         team_id=ctx.team_id,
         name=payload.name,
         description=payload.description or (f"Cloned config from shared batch {source.id}."),
-        task_filter=dict(source.task_filter),
+        task_filter=task_filter,
+        resolved_task_ids=resolved_task_ids,
         trial_config=dict(source.trial_config),
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
         usage_attributed_user_id=ctx.user_id,
         usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
-        expected_trial_count=source.expected_trial_count,
+        expected_trial_count=expected,
         n_per_task=source.n_per_task,
         backend=source.backend,
-        combinations=list(source.combinations or []),
+        combinations=combinations,
+        required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,
         provider_model_id=payload.provider_model_id or source.provider_model_id,
         source_provenance=provenance,
@@ -2102,22 +2142,38 @@ async def reuse_run_library_artifact(
         else {"subset_kind": "explicit", "task_ids": [trial.task_id]}
     )
     trial_config = dict(batch.trial_config) if batch is not None else dict(trial.config)
+    resolved_task_ids, benchmark_provenance = await _resolve_new_batch_snapshot(
+        session,
+        task_filter=task_filter,
+        team_id=ctx.team_id,
+    )
+    combinations = list(batch.combinations or []) if batch else []
+    required_worker_pools = list(batch.required_worker_pools or []) if batch else []
+    n_per_task = batch.n_per_task if batch else 1
+    expected = expected_trial_count(
+        task_count=len(resolved_task_ids),
+        n_per_task=n_per_task,
+        combinations=combinations,
+    ) + len(required_worker_pools)
+    provenance.extend(benchmark_provenance)
     derived = Batch(
         team_id=ctx.team_id,
         name=payload.name,
         description=payload.description
         or (f"Reuses shared artifact {payload.key} from trial {trial.id}."),
         task_filter=task_filter,
+        resolved_task_ids=resolved_task_ids,
         trial_config=trial_config,
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
         usage_attributed_user_id=ctx.user_id,
         usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
-        expected_trial_count=batch.expected_trial_count if batch else 1,
-        n_per_task=batch.n_per_task if batch else 1,
+        expected_trial_count=expected,
+        n_per_task=n_per_task,
         backend=batch.backend if batch else "docker",
-        combinations=list(batch.combinations or []) if batch else [],
+        combinations=combinations,
+        required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,
         provider_model_id=(
             payload.provider_model_id

@@ -1318,6 +1318,27 @@ issue promotes it into scope.
 Required public benchmarks should move from publish/repair pending states to
 `Ready`; hiding a needed benchmark is not a substitute for publishing it.
 
+Terminal-Bench 2.1 has a stricter lifecycle. Harbor Hub dataset
+`terminal-bench/terminal-bench-2-1@6` and its 89 locked package digests are the
+execution authority. Publish/register creates the immutable physical profile
+`terminal-bench-2@tb2.1-r6` in `pending`; a fresh 89/89 bundle, provenance,
+architecture, verifier, checksum, and isolation audit must pass before
+activation atomically makes the profile runnable and points the public
+`terminal-bench-2` selector at it. Direct pending selection is refused, and a
+failed activation never falls back to TB2.0 or to fewer tasks.
+
+Rev-6 agents do not receive `solution/`, `tests/`, `verifier/`, or
+`upstream-task.toml`. Verification starts in a fresh private driver after the
+agent driver exits. Every result records Hub/profile/verifier provenance and
+agent runtime/image provenance independently. Numeric reward `0` is a valid
+scored outcome; missing, malformed, non-finite, or timed-out reward evidence is
+a platform/verifier failure.
+
+Full-cluster rollout smoke must use an explicit audited physical task ID via
+`--smoke-task-id terminal-bench-2@tb2.1-r6/<task>`. Loom never guesses a TB2
+default. The `current-gb10` scope alone keeps the Loom-owned
+`loom-smoke/gb10-oracle-hello-world` default.
+
 The hidden `/benchmarks` route remains a power-user diagnostic view rather
 than the normal submission path. It includes the same registry readiness states
 plus operator-oriented `loom datasets list --remote`, `loom datasets audit`,
@@ -1390,7 +1411,7 @@ loom run
   --output-dir DIR        # default ./runs
   --json                  # JSON-line output instead of text
   --server-url URL        # also POST results to <url>/api/v1/cli/results
-  --tb2-report PATH       # also write Terminal-Bench-2.0 canonical JSON
+  --tb2-report PATH       # also write a TB2 report with profile provenance
 ```
 
 `--dataset` and `--task` are mutually exclusive (one required).
