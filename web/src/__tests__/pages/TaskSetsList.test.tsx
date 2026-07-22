@@ -1,7 +1,6 @@
 import { screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { setBrowserFailureReporter } from "../../lib/errorReporting";
 import TaskSetsList from "../../pages/TaskSetsList";
 import { jsonResponse } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
@@ -24,14 +23,7 @@ const baseItem = {
 };
 
 describe("TaskSetsList", () => {
-  beforeEach(() => {
-    setBrowserFailureReporter(() => undefined);
-  });
-
-  afterEach(() => {
-    setBrowserFailureReporter(null);
-    vi.restoreAllMocks();
-  });
+  afterEach(() => vi.restoreAllMocks());
 
   it("renders empty and error states", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({ items: [] }));

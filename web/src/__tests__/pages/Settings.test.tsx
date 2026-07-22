@@ -1,8 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { setBrowserFailureReporter } from "../../lib/errorReporting";
 import { setFrontendConfigForTests } from "../../lib/frontendConfig";
 import Settings from "../../pages/Settings";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
@@ -66,12 +65,7 @@ const teamDetail = {
 };
 
 describe("Settings", () => {
-  beforeEach(() => {
-    setBrowserFailureReporter(() => undefined);
-  });
-
   afterEach(() => {
-    setBrowserFailureReporter(null);
     setFrontendConfigForTests(null);
     vi.restoreAllMocks();
   });
