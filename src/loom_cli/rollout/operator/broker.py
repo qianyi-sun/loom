@@ -1040,10 +1040,12 @@ def _resume(
         return 0
 
 
-def _latest_request(dependencies: BrokerDependencies) -> RolloutRequest | None:
+def _latest_request(
+    dependencies: BrokerDependencies,
+) -> PreflightRequest | RolloutRequest | None:
     custom = getattr(dependencies.store, "latest_request", None)
     if callable(custom):
-        return cast(RolloutRequest | None, custom())
+        return cast(PreflightRequest | RolloutRequest | None, custom())
     requests_root = dependencies.config.state_root / "requests"
     try:
         entries = list(os.scandir(requests_root))
@@ -1051,18 +1053,28 @@ def _latest_request(dependencies: BrokerDependencies) -> RolloutRequest | None:
         return None
     except OSError as exc:
         raise RequestStoreError("request ledger is unavailable") from exc
-    requests: list[RolloutRequest] = []
+    requests: list[PreflightRequest | RolloutRequest] = []
     for entry in entries:
         if not entry.is_dir(follow_symlinks=False):
             continue
         try:
             requests.append(dependencies.store.read_request(entry.name))
+        except RequestStoreError as exc:
+            if str(exc) != "rollout request is not promoted":
+                continue
+            try:
+                requests.append(dependencies.store.read_preflight_request(entry.name))
+            except Exception:
+                continue
         except Exception:
             continue
     return max(requests, key=lambda item: (item.requested_at, item.request_id), default=None)
 
 
-def _request_status(dependencies: BrokerDependencies, request: RolloutRequest) -> dict[str, object]:
+def _request_status(
+    dependencies: BrokerDependencies,
+    request: PreflightRequest | RolloutRequest,
+) -> dict[str, object]:
     events = dependencies.store.read_events(request.request_id)
     latest = _latest_attempt_event(events)
     if latest is None and events:
@@ -1101,7 +1113,7 @@ def _status(
     dependencies: BrokerDependencies,
     request_id: str | None,
 ) -> int:
-    request: RolloutRequest | None = None
+    request: PreflightRequest | RolloutRequest | None = None
     reconciled = dependencies.lifecycle.reconcile_active()
     if request_id is None:
         if reconciled.pointer is not None:
@@ -1117,6 +1129,13 @@ def _status(
     if request is None:
         try:
             request = dependencies.store.read_request(cast(str, request_id))
+        except RequestStoreError as exc:
+            if str(exc) != "rollout request is not promoted":
+                return _safe_error(dependencies, "request does not exist")
+            try:
+                request = dependencies.store.read_preflight_request(cast(str, request_id))
+            except Exception:
+                return _safe_error(dependencies, "request does not exist")
         except Exception:
             return _safe_error(dependencies, "request does not exist")
     payload = _request_status(dependencies, request)

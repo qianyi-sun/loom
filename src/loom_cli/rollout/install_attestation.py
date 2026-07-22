@@ -19,6 +19,21 @@ INSTALL_ASSETS = MappingProxyType(
         "broker": (Path("/usr/local/libexec/loom-staging-rollout-broker"), 0o755, False),
         "client": (Path("/usr/local/bin/loom-staging-rollout"), 0o755, False),
         "config": (Path("/etc/loom/staging-rollout.toml"), 0o640, True),
+        "credential-refresh-helper": (
+            Path("/usr/local/libexec/loom-staging-rollout-credential-refresh"),
+            0o755,
+            False,
+        ),
+        "credential-refresh-service": (
+            Path("/etc/systemd/system/loom-staging-rollout-credential-refresh.service"),
+            0o644,
+            False,
+        ),
+        "credential-refresh-timer": (
+            Path("/etc/systemd/system/loom-staging-rollout-credential-refresh.timer"),
+            0o644,
+            False,
+        ),
         "gb10-known-hosts": (
             Path("/etc/loom/staging-rollout-gb10-known-hosts"),
             0o644,

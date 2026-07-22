@@ -52,17 +52,41 @@ def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Pat
         bundle_name = f"20260719T1{index}0000Z-{request_id}"
         root = backups / bundle_name
         root.mkdir(mode=0o700)
-        partial = root / "partial.bin"
-        partial.write_bytes(f"partial-{index}".encode())
-        partial.chmod(0o600)
         roots.append(root)
+        manifest_sha256: str | None = None
+        if index == 1:
+            manifest = root / "backup-manifest.json"
+            manifest.write_bytes(b"restore-verified latest\n")
+            manifest.chmod(0o600)
+            manifest_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            store.publish_backup_lease(
+                BackupLease(
+                    lease_id="lease-failed010000",
+                    source_request_id=request_id,
+                    manifest_sha256=manifest_sha256,
+                    component_sha256={"postgres": "1" * 64},
+                    environment="staging",
+                    namespace="loom-staging",
+                    mutation_epoch=17,
+                    db_snapshot_identity="pgdump-sha256:" + "1" * 64,
+                    schema_revision="0072",
+                    object_inventory_root="2" * 64,
+                    created_at=datetime(2026, 7, 19, 11, tzinfo=UTC),
+                    restore_verified_at=datetime(2026, 7, 19, 11, 5, tzinfo=UTC),
+                    expires_at=datetime(2026, 7, 20, 11, tzinfo=UTC),
+                )
+            )
+        else:
+            partial = root / "partial.bin"
+            partial.write_bytes(b"partial-2")
+            partial.chmod(0o600)
         records.append(
             BackupRetirementRecord(
                 payload_id=f"payload-failed0{index}",
                 request_id=request_id,
                 bundle_name=bundle_name,
                 reason="failed",
-                manifest_sha256=None,
+                manifest_sha256=manifest_sha256,
             )
         )
     state = BackupRotationState(generation=1, retirements=tuple(records))
@@ -75,9 +99,7 @@ def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Pat
             service_uid=os.geteuid(),
             store=store,
             retirer=BackupPayloadRetirer(creator=creator, store=store),
-            activate_payload=lambda _record: (_ for _ in ()).throw(
-                AssertionError("retirement-only plan must not activate a payload")
-            ),
+            activate_payload=lambda _record: None,
         ),
         (roots[0], roots[1]),
     )
@@ -182,23 +204,77 @@ def test_digest_approved_rotation_retirement_preserves_compact_evidence(
     retried = service.apply(loaded)
 
     assert loaded == plan
-    assert plan.to_dict()["schema_version"] == 2
-    assert plan.active_action == "none"
-    assert plan.desired_latest_bundle is None
+    assert plan.to_dict()["schema_version"] == 3
+    assert plan.active_action == "recover-and-verify"
+    assert plan.recovered_active is not None
+    assert plan.recovered_active.payload_id == "payload-failed01"
+    assert plan.desired_latest_bundle == roots[0].name
+    assert result["recovered_payload_id"] == "payload-failed01"
     assert result["retired_payload_ids"] == ["payload-failed02"]
-    assert result["retained_payload_ids"] == ["payload-failed01"]
+    assert result["retained_payload_ids"] == []
     assert retried == result
     assert roots[0].is_dir()
     assert not roots[1].exists()
     rotation = service.store.read_backup_rotation()
     assert rotation.payload_count == 1
-    assert tuple(record.payload_id for record in rotation.retirements) == ("payload-failed01",)
+    assert rotation.active is not None
+    assert rotation.active.payload_id == "payload-failed01"
+    assert rotation.retirements == ()
     assert not service.store.has_backup_retirement_receipt("payload-failed01")
     assert service.store.has_backup_retirement_receipt("payload-failed02")
     evidence = service.store.backup_retirements_root / "payload-failed02.json"
     receipt = service.store.backup_retirements_root / "payload-failed02.deleted.json"
     assert evidence.is_file()
     assert receipt.is_file()
+
+
+def test_latest_failed_retirement_recovery_requires_one_exact_immutable_lease(
+    tmp_path: Path,
+) -> None:
+    service, roots = _service(tmp_path)
+    lease_paths = tuple(service.store.backup_leases_root.glob("*.json"))
+    assert len(lease_paths) == 1
+    lease_paths[0].unlink()
+
+    with pytest.raises(
+        InstalledBackupRetentionError,
+        match="lease authority is unavailable",
+    ):
+        service.inventory()
+
+    assert all(root.is_dir() for root in roots)
+    state = service.store.read_backup_rotation()
+    assert state.active is None
+    assert state.payload_count == 2
+
+
+def test_latest_failed_retirement_recovery_resumes_after_rotation_cas(
+    tmp_path: Path,
+) -> None:
+    service, roots = _service(tmp_path)
+    plan = service.inventory()
+    original_retirer = service.retirer
+
+    def stop_before_incomplete_delete(record: BackupRetirementRecord) -> None:
+        raise RuntimeError(f"stop before deleting {record.payload_id}")
+
+    service.retirer = stop_before_incomplete_delete  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="payload-failed02"):
+        service.apply(plan)
+
+    interrupted = service.store.read_backup_rotation()
+    assert interrupted.active == plan.recovered_active
+    assert tuple(record.payload_id for record in interrupted.retirements) == ("payload-failed02",)
+    assert all(root.is_dir() for root in roots)
+    assert service.store.read_backup_retention_claim() is not None
+
+    service.retirer = original_retirer
+    result = service.apply(service.load_claim(plan.plan_digest))
+
+    assert result["recovered_payload_id"] == "payload-failed01"
+    assert result["retired_payload_ids"] == ["payload-failed02"]
+    assert service.store.read_backup_rotation().payload_count == 1
+    assert roots[0].is_dir() and not roots[1].exists()
 
 
 def test_same_retention_claim_cannot_execute_concurrently(tmp_path: Path) -> None:

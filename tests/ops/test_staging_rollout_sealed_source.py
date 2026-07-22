@@ -10,7 +10,7 @@ from scripts.ops import staging_rollout_sealed_source as sealed
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", "-c", "maintenance.auto=false", "-C", str(repo), *args],
         check=True,
         capture_output=True,
         text=True,

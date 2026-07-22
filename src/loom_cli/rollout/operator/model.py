@@ -48,6 +48,7 @@ BackupPublicReason = Literal[
     "backup_minio_failed",
     "backup_transport_failed",
     "backup_object_limit_exceeded",
+    "backup_object_inventory_failed",
     "backup_secrets_failed",
     "backup_manifest_failed",
     "backup_cleanup_failed",
@@ -87,6 +88,7 @@ _REQUEST_EVENTS = frozenset(
     }
 )
 _EVENT_STATUSES = frozenset({"pending", "preview", "running", "done", "failed", "cancelled"})
+
 
 def validate_safe_identifier(value: object, field_name: str) -> str:
     """Return a path-safe request/rollout identifier or fail closed."""

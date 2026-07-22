@@ -39,6 +39,7 @@ from loom_cli.rollout.operator.model import (
     CandidateBinding,
     RolloutRequest,
 )
+from loom_cli.rollout.operator.readonly_database_client import ReadonlyDatabaseTunnelError
 from loom_cli.rollout.operator.rollout_checkpoint import (
     ImmutableObjectInventory,
     build_immutable_inventory,
@@ -397,7 +398,7 @@ def test_critical_checkpoint_surfaces_inventory_provider_failure_without_detail(
         ).create(make_request())
 
     assert exc_info.value.code == "object_inventory_failed"
-    assert exc_info.value.public_reason == "backup_manifest_failed"
+    assert exc_info.value.public_reason == "backup_object_inventory_failed"
     assert "secret-bearing" not in str(exc_info.value)
 
 
@@ -425,7 +426,7 @@ def test_critical_checkpoint_surfaces_inventory_binding_failure(tmp_path: Path) 
         ).create(make_request())
 
     assert exc_info.value.code == "object_inventory_binding_failed"
-    assert exc_info.value.public_reason == "backup_manifest_failed"
+    assert exc_info.value.public_reason == "backup_object_inventory_failed"
 
 
 def test_creator_surfaces_missing_service_account_as_precondition(
@@ -3654,6 +3655,47 @@ def test_stage_unknown_code_defaults_to_backup_failed() -> None:
     with pytest.raises(backup_module.BackupError) as exc_info:
         backup_module._stage("some_unmapped_code", boom)
     assert exc_info.value.public_reason == "backup_failed"
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_code"),
+    [
+        ("credential", "object_inventory_credentials_failed"),
+        ("transport", "object_inventory_transport_failed"),
+        ("timeout", "object_inventory_timeout"),
+    ],
+)
+def test_inventory_stage_preserves_typed_private_tunnel_diagnostic(
+    kind: str,
+    expected_code: str,
+) -> None:
+    diagnostic = "Unauthorized token=[REDACTED:token]"
+
+    def fail() -> None:
+        raise ReadonlyDatabaseTunnelError(kind, diagnostic)  # type: ignore[arg-type]
+
+    with pytest.raises(backup_module.BackupError) as caught:
+        backup_module._stage("object_inventory_failed", fail)
+
+    assert caught.value.args == (expected_code,)
+    assert caught.value.code == expected_code
+    assert caught.value.public_reason == "backup_object_inventory_failed"
+    assert caught.value.diagnostic == diagnostic
+    assert diagnostic not in str(caught.value)
+
+
+def test_non_inventory_stage_discards_typed_tunnel_diagnostic() -> None:
+    def fail() -> None:
+        raise ReadonlyDatabaseTunnelError(
+            "credential",
+            "Unauthorized token=[REDACTED:token]",
+        )
+
+    with pytest.raises(backup_module.BackupError) as caught:
+        backup_module._stage("postgres_dump_failed", fail)
+
+    assert caught.value.code == "postgres_dump_failed"
+    assert caught.value.diagnostic is None
 
 
 def test_stage_reraises_specific_backup_error_unchanged() -> None:

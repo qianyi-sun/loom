@@ -222,53 +222,9 @@ class PreflightCredentialInstaller:
         self._converge_minio_authority(minio_credential)
         application_token = self._load_or_create_application_token()
         self._converge_application_probe(application_token, team_id=team_id)
-        existing = self.check(minimum_token_remaining_seconds=_INSTALL_MIN_REMAINING_SECONDS)
-        installed_application_token: bytes | None = None
-        installed_database_credential: ReadonlyDatabaseCredential | None = None
-        installed_minio_credential: ReadonlyMinioCredential | None = None
-        if existing["ok"]:
-            installed_application_token = self._read_private(
-                self.paths.readonly_token,
-                expected_uid=self.service_uid,
-                expected_gid=self.service_gid,
-            ).strip()
-            installed_database_credential = ReadonlyDatabaseCredential.from_bytes(
-                self._read_private(
-                    self.paths.readonly_database_credential,
-                    expected_uid=self.service_uid,
-                    expected_gid=self.service_gid,
-                )
-            )
-            installed_minio_credential = ReadonlyMinioCredential.from_bytes(
-                self._read_private(
-                    self.paths.readonly_minio_credential,
-                    expected_uid=self.service_uid,
-                    expected_gid=self.service_gid,
-                )
-            )
-        if (
-            existing["ok"]
-            and installed_application_token == application_token
-            and installed_database_credential == database_credential
-            and installed_minio_credential == minio_credential
-        ):
-            return {"ok": True, "changed": [], "authority": existing["authority"]}
-        readonly = self._request_kubeconfig(
-            source_kubeconfig,
-            namespace="loom-staging",
-            service_account="loom-rollout-readonly",
-        )
-        rehearsal = self._request_kubeconfig(
-            source_kubeconfig,
-            namespace="loom-rollout-system",
-            service_account="loom-rollout-rehearsal",
-        )
+        kubeconfigs = self._refresh_kubeconfigs(source_kubeconfig=source_kubeconfig)
         self._ensure_private_directory(self.paths.credential_root)
         changed = {
-            str(self.paths.readonly_kubeconfig): self._atomic_write(
-                self.paths.readonly_kubeconfig,
-                readonly,
-            ),
             str(self.paths.readonly_token): self._atomic_write(
                 self.paths.readonly_token,
                 application_token.rstrip() + b"\n",
@@ -281,18 +237,83 @@ class PreflightCredentialInstaller:
                 self.paths.readonly_minio_credential,
                 minio_credential.to_bytes(),
             ),
+        }
+        result = self.check(minimum_token_remaining_seconds=_INSTALL_MIN_REMAINING_SECONDS)
+        if not result["ok"]:
+            raise CredentialInstallError("installed preflight credentials did not verify")
+        authority = result["authority"]
+        kubeconfig_authority = kubeconfigs["authority"]
+        if isinstance(authority, dict) and isinstance(kubeconfig_authority, dict):
+            for label in ("readonly", "rehearsal"):
+                installed = authority.get(label)
+                refreshed = kubeconfig_authority.get(label)
+                if isinstance(installed, dict) and isinstance(refreshed, dict):
+                    installed.update(refreshed)
+        kubeconfig_changes = kubeconfigs["changed"]
+        if not isinstance(kubeconfig_changes, list) or any(
+            not isinstance(path, str) for path in kubeconfig_changes
+        ):
+            raise CredentialInstallError("preflight kubeconfig change ledger is invalid")
+        changed_paths = set(kubeconfig_changes)
+        changed_paths.update(path for path, value in changed.items() if value)
+        return {
+            "ok": True,
+            "changed": sorted(changed_paths),
+            "authority": authority,
+        }
+
+    def refresh(self) -> dict[str, object]:
+        """Refresh only the two root-minted TokenRequest kubeconfigs."""
+        if self.euid != 0:
+            raise CredentialInstallError("preflight credential refresh requires root")
+        return self._refresh_kubeconfigs()
+
+    def _refresh_kubeconfigs(
+        self,
+        *,
+        source_kubeconfig: bytes | None = None,
+    ) -> dict[str, object]:
+        existing = self._check_kubeconfigs(
+            minimum_token_remaining_seconds=_INSTALL_MIN_REMAINING_SECONDS
+        )
+        if existing["ok"]:
+            authority = existing["authority"]
+            self._add_live_kubeconfig_authority(authority)
+            return {"ok": True, "changed": [], "authority": authority}
+        source = source_kubeconfig or self._minified_source_kubeconfig()
+        # Both TokenRequests must succeed before either installed file changes.
+        readonly = self._request_kubeconfig(
+            source,
+            namespace="loom-staging",
+            service_account="loom-rollout-readonly",
+        )
+        rehearsal = self._request_kubeconfig(
+            source,
+            namespace="loom-rollout-system",
+            service_account="loom-rollout-rehearsal",
+        )
+        self._ensure_private_directory(self.paths.credential_root)
+        changed = {
+            str(self.paths.readonly_kubeconfig): self._atomic_write(
+                self.paths.readonly_kubeconfig,
+                readonly,
+            ),
             str(self.paths.rehearsal_kubeconfig): self._atomic_write(
                 self.paths.rehearsal_kubeconfig,
                 rehearsal,
             ),
         }
-        result = self.check(minimum_token_remaining_seconds=_INSTALL_MIN_REMAINING_SECONDS)
-        if not result["ok"]:
-            raise CredentialInstallError("installed preflight credentials did not verify")
+        verified = self._check_kubeconfigs(
+            minimum_token_remaining_seconds=_INSTALL_MIN_REMAINING_SECONDS
+        )
+        if not verified["ok"]:
+            raise CredentialInstallError("refreshed preflight kubeconfigs did not verify")
+        authority = verified["authority"]
+        self._add_live_kubeconfig_authority(authority)
         return {
             "ok": True,
             "changed": sorted(path for path, value in changed.items() if value),
-            "authority": result["authority"],
+            "authority": authority,
         }
 
     def _load_or_create_application_token(self) -> bytes:
@@ -356,46 +377,19 @@ class PreflightCredentialInstaller:
         *,
         minimum_token_remaining_seconds: int = _RUNTIME_MIN_REMAINING_SECONDS,
     ) -> dict[str, object]:
-        now = self.now()
-        failures: list[str] = []
-        authority: dict[str, object] = {}
-        for label, path, namespace, account in (
-            (
-                "readonly",
-                self.paths.readonly_kubeconfig,
-                "loom-staging",
-                "loom-rollout-readonly",
-            ),
-            (
-                "rehearsal",
-                self.paths.rehearsal_kubeconfig,
-                "loom-rollout-system",
-                "loom-rollout-rehearsal",
-            ),
+        kubeconfigs = self._check_kubeconfigs(
+            minimum_token_remaining_seconds=minimum_token_remaining_seconds
+        )
+        kubeconfig_failures = kubeconfigs["failures"]
+        kubeconfig_authority = kubeconfigs["authority"]
+        if not isinstance(kubeconfig_failures, list) or any(
+            not isinstance(label, str) for label in kubeconfig_failures
         ):
-            try:
-                payload = self._read_private(
-                    path,
-                    expected_uid=self.service_uid,
-                    expected_gid=self.service_gid,
-                )
-                evidence = validate_token_request_kubeconfig(
-                    payload,
-                    namespace=namespace,
-                    service_account=account,
-                    now=now,
-                    minimum_remaining_seconds=minimum_token_remaining_seconds,
-                )
-                if evidence.audiences != (_TOKEN_AUDIENCE,):
-                    raise ValueError("preflight TokenRequest audience is invalid")
-                authority[label] = {
-                    "audiences": list(evidence.audiences),
-                    "expires_at": evidence.expires_at,
-                    "metadata_digest": evidence.metadata_digest,
-                    "subject": evidence.subject,
-                }
-            except (CredentialInstallError, ValueError, yaml.YAMLError):
-                failures.append(label)
+            raise CredentialInstallError("preflight kubeconfig failure ledger is invalid")
+        if not isinstance(kubeconfig_authority, dict):
+            raise CredentialInstallError("preflight kubeconfig authority is invalid")
+        failures = list(kubeconfig_failures)
+        authority = dict(kubeconfig_authority)
         try:
             application_payload = self._read_private(
                 self.paths.readonly_token,
@@ -437,7 +431,206 @@ class PreflightCredentialInstaller:
             }
         except (CredentialInstallError, ValueError):
             failures.append("readonly-minio")
+        if not {"readonly", "rehearsal"}.intersection(failures):
+            try:
+                self._add_live_kubeconfig_authority(authority)
+            except CredentialInstallError:
+                failures.append("kubeconfig-readback")
         return {"ok": not failures, "failures": sorted(failures), "authority": authority}
+
+    def _check_kubeconfigs(
+        self,
+        *,
+        minimum_token_remaining_seconds: int,
+    ) -> dict[str, object]:
+        now = self.now()
+        failures: list[str] = []
+        authority: dict[str, object] = {}
+        for label, path, namespace, account in (
+            (
+                "readonly",
+                self.paths.readonly_kubeconfig,
+                "loom-staging",
+                "loom-rollout-readonly",
+            ),
+            (
+                "rehearsal",
+                self.paths.rehearsal_kubeconfig,
+                "loom-rollout-system",
+                "loom-rollout-rehearsal",
+            ),
+        ):
+            try:
+                payload = self._read_private(
+                    path,
+                    expected_uid=self.service_uid,
+                    expected_gid=self.service_gid,
+                )
+                evidence = validate_token_request_kubeconfig(
+                    payload,
+                    namespace=namespace,
+                    service_account=account,
+                    now=now,
+                    minimum_remaining_seconds=minimum_token_remaining_seconds,
+                )
+                if evidence.audiences != (_TOKEN_AUDIENCE,):
+                    raise ValueError("preflight TokenRequest audience is invalid")
+                authority[label] = {
+                    "audiences": list(evidence.audiences),
+                    "expires_at": evidence.expires_at,
+                    "metadata_digest": evidence.metadata_digest,
+                    "subject": evidence.subject,
+                }
+            except (CredentialInstallError, ValueError, yaml.YAMLError):
+                failures.append(label)
+        return {"ok": not failures, "failures": sorted(failures), "authority": authority}
+
+    def _add_live_kubeconfig_authority(self, authority: object) -> None:
+        if not isinstance(authority, dict):
+            raise CredentialInstallError("preflight kubeconfig authority is invalid")
+        for label, path, namespace, account, capabilities in (
+            (
+                "readonly",
+                self.paths.readonly_kubeconfig,
+                "loom-staging",
+                "loom-rollout-readonly",
+                (
+                    {
+                        "group": "",
+                        "name": "loom-postgres-0",
+                        "namespace": "loom-staging",
+                        "resource": "pods",
+                        "subresource": "portforward",
+                        "verb": "create",
+                    },
+                    {
+                        "group": "",
+                        "name": "loom-minio-0",
+                        "namespace": "loom-staging",
+                        "resource": "pods",
+                        "subresource": "portforward",
+                        "verb": "create",
+                    },
+                ),
+            ),
+            (
+                "rehearsal",
+                self.paths.rehearsal_kubeconfig,
+                "loom-rollout-system",
+                "loom-rollout-rehearsal",
+                ({"group": "", "resource": "namespaces", "verb": "create"},),
+            ),
+        ):
+            installed = authority.get(label)
+            if not isinstance(installed, dict):
+                raise CredentialInstallError("preflight kubeconfig authority is incomplete")
+            installed.update(
+                self._live_kubeconfig_authority(
+                    path,
+                    namespace=namespace,
+                    service_account=account,
+                    capabilities=capabilities,
+                )
+            )
+
+    def _live_kubeconfig_authority(
+        self,
+        path: Path,
+        *,
+        namespace: str,
+        service_account: str,
+        capabilities: tuple[dict[str, str], ...],
+    ) -> dict[str, object]:
+        subject_review = self._server_review(
+            path,
+            "/apis/authentication.k8s.io/v1/selfsubjectreviews",
+            {"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview"},
+        )
+        status = subject_review.get("status")
+        user_info = status.get("userInfo") if isinstance(status, dict) else None
+        subject = user_info.get("username") if isinstance(user_info, dict) else None
+        expected = f"system:serviceaccount:{namespace}:{service_account}"
+        if subject != expected:
+            raise CredentialInstallError("preflight kubeconfig subject readback failed")
+        required_allowed = all(
+            self._self_subject_access(path, capability) for capability in capabilities
+        )
+        mint_allowed = self._self_subject_access(
+            path,
+            {
+                "group": "",
+                "namespace": namespace,
+                "resource": "serviceaccounts",
+                "subresource": "token",
+                "verb": "create",
+            },
+        )
+        if not required_allowed or mint_allowed:
+            raise CredentialInstallError("preflight kubeconfig capability readback failed")
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "required_capabilities": capabilities,
+                    "subject": subject,
+                    "token_mint_allowed": False,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return {
+            "capability_digest": digest,
+            "subject": subject,
+            "token_mint_allowed": False,
+        }
+
+    def _self_subject_access(self, path: Path, attributes: dict[str, str]) -> bool:
+        review = self._server_review(
+            path,
+            "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+            {
+                "apiVersion": "authorization.k8s.io/v1",
+                "kind": "SelfSubjectAccessReview",
+                "spec": {"resourceAttributes": attributes},
+            },
+        )
+        status = review.get("status")
+        if not isinstance(status, dict) or type(status.get("allowed")) is not bool:
+            raise CredentialInstallError("preflight kubeconfig access readback failed")
+        if status.get("evaluationError") not in {None, ""}:
+            raise CredentialInstallError("preflight kubeconfig access readback failed")
+        return bool(status["allowed"])
+
+    def _server_review(
+        self,
+        path: Path,
+        uri: str,
+        spec: dict[str, object],
+    ) -> dict[str, object]:
+        result = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(path),
+                "create",
+                "--raw",
+                uri,
+                "--request-timeout=10s",
+                "-f",
+                "-",
+            ),
+            input=json.dumps(spec, sort_keys=True, separators=(",", ":")),
+            timeout=15,
+        )
+        if len(result.stdout.encode()) > 1 << 20:
+            raise CredentialInstallError("preflight kubeconfig server readback is invalid")
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise CredentialInstallError("preflight kubeconfig server readback is invalid") from exc
+        if not isinstance(value, dict):
+            raise CredentialInstallError("preflight kubeconfig server readback is invalid")
+        return value
 
     def _load_or_create_database_credential(self) -> ReadonlyDatabaseCredential:
         path = self.paths.database_credential_source
@@ -714,7 +907,10 @@ class PreflightCredentialInstaller:
         timeout: int,
         require_output: bool = True,
     ) -> CommandResult:
-        result = self.run(argv, input=input, timeout=timeout)
+        try:
+            result = self.run(argv, input=input, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            raise CredentialInstallError("preflight credential command failed") from None
         # stderr is a diagnostic stream, not a failure signal.  kubectl and mc
         # may emit bounded warnings there while still returning success.  The
         # subprocess exit status and the command-specific output validators
@@ -854,7 +1050,7 @@ class PreflightCredentialInstaller:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("command", choices=("install", "check"))
+    parser.add_argument("command", choices=("install", "check", "refresh"))
     parser.add_argument("--team-id", type=UUID)
     return parser
 
@@ -867,10 +1063,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.team_id is None:
                 raise CredentialInstallError("credential install requires exact team ID")
             result = installer.install(args.team_id)
-        else:
+        elif args.command == "check":
             if args.team_id is not None:
                 raise CredentialInstallError("credential check rejects team override")
             result = installer.check()
+        else:
+            if args.team_id is not None:
+                raise CredentialInstallError("credential refresh rejects team override")
+            result = installer.refresh()
         sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
         return 0 if result["ok"] else 1
     except CredentialInstallError as exc:

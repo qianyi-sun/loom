@@ -8,8 +8,8 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from threading import Lock
-from typing import Any, Protocol
+from threading import Lock, Thread
+from typing import Any, Literal, Protocol, TextIO
 
 import psycopg
 from psycopg.rows import dict_row
@@ -29,11 +29,14 @@ from loom_cli.rollout.readonly_database_authority import (
 )
 from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredential
 
+from .redaction import redact_rollout_text
+
 _NAMESPACE = "loom-staging"
 _POD = "loom-postgres-0"
 _REMOTE_PORT = 5432
 _START_TIMEOUT_SECONDS = 15.0
 _STOP_TIMEOUT_SECONDS = 5.0
+_DIAGNOSTIC_LIMIT = 8 * 1024
 _CHILD_ENVIRONMENT = {
     "HOME": "/var/lib/loom-staging-rollout",
     "LANG": "C.UTF-8",
@@ -68,6 +71,106 @@ Connect = Callable[[str, int, ReadonlyDatabaseCredential], DatabaseConnection]
 PortAllocator = Callable[[], int]
 WaitReady = Callable[[TunnelProcess, int], None]
 
+ReadonlyDatabaseTunnelFailureKind = Literal["credential", "transport", "timeout"]
+
+
+class ReadonlyDatabaseTunnelError(RuntimeError):
+    """Typed tunnel failure whose string form never contains private diagnostics."""
+
+    def __init__(
+        self,
+        kind: ReadonlyDatabaseTunnelFailureKind,
+        diagnostic: str | None = None,
+    ) -> None:
+        if kind not in {"credential", "transport", "timeout"}:
+            raise ValueError("readonly database tunnel failure kind is invalid")
+        sanitized = (
+            None
+            if diagnostic is None
+            else redact_rollout_text(diagnostic, limit=_DIAGNOSTIC_LIMIT).strip() or None
+        )
+        super().__init__(f"readonly database tunnel {kind} failure")
+        self.kind = kind
+        self.diagnostic = sanitized
+
+
+class _BoundedStderrCapture:
+    """Drain a child pipe concurrently while retaining only sanitized bounded text."""
+
+    def __init__(
+        self,
+        stream: TextIO | None,
+        *,
+        known_secrets: Sequence[str],
+    ) -> None:
+        self._stream = stream
+        self._known_secrets = tuple(known_secrets)
+        self._lock = Lock()
+        self._parts: list[str] = []
+        self._size = 0
+        self._thread = Thread(target=self._drain, daemon=True)
+
+    def start(self) -> None:
+        if self._stream is not None:
+            self._thread.start()
+
+    def _drain(self) -> None:
+        assert self._stream is not None
+        try:
+            while chunk := self._stream.read(1024):
+                sanitized = redact_rollout_text(
+                    chunk,
+                    known_secrets=self._known_secrets,
+                )
+                with self._lock:
+                    remaining = _DIAGNOSTIC_LIMIT - self._size
+                    if remaining > 0:
+                        retained = sanitized[:remaining]
+                        self._parts.append(retained)
+                        self._size += len(retained)
+        except (OSError, ValueError):
+            return
+
+    def diagnostic(self) -> str | None:
+        if self._stream is not None:
+            self._thread.join(timeout=0.05)
+        with self._lock:
+            joined = "".join(self._parts)
+        # Redact the joined text again so a sensitive assignment split across
+        # two fixed-size reads cannot escape the structural redactor.
+        sanitized = redact_rollout_text(
+            joined,
+            known_secrets=self._known_secrets,
+            limit=_DIAGNOSTIC_LIMIT,
+        ).strip()
+        return sanitized or None
+
+    def finish(self) -> None:
+        if self._stream is not None:
+            self._thread.join(timeout=1.0)
+
+
+def _classify_tunnel_failure(
+    error: Exception,
+    diagnostic: str | None,
+) -> ReadonlyDatabaseTunnelFailureKind:
+    rendered = f"{type(error).__name__}: {error}\n{diagnostic or ''}".casefold()
+    if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)) or "timed out" in rendered:
+        return "timeout"
+    if any(
+        marker in rendered
+        for marker in (
+            "unauthorized",
+            "forbidden",
+            "authentication",
+            "credentials",
+            "token has expired",
+            "you must be logged in",
+        )
+    ):
+        return "credential"
+    return "transport"
+
 
 def _spawn(argv: Sequence[str], environment: Mapping[str, str]) -> TunnelProcess:
     return subprocess.Popen(
@@ -75,7 +178,10 @@ def _spawn(argv: Sequence[str], environment: Mapping[str, str]) -> TunnelProcess
         env=dict(environment),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         close_fds=True,
         start_new_session=False,
     )
@@ -187,9 +293,31 @@ def open_readonly_database_query(
         "--pod-running-timeout=15s",
     )
     process = spawn(argv, _CHILD_ENVIRONMENT)
+    diagnostics = _BoundedStderrCapture(
+        getattr(process, "stderr", None),
+        known_secrets=(str(kubeconfig_path), credential.password),
+    )
+    diagnostics.start()
     connection: DatabaseConnection | None = None
     try:
-        wait_ready(process, port)
+        try:
+            wait_ready(process, port)
+        except ReadonlyDatabaseTunnelError:
+            try:
+                _stop_exact(process)
+            finally:
+                diagnostics.finish()
+            raise
+        except Exception as exc:
+            try:
+                _stop_exact(process)
+            finally:
+                diagnostics.finish()
+            diagnostic = diagnostics.diagnostic()
+            raise ReadonlyDatabaseTunnelError(
+                _classify_tunnel_failure(exc, diagnostic),
+                diagnostic,
+            ) from None
         connection = connect("127.0.0.1", port, credential)
         connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
 
@@ -214,7 +342,10 @@ def open_readonly_database_query(
     finally:
         if connection is not None:
             connection.close()
-        _stop_exact(process)
+        try:
+            _stop_exact(process)
+        finally:
+            diagnostics.finish()
 
 
 def probe_installed_readonly_database(
@@ -271,18 +402,22 @@ class InstalledReadonlyDatabaseEvidenceSource:
         self._probe = probe
         self._lock = Lock()
         self._evidence: ReadonlyDatabaseEvidence | None = None
-        self._failure: str | None = None
+        self._failure: Exception | None = None
 
     def __call__(self) -> ReadonlyDatabaseEvidence:
         with self._lock:
             if self._failure is not None:
-                raise RuntimeError(self._failure)
+                raise self._failure
             if self._evidence is None:
                 try:
                     self._evidence = self._probe(service_uid=self._service_uid)
+                except ReadonlyDatabaseTunnelError as exc:
+                    self._failure = exc
+                    raise
                 except Exception as exc:
-                    self._failure = f"{type(exc).__name__}: {exc}"
-                    raise RuntimeError(self._failure) from exc
+                    failure = RuntimeError(f"{type(exc).__name__}: {exc}")
+                    self._failure = failure
+                    raise failure from exc
             return self._evidence
 
 
@@ -317,6 +452,8 @@ __all__ = [
     "InstalledReadonlyDatabaseEvidenceSource",
     "InstalledReadonlyMutationEpochSource",
     "PortAllocator",
+    "ReadonlyDatabaseTunnelError",
+    "ReadonlyDatabaseTunnelFailureKind",
     "Spawn",
     "TunnelProcess",
     "WaitReady",

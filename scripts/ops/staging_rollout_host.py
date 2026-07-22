@@ -94,6 +94,11 @@ BROKER_PATH = Path("/usr/local/libexec/loom-staging-rollout-broker")
 REHEARSAL_PATH = Path("/usr/local/libexec/loom-staging-rollout-rehearsal")
 FINAL_GATE_PATH = Path("/usr/local/libexec/loom-staging-rollout-final-gate")
 TRUST_TOOL_PATH = Path("/usr/local/libexec/loom-staging-rollout-gb10-trust")
+CREDENTIAL_REFRESH_PATH = Path("/usr/local/libexec/loom-staging-rollout-credential-refresh")
+CREDENTIAL_REFRESH_SERVICE = "loom-staging-rollout-credential-refresh.service"
+CREDENTIAL_REFRESH_TIMER = "loom-staging-rollout-credential-refresh.timer"
+CREDENTIAL_REFRESH_SERVICE_PATH = Path("/etc/systemd/system") / CREDENTIAL_REFRESH_SERVICE
+CREDENTIAL_REFRESH_TIMER_PATH = Path("/etc/systemd/system") / CREDENTIAL_REFRESH_TIMER
 SUDOERS_PATH = Path("/etc/sudoers.d/loom-staging-rollout")
 TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
 SYSCTL_PATH = Path("/etc/sysctl.d/90-loom-staging-rollout.conf")
@@ -210,6 +215,9 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "broker",
         "client",
         "config",
+        "credential-refresh-helper",
+        "credential-refresh-service",
+        "credential-refresh-timer",
         "gb10-known-hosts",
         "gb10-trust-tool",
         "final-gate-helper",
@@ -1691,6 +1699,7 @@ class HostSystem:
                     "loom-staging-rollout-broker",
                     "loom-staging-rollout-rehearsal",
                     "loom-staging-rollout-final-gate",
+                    "loom-staging-rollout-credential-refresh",
                     "loom-staging-rollout.sudoers",
                     SHARED_WORK2_MOUNT_UNIT,
                 )
@@ -1733,6 +1742,9 @@ class HostSystem:
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-broker")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-rehearsal")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-final-gate")])
+            self.runner.run(
+                ["bash", "-n", str(directory / "loom-staging-rollout-credential-refresh")]
+            )
             self.runner.run(["visudo", "-cf", str(directory / "loom-staging-rollout.sudoers")])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_repo_helper)])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_work2_helper)])
@@ -2011,6 +2023,32 @@ class HostSystem:
 
     def reload_systemd(self) -> None:
         self.runner.run(["systemctl", "daemon-reload"])
+
+    def credential_refresh_timer_ready(self) -> bool:
+        enabled = self._probe(["systemctl", "is-enabled", CREDENTIAL_REFRESH_TIMER])
+        active = self._probe(["systemctl", "is-active", CREDENTIAL_REFRESH_TIMER])
+        return bool(
+            enabled.returncode == 0
+            and enabled.stdout.strip() == "enabled"
+            and not enabled.stderr.strip()
+            and active.returncode == 0
+            and active.stdout.strip() == "active"
+            and not active.stderr.strip()
+        )
+
+    def ensure_credential_refresh_timer(self, *, reload_units: bool) -> bool:
+        before = self.credential_refresh_timer_ready()
+        if reload_units:
+            self.reload_systemd()
+        if reload_units or not before:
+            self.runner.run(["systemctl", "enable", "--now", CREDENTIAL_REFRESH_TIMER])
+        if not self.credential_refresh_timer_ready():
+            raise InstallError("credential refresh timer did not converge")
+        return reload_units or not before
+
+    def disable_credential_refresh_timer(self) -> None:
+        self.runner.run(["systemctl", "disable", "--now", CREDENTIAL_REFRESH_TIMER])
+        self.runner.run(["systemctl", "stop", CREDENTIAL_REFRESH_SERVICE])
 
     @staticmethod
     def _validate_shared_worker_repo_report(payload: object) -> dict[str, object]:
@@ -4520,12 +4558,36 @@ class HostInstaller:
                 "root",
                 "root",
             ),
+            (
+                CREDENTIAL_REFRESH_PATH,
+                self._asset("loom-staging-rollout-credential-refresh"),
+                0o755,
+                "root",
+                "root",
+            ),
+            (
+                CREDENTIAL_REFRESH_SERVICE_PATH,
+                self._asset(CREDENTIAL_REFRESH_SERVICE),
+                0o644,
+                "root",
+                "root",
+            ),
+            (
+                CREDENTIAL_REFRESH_TIMER_PATH,
+                self._asset(CREDENTIAL_REFRESH_TIMER),
+                0o644,
+                "root",
+                "root",
+            ),
         )
         sudoers = self._asset("loom-staging-rollout.sudoers")
         attestation_assets = {
             "broker": installed_files[1][1],
             "client": installed_files[0][1],
             "config": config,
+            "credential-refresh-helper": installed_files[10][1],
+            "credential-refresh-service": installed_files[11][1],
+            "credential-refresh-timer": installed_files[12][1],
             "gb10-known-hosts": installed_files[5][1],
             "gb10-trust-tool": installed_files[3][1],
             "readonly-authority": self._source_file("deploy/k8s/staging-rollout-readonly.yaml"),
@@ -4769,6 +4831,7 @@ class HostInstaller:
         preflight_credentials_ready = (
             package_runtime_ready and self.system.preflight_credentials_ready(candidate_venv)
         )
+        credential_refresh_timer_ready = self.system.credential_refresh_timer_ready()
         installed_files_ready = all(
             self.filesystem.file_matches(
                 destination,
@@ -4879,6 +4942,7 @@ class HostInstaller:
             or not venv_ready
             or not package_runtime_ready
             or not preflight_credentials_ready
+            or not credential_refresh_timer_ready
             or not preflight_candidate_source_ready
             or not broker_runtime_ready
             or not installed_files_ready
@@ -5045,16 +5109,27 @@ class HostInstaller:
                 maintenance=maintenance_enabled,
             )
 
+        credential_refresh_units_changed = False
         for destination, payload, mode, owner, group in installed_files:
-            if self.filesystem.atomic_write(
+            file_changed = self.filesystem.atomic_write(
                 destination,
                 payload,
                 mode,
                 expected_nlink=1 if destination == CONFIG_PATH else None,
-            ):
+            )
+            if file_changed:
                 changes.append(f"file:{destination}")
+                if destination in {
+                    CREDENTIAL_REFRESH_SERVICE_PATH,
+                    CREDENTIAL_REFRESH_TIMER_PATH,
+                }:
+                    credential_refresh_units_changed = True
             if self.system.install_owner(destination, owner, mode, group=group):
                 changes.append(f"ownership:{destination}")
+        if self.system.ensure_credential_refresh_timer(
+            reload_units=credential_refresh_units_changed
+        ):
+            changes.append("credential-refresh-timer")
         if self.system.ensure_inotify_capacity():
             changes.append("sysctl:fs.inotify.max_user_instances")
         if not self.system.broker_runtime_ready(candidate_venv):
@@ -5195,6 +5270,21 @@ class HostInstaller:
                 self._asset(SHARED_WORK2_MOUNT_UNIT),
                 0o644,
             ),
+            (
+                CREDENTIAL_REFRESH_PATH,
+                self._asset("loom-staging-rollout-credential-refresh"),
+                0o755,
+            ),
+            (
+                CREDENTIAL_REFRESH_SERVICE_PATH,
+                self._asset(CREDENTIAL_REFRESH_SERVICE),
+                0o644,
+            ),
+            (
+                CREDENTIAL_REFRESH_TIMER_PATH,
+                self._asset(CREDENTIAL_REFRESH_TIMER),
+                0o644,
+            ),
         )
         failures = [
             str(path)
@@ -5237,6 +5327,9 @@ class HostInstaller:
                 "broker": self._asset("loom-staging-rollout-broker"),
                 "client": self._asset("loom-staging-rollout"),
                 "config": config_payload,
+                "credential-refresh-helper": self._asset("loom-staging-rollout-credential-refresh"),
+                "credential-refresh-service": self._asset(CREDENTIAL_REFRESH_SERVICE),
+                "credential-refresh-timer": self._asset(CREDENTIAL_REFRESH_TIMER),
                 "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
                 "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
                 "readonly-authority": self._source_file("deploy/k8s/staging-rollout-readonly.yaml"),
@@ -5277,6 +5370,8 @@ class HostInstaller:
             failures.append(str(KUBECONFIG_PATH))
         if not self.system.preflight_credentials_ready(candidate_venv):
             failures.append("preflight-credentials")
+        if not self.system.credential_refresh_timer_ready():
+            failures.append("credential-refresh-timer")
         if not self.system.preflight_candidate_source_ready(candidate_venv):
             failures.append("candidate-source-publication")
         if not self.filesystem.exists(SERVICE_KEY):
@@ -5550,6 +5645,9 @@ class HostInstaller:
         mount_unit_present = self.filesystem.exists(SHARED_WORK2_MOUNT_UNIT_PATH)
         if mount_unit_present:
             self.system.disable_shared_work2_mount()
+        credential_refresh_unit_present = self.filesystem.exists(CREDENTIAL_REFRESH_TIMER_PATH)
+        if credential_refresh_unit_present:
+            self.system.disable_credential_refresh_timer()
         removable_files = [
             CLIENT_PATH,
             BROKER_PATH,
@@ -5563,13 +5661,16 @@ class HostInstaller:
             SYSCTL_PATH,
             KNOWN_HOSTS_PATH,
             SHARED_WORK2_MOUNT_UNIT_PATH,
+            CREDENTIAL_REFRESH_PATH,
+            CREDENTIAL_REFRESH_SERVICE_PATH,
+            CREDENTIAL_REFRESH_TIMER_PATH,
         ]
         if created_service_key:
             removable_files.extend((SERVICE_KEY, Path(str(SERVICE_KEY) + ".pub")))
         for path in removable_files:
             if self.filesystem.remove(path):
                 removed.append(str(path))
-        if mount_unit_present:
+        if mount_unit_present or credential_refresh_unit_present:
             self.system.reload_systemd()
         if self.filesystem.remove_tree(GENERATED_ROOT):
             removed.append(str(GENERATED_ROOT))

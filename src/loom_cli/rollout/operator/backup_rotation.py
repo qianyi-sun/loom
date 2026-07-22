@@ -555,6 +555,42 @@ def acknowledge_retirement(
     )
 
 
+def recover_failed_retirement(
+    state: BackupRotationState,
+    *,
+    active: BackupPayloadRecord,
+) -> BackupRotationResult:
+    """Restore one exact lease-backed failed retirement as active authority."""
+    if state.active is not None or state.candidate is not None:
+        raise BackupRotationError("backup rotation recovery requires an empty active slot")
+    if active.phase is not BackupPayloadPhase.ACTIVE:
+        raise BackupRotationError("backup rotation recovery requires active lease authority")
+    matches = tuple(
+        record for record in state.retirements if record.payload_id == active.payload_id
+    )
+    if len(matches) != 1:
+        raise BackupRotationError("backup rotation recovery identity does not match")
+    retirement = matches[0]
+    if (
+        retirement.reason != "failed"
+        or retirement.request_id != active.request_id
+        or retirement.bundle_name != active.bundle_name
+        or retirement.manifest_sha256 is None
+        or retirement.manifest_sha256 != active.manifest_sha256
+    ):
+        raise BackupRotationError("backup rotation recovery authority does not match")
+    return BackupRotationResult(
+        BackupRotationState(
+            generation=state.generation + 1,
+            active=active,
+            candidate=None,
+            retirements=tuple(
+                record for record in state.retirements if record.payload_id != active.payload_id
+            ),
+        )
+    )
+
+
 def _require_candidate(
     state: BackupRotationState,
     payload_id: str,
@@ -597,4 +633,5 @@ __all__ = [
     "promote_candidate",
     "record_manifest_verified",
     "record_restore_verified",
+    "recover_failed_retirement",
 ]

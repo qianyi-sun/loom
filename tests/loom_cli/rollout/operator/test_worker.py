@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import json
+import os
 import signal
 import subprocess
 from contextlib import contextmanager
@@ -13,10 +15,12 @@ import pytest
 from loom_cli.rollout.failure_authority import classify_rollout_failure
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.operator import worker as worker_module
-from loom_cli.rollout.operator.backup import BackupError
+from loom_cli.rollout.operator.backup import BackupCreator, BackupError
 from loom_cli.rollout.operator.backup_job import PreflightBackupJobEnvelope, transition_backup_job
+from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.model import ActivePointer, DriverEnvelope, RequestEvent
 from loom_cli.rollout.operator.policy import sanitized_child_environment
+from loom_cli.rollout.operator.readonly_database_client import ReadonlyDatabaseTunnelError
 from loom_cli.rollout.operator.store import RequestStore
 from loom_cli.rollout.operator.worker import (
     VerifiedBackupJob,
@@ -25,6 +29,9 @@ from loom_cli.rollout.operator.worker import (
     run_backup_job,
 )
 from loom_cli.rollout.operator.worker import main as worker_main
+from tests.loom_cli.rollout.operator.test_backup import RecordingRunner
+from tests.loom_cli.rollout.operator.test_backup import make_config as make_backup_config
+from tests.loom_cli.rollout.operator.test_broker import fakes as broker_fakes
 from tests.loom_cli.rollout.operator.test_broker import make_config
 from tests.loom_cli.rollout.operator.test_store import (
     make_assessment,
@@ -506,6 +513,103 @@ def test_backup_worker_persists_secret_safe_backup_stage_code(tmp_path: Path) ->
     state = store.read_preflight_backup_job_state(REQUEST_ID)
     assert state.phase is LifecyclePhase.BACKUP_FAILED
     assert state.failure_code == "postgres_dump_failed"
+
+
+def test_inventory_tunnel_failure_reaches_private_diagnostic_and_public_status(
+    tmp_path: Path,
+) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir()
+    creator = BackupCreator(
+        make_backup_config(backup_root),
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        now=lambda: job.created_at,
+        object_inventory_provider=lambda _created_at: (_ for _ in ()).throw(
+            ReadonlyDatabaseTunnelError(
+                "credential",
+                "Unauthorized token=private-value",
+            )
+        ),
+        publish_latest=False,
+    )
+    stderr = io.StringIO()
+
+    def run_backup(request, envelope, _cancelled):  # type: ignore[no-untyped-def]
+        creator.create(request, created_at=envelope.created_at)
+        raise AssertionError("unreachable")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=run_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=stderr,
+    )
+
+    assert run_backup_job(job, deps) == 1
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "object_inventory_credentials_failed"
+    event = store.read_events(REQUEST_ID)[-1]
+    assert event.event == "backup_failed"
+    assert event.reason == "backup_object_inventory_failed"
+    assert event.operator == "hongjian"
+    assert event.operator_uid == 2002
+    assert event.unit_name == f"loom-staging-backup-{REQUEST_ID}.service"
+    assert "private-value" not in stderr.getvalue()
+    assert "[REDACTED:token]" in stderr.getvalue()
+
+    broker = broker_fakes(tmp_path / "broker")
+    status_dependencies = replace(
+        broker.dependencies,
+        config=replace(broker.config, state_root=store.root),
+        store=store,
+    )
+    assert (
+        broker_main(
+            ["status"],
+            dependencies=status_dependencies,
+        )
+        == 0
+    )
+    status = json.loads(broker.stdout.getvalue().splitlines()[-1])
+    assert status["stage"] == "backup_failed"
+    assert status["reason"] == "backup_object_inventory_failed"
+    assert status["unit"] == f"loom-staging-backup-{REQUEST_ID}.service"
+    assert "diagnostic" not in status
+    assert "object_inventory_credentials_failed" not in json.dumps(status)
+
+
+def test_private_diagnostic_write_failure_does_not_drop_durable_event(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        raise BackupError(
+            "object_inventory_transport_failed",
+            diagnostic="private transport diagnostic",
+        )
+
+    class FailingStderr(io.StringIO):
+        def write(self, value: str) -> int:
+            del value
+            raise OSError("stderr unavailable")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=fail_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=FailingStderr(),
+    )
+
+    assert run_backup_job(job, deps) == 1
+    event = store.read_events(REQUEST_ID)[-1]
+    assert event.event == "backup_failed"
+    assert event.reason == "backup_object_inventory_failed"
 
 
 def test_backup_worker_redacts_unclassified_failure_text(tmp_path: Path) -> None:

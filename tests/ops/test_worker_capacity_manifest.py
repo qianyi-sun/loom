@@ -103,8 +103,8 @@ state = "eligible"
     )
     manifest.write_text(
         manifest.read_text(encoding="utf-8").replace(
-            'name = "staging"',
             'name = "development"',
+            'name = "production"',
             1,
         ),
         encoding="utf-8",
@@ -113,7 +113,7 @@ state = "eligible"
     completed = _run_capacity("--manifest", manifest)
 
     assert completed.returncode == 1
-    assert "environments.staging.name must be 'staging'" in completed.stdout
+    assert "environments.prod.name and staging.name must differ" in completed.stdout
 
 
 def test_manifest_expresses_staging_lease_and_draining_states(tmp_path: Path) -> None:

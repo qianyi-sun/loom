@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -54,6 +55,19 @@ class Runner:
         assert timeout <= 60
         if "config" in command and "view" in command:
             return Result(stdout=self.source.decode())
+        if "--raw" in command:
+            assert input is not None
+            kubeconfig = Path(command[command.index("--kubeconfig") + 1])
+            if "readonly" in kubeconfig.name:
+                subject = "system:serviceaccount:loom-staging:loom-rollout-readonly"
+            else:
+                subject = "system:serviceaccount:loom-rollout-system:loom-rollout-rehearsal"
+            if any("selfsubjectreviews" in item for item in command):
+                return Result(stdout=json.dumps({"status": {"userInfo": {"username": subject}}}))
+            spec = json.loads(input)
+            attributes = spec["spec"]["resourceAttributes"]
+            allowed = attributes.get("subresource") != "token"
+            return Result(stdout=json.dumps({"status": {"allowed": allowed}}))
         if "token" in command:
             account = command[command.index("token") + 1]
             namespace = command[command.index("--namespace") + 1]
@@ -599,6 +613,8 @@ def test_install_requires_root_and_rejects_unsafe_source_mode(tmp_path: Path) ->
     installer.euid = 501
     with pytest.raises(CredentialInstallError, match="requires root"):
         installer.install(TEAM_ID)
+    with pytest.raises(CredentialInstallError, match="requires root"):
+        installer.refresh()
 
     installer.euid = 0
     installer.paths.application_token_source.chmod(0o644)
@@ -616,3 +632,126 @@ def test_install_rejects_corrupt_or_public_database_credential(tmp_path: Path) -
     installer.paths.database_credential_source.chmod(0o644)
     with pytest.raises(CredentialInstallError, match="authority is unsafe"):
         installer.install(TEAM_ID)
+
+
+def test_refresh_is_noop_while_both_token_requests_are_fresh(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    token_calls = sum("token" in command for command, _input in runner.calls)
+
+    result = installer.refresh()
+
+    assert result["ok"] is True
+    assert result["changed"] == []
+    assert sum("token" in command for command, _input in runner.calls) == token_calls
+    assert result["authority"]["readonly"]["token_mint_allowed"] is False
+    assert result["authority"]["rehearsal"]["token_mint_allowed"] is False
+    reviewed_pods = {
+        json.loads(input)["spec"]["resourceAttributes"].get("name")
+        for command, input in runner.calls
+        if input is not None and any("selfsubjectaccessreviews" in item for item in command)
+    }
+    assert {"loom-postgres-0", "loom-minio-0"}.issubset(reviewed_pods)
+
+
+def test_refresh_rotates_both_token_requests_near_expiry(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    before = (
+        installer.paths.readonly_kubeconfig.read_bytes(),
+        installer.paths.rehearsal_kubeconfig.read_bytes(),
+    )
+    later = NOW + timedelta(hours=2, minutes=30)
+    installer.now = lambda: later
+    runner.now = later
+
+    result = installer.refresh()
+
+    assert result["changed"] == sorted(
+        [
+            str(installer.paths.readonly_kubeconfig),
+            str(installer.paths.rehearsal_kubeconfig),
+        ]
+    )
+    assert (
+        installer.paths.readonly_kubeconfig.read_bytes(),
+        installer.paths.rehearsal_kubeconfig.read_bytes(),
+    ) != before
+    assert all(
+        stat.st_mode & 0o777 == 0o600 and stat.st_uid == os.getuid() and stat.st_gid == os.getgid()
+        for stat in (
+            installer.paths.readonly_kubeconfig.stat(),
+            installer.paths.rehearsal_kubeconfig.stat(),
+        )
+    )
+
+
+def test_refresh_second_token_failure_preserves_both_installed_files(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    before = (
+        installer.paths.readonly_kubeconfig.read_bytes(),
+        installer.paths.rehearsal_kubeconfig.read_bytes(),
+    )
+    later = NOW + timedelta(hours=2, minutes=30)
+    installer.now = lambda: later
+    runner.now = later
+    original_run = runner.__call__
+
+    def fail_rehearsal_token(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        command = tuple(argv)
+        if "token" in command and "loom-rollout-rehearsal" in command:
+            return Result(returncode=1, stderr="secret-looking-token")
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = fail_rehearsal_token
+    with pytest.raises(CredentialInstallError, match="command failed") as raised:
+        installer.refresh()
+
+    assert "secret-looking-token" not in str(raised.value)
+    assert (
+        installer.paths.readonly_kubeconfig.read_bytes(),
+        installer.paths.rehearsal_kubeconfig.read_bytes(),
+    ) == before
+
+
+def test_refresh_redacts_timeout_and_fails_closed_on_live_readback(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+
+    def timeout(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        del input
+        raise subprocess.TimeoutExpired(argv, timeout, output="secret-token")
+
+    installer.run = timeout
+    with pytest.raises(CredentialInstallError, match="command failed") as raised:
+        installer.refresh()
+
+    assert "secret-token" not in str(raised.value)
+    installer.run = runner
+    original_run = runner.__call__
+
+    def wrong_subject(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        command = tuple(argv)
+        if any("selfsubjectreviews" in item for item in command):
+            return Result(stdout=json.dumps({"status": {"userInfo": {"username": "root"}}}))
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = wrong_subject
+    with pytest.raises(CredentialInstallError, match="subject readback"):
+        installer.refresh()

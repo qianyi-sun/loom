@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pwd
 import re
@@ -21,7 +22,7 @@ from loom_cli.rollout.failure_authority import RolloutFailureEvidence
 from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 
-from .backup import BackupError
+from .backup import BackupError, backup_public_reason_for_code
 from .backup_job import (
     BackupJobState,
     PreflightBackupJobEnvelope,
@@ -60,6 +61,56 @@ def _backup_failure_code(error: BaseException) -> str:
     if isinstance(error, BackupError) and _FAILURE_CODE_RE.fullmatch(error.code) is not None:
         return error.code
     return "backup_failed"
+
+
+def _write_backup_failure_diagnostic(
+    dependencies: WorkerDependencies,
+    *,
+    request: PreflightRequest,
+    envelope: PreflightBackupJobEnvelope,
+    failure_code: str,
+    error: BaseException,
+) -> None:
+    diagnostic = error.diagnostic if isinstance(error, BackupError) else None
+    if diagnostic is None:
+        return
+    safe_diagnostic = redact_rollout_text(diagnostic, limit=8 * 1024)
+    try:
+        dependencies.stderr.write(
+            json.dumps(
+                {
+                    "diagnostic": safe_diagnostic,
+                    "failure_code": failure_code,
+                    "job_id": envelope.job_id,
+                    "request_id": request.request_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+    except Exception:
+        pass
+
+
+def _append_backup_failed_event(
+    dependencies: WorkerDependencies,
+    *,
+    request: PreflightRequest,
+    reason: str,
+) -> None:
+    dependencies.store.append_event(
+        RequestEvent(
+            request_id=request.request_id,
+            event="backup_failed",
+            occurred_at=dependencies.now(),
+            operator=request.caller.username,
+            operator_uid=request.caller.uid,
+            unit_name=f"loom-staging-backup-{request.request_id}.service",
+            status="failed",
+            reason=reason,
+        )
+    )
 
 
 class _Parser(argparse.ArgumentParser):
@@ -479,16 +530,30 @@ def run_backup_job(
             if current.phase is LifecyclePhase.BACKUP_CANCEL_REQUESTED
             else LifecycleAction.FAIL_BACKUP
         )
+        failure_code = (
+            "backup_cancelled"
+            if action is LifecycleAction.SEAL_CANCELLED
+            else _backup_failure_code(error)
+        )
         _seal_backup_failure(
             dependencies,
             current,
             action=action,
-            failure_code=(
-                "backup_cancelled"
-                if action is LifecycleAction.SEAL_CANCELLED
-                else _backup_failure_code(error)
-            ),
+            failure_code=failure_code,
         )
+        if action is LifecycleAction.FAIL_BACKUP:
+            _append_backup_failed_event(
+                dependencies,
+                request=request,
+                reason=backup_public_reason_for_code(failure_code),
+            )
+            _write_backup_failure_diagnostic(
+                dependencies,
+                request=request,
+                envelope=envelope,
+                failure_code=failure_code,
+                error=error,
+            )
         return 1
 
     current = dependencies.store.read_preflight_backup_job_state(envelope.request_id)

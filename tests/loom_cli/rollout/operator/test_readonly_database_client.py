@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
+import sys
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -11,6 +15,7 @@ import pytest
 from loom_cli.rollout.operator.readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
     InstalledReadonlyMutationEpochSource,
+    ReadonlyDatabaseTunnelError,
     open_readonly_database_query,
 )
 from loom_cli.rollout.readonly_database_authority import (
@@ -21,8 +26,14 @@ from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredent
 
 
 class Process:
-    def __init__(self) -> None:
-        self.returncode: int | None = None
+    def __init__(
+        self,
+        *,
+        stderr: str | None = None,
+        returncode: int | None = None,
+    ) -> None:
+        self.returncode = returncode
+        self.stderr = None if stderr is None else io.StringIO(stderr)
         self.terminated = False
         self.killed = False
 
@@ -188,6 +199,128 @@ def test_client_rejects_public_or_symlinked_credential(tmp_path: Path) -> None:
             raise AssertionError("unreachable")
 
 
+@pytest.mark.parametrize(
+    ("stderr", "wait_error", "expected_kind"),
+    [
+        (
+            "error: You must be logged in to the server (Unauthorized) token=private-value\n",
+            RuntimeError("readonly database port-forward exited early"),
+            "credential",
+        ),
+        (
+            "error: unable to forward port because the pod exited\n",
+            RuntimeError("readonly database port-forward exited early"),
+            "transport",
+        ),
+        (
+            "waiting for pod readiness\n",
+            RuntimeError("readonly database port-forward timed out"),
+            "timeout",
+        ),
+    ],
+)
+def test_client_classifies_tunnel_failures_with_private_sanitized_diagnostic(
+    tmp_path: Path,
+    stderr: str,
+    wait_error: Exception,
+    expected_kind: str,
+) -> None:
+    kubeconfig, credential_path, _credential = _paths(tmp_path)
+    process = Process(stderr=stderr, returncode=1)
+
+    with pytest.raises(ReadonlyDatabaseTunnelError) as caught:
+        with open_readonly_database_query(
+            service_uid=os.getuid(),
+            kubeconfig_path=kubeconfig,
+            credential_path=credential_path,
+            spawn=lambda _argv, _env: process,
+            allocate_port=lambda: 15434,
+            wait_ready=lambda _process, _port: (_ for _ in ()).throw(wait_error),
+        ):
+            raise AssertionError("unreachable")
+
+    assert caught.value.kind == expected_kind
+    assert str(caught.value) == f"readonly database tunnel {expected_kind} failure"
+    assert caught.value.diagnostic is not None
+    assert "private-value" not in caught.value.diagnostic
+    assert "private-value" not in str(caught.value)
+
+
+def test_client_caps_diagnostic_after_redaction(tmp_path: Path) -> None:
+    kubeconfig, credential_path, _credential = _paths(tmp_path)
+    process = Process(
+        stderr=("x" * 9000) + " token=private-value\n",
+        returncode=1,
+    )
+
+    with pytest.raises(ReadonlyDatabaseTunnelError) as caught:
+        with open_readonly_database_query(
+            service_uid=os.getuid(),
+            kubeconfig_path=kubeconfig,
+            credential_path=credential_path,
+            spawn=lambda _argv, _env: process,
+            allocate_port=lambda: 15435,
+            wait_ready=lambda _process, _port: (_ for _ in ()).throw(
+                RuntimeError("readonly database port-forward exited early")
+            ),
+        ):
+            raise AssertionError("unreachable")
+
+    assert caught.value.diagnostic is not None
+    assert len(caught.value.diagnostic) <= 8 * 1024
+    assert "private-value" not in caught.value.diagnostic
+
+
+def test_client_stops_live_child_before_collecting_short_real_pipe_stderr(
+    tmp_path: Path,
+) -> None:
+    kubeconfig, credential_path, _credential = _paths(tmp_path)
+    marker = tmp_path / "stderr-ready"
+    processes: list[subprocess.Popen[str]] = []
+
+    def spawn(_argv, _environment):  # type: ignore[no-untyped-def]
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import pathlib,sys,time; "
+                    "sys.stderr.write('Unauthorized token=private-value\\n'); "
+                    "sys.stderr.flush(); pathlib.Path(sys.argv[1]).touch(); time.sleep(30)"
+                ),
+                str(marker),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        processes.append(process)
+        return process
+
+    def fail_after_short_write(_process, _port):  # type: ignore[no-untyped-def]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.01)
+        assert marker.exists()
+        raise RuntimeError("readonly database port-forward exited early")
+
+    with pytest.raises(ReadonlyDatabaseTunnelError) as caught:
+        with open_readonly_database_query(
+            service_uid=os.getuid(),
+            kubeconfig_path=kubeconfig,
+            credential_path=credential_path,
+            spawn=spawn,
+            allocate_port=lambda: 15436,
+            wait_ready=fail_after_short_write,
+        ):
+            raise AssertionError("unreachable")
+
+    assert caught.value.kind == "credential"
+    assert caught.value.diagnostic == "Unauthorized token=[REDACTED:token]"
+    assert processes[0].poll() is not None
+
+
 def test_installed_evidence_source_is_single_flight_under_concurrent_dag() -> None:
     evidence = ReadonlyDatabaseEvidence(
         schema_revision="0065",
@@ -292,3 +425,27 @@ def test_installed_database_source_caches_one_fail_closed_probe_per_concurrent_d
 
     assert calls == [os.getuid()]
     assert failures == ["ValueError: readonly database capacity evidence is incomplete"] * 4
+
+
+def test_installed_database_source_preserves_typed_tunnel_failure() -> None:
+    calls: list[int] = []
+    failure = ReadonlyDatabaseTunnelError(
+        "credential",
+        "Unauthorized token=private-value",
+    )
+
+    def probe(*, service_uid: int) -> ReadonlyDatabaseEvidence:
+        calls.append(service_uid)
+        raise failure
+
+    source = InstalledReadonlyDatabaseEvidenceSource(
+        service_uid=os.getuid(),
+        probe=probe,
+    )
+
+    for _ in range(2):
+        with pytest.raises(ReadonlyDatabaseTunnelError) as caught:
+            source()
+        assert caught.value.kind == "credential"
+        assert caught.value.diagnostic == "Unauthorized token=[REDACTED:token]"
+    assert calls == [os.getuid()]

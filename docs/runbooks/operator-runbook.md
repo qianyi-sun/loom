@@ -1445,9 +1445,12 @@ loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
 `qianyi`, `hongjian`, and `devansh` are members of
-`loom-staging-operators`. The broker derives the authenticated OS caller from
-sudo rather than accepting an actor argument. Every new `start` fresh-fetches
-exactly `refs/heads/dev` from `https://github.com/qianyi-sun/loom.git`, pins
+`loom-staging-operators`. Invoke these broker commands directly as the
+authenticated operator, without a leading `sudo`; the broker derives the OS
+caller rather than accepting an actor argument. Exact-source `install` and
+`check` remain the separate root-owned path documented below. Every new
+`start` fresh-fetches exactly `refs/heads/dev` from
+`https://github.com/qianyi-sun/loom.git`, pins
 that merged 40-character SHA, and derives `staging-<sha7>`. Unmerged pull
 requests, feature branches, tags, historical SHAs, local commits, custom image
 tags, alternate remotes, and target/config/secret overrides are forbidden.
@@ -1900,12 +1903,21 @@ minified service-owned `0600` kubeconfigs under
 `/var/lib/loom-staging-rollout/credentials`; inherited root client keys are
 discarded. `check` fails once either token has less than two hours remaining,
 while `install` requires at least four hours remaining and rotates both
-kubeconfigs otherwise. This headroom prevents a token that is still runtime-valid
-at install admission from expiring during the complete post-install preflight;
-repeated `install` is the supported refresh path before admission. The
-credential check reports only authority metadata and expiry; the deep-preflight
-attestation retains only metadata fingerprints and evidence hashes, never a
-token value.
+kubeconfigs otherwise. This headroom prevents a token that is still
+runtime-valid at install admission from expiring during the complete
+post-install preflight. The installed root-owned
+`loom-staging-rollout-credential-refresh.timer` checks them hourly and mints
+both before publishing either when refresh is needed. Each service-owned
+kubeconfig is replaced atomically as `loom-rollout:loom-rollout` at mode
+`0600`. The refresh then verifies the exact service-account subject, its
+required capability, and denial of TokenRequest minting authority. Any mint,
+publication, or read-back failure is
+fail-closed and emits no token material. The credential check reports only
+authority metadata and expiry; the deep-preflight attestation retains only
+metadata fingerprints and evidence hashes, never a token value. An
+incident-only host refresh timer may be retired only after installing the exact
+merged SHA and `staging_rollout_host.py check` confirms this managed timer
+and both credential authorities.
 
 The same install transaction creates or reuses a separate root-owned MinIO
 credential and converges one fixed non-mutating policy for
@@ -1941,9 +1953,9 @@ sudo "$INSTALLER_CHECKOUT/scripts/ops/staging_rollout_host.py" install \
   --smoke-on-behalf-team-id "<agentic-rl-team-uuid>"
 ```
 
-During one explicitly approved replacement-attempt incident, Qianyi may
-accumulate reviewed fixes locally and install the cumulative result before one
-final durable PR. This is not a general unmerged deployment path. Create a new
+During one explicitly approved replacement-attempt incident, Qianyi or
+Hongjian may accumulate reviewed fixes locally and install the cumulative
+result before one final durable PR. This is not a general unmerged deployment path. Create a new
 standalone root-owned checkout (a linked Git worktree is not accepted), detach
 it at the independently reviewed exact commit, retain only the approved GitHub
 origin URL, and record the exact commit tree and approved merged base. The
@@ -1971,8 +1983,10 @@ The installer validates the sealed checkout before any staging mutation,
 copies only the exact commit into its root source without resolving a remote
 ref, imports the same commit into the service candidate, and records source
 mode, commit, tree, and approved base in the install ledger, protected config,
-request, and attempt envelope. In sealed mode only `qianyi` may start or resume;
-the other operators retain status/log access. A missing or mismatched exact
+request, and attempt envelope. In sealed mode only `qianyi` and `hongjian` may
+start or resume; the other operators retain status/log access. A coordinator
+handoff always creates a new request under the new initiator; never resume or
+reuse another initiator's request. A missing or mismatched exact
 argument fails closed. Never bypass this path by copying files into the install
 directory, adding a global/system `safe.directory`, injecting Git objects, or selecting a
 caller-provided source path.

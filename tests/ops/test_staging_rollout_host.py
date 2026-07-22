@@ -69,6 +69,7 @@ class FakeSystem:
         self.shared_worker_identity_ready = True
         self.shared_work2_mounted = False
         self.preflight_credentials = False
+        self.credential_refresh_timer = False
         self.preflight_candidate_source = False
         self.inotify_capacity = False
         self.runtime_venvs: set[Path] = set()
@@ -293,6 +294,17 @@ class FakeSystem:
 
     def reload_systemd(self) -> None:
         return None
+
+    def credential_refresh_timer_ready(self) -> bool:
+        return self.credential_refresh_timer
+
+    def ensure_credential_refresh_timer(self, *, reload_units: bool) -> bool:
+        changed = reload_units or not self.credential_refresh_timer
+        self.credential_refresh_timer = True
+        return changed
+
+    def disable_credential_refresh_timer(self) -> None:
+        self.credential_refresh_timer = False
 
     def ensure_owned_directory(self, path: Path, *, owner: str, mode: int) -> bool:
         assert owner == host.SERVICE_USER
@@ -818,7 +830,12 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         in rendered
     )
     assert system.runtime_venvs == {candidate_venv}
-    for path in (host.BROKER_PATH, host.REHEARSAL_PATH, host.FINAL_GATE_PATH):
+    for path in (
+        host.BROKER_PATH,
+        host.REHEARSAL_PATH,
+        host.FINAL_GATE_PATH,
+        host.CREDENTIAL_REFRESH_PATH,
+    ):
         wrapper = installer.filesystem.path(path).read_text(encoding="utf-8")
         assert str(candidate_venv / "bin/python") in wrapper
         assert "PYTHONDONTWRITEBYTECODE=1" in wrapper
@@ -848,7 +865,9 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert set(system.operator_members) == set(host.OPERATORS)
     assert system.docker is True
     assert system.preflight_credentials is True
+    assert system.credential_refresh_timer is True
     assert "preflight-credentials" in first["changed"]
+    assert "credential-refresh-timer" in first["changed"]
     assert all(
         stat.S_IMODE(installer.filesystem.path(path).stat().st_mode) == 0o600
         for path in (
@@ -932,6 +951,9 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert set(system.source_reads) >= {
         "deploy/staging-rollout/loom-staging-rollout",
         "deploy/staging-rollout/loom-staging-rollout-broker",
+        "deploy/staging-rollout/loom-staging-rollout-credential-refresh",
+        "deploy/staging-rollout/loom-staging-rollout-credential-refresh.service",
+        "deploy/staging-rollout/loom-staging-rollout-credential-refresh.timer",
         "deploy/staging-rollout/loom-staging-rollout-final-gate",
         "deploy/staging-rollout/loom-staging-rollout-rehearsal",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
@@ -2367,6 +2389,17 @@ def test_check_rejects_host_inotify_capacity_drift(tmp_path: Path) -> None:
     assert "host-inotify-capacity" in result["failures"]
 
 
+def test_check_rejects_disabled_credential_refresh_timer(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.credential_refresh_timer = False
+
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert "credential-refresh-timer" in result["failures"]
+
+
 def test_host_system_converges_only_fixed_inotify_sysctl() -> None:
     class InotifyRunner:
         def __init__(self) -> None:
@@ -2551,6 +2584,7 @@ def test_uninstall_refuses_active_request_and_retains_ledger(tmp_path: Path) -> 
     assert not installer.filesystem.exists(host.TRUST_REVOCATION_LEDGER)
     assert not installer.filesystem.exists(host.KNOWN_HOSTS_PATH)
     assert system.shared_work2_mounted is False
+    assert system.credential_refresh_timer is False
     assert result["removed"][-2:] == [
         str(host.TRUST_REVOCATION_LEDGER),
         str(host.INSTALL_RECORD),

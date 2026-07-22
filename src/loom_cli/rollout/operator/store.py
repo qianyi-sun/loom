@@ -25,7 +25,12 @@ from .backup_job import (
     validate_job_binding,
 )
 from .backup_lease import BackupLease
-from .backup_rotation import BackupRetirementRecord, BackupRotationState
+from .backup_rotation import (
+    BackupPayloadPhase,
+    BackupPayloadRecord,
+    BackupRetirementRecord,
+    BackupRotationState,
+)
 from .model import (
     ActivePointer,
     DriverEnvelope,
@@ -552,6 +557,54 @@ class RequestStore:
                 manifest_sha256=manifest_sha256,
             )
         raise RequestStoreError("legacy retirement job authority is missing")
+
+    def resolve_failed_retirement_active(
+        self,
+        record: BackupRetirementRecord,
+    ) -> BackupPayloadRecord:
+        """Recover exact active authority from one uniquely matching immutable lease."""
+        record = self.resolve_backup_retirement(record)
+        if (
+            record.reason != "failed"
+            or record.bundle_name is None
+            or record.manifest_sha256 is None
+        ):
+            raise RequestStoreError("failed retirement is not recoverable")
+        try:
+            _validate_private_directory(self.root, "request store root")
+            _validate_private_directory(self.backup_leases_root, "backup leases directory")
+            with os.scandir(self.backup_leases_root) as entries:
+                names = tuple(sorted(entry.name for entry in entries))
+        except (FileNotFoundError, OSError) as exc:
+            raise RequestStoreError("failed retirement lease authority is missing") from exc
+        leases: list[BackupLease] = []
+        for name in names:
+            if (
+                len(name) != 69
+                or not name.endswith(".json")
+                or any(character not in "0123456789abcdef" for character in name[:64])
+            ):
+                raise RequestStoreError("backup lease directory contains unsafe authority")
+            lease = self.read_backup_lease(name[:64])
+            if (
+                lease.source_request_id == record.request_id
+                and lease.manifest_sha256 == record.manifest_sha256
+            ):
+                leases.append(lease)
+        if len(leases) != 1:
+            raise RequestStoreError("failed retirement requires one exact backup lease")
+        lease = leases[0]
+        if lease.environment != "staging" or lease.namespace != "loom-staging":
+            raise RequestStoreError("failed retirement lease authority is outside staging")
+        return BackupPayloadRecord(
+            payload_id=record.payload_id,
+            request_id=record.request_id,
+            bundle_name=record.bundle_name,
+            phase=BackupPayloadPhase.ACTIVE,
+            created_at=lease.created_at,
+            manifest_sha256=record.manifest_sha256,
+            lease=lease,
+        )
 
     def publish_backup_retirement_evidence(
         self,

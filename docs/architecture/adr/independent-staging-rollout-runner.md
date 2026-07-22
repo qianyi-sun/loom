@@ -73,9 +73,9 @@ deployment of an older SHA is not an operational rollback mechanism.
 
 ### Coordinator-only sealed cumulative repair amendment
 
-For an explicitly approved replacement-attempt incident, Qianyi may batch
-multiple independently reviewed local fixes and defer the single durable PR
-until staging acceptance succeeds. The default remains merged-only. The root
+For an explicitly approved replacement-attempt incident, Qianyi or Hongjian
+may batch multiple independently reviewed local fixes and defer the single
+durable PR until staging acceptance succeeds. The default remains merged-only. The root
 installer exposes one explicit `sealed-cumulative` mode that accepts no path or
 ref override and binds the fixed invocation checkout to an exact commit, tree,
 and approved merged base. It requires a standalone root-owned clean detached
@@ -94,8 +94,10 @@ The shared-work2 exporter consumes the same exact source validator before its
 first mutation. The install ledger and protected config record the source mode,
 commit, tree, and base; immutable requests and attempt envelopes carry and
 revalidate the same provenance. While that config is installed, broker
-`start`/`resume` is restricted to Qianyi before preflight or request creation.
-Status and logs remain available to the other operators. Manual file copying,
+`start`/`resume` is restricted to Qianyi and Hongjian before preflight or request
+creation. A coordinator handoff creates a new request under the new initiator;
+it never resumes or reuses the prior initiator's request. Status and logs remain
+available to the other operators. Manual file copying,
 Git-object injection, alternate source paths, and implicit fallback to merged
 or cached refs remain unsupported. After the accepted rollout, the accumulated
 changes return through the normal reviewed PR and protected-gate process.

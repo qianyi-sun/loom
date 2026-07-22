@@ -16,10 +16,12 @@ from loom_cli.rollout.lifecycle_protocol import LifecyclePhase
 
 from .backup_retirement import BackupPayloadRetirer
 from .backup_rotation import (
+    BackupPayloadPhase,
     BackupPayloadRecord,
     BackupRetirementRecord,
     BackupRotationState,
     acknowledge_retirement,
+    recover_failed_retirement,
 )
 from .config import OperatorConfig
 from .store import RequestStore, RequestStoreError
@@ -44,28 +46,55 @@ class BackupRotationRetentionPlan:
     desired_latest_bundle: str | None
     latest_bundle: str | None
     retirements: tuple[BackupRetirementRecord, ...]
+    recovered_active: BackupPayloadRecord | None = None
     environment: str = "staging"
     namespace: str = "loom-staging"
 
     def __post_init__(self) -> None:
         payload_ids = tuple(record.payload_id for record in self.retirements)
+        recovery = self.recovered_active
+        recovery_retirements = tuple(
+            record
+            for record in self.retirements
+            if recovery is not None and record.payload_id == recovery.payload_id
+        )
+        action_valid = (
+            self.active_payload_id is None
+            and self.active_bundle_name is None
+            and self.active_action == "none"
+            and self.desired_latest_bundle is None
+            and recovery is None
+        ) or (
+            self.active_payload_id is not None
+            and self.active_bundle_name is not None
+            and self.desired_latest_bundle == self.active_bundle_name
+            and (
+                (self.active_action == "activate-and-verify" and recovery is None)
+                or (
+                    self.active_action == "recover-and-verify"
+                    and recovery is not None
+                    and recovery.phase is BackupPayloadPhase.ACTIVE
+                    and recovery.payload_id == self.active_payload_id
+                    and recovery.bundle_name == self.active_bundle_name
+                    and recovery.lease is not None
+                    and recovery.lease.environment == self.environment
+                    and recovery.lease.namespace == self.namespace
+                    and len(recovery_retirements) == 1
+                    and recovery_retirements[0].reason == "failed"
+                    and recovery_retirements[0].request_id == recovery.request_id
+                    and recovery_retirements[0].bundle_name == recovery.bundle_name
+                    and recovery_retirements[0].manifest_sha256 == recovery.manifest_sha256
+                    and self.latest_bundle == recovery.bundle_name
+                )
+            )
+        )
         if (
             self.rotation_generation < 0
             or len(self.rotation_sha256) != 64
             or any(character not in "0123456789abcdef" for character in self.rotation_sha256)
             or self.environment != "staging"
             or self.namespace != "loom-staging"
-            or (
-                self.active_payload_id is None
-                and (self.active_action != "none" or self.desired_latest_bundle is not None)
-            )
-            or (
-                self.active_payload_id is not None
-                and (
-                    self.active_action != "activate-and-verify"
-                    or self.desired_latest_bundle != self.active_bundle_name
-                )
-            )
+            or not action_valid
             or (
                 not self.retirements
                 and (
@@ -74,7 +103,10 @@ class BackupRotationRetentionPlan:
                 )
             )
             or len(set(payload_ids)) != len(payload_ids)
-            or self.active_payload_id in set(payload_ids)
+            or (
+                self.active_payload_id in set(payload_ids)
+                and (recovery is None or self.active_payload_id != recovery.payload_id)
+            )
             or (self.active_payload_id is None) != (self.active_bundle_name is None)
             or any(
                 value is not None and (not value or "/" in value or value in {".", ".."})
@@ -102,10 +134,13 @@ class BackupRotationRetentionPlan:
             "environment": self.environment,
             "namespace": self.namespace,
             "latest_bundle": self.latest_bundle,
+            "recovered_active": (
+                self.recovered_active.to_dict() if self.recovered_active is not None else None
+            ),
             "retirements": [record.to_dict() for record in self.retirements],
             "rotation_generation": self.rotation_generation,
             "rotation_sha256": self.rotation_sha256,
-            "schema_version": 2,
+            "schema_version": 3,
         }
 
     @classmethod
@@ -118,6 +153,7 @@ class BackupRotationRetentionPlan:
             "environment",
             "namespace",
             "latest_bundle",
+            "recovered_active",
             "retirements",
             "rotation_generation",
             "rotation_sha256",
@@ -125,7 +161,7 @@ class BackupRotationRetentionPlan:
         }
         if (
             set(data) != expected
-            or data["schema_version"] != 2
+            or data["schema_version"] != 3
             or type(data["rotation_generation"]) is not int
             or not isinstance(data["rotation_sha256"], str)
             or not isinstance(data["environment"], str)
@@ -144,6 +180,10 @@ class BackupRotationRetentionPlan:
                 and not isinstance(data["desired_latest_bundle"], str)
             )
             or (data["latest_bundle"] is not None and not isinstance(data["latest_bundle"], str))
+            or (
+                data["recovered_active"] is not None
+                and not isinstance(data["recovered_active"], dict)
+            )
             or not isinstance(data["retirements"], list)
             or not all(isinstance(item, dict) for item in data["retirements"])
         ):
@@ -156,6 +196,11 @@ class BackupRotationRetentionPlan:
             active_action=data["active_action"],
             desired_latest_bundle=data["desired_latest_bundle"],
             latest_bundle=data["latest_bundle"],
+            recovered_active=(
+                BackupPayloadRecord.from_dict(data["recovered_active"])
+                if isinstance(data["recovered_active"], dict)
+                else None
+            ),
             retirements=tuple(
                 BackupRetirementRecord.from_dict(item) for item in data["retirements"]
             ),
@@ -215,15 +260,43 @@ class InstalledBackupRetentionService:
             self.store.resolve_backup_retirement(record) for record in state.retirements
         )
         normalized_state = replace(state, retirements=retirements)
+        recovered_active: BackupPayloadRecord | None = None
+        if state.active is None and latest_bundle is not None:
+            latest_retirements = tuple(
+                record for record in retirements if record.bundle_name == latest_bundle
+            )
+            if (
+                len(latest_retirements) != 1
+                or latest_retirements[0].reason != "failed"
+                or latest_retirements[0].manifest_sha256 is None
+            ):
+                raise InstalledBackupRetentionError("latest backup retirement is not recoverable")
+            try:
+                recovered_active = self.store.resolve_failed_retirement_active(
+                    latest_retirements[0]
+                )
+            except RequestStoreError as exc:
+                raise InstalledBackupRetentionError(
+                    "latest backup retirement lease authority is unavailable"
+                ) from exc
+            self._assert_payload_job_terminal(recovered_active)
+        desired_active = state.active or recovered_active
         plan = BackupRotationRetentionPlan(
             rotation_generation=state.generation,
             rotation_sha256=normalized_state.evidence_digest,
-            active_payload_id=(None if state.active is None else state.active.payload_id),
-            active_bundle_name=(None if state.active is None else state.active.bundle_name),
-            active_action=("none" if state.active is None else "activate-and-verify"),
-            desired_latest_bundle=(None if state.active is None else state.active.bundle_name),
+            active_payload_id=(None if desired_active is None else desired_active.payload_id),
+            active_bundle_name=(None if desired_active is None else desired_active.bundle_name),
+            active_action=(
+                "none"
+                if desired_active is None
+                else (
+                    "recover-and-verify" if recovered_active is not None else "activate-and-verify"
+                )
+            ),
+            desired_latest_bundle=(None if desired_active is None else desired_active.bundle_name),
             latest_bundle=latest_bundle,
             retirements=retirements,
+            recovered_active=recovered_active,
             namespace=self.config.namespace,
         )
         _publish_exact(self._plan_path(plan.plan_digest), plan.to_dict(), self.service_uid)
@@ -289,7 +362,12 @@ class InstalledBackupRetentionService:
         state = self.store.read_backup_rotation()
         self._validate_current(plan, state=state)
         state = self._converge_active(plan, state)
+        recovered_payload_id = (
+            None if plan.recovered_active is None else plan.recovered_active.payload_id
+        )
         for planned in plan.retirements:
+            if planned.payload_id == recovered_payload_id:
+                continue
             self._require_execution_claim(plan)
             state = self.store.read_backup_rotation()
             self._validate_current(plan, state=state)
@@ -326,15 +404,13 @@ class InstalledBackupRetentionService:
         self._require_execution_claim(plan)
         self._validate_current(plan, state=final)
         self._assert_expected_latest(plan, final)
-        observed_latest = self._read_latest_bundle(final)
-        protected_latest = {
-            record.payload_id
-            for record in plan.retirements
-            if record.bundle_name == observed_latest
-        }
         if any(
             record.payload_id
-            in {planned.payload_id for planned in plan.retirements} - protected_latest
+            in {
+                planned.payload_id
+                for planned in plan.retirements
+                if planned.payload_id != recovered_payload_id
+            }
             for record in final.retirements
         ):
             raise InstalledBackupRetentionError("backup retirements remain after convergence")
@@ -345,15 +421,18 @@ class InstalledBackupRetentionService:
             "final_rotation_generation": final.generation,
             "final_rotation_sha256": final.evidence_digest,
             "namespace": self.config.namespace,
+            "recovered_payload_id": recovered_payload_id,
             "retired_payload_ids": [
                 record.payload_id
                 for record in plan.retirements
-                if record.payload_id not in remaining
+                if record.payload_id != recovered_payload_id and record.payload_id not in remaining
             ],
             "retained_payload_ids": [
-                record.payload_id for record in plan.retirements if record.payload_id in remaining
+                record.payload_id
+                for record in plan.retirements
+                if record.payload_id != recovered_payload_id and record.payload_id in remaining
             ],
-            "schema_version": 2,
+            "schema_version": 3,
         }
         self._validate_applied_document(plan, result_document, state=final)
         _publish_exact(
@@ -370,6 +449,11 @@ class InstalledBackupRetentionService:
     ) -> BackupRotationState:
         present = {record.payload_id for record in state.retirements}
         for planned in plan.retirements:
+            if (
+                plan.recovered_active is not None
+                and planned.payload_id == plan.recovered_active.payload_id
+            ):
+                continue
             if planned.payload_id in present:
                 continue
             if not self.store.has_backup_retirement_receipt(planned.payload_id):
@@ -388,9 +472,41 @@ class InstalledBackupRetentionService:
         plan: BackupRotationRetentionPlan,
         state: BackupRotationState,
     ) -> BackupRotationState:
-        if state.active is not None:
-            desired_latest = plan.desired_latest_bundle
-            if plan.active_action != "activate-and-verify" or desired_latest is None:
+        desired_latest = plan.desired_latest_bundle
+        activated = False
+        if plan.recovered_active is not None and state.active is None:
+            try:
+                self.activate_payload(plan.recovered_active)
+            except Exception:
+                raise InstalledBackupRetentionError(
+                    "active backup payload activation did not complete"
+                ) from None
+            activated = True
+            state = self.store.read_backup_rotation()
+            self._require_execution_claim(plan)
+            self._validate_current(plan, state=state)
+            self._assert_expected_latest(plan, state)
+            recovered = recover_failed_retirement(
+                state,
+                active=plan.recovered_active,
+            )
+            try:
+                self.store.replace_backup_rotation(
+                    recovered.state,
+                    expected_generation=state.generation,
+                )
+            except RequestStoreError as exc:
+                raise InstalledBackupRetentionError(
+                    "backup rotation recovery changed concurrently"
+                ) from exc
+            state = self.store.read_backup_rotation()
+            self._require_execution_claim(plan)
+            self._validate_current(plan, state=state)
+        if state.active is not None and not activated:
+            if (
+                plan.active_action not in {"activate-and-verify", "recover-and-verify"}
+                or desired_latest is None
+            ):
                 raise InstalledBackupRetentionError(
                     "backup retention activation authority is invalid"
                 )
@@ -413,7 +529,7 @@ class InstalledBackupRetentionService:
     ) -> None:
         expected = (
             plan.desired_latest_bundle
-            if plan.active_action == "activate-and-verify"
+            if plan.active_action in {"activate-and-verify", "recover-and-verify"}
             else plan.latest_bundle
         )
         if self._read_latest_bundle(state) != expected:
@@ -432,6 +548,7 @@ class InstalledBackupRetentionService:
             "final_rotation_generation",
             "final_rotation_sha256",
             "namespace",
+            "recovered_payload_id",
             "retired_payload_ids",
             "retained_payload_ids",
             "schema_version",
@@ -441,10 +558,12 @@ class InstalledBackupRetentionService:
         final_sha256 = document.get("final_rotation_sha256")
         if (
             set(document) != expected_keys
-            or document.get("schema_version") != 2
+            or document.get("schema_version") != 3
             or document.get("approved_plan_sha256") != plan.plan_digest
             or document.get("environment") != self.config.environment
             or document.get("namespace") != self.config.namespace
+            or document.get("recovered_payload_id")
+            != (None if plan.recovered_active is None else plan.recovered_active.payload_id)
             or type(document.get("final_rotation_generation")) is not int
             or not isinstance(final_sha256, str)
             or len(final_sha256) != 64
@@ -458,11 +577,18 @@ class InstalledBackupRetentionService:
         if state is None:
             return
         remaining = {record.payload_id for record in state.retirements}
+        recovered_payload_id = (
+            None if plan.recovered_active is None else plan.recovered_active.payload_id
+        )
         expected_retired = [
-            record.payload_id for record in plan.retirements if record.payload_id not in remaining
+            record.payload_id
+            for record in plan.retirements
+            if record.payload_id != recovered_payload_id and record.payload_id not in remaining
         ]
         expected_retained = [
-            record.payload_id for record in plan.retirements if record.payload_id in remaining
+            record.payload_id
+            for record in plan.retirements
+            if record.payload_id != recovered_payload_id and record.payload_id in remaining
         ]
         if (
             retired != expected_retired
@@ -530,8 +656,6 @@ class InstalledBackupRetentionService:
             raise InstalledBackupRetentionError("active rollout blocks backup retirement")
         current = state or self.store.read_backup_rotation()
         self._assert_no_nonterminal_backup_job(current)
-        active_id = None if current.active is None else current.active.payload_id
-        active_bundle = None if current.active is None else current.active.bundle_name
         planned = {record.payload_id: record for record in plan.retirements}
         resolved_current = tuple(
             self.store.resolve_backup_retirement(record) for record in current.retirements
@@ -541,10 +665,22 @@ class InstalledBackupRetentionService:
         allowed_latest = {plan.latest_bundle}
         if plan.active_bundle_name is not None:
             allowed_latest.add(plan.active_bundle_name)
+        recovery = plan.recovered_active
+        recovered = recovery is not None and current.active == recovery
+        recovery_pending = (
+            recovery is not None and current.active is None and recovery.payload_id in observed
+        )
+        if recovery is None:
+            active_matches = (
+                None if current.active is None else current.active.payload_id
+            ) == plan.active_payload_id and (
+                None if current.active is None else current.active.bundle_name
+            ) == plan.active_bundle_name
+        else:
+            active_matches = recovered or recovery_pending
         if (
             current.candidate is not None
-            or active_id != plan.active_payload_id
-            or active_bundle != plan.active_bundle_name
+            or not active_matches
             or observed_latest not in allowed_latest
             or not set(observed).issubset(planned)
             or any(planned[payload_id] != record for payload_id, record in observed.items())
@@ -552,18 +688,24 @@ class InstalledBackupRetentionService:
         ):
             raise InstalledBackupRetentionError("backup rotation authority drifted")
         missing = set(planned) - set(observed)
-        if any(not self.store.has_backup_retirement_receipt(payload_id) for payload_id in missing):
+        recovered_payload_ids = (
+            {recovery.payload_id} if recovery is not None and recovered else set()
+        )
+        deleted = missing - recovered_payload_ids
+        if any(not self.store.has_backup_retirement_receipt(payload_id) for payload_id in deleted):
             raise InstalledBackupRetentionError("backup retirement receipt is missing")
         remaining = tuple(record for record in plan.retirements if record.payload_id in observed)
         normalized_current = replace(current, retirements=resolved_current)
-        initial = replace(
-            normalized_current,
+        initial = BackupRotationState(
             generation=plan.rotation_generation,
+            active=(None if recovery is not None else normalized_current.active),
+            candidate=None,
             retirements=plan.retirements,
         )
-        expected_current = replace(
-            initial,
-            generation=plan.rotation_generation + len(missing),
+        expected_current = BackupRotationState(
+            generation=(plan.rotation_generation + len(deleted) + int(bool(recovered_payload_ids))),
+            active=(recovery if recovered else initial.active),
+            candidate=None,
             retirements=remaining,
         )
         if (
@@ -577,6 +719,9 @@ class InstalledBackupRetentionService:
         active = state.active
         if active is None:
             return
+        self._assert_payload_job_terminal(active)
+
+    def _assert_payload_job_terminal(self, active: BackupPayloadRecord) -> None:
         for read_envelope, read_state in (
             (
                 self.store.read_preflight_backup_job,

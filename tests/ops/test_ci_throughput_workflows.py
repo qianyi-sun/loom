@@ -969,7 +969,8 @@ def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
     assert "https://yylx.world/dev/api/v1/health" in script
     assert "https://www.yylx.world/dev?next=%2Fmonitor&x=1" in script
     assert "scripts/ops/frontend_security_headers.py" in script
-    assert "--route staging=https://yylx.world/dev" in script
+    assert "--route development=https://yylx.world/dev" in script
+    assert "--route staging=https://yylx.world/dev" not in script
     assert "--probe web_500=500=http://127.0.0.1:18082/dev/security-header-5xx-probe" in script
     assert "--web-origin-only" in script
     assert "index.html.security-header-smoke" in script
@@ -1065,6 +1066,8 @@ def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() ->
     )["run"]
     assert 'runtime_environment = "development"' in cluster_config
     assert 'runtime_environment = "staging"' not in cluster_config
+    assert 'frontend_environment = "development"' in cluster_config
+    assert 'frontend_environment = "staging"' not in cluster_config
 
     deny_script = steps[deny_index]["run"]
     syntax = subprocess.run(

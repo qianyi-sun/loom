@@ -20,6 +20,7 @@ from loom.db.schema import (
     Batch,
     Benchmark,
     BenchmarkAlias,
+    DataLifecycleAuthority,
     Task,
     Team,
     TeamMembership,
@@ -175,6 +176,9 @@ async def profile_batch_setup(
                 ),
             )
             sync.execute(delete(Worker).where(Worker.hostname == "tb21-fixture-worker"))
+            sync.execute(
+                delete(DataLifecycleAuthority).where(DataLifecycleAuthority.team_id == team_id),
+            )
             sync.execute(delete(TeamMembership).where(TeamMembership.team_id == team_id))
             sync.execute(delete(User).where(User.id == user_id))
             sync.execute(delete(Team).where(Team.id == team_id))

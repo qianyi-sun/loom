@@ -7,6 +7,8 @@ import pytest
 from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.backup_rotation import (
     BackupPayloadPhase,
+    BackupPayloadRecord,
+    BackupRetirementRecord,
     BackupRotationError,
     BackupRotationState,
     acknowledge_retirement,
@@ -16,6 +18,7 @@ from loom_cli.rollout.operator.backup_rotation import (
     promote_candidate,
     record_manifest_verified,
     record_restore_verified,
+    recover_failed_retirement,
 )
 
 NOW = datetime(2026, 7, 19, 20, tzinfo=UTC)
@@ -205,6 +208,43 @@ def test_promotion_state_is_crash_safe_before_old_payload_deletion() -> None:
     ).state
     assert acknowledged.payload_count == 1
     assert acknowledged.retirements == ()
+
+
+def test_exact_lease_backed_failed_retirement_can_be_recovered_as_active() -> None:
+    lease = _lease("req-latest0000", suffix="a")
+    active = BackupPayloadRecord(
+        payload_id="payload-latest00",
+        request_id="req-latest0000",
+        bundle_name="20260719T200000Z-req-latest0000",
+        phase=BackupPayloadPhase.ACTIVE,
+        created_at=lease.created_at,
+        manifest_sha256=lease.manifest_sha256,
+        lease=lease,
+    )
+    latest = BackupRetirementRecord(
+        payload_id=active.payload_id,
+        request_id=active.request_id,
+        bundle_name=active.bundle_name,
+        reason="failed",
+        manifest_sha256=active.manifest_sha256,
+    )
+    incomplete = BackupRetirementRecord(
+        payload_id="payload-partial00",
+        request_id="req-partial000",
+        bundle_name="20260719T210000Z-req-partial000",
+        reason="failed",
+    )
+    state = BackupRotationState(generation=7, retirements=(latest, incomplete))
+
+    recovered = recover_failed_retirement(state, active=active).state
+
+    assert recovered.generation == 8
+    assert recovered.active == active
+    assert recovered.retirements == (incomplete,)
+    assert recovered.payload_count == 2
+
+    with pytest.raises(BackupRotationError, match="empty active slot"):
+        recover_failed_retirement(recovered, active=active)
 
 
 def test_one_failed_retirement_can_share_the_transient_window_with_candidate() -> None:

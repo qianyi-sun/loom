@@ -55,6 +55,7 @@ from .model import (
     PreflightRequest,
     RolloutRequest,
 )
+from .readonly_database_client import ReadonlyDatabaseTunnelError
 from .rollout_checkpoint import ImmutableObjectInventory
 
 logger = logging.getLogger(__name__)
@@ -193,9 +194,12 @@ _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
     "backup_manifest_digest_mismatch": "backup_manifest_failed",
     "backup_revalidation_failed": "backup_manifest_failed",
     "backup_retirement_manifest_invalid": "backup_manifest_failed",
-    "object_inventory_failed": "backup_manifest_failed",
-    "object_inventory_binding_failed": "backup_manifest_failed",
-    "object_inventory_write_failed": "backup_manifest_failed",
+    "object_inventory_failed": "backup_object_inventory_failed",
+    "object_inventory_credentials_failed": "backup_object_inventory_failed",
+    "object_inventory_transport_failed": "backup_object_inventory_failed",
+    "object_inventory_timeout": "backup_object_inventory_failed",
+    "object_inventory_binding_failed": "backup_object_inventory_failed",
+    "object_inventory_write_failed": "backup_object_inventory_failed",
     "latest_publish_failed": "backup_manifest_failed",
     "backup_cleanup_failed": "backup_cleanup_failed",
     "backup_retirement_failed": "backup_retirement_failed",
@@ -455,6 +459,7 @@ class BackupError(RuntimeError):
         code: str,
         *,
         public_reason: BackupPublicReason | None = None,
+        diagnostic: str | None = None,
     ) -> None:
         resolved_reason = (
             backup_public_reason_for_code(code) if public_reason is None else public_reason
@@ -464,6 +469,7 @@ class BackupError(RuntimeError):
         super().__init__(code)
         self.code = code
         self.public_reason = resolved_reason
+        self.diagnostic = diagnostic
 
 
 class BackupPolicyLimitError(BackupError, ValueError):
@@ -678,6 +684,14 @@ def _stage(code: str, operation: Callable[[], _T]) -> _T:
         result = operation()
     except BackupError:
         raise
+    except ReadonlyDatabaseTunnelError as exc:
+        if code == "object_inventory_failed":
+            inventory_code = {
+                "credential": "object_inventory_credentials_failed",
+                "transport": "object_inventory_transport_failed",
+                "timeout": "object_inventory_timeout",
+            }[exc.kind]
+            raise BackupError(inventory_code, diagnostic=exc.diagnostic) from None
     except Exception:
         pass
     else:
