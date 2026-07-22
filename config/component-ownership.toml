@@ -400,6 +400,7 @@ exclude_paths = [
   "tests/integration/test_trial_e2e_docker.py",
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
+  "tests/integration/test_workspace_snapshot_docker.py",
 ]
 
 [[test_suites]]
@@ -420,6 +421,7 @@ include_paths = [
   "tests/integration/test_trial_e2e_docker.py",
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
+  "tests/integration/test_workspace_snapshot_docker.py",
 ]
 
 [[test_suites]]
