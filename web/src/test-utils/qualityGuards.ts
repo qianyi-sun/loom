@@ -5,6 +5,19 @@ type ConsoleMethod = "error" | "warn";
 let consoleFailures: string[] = [];
 let unhandledRejections: string[] = [];
 let consoleSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+let allowedRejectionMatchers: Array<(reason: unknown) => boolean> = [];
+
+/**
+ * Acknowledge a single deliberately-dispatched unhandled rejection (e.g. a test
+ * that verifies the app's rejection-redaction path). The next matching rejection
+ * is consumed instead of failing the guard. Opt-in per test; the default guard
+ * behavior for genuinely unexpected rejections is unchanged.
+ */
+export function allowExpectedUnhandledRejection(
+  matches: (reason: unknown) => boolean = () => true,
+): void {
+  allowedRejectionMatchers.push(matches);
+}
 
 function safeMessage(value: unknown): string {
   if (value instanceof Error) return `${value.name}: ${value.message}`;
@@ -33,6 +46,13 @@ function captureConsole(method: ConsoleMethod): void {
 
 function onUnhandledRejection(event: PromiseRejectionEvent): void {
   event.preventDefault();
+  const index = allowedRejectionMatchers.findIndex((matches) =>
+    matches(event.reason),
+  );
+  if (index >= 0) {
+    allowedRejectionMatchers.splice(index, 1);
+    return;
+  }
   unhandledRejections.push(safeMessage(event.reason));
 }
 
@@ -40,6 +60,7 @@ beforeEach(() => {
   consoleFailures = [];
   unhandledRejections = [];
   consoleSpies = [];
+  allowedRejectionMatchers = [];
   captureConsole("error");
   captureConsole("warn");
   if (typeof window !== "undefined") {

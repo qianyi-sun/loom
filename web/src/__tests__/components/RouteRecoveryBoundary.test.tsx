@@ -33,7 +33,7 @@ describe("RouteRecoveryBoundary", () => {
     }
 
     render(
-      <MemoryRouter initialEntries={["/broken"]}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/broken"]}>
         <nav aria-label="Recovery test navigation">
           <Link to="/healthy">Open healthy route</Link>
         </nav>
@@ -86,7 +86,7 @@ describe("RouteRecoveryBoundary", () => {
     const LazyPage = React.lazy(() => modulePromise);
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <main id="main-content">
           <RouteRecoveryBoundary retryPolicy="reload-required">
             <LazyPage />
@@ -130,7 +130,7 @@ describe("RouteRecoveryBoundary", () => {
 
     try {
       render(
-        <MemoryRouter>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <main id="main-content">
             <RouteRecoveryBoundary
               onReload={onReload}

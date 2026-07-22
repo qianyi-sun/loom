@@ -13,6 +13,7 @@ import {
   setBrowserFailureUnhandledSignaler,
   type BrowserFailureReport,
 } from "../../lib/errorReporting";
+import { allowExpectedUnhandledRejection } from "../../test-utils/qualityGuards";
 
 const BROKEN_ROOT_ERROR = new Error(
   "raw-root-loom_api_abcdefghijklmnopqrstuvwxyz012345",
@@ -385,6 +386,10 @@ describe("RootErrorBoundary", () => {
     });
 
     try {
+      // This test deliberately dispatches a synthetic unhandled rejection to
+      // verify redaction; acknowledge it so the shared quality guard does not
+      // treat it as an unexpected failure.
+      allowExpectedUnhandledRejection();
       window.dispatchEvent(event);
       await new Promise((resolve) => window.setTimeout(resolve, 75));
 

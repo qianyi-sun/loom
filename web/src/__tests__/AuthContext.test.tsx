@@ -83,6 +83,10 @@ function withQueryClient(ui: ReactNode, qc?: QueryClient): JSX.Element {
 describe("AuthContext", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    // Route expected browser-failure reports to a test sink instead of the
+    // DEV console fallback (import.meta.env.DEV is true under vitest), so the
+    // shared quality guard does not see them as unhandled console output.
+    setBrowserFailureReporter(() => undefined);
   });
 
   afterEach(() => {

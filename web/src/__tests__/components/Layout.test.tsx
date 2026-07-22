@@ -1,6 +1,6 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "../../App";
 import { setBrowserFailureReporter } from "../../lib/errorReporting";
@@ -15,6 +15,12 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("Layout", () => {
+  beforeEach(() => {
+    // Default expected browser-failure reports to a sink (tests that assert
+    // reporting install their own reporter in the test body).
+    setBrowserFailureReporter(() => undefined);
+  });
+
   afterEach(() => {
     setBrowserFailureReporter(null);
     setFrontendConfigForTests(null);
