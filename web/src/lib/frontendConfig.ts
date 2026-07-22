@@ -180,11 +180,16 @@ export function resolveFrontendConfig(
     );
   }
 
-  if (environment === "production" && routePath !== "/prod") {
-    throw new Error("production frontend config must use routePath /prod");
-  }
-  if (environment !== "production" && routePath === "/prod") {
-    throw new Error("non-production frontend config must not use routePath /prod");
+  const canonicalRoutePaths: Record<FrontendEnvironment, RegExp> = {
+    local: /^$/u,
+    development: /^\/dev$/u,
+    staging: /^\/staging(?:\/rehearsal\/[0-9a-f]{24})?$/u,
+    production: /^\/prod$/u,
+  };
+  if (!canonicalRoutePaths[environment].test(routePath)) {
+    throw new Error(
+      `${environment} frontend config does not use its canonical routePath`,
+    );
   }
   if (environment === "production" && /beta/i.test(environmentLabel)) {
     throw new Error("production frontend label must not contain beta wording");
