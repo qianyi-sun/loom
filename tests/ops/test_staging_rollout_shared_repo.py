@@ -26,7 +26,7 @@ def test_consumer_identity_keeps_distinct_primary_and_shared_group(
     assert identity.groups == (2005, 2007)
 
 
-def test_ensure_child_creates_and_validates_once(tmp_path: Path) -> None:
+def test_ensure_child_claims_final_name_once(tmp_path: Path) -> None:
     parent = helper._open_absolute(tmp_path)
     try:
         child, created = helper._ensure_child(
@@ -42,6 +42,32 @@ def test_ensure_child_creates_and_validates_once(tmp_path: Path) -> None:
             assert stat.S_IMODE(os.fstat(child.fd).st_mode) == 0o750
         finally:
             os.close(child.fd)
+    finally:
+        os.close(parent.fd)
+
+
+def test_ensure_child_never_takes_over_concurrent_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = helper._open_absolute(tmp_path)
+    original_mkdir = helper.os.mkdir
+
+    def inject_concurrent_destination(name: str, mode: int, *, dir_fd: int) -> None:
+        original_mkdir(name, mode, dir_fd=dir_fd)
+        raise FileExistsError("destination exists")
+
+    monkeypatch.setattr(helper.os, "mkdir", inject_concurrent_destination)
+    try:
+        with pytest.raises(helper.AuthorityError, match="metadata"):
+            helper._ensure_child(
+                parent,
+                "worker-repos",
+                uid=os.geteuid(),
+                gid=os.getegid(),
+                mode=0o750,
+            )
+        assert stat.S_IMODE((tmp_path / "worker-repos").stat().st_mode) == 0o700
     finally:
         os.close(parent.fd)
 
