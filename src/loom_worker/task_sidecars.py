@@ -67,6 +67,9 @@ class DockerTaskSidecarRuntime:
         health_poll_interval_sec: float = 0.5,
         docker_api_timeout_sec: int | None = None,
         setup_slot_provider: SetupSlotProvider | None = None,
+        container_cpus: float = 0.0,
+        container_memory_mib: int = 0,
+        container_pids: int = 0,
     ) -> None:
         self.task_config = task_config
         self.task_dir = task_dir
@@ -75,6 +78,11 @@ class DockerTaskSidecarRuntime:
         self.health_poll_interval_sec = health_poll_interval_sec
         self.docker_api_timeout_sec = docker_api_timeout_sec
         self.setup_slot_provider = setup_slot_provider
+        # #896: per-container hard caps for setup-sidecar containers on
+        # non-exclusive (packed) workers. 0 = unbounded (default).
+        self.container_cpus = container_cpus
+        self.container_memory_mib = container_memory_mib
+        self.container_pids = container_pids
         self._client: Any | None = None
         self._containers: list[Any] = []
         self._network: Any | None = None
@@ -279,6 +287,14 @@ class DockerTaskSidecarRuntime:
         healthcheck = _docker_healthcheck(sidecar.healthcheck)
         if healthcheck is not None:
             kwargs["healthcheck"] = healthcheck
+        # #896: apply per-container hard caps when configured (>0); unset
+        # (0) preserves the current unbounded behavior for exclusive pools.
+        if self.container_cpus > 0:
+            kwargs["nano_cpus"] = int(self.container_cpus * 1_000_000_000)
+        if self.container_memory_mib > 0:
+            kwargs["mem_limit"] = self.container_memory_mib * 1024 * 1024
+        if self.container_pids > 0:
+            kwargs["pids_limit"] = self.container_pids
         create_kwargs = dict(kwargs)
         create_kwargs.pop("remove", None)
         container = self._client.containers.create(image, **create_kwargs)

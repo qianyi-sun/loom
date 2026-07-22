@@ -64,6 +64,25 @@ def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
     )
 
 
+def test_remote_worker_compose_container_caps_passthrough() -> None:
+    # #896: the worker PROCESS reads the per-container caps so it can
+    # re-apply them to the trial/sidecar containers it creates. Empty
+    # default → pydantic uses the schema default (0/unbounded).
+    worker = _worker_service(_COMPOSE)
+    env = _env_map(worker["environment"])
+    # Numeric 0 default (== schema default). NOT empty — the WorkerSettings
+    # float/int fields cannot parse "" and would crash worker startup.
+    assert env["LOOM_WORKER_CONTAINER_CPUS"] == "${LOOM_WORKER_CONTAINER_CPUS:-0}"
+    assert env["LOOM_WORKER_CONTAINER_MEMORY_MIB"] == (
+        "${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}"
+    )
+    assert env["LOOM_WORKER_CONTAINER_PIDS"] == "${LOOM_WORKER_CONTAINER_PIDS:-0}"
+    # The compose-level caps bound THIS container (unbounded by default).
+    assert worker["cpus"] == "${LOOM_WORKER_CONTAINER_CPUS:-0}"
+    assert worker["mem_limit"] == "${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}m"
+    assert worker["pids_limit"] == "${LOOM_WORKER_CONTAINER_PIDS:--1}"
+
+
 def test_compose_workers_raise_nofile_limit_for_concurrent_sandboxes() -> None:
     for compose_file in (_COMPOSE, _DEV_COMPOSE):
         worker = _worker_service(compose_file)

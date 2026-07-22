@@ -23,6 +23,9 @@ class WorkerSettings(BaseSettings):
     benchmark_cache: Path | None = None
     blocking_io_max_workers: int | None = None
     claim_poll_interval_sec: float = 1.0
+    container_cpus: float = 0.0
+    container_memory_mib: int = 0
+    container_pids: int = 0
     control_plane_url: HttpUrl = cast(HttpUrl, "http://loom-control-plane:8080")
     docker_api_timeout_sec: int = 1800
     docker_socket: Path = Path("/var/run/docker.sock")
