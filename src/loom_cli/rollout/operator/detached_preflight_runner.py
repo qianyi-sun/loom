@@ -49,6 +49,8 @@ class DetachedPreflightBackupRunner:
     referenced_payload_ids: Callable[[], frozenset[str]] = frozenset
     retire_payload: Callable[[BackupRetirementRecord], None] | None = None
     activate_payload: Callable[[BackupPayloadRecord], None] | None = None
+    recover_active_payload: Callable[[BackupPayloadRecord], None] | None = None
+    confirm_active_payload: Callable[[BackupPayloadRecord], None] | None = None
 
     def __post_init__(self) -> None:
         if self.lease_ttl <= timedelta(0):
@@ -92,6 +94,8 @@ class DetachedPreflightBackupRunner:
             referenced_payload_ids=self.referenced_payload_ids,
             retire_payload=self.retire_payload,
             activate_payload=self.activate_payload,
+            recover_active_payload=self.recover_active_payload,
+            confirm_active_payload=self.confirm_active_payload,
         )
         return coordinator(request, envelope, cancelled)
 

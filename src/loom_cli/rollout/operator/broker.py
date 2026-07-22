@@ -32,7 +32,7 @@ from .backup import (
     normalize_backup_public_reason,
 )
 from .backup_job import PreflightBackupJobEnvelope, transition_backup_job
-from .backup_retirement import BackupPayloadRetirer
+from .backup_retirement import BackupPayloadActivator, BackupPayloadRetirer
 from .backup_rotation import (
     backup_rotation_admission_blockers,
     begin_candidate,
@@ -492,6 +492,7 @@ def _backup_retention(
             plan = dependencies.backup_retention.inventory()
         elif action == "apply" and approved_plan_sha256 is not None:
             plan = dependencies.backup_retention.load_claim(approved_plan_sha256)
+            dependencies.backup_retention.claim(plan)
         else:
             return 2
     if action == "inventory":
@@ -1551,6 +1552,10 @@ def _default_dependencies() -> BrokerDependencies:
             service_uid=service_uid,
             store=store,
             retirer=BackupPayloadRetirer(creator=backup, store=store),
+            activate_payload=BackupPayloadActivator(
+                creator=backup,
+                enforce_freshness=False,
+            ),
         )
         if config.source_mode == "sealed-cumulative"
         else None

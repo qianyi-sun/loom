@@ -219,20 +219,26 @@ class LifecycleCoordinator:
         try:
             metadata = os.lstat(marker)
         except FileNotFoundError:
-            return
+            metadata = None
         except OSError as exc:
             raise LifecycleError("maintenance admission marker is unavailable") from exc
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != self._maintenance_owner_uid
-            or metadata.st_gid != self._maintenance_owner_gid
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-        ):
-            raise LifecycleError("maintenance admission marker is unsafe")
-        raise LifecycleBusyError(
-            "staging rollout admission is disabled for maintenance",
-            {"status": "busy", "reason": "maintenance"},
-        )
+        if metadata is not None:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != self._maintenance_owner_uid
+                or metadata.st_gid != self._maintenance_owner_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise LifecycleError("maintenance admission marker is unsafe")
+            raise LifecycleBusyError(
+                "staging rollout admission is disabled for maintenance",
+                {"status": "busy", "reason": "maintenance"},
+            )
+        if self.store.read_backup_retention_claim() is not None:
+            raise LifecycleBusyError(
+                "backup retention maintenance is still in progress",
+                {"status": "busy", "reason": "backup_retention_busy"},
+            )
 
     def assert_maintenance_active(self) -> None:
         """Require the root-owned admission freeze for protected maintenance."""

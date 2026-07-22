@@ -34,7 +34,7 @@ from loom_cli.rollout.operator.model import (
 )
 from loom_cli.rollout.operator.policy import sanitized_child_environment
 from loom_cli.rollout.operator.preflight import PreflightCheck, PreflightReport
-from loom_cli.rollout.operator.store import RequestStore
+from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_pipeline import PreflightPipeline
 from tests.loom_cli.rollout.test_preflight_pipeline import (
@@ -273,6 +273,7 @@ class FakeLifecycle:
         self.guard_depth = 0
         self.reconciled: ReconciliationResult | None = None
         self.maintenance = False
+        self.retention_claim = False
 
     @contextmanager
     def launch_guard(self):  # type: ignore[no-untyped-def]
@@ -299,6 +300,11 @@ class FakeLifecycle:
             raise LifecycleBusyError(
                 "staging rollout admission is disabled for maintenance",
                 {"status": "busy", "reason": "maintenance"},
+            )
+        if self.retention_claim:
+            raise LifecycleBusyError(
+                "backup retention maintenance is still in progress",
+                {"status": "busy", "reason": "backup_retention_busy"},
             )
 
     def assert_maintenance_active(self) -> None:
@@ -618,6 +624,10 @@ class _BackupRetention:
         assert digest == "f" * 64
         return self.plan
 
+    def claim(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("claim", self.lifecycle.guard_depth))
+        assert plan is self.plan
+
     def apply(self, plan):  # type: ignore[no-untyped-def]
         self.calls.append(("apply", self.lifecycle.guard_depth))
         assert plan is self.plan
@@ -661,7 +671,7 @@ def test_backup_retention_requires_maintenance_and_digest_approval(tmp_path: Pat
         )
         == 0
     )
-    assert service.calls[-2:] == [("load", 1), ("apply", 0)]
+    assert service.calls[-3:] == [("load", 1), ("claim", 1), ("apply", 0)]
 
 
 def test_backup_retention_rejects_non_coordinator(tmp_path: Path) -> None:
@@ -832,6 +842,28 @@ def test_maintenance_marker_blocks_start_before_preflight(tmp_path: Path) -> Non
     assert '"reason":"maintenance"' in deps.stderr.getvalue()
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["start"],
+        ["resume", REQUEST_ID],
+        ["cleanup-incomplete-backup", REQUEST_ID],
+    ],
+)
+def test_durable_retention_claim_blocks_start_and_resume_before_side_effects(
+    tmp_path: Path,
+    command: list[str],
+) -> None:
+    deps = fakes(tmp_path)
+    deps.lifecycle.retention_claim = True
+
+    assert broker_main(command, dependencies=deps.dependencies) == 1
+
+    assert deps.order == []
+    assert deps.store.requests == {}
+    assert '"reason":"backup_retention_busy"' in deps.stderr.getvalue()
+
+
 def test_start_reserves_before_launch_and_returns_detached_request(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     rc = broker_main(["start"], dependencies=deps.dependencies)
@@ -894,6 +926,11 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
 
         def assert_admission_open(self) -> None:
             assert self.depth == 1
+            if store.read_backup_retention_claim() is not None:
+                raise LifecycleBusyError(
+                    "backup retention maintenance is still in progress",
+                    {"status": "busy", "reason": "backup_retention_busy"},
+                )
 
         def reconcile_active(self) -> ReconciliationResult:
             return ReconciliationResult(
@@ -934,6 +971,14 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
         new_backup_job_id=lambda: "job-staged0001",
         new_payload_id=lambda: "payload-staged01",
     )
+
+    store.claim_backup_retention("e" * 64, ("payload-failed00",))
+    assert broker_main(["start"], dependencies=staged) == 1
+    assert store.read_backup_rotation().candidate is None
+    with pytest.raises(RequestStoreError, match="does not exist"):
+        store.read_preflight_request("req-staged0001")
+    assert deps.systemd.backup_starts == []
+    assert store.clear_backup_retention_claim("e" * 64) is True
 
     rc = broker_main(["start"], dependencies=staged)
 

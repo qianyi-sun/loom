@@ -495,6 +495,45 @@ def test_critical_checkpoint_defers_latest_until_explicit_activation(tmp_path: P
     assert latest.readlink() == Path(backup.manifest_path.parent.name)
 
 
+def test_recovery_activation_revalidates_aged_payload_without_freshness_authority(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+
+    def inventory(created_at: datetime):
+        return build_immutable_inventory(
+            environment="staging",
+            namespace="loom-staging",
+            mutation_epoch=6,
+            schema_revision="0066",
+            created_at=created_at,
+            objects=[],
+        )
+
+    backup = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        runner=RecordingRunner(),
+        minio=FailingMinioMirror(),
+        now=lambda: FIXED_NOW,
+        object_inventory_provider=inventory,
+        publish_latest=False,
+    ).create(make_request())
+    latest = config.rollout_root / "backups" / "latest"
+    recovery = BackupCreator(
+        config,
+        service_uid=os.getuid(),
+        now=lambda: FIXED_NOW + timedelta(days=2),
+    )
+
+    with pytest.raises(BackupError, match="backup_revalidation_failed"):
+        recovery.activate(backup)
+
+    assert not latest.exists()
+    recovery.activate(backup, enforce_freshness=False)
+    assert latest.readlink() == Path(backup.manifest_path.parent.name)
+
+
 def test_oversized_postgres_dump_stops_before_crossing_component_cap(
     tmp_path: Path,
 ) -> None:

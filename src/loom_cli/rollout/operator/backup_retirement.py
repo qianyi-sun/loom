@@ -4,9 +4,40 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .backup import BackupCreator
-from .backup_rotation import BackupRetirementRecord
+from .backup import BackupCreator, VerifiedBackup
+from .backup_rotation import BackupPayloadPhase, BackupPayloadRecord, BackupRetirementRecord
 from .store import RequestStore
+
+
+@dataclass(slots=True)
+class BackupPayloadActivator:
+    """Converge legacy ``latest`` to one exact restore-verified active record."""
+
+    creator: BackupCreator
+    enforce_freshness: bool = True
+    allow_metadata_fast_path: bool = False
+
+    def __call__(self, record: BackupPayloadRecord) -> None:
+        if (
+            record.phase is not BackupPayloadPhase.ACTIVE
+            or record.manifest_sha256 is None
+            or record.lease is None
+        ):
+            raise RuntimeError("backup activation record is not restore verified")
+        if self.allow_metadata_fast_path and self.creator.latest_points_to(record.bundle_name):
+            return
+        self.creator.activate(
+            VerifiedBackup(
+                manifest_path=(
+                    self.creator.config.rollout_root
+                    / "backups"
+                    / record.bundle_name
+                    / "backup-manifest.json"
+                ),
+                manifest_sha256=record.manifest_sha256,
+            ),
+            enforce_freshness=self.enforce_freshness,
+        )
 
 
 @dataclass(slots=True)
@@ -41,4 +72,4 @@ class BackupPayloadRetirer:
         self.store.publish_backup_retirement_receipt(record.payload_id)
 
 
-__all__ = ["BackupPayloadRetirer"]
+__all__ = ["BackupPayloadActivator", "BackupPayloadRetirer"]

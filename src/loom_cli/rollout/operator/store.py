@@ -306,6 +306,7 @@ class RequestStore:
         self._active_lock_path = self.root / ".active.lock"
         self.backup_rotation_path = self.root / "backup-rotation.json"
         self._backup_rotation_lock_path = self.root / ".backup-rotation.lock"
+        self.backup_retention_claim_path = self.root / "backup-retention-claim.json"
         self.backup_leases_root = self.root / "backup-leases"
         self.backup_retirements_root = self.root / "backup-retirements"
 
@@ -426,6 +427,100 @@ class RequestStore:
                 raise
             return frozenset({envelope.payload_id})
         raise RequestStoreError("active rollout payload reference is missing")
+
+    def read_backup_retention_claim(self) -> tuple[str, tuple[str, ...]] | None:
+        """Return the exact durable maintenance claim blocking new references."""
+        try:
+            self.root.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RequestStoreError("could not inspect request store root") from exc
+        _validate_private_directory(self.root, "request store root")
+        try:
+            payload = _read_json(
+                self.backup_retention_claim_path,
+                "backup retention claim",
+            )
+        except RequestStoreError as exc:
+            if "does not exist" in str(exc):
+                return None
+            raise
+        if (
+            set(payload) != {"plan_sha256", "retirement_payload_ids", "schema_version"}
+            or payload["schema_version"] != 1
+            or not isinstance(payload["plan_sha256"], str)
+            or len(payload["plan_sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in payload["plan_sha256"])
+            or not isinstance(payload["retirement_payload_ids"], list)
+            or not all(isinstance(item, str) for item in payload["retirement_payload_ids"])
+        ):
+            raise RequestStoreError("backup retention claim schema is invalid")
+        payload_ids = tuple(
+            validate_safe_identifier(item, "retirement_payload_id")
+            for item in payload["retirement_payload_ids"]
+        )
+        if tuple(sorted(set(payload_ids))) != payload_ids:
+            raise RequestStoreError("backup retention claim payload identities are invalid")
+        return payload["plan_sha256"], payload_ids
+
+    def claim_backup_retention(
+        self,
+        plan_sha256: str,
+        retirement_payload_ids: tuple[str, ...],
+    ) -> Path:
+        """Atomically block active-pointer publication for one approved plan."""
+        if len(plan_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in plan_sha256
+        ):
+            raise RequestStoreError("backup retention plan digest is invalid")
+        payload_ids = tuple(
+            sorted(
+                validate_safe_identifier(item, "retirement_payload_id")
+                for item in retirement_payload_ids
+            )
+        )
+        if len(set(payload_ids)) != len(payload_ids):
+            raise RequestStoreError("backup retention claim payload identities are invalid")
+        expected = (plan_sha256, payload_ids)
+        self._ensure_store()
+        with self._active_lock():
+            try:
+                self.active_path.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise RequestStoreError("could not inspect active.json") from exc
+            else:
+                raise RequestStoreError("active rollout blocks backup retention claim")
+            existing = self.read_backup_retention_claim()
+            if existing is not None:
+                if existing != expected:
+                    raise RequestStoreError("another backup retention claim is already active")
+                return self.backup_retention_claim_path
+            return _replace_mutable(
+                self.backup_retention_claim_path,
+                {
+                    "plan_sha256": plan_sha256,
+                    "retirement_payload_ids": list(payload_ids),
+                    "schema_version": 1,
+                },
+            )
+
+    def clear_backup_retention_claim(self, plan_sha256: str) -> bool:
+        """Clear only the exact completed claim while still excluding launches."""
+        with self._active_lock():
+            existing = self.read_backup_retention_claim()
+            if existing is None:
+                return False
+            if existing[0] != plan_sha256:
+                raise RequestStoreError("backup retention claim identity does not match")
+            try:
+                self.backup_retention_claim_path.unlink()
+                _fsync_directory(self.root)
+            except OSError as exc:
+                raise RequestStoreError("could not clear backup retention claim") from exc
+            return True
 
     def resolve_backup_retirement(
         self,
@@ -1122,6 +1217,8 @@ class RequestStore:
         except ValueError as exc:
             raise RequestStoreError(str(exc)) from exc
         with self._active_lock():
+            if self.read_backup_retention_claim() is not None:
+                raise RequestStoreError("backup retention maintenance blocks active publication")
             try:
                 self.active_path.lstat()
             except FileNotFoundError:

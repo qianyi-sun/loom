@@ -44,6 +44,8 @@ class CriticalBackupCreator(Protocol):
 class CheckpointStore(Protocol):
     def read_backup_rotation(self) -> BackupRotationState: ...
 
+    def read_backup_retention_claim(self) -> tuple[str, tuple[str, ...]] | None: ...
+
     def replace_backup_rotation(
         self,
         state: BackupRotationState,
@@ -83,6 +85,8 @@ class DetachedCheckpointCoordinator:
     referenced_payload_ids: Callable[[], frozenset[str]] = frozenset
     retire_payload: Callable[[BackupRetirementRecord], None] | None = None
     activate_payload: Callable[[BackupPayloadRecord], None] | None = None
+    recover_active_payload: Callable[[BackupPayloadRecord], None] | None = None
+    confirm_active_payload: Callable[[BackupPayloadRecord], None] | None = None
 
     def __post_init__(self) -> None:
         if self.lease_ttl <= timedelta(0):
@@ -115,6 +119,7 @@ class DetachedCheckpointCoordinator:
 
     def _drain_retirements(self, *, strict: bool) -> None:
         """Idempotently delete and acknowledge exact persisted retirements."""
+        self._assert_no_retention_claim()
         state = self.store.read_backup_rotation()
         referenced = self.referenced_payload_ids()
         for retirement in state.retirements:
@@ -137,6 +142,30 @@ class DetachedCheckpointCoordinator:
         remaining = self.store.read_backup_rotation().retirements
         if strict and remaining:
             raise CheckpointCoordinatorError("backup payload retirement is still referenced")
+
+    def _reconcile_promoted_activation(self) -> None:
+        """Replay a durable promotion before its old latest payload is retired.
+
+        A process can stop after the rotation CAS promotes the restore-verified
+        payload but before the legacy ``latest`` pointer is replaced.  The
+        active record is the durable activation intent, including a first-ever
+        promotion with no superseded retirement.  Replaying the exact active
+        payload is idempotent and must precede candidate work and retirement.
+        """
+        self._assert_no_retention_claim()
+        state = self.store.read_backup_rotation()
+        recovery = (
+            self.recover_active_payload
+            if state.retirements
+            else self.confirm_active_payload or self.recover_active_payload
+        ) or self.activate_payload
+        if state.active is None or recovery is None:
+            return
+        recovery(state.active)
+
+    def _assert_no_retention_claim(self) -> None:
+        if self.store.read_backup_retention_claim() is not None:
+            raise CheckpointCoordinatorError("backup retention maintenance blocks checkpoint work")
 
     @staticmethod
     def _validate_binding(
@@ -166,6 +195,13 @@ class DetachedCheckpointCoordinator:
         self._validate_binding(request, envelope)
         if cancelled():
             raise CheckpointCoordinatorError("backup cancelled before reservation")
+        self._assert_no_retention_claim()
+        state = self.store.read_backup_rotation()
+        try:
+            self._reconcile_promoted_activation()
+        except BaseException:
+            self._fail_reserved_candidate(envelope.payload_id, "checkpoint_activation_failed")
+            raise
         state = self.store.read_backup_rotation()
         candidate = state.candidate
         if candidate is None:

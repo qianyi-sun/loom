@@ -339,6 +339,153 @@ def test_failed_latest_retirement_is_kept_until_replacement_activates(
     assert state.retirements == ()
 
 
+def test_activation_failure_preserves_promotion_without_retiring_old_latest(
+    tmp_path: Path,
+) -> None:
+    coordinator, _creator, store, job = _coordinator(tmp_path)
+    coordinator(_request(), job, lambda: False)
+    old = store.read_backup_rotation().active
+    assert old is not None
+
+    second_path = tmp_path / "20260719T220000Z-req-checkpoint2" / "backup-manifest.json"
+    second_request = replace(_request(), request_id="req-checkpoint2")
+    second_job = replace(
+        job,
+        job_id="job-checkpoint02",
+        request_id="req-checkpoint2",
+        payload_id="payload-checkpoint2",
+        bundle_name=second_path.parent.name,
+        created_at=NOW + timedelta(hours=1),
+    )
+    second_checkpoint = replace(
+        _checkpoint(second_path),
+        request_id="req-checkpoint2",
+        created_at=NOW + timedelta(hours=1),
+    )
+    retired: list[str] = []
+    strict_activation_attempts: list[str] = []
+    recovery_attempts: list[str] = []
+
+    def fail_strict_activation(record) -> None:
+        strict_activation_attempts.append(record.payload_id)
+        raise RuntimeError("latest activation failed")
+
+    replacement = DetachedCheckpointCoordinator(
+        creator=FakeCreator(second_path),
+        store=store,
+        inspect_checkpoint=lambda _backup, _request: second_checkpoint,
+        verify_restore=lambda found, _request, _cancelled: replace(
+            _restore(found),
+            verified_at=NOW + timedelta(hours=1, minutes=3),
+        ),
+        publish_attestation=lambda _checkpoint, _lease, _request: "a" * 64,
+        now=lambda: NOW + timedelta(hours=1, minutes=4),
+        lease_ttl=timedelta(hours=4),
+        retire_payload=lambda record: retired.append(record.payload_id),
+        activate_payload=fail_strict_activation,
+        confirm_active_payload=lambda record: recovery_attempts.append(record.payload_id),
+    )
+
+    with pytest.raises(RuntimeError, match="latest activation failed"):
+        replacement(second_request, second_job, lambda: False)
+
+    stranded = store.read_backup_rotation()
+    assert stranded.active is not None
+    assert stranded.active.payload_id == second_job.payload_id
+    assert stranded.candidate is None
+    assert tuple(record.payload_id for record in stranded.retirements) == (old.payload_id,)
+    assert stranded.payload_count == 2
+    assert recovery_attempts == [old.payload_id]
+    assert strict_activation_attempts == [second_job.payload_id]
+    assert retired == []
+
+    full_recovery_attempts: list[str] = []
+    replacement.recover_active_payload = lambda record: full_recovery_attempts.append(
+        record.payload_id
+    )
+    replacement.confirm_active_payload = lambda _record: pytest.fail(
+        "destructive recovery must not use the metadata-only confirmation path"
+    )
+    replacement._reconcile_promoted_activation()
+    assert full_recovery_attempts == [second_job.payload_id]
+
+
+def test_active_only_activation_intent_blocks_candidate_work_until_replayed(
+    tmp_path: Path,
+) -> None:
+    coordinator, creator, store, job = _coordinator(tmp_path)
+    strict_activation_attempts: list[str] = []
+    confirmation_attempts: list[str] = []
+
+    def fail_strict_activation(record) -> None:
+        strict_activation_attempts.append(record.payload_id)
+        raise RuntimeError("latest activation failed")
+
+    def fail_confirmation(record) -> None:
+        confirmation_attempts.append(record.payload_id)
+        raise RuntimeError("latest activation failed")
+
+    coordinator.activate_payload = fail_strict_activation
+    with pytest.raises(RuntimeError, match="latest activation failed"):
+        coordinator(_request(), job, lambda: False)
+
+    active_only = store.read_backup_rotation()
+    assert creator.calls == [(_request(), NOW)]
+    assert active_only.active is not None
+    assert active_only.active.payload_id == job.payload_id
+    assert active_only.candidate is None
+    assert active_only.retirements == ()
+    assert active_only.payload_count == 1
+
+    next_path = tmp_path / "20260719T220000Z-req-checkpoint2" / "backup-manifest.json"
+    next_creator = FakeCreator(next_path)
+    next_request = replace(_request(), request_id="req-checkpoint2")
+    next_job = replace(
+        job,
+        job_id="job-checkpoint02",
+        request_id="req-checkpoint2",
+        payload_id="payload-checkpoint2",
+        bundle_name=next_path.parent.name,
+        created_at=NOW + timedelta(hours=1),
+    )
+    reservation = begin_candidate(
+        active_only,
+        payload_id=next_job.payload_id,
+        request_id=next_job.request_id,
+        bundle_name=next_job.bundle_name,
+        created_at=next_job.created_at,
+    )
+    store.replace_backup_rotation(
+        reservation.state,
+        expected_generation=active_only.generation,
+    )
+    retired: list[str] = []
+    restarted = DetachedCheckpointCoordinator(
+        creator=next_creator,
+        store=store,
+        inspect_checkpoint=lambda _backup, _request: _checkpoint(next_path),
+        verify_restore=lambda found, _request, _cancelled: _restore(found),
+        publish_attestation=lambda _checkpoint, _lease, _request: "a" * 64,
+        now=lambda: NOW + timedelta(hours=1),
+        lease_ttl=timedelta(hours=4),
+        retire_payload=lambda record: retired.append(record.payload_id),
+        activate_payload=fail_strict_activation,
+        confirm_active_payload=fail_confirmation,
+    )
+
+    with pytest.raises(RuntimeError, match="latest activation failed"):
+        restarted(next_request, next_job, lambda: False)
+
+    blocked = store.read_backup_rotation()
+    assert next_creator.calls == []
+    assert blocked.active == active_only.active
+    assert blocked.candidate is None
+    assert blocked.retirements == ()
+    assert retired == [next_job.payload_id]
+    assert strict_activation_attempts == [job.payload_id]
+    assert confirmation_attempts == [job.payload_id]
+
+
 def test_replacement_failure_compacts_only_the_nonlatest_candidate(
     tmp_path: Path,
 ) -> None:
@@ -402,6 +549,23 @@ def test_binding_drift_and_early_cancel_do_not_reserve_payload(tmp_path: Path) -
 
     assert creator.calls == []
     assert store.read_backup_rotation().payload_count == 0
+
+
+def test_retention_claim_blocks_checkpoint_before_any_side_effect(tmp_path: Path) -> None:
+    retired: list[BackupRetirementRecord] = []
+    activated: list[str] = []
+    coordinator, creator, store, job = _coordinator(tmp_path, retired=retired)
+    coordinator.activate_payload = lambda record: activated.append(record.payload_id)
+    store.claim_backup_retention("f" * 64, ())
+    before = store.read_backup_rotation()
+
+    with pytest.raises(CheckpointCoordinatorError, match="retention maintenance"):
+        coordinator(_request(), job, lambda: False)
+
+    assert creator.calls == []
+    assert activated == []
+    assert retired == []
+    assert store.read_backup_rotation() == before
 
 
 def test_cancel_after_manifest_seals_candidate_without_promotion(tmp_path: Path) -> None:

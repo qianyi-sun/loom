@@ -8,8 +8,7 @@ from datetime import datetime, timedelta
 from loom_cli.cluster_backup_guard import DEFAULT_BACKUP_MAX_AGE_HOURS
 
 from .backup import BackupCreator, SubprocessBackupCommandRunner, VerifiedBackup
-from .backup_retirement import BackupPayloadRetirer
-from .backup_rotation import BackupPayloadRecord
+from .backup_retirement import BackupPayloadActivator, BackupPayloadRetirer
 from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .checkpoint_lease import CriticalCheckpointEvidence, inspect_critical_checkpoint
 from .config import OperatorConfig
@@ -53,18 +52,6 @@ def build_installed_detached_preflight_runner(
     )
     payload_retirer = BackupPayloadRetirer(creator=creator, store=store)
 
-    def activate_payload(record: BackupPayloadRecord) -> None:
-        if record.manifest_sha256 is None:
-            raise ValueError("active backup payload has no manifest authority")
-        creator.activate(
-            VerifiedBackup(
-                manifest_path=(
-                    config.rollout_root / "backups" / record.bundle_name / "backup-manifest.json"
-                ),
-                manifest_sha256=record.manifest_sha256,
-            )
-        )
-
     deep_preflight = (
         authority
         or build_installed_deep_preflight_composition(
@@ -100,7 +87,19 @@ def build_installed_detached_preflight_runner(
         lease_ttl=_RESTORE_VERIFIED_LEASE_TTL,
         referenced_payload_ids=store.referenced_backup_payload_ids,
         retire_payload=payload_retirer,
-        activate_payload=activate_payload,
+        activate_payload=BackupPayloadActivator(
+            creator=creator,
+            enforce_freshness=True,
+        ),
+        recover_active_payload=BackupPayloadActivator(
+            creator=creator,
+            enforce_freshness=False,
+        ),
+        confirm_active_payload=BackupPayloadActivator(
+            creator=creator,
+            enforce_freshness=False,
+            allow_metadata_fast_path=True,
+        ),
     )
 
 

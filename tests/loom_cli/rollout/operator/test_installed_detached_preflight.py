@@ -5,7 +5,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from loom_cli.rollout.operator.backup_retirement import BackupPayloadRetirer
+from loom_cli.rollout.operator.backup_retirement import (
+    BackupPayloadActivator,
+    BackupPayloadRetirer,
+)
 from loom_cli.rollout.operator.deep_preflight_authority import DeepPreflightAuthority
 from loom_cli.rollout.operator.installed_detached_preflight import (
     build_installed_detached_preflight_runner,
@@ -32,3 +35,12 @@ def test_installed_runner_binds_reference_and_retirement_callbacks(tmp_path: Pat
 
     assert runner.referenced_payload_ids() == frozenset()
     assert isinstance(runner.retire_payload, BackupPayloadRetirer)
+    assert isinstance(runner.activate_payload, BackupPayloadActivator)
+    assert runner.activate_payload.enforce_freshness is True
+    assert runner.activate_payload.allow_metadata_fast_path is False
+    assert isinstance(runner.recover_active_payload, BackupPayloadActivator)
+    assert runner.recover_active_payload.enforce_freshness is False
+    assert runner.recover_active_payload.allow_metadata_fast_path is False
+    assert isinstance(runner.confirm_active_payload, BackupPayloadActivator)
+    assert runner.confirm_active_payload.enforce_freshness is False
+    assert runner.confirm_active_payload.allow_metadata_fast_path is True

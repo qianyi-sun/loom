@@ -703,6 +703,49 @@ def test_set_active_only_replaces_status_for_the_same_attempt(tmp_path: Path) ->
     assert list(tmp_path.glob(".active.json.*.tmp")) == []
 
 
+def test_backup_retention_claim_is_exact_idempotent_and_blocks_active_publication(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    digest = "a" * 64
+    payload_ids = ("payload-retire02", "payload-retire01")
+
+    path = store.claim_backup_retention(digest, payload_ids)
+    repeated = store.claim_backup_retention(
+        digest,
+        ("payload-retire01", "payload-retire02"),
+    )
+
+    assert path == repeated == tmp_path / "backup-retention-claim.json"
+    assert store.read_backup_retention_claim() == (
+        digest,
+        ("payload-retire01", "payload-retire02"),
+    )
+    with pytest.raises(RequestStoreError, match="another backup retention claim"):
+        store.claim_backup_retention("b" * 64, payload_ids)
+    with pytest.raises(RequestStoreError, match="retention maintenance"):
+        store.set_active(ActivePointer("req-blocked", 1, "unit-blocked", "pending"))
+    with pytest.raises(RequestStoreError, match="identity does not match"):
+        store.clear_backup_retention_claim("b" * 64)
+
+    assert store.clear_backup_retention_claim(digest) is True
+    assert store.clear_backup_retention_claim(digest) is False
+    assert store.read_backup_retention_claim() is None
+    store.set_active(ActivePointer("req-allowed", 1, "unit-allowed", "pending"))
+
+
+def test_backup_retention_claim_rejects_existing_active_pointer(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    pointer = ActivePointer("req-active", 1, "unit-active", "pending")
+    store.set_active(pointer)
+
+    with pytest.raises(RequestStoreError, match="active rollout blocks"):
+        store.claim_backup_retention("a" * 64, ())
+
+    assert store.read_active() == pointer
+    assert store.read_backup_retention_claim() is None
+
+
 def test_concurrent_active_reservation_has_exactly_one_winner(tmp_path: Path) -> None:
     store = RequestStore(tmp_path)
     seed = ActivePointer("req-seed", 1, "unit-seed", "pending")

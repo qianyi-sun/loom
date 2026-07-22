@@ -460,6 +460,25 @@ def test_maintenance_marker_blocks_admission_under_launch_guard(tmp_path: Path) 
     assert caught.value.safe_status == {"status": "busy", "reason": "maintenance"}
 
 
+def test_durable_backup_retention_claim_blocks_admission_without_maintenance_marker(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    store = RequestStore(config.state_root)
+    store.claim_backup_retention("a" * 64, ("payload-retire01",))
+    coordinator = make_coordinator(config, store=store)
+
+    assert not (config.runtime_root / "maintenance").exists()
+    with coordinator.launch_guard():
+        with pytest.raises(LifecycleBusyError) as caught:
+            coordinator.assert_admission_open()
+
+    assert caught.value.safe_status == {
+        "status": "busy",
+        "reason": "backup_retention_busy",
+    }
+
+
 def test_admission_check_rejects_unsafe_maintenance_marker(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     (config.runtime_root / "maintenance").symlink_to(tmp_path / "outside")

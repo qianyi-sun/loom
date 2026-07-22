@@ -2162,15 +2162,109 @@ class BackupCreator:
         self._object_inventory_provider = object_inventory_provider
         self._publish_latest = publish_latest
 
-    def activate(self, backup: VerifiedBackup) -> None:
+    def latest_points_to(self, bundle_name: str) -> bool:
+        """Return whether a stable, private ``latest`` names one exact bundle.
+
+        This is intentionally metadata-only.  A safe exact match lets replay
+        avoid another full payload validation; missing ``latest`` returns
+        false so activation can converge it.  Every malformed, untrusted, or
+        racing pointer fails closed.
+        """
+        if _BUNDLE_NAME_RE.fullmatch(bundle_name) is None:
+            raise BackupError("backup_path_not_approved")
+        backups_fd: int | None = None
+        target_fd: int | None = None
+        try:
+            backups_fd = _open_directory_no_follow(self.config.rollout_root / "backups")
+            backups_metadata = os.fstat(backups_fd)
+            if not _existing_backups_directory_is_approved(
+                backups_metadata,
+                service_uid=self.service_uid,
+            ):
+                raise ValueError("backups directory metadata is not approved")
+            try:
+                latest_metadata = os.stat(
+                    "latest",
+                    dir_fd=backups_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return False
+            if (
+                not stat.S_ISLNK(latest_metadata.st_mode)
+                or latest_metadata.st_uid != self.service_uid
+                or latest_metadata.st_nlink != 1
+            ):
+                raise ValueError("latest backup pointer metadata is unsafe")
+            target = _read_previous_latest_target(backups_fd)
+            if target is None:
+                raise ValueError("latest backup pointer disappeared")
+            named_target_metadata = os.stat(
+                target,
+                dir_fd=backups_fd,
+                follow_symlinks=False,
+            )
+            target_fd = os.open(target, _directory_open_flags(), dir_fd=backups_fd)
+            target_metadata = os.fstat(target_fd)
+            if (
+                target_metadata.st_dev,
+                target_metadata.st_ino,
+            ) != (
+                named_target_metadata.st_dev,
+                named_target_metadata.st_ino,
+            ):
+                raise ValueError("latest backup target changed before opening")
+            _require_cleanup_entry(target_metadata, service_uid=self.service_uid)
+            if target_metadata.st_dev != backups_metadata.st_dev:
+                raise ValueError("latest backup pointer crosses a filesystem boundary")
+            observed = os.stat(
+                "latest",
+                dir_fd=backups_fd,
+                follow_symlinks=False,
+            )
+            if (observed.st_dev, observed.st_ino) != (
+                latest_metadata.st_dev,
+                latest_metadata.st_ino,
+            ) or os.readlink("latest", dir_fd=backups_fd) != target:
+                raise ValueError("latest backup pointer changed during validation")
+            final_target_metadata = os.stat(
+                target,
+                dir_fd=backups_fd,
+                follow_symlinks=False,
+            )
+            if (
+                final_target_metadata.st_dev,
+                final_target_metadata.st_ino,
+            ) != (target_metadata.st_dev, target_metadata.st_ino):
+                raise ValueError("latest backup target changed during validation")
+            return hmac.compare_digest(target, bundle_name)
+        except BackupError:
+            raise
+        except Exception:
+            raise BackupError("latest_publish_failed") from None
+        finally:
+            if target_fd is not None:
+                os.close(target_fd)
+            if backups_fd is not None:
+                os.close(backups_fd)
+
+    def activate(
+        self,
+        backup: VerifiedBackup,
+        *,
+        enforce_freshness: bool = True,
+    ) -> None:
         """Atomically publish one restore-verified payload as legacy ``latest``.
 
         Critical-checkpoint creation deliberately defers this compatibility
         pointer until the detached restore rehearsal has passed and the
         rotation state has promoted the payload.  Legacy callers keep the
-        historical create-time publication behavior by default.
+        historical create-time publication behavior by default.  Recovery may
+        replay an already-promoted active record after its lease has aged; that
+        path still verifies the exact manifest and payload integrity but does
+        not reuse the payload as fresh rollout authority.
         """
-        self.revalidate(backup, enforce_freshness=True)
+        self.revalidate(backup, enforce_freshness=enforce_freshness)
         resources = _BackupResourceBudget(
             self.config.rollout_root,
             max_postgres_bytes=self._max_postgres_bytes,
