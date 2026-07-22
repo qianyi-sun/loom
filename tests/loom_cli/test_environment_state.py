@@ -193,6 +193,36 @@ def test_staging_gb10_desired_state_sets_two_hour_worker_idle_ttl() -> None:
     assert gb10["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "7200"
 
 
+def test_committed_production_profile_ships_fail_closed() -> None:
+    # #484 prod bootstrap: the committed prod env-state loads and ships
+    # DISABLED — applying it must not activate any prod worker.
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/production.toml"),
+        variables={
+            "IMAGE_TAG": "prod-abc1234",
+            "ENV_CONFIG_VERSION": "prod-abc1234",
+            "GIT_SHA": "abc1234def5678901234567890123456789012ab",
+        },
+        expected_environment="production",
+    )
+
+    gb10 = next(row for row in profile.autoscaler_policies if row["pool_name"] == "gb10")
+    assert gb10["enabled"] is False
+    assert gb10["actuator_config"]["exclusive"] is True  # safe without #896
+
+    desired = next(
+        row for row in profile.gb10_desired_states if row["pool_name"] == "gb10"
+    )
+    assert desired["target_slots"] == 0
+    assert all(intent == "stopped" for intent in desired["host_intents"].values())
+
+    supervisor = profile.external_slurm_autoscaler_supervisors[0]
+    assert supervisor["name"] == "gb10-production"
+    assert supervisor["enabled"] is False
+    assert supervisor["active"] is False
+    assert "15452" in " ".join(supervisor["args"])  # reserved prod gb10 port
+
+
 def test_load_environment_state_profile_requires_placeholder_values(tmp_path: Path) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)
