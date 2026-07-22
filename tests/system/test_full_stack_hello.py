@@ -15,7 +15,10 @@ def test_hello_world_succeeds(compose_stack: dict[str, str]) -> None:
     r = httpx.post(
         f"{cp}/trials",
         headers={"Authorization": f"Bearer {raw_token}"},
-        json={"task_id": "hello-world", "config": {}},
+        json={
+            "task_id": "hello-world",
+            "config": {"agent_name": "oracle", "agent_model": None},
+        },
         timeout=10,
     )
     assert r.status_code == 201, r.text

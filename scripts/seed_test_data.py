@@ -55,7 +55,16 @@ from sqlalchemy import create_engine, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from loom.db.schema import Benchmark, RateCard, Task, Team, TeamQuota, Token
+from loom.db.schema import (
+    Benchmark,
+    RateCard,
+    Task,
+    Team,
+    TeamMembership,
+    TeamQuota,
+    Token,
+    User,
+)
 
 DB_URL = "postgresql+psycopg://loom:loom@localhost:55432/loom"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -469,7 +478,9 @@ def main() -> None:
     engine = create_engine(args.db_url)
     session_local = sessionmaker(engine)
     team_id = uuid4()
-    raw_team = "loom_team_" + secrets.token_hex(8)
+    user_id = uuid4() if args.mode == "test" else None
+    token_prefix = "loom_api_" if args.mode == "test" else "loom_team_"
+    raw_team = token_prefix + secrets.token_hex(8)
     raw_worker = "loom_w_" + secrets.token_hex(8)
     now = datetime.now(UTC)
 
@@ -489,9 +500,24 @@ def main() -> None:
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"e2e-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
+        if user_id is not None:
+            username = f"e2e-user-{user_id.hex}"
+            s.execute(insert(User).values(
+                id=user_id,
+                username=username,
+                username_normalized=username,
+                status="active",
+                is_platform_admin=False,
+            ))
+            s.execute(insert(TeamMembership).values(
+                team_id=team_id,
+                user_id=user_id,
+                role="owner",
+            ))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw_team.encode()).digest(),
             type="team", scopes=["submit", "read:own"], team_id=team_id,
+            created_by_user_id=user_id,
             issued_at=now, expires_at=None,
         ))
         s.execute(insert(Token).values(

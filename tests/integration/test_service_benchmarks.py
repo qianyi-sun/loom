@@ -70,6 +70,11 @@ async def benchmarks_setup(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        # This fixture seeds fixed benchmark ids; clear any left over from a
+        # prior test sharing the per-shard database so the insert is resilient
+        # (teardown wipes them symmetrically).
+        s.execute(delete(Task))
+        s.execute(delete(Benchmark))
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(

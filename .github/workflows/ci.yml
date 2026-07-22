@@ -217,10 +217,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: unit-ops
-            test_paths: "tests/unit tests/ops"
-          - shard: cli-contract-property
-            test_paths: "tests/loom_cli tests/contract tests/property"
+          - shard: 1-of-2
+            shard_index: 0
+          - shard: 2-of-2
+            shard_index: 1
     env:
       COVERAGE_FILE: .coverage.root-${{ matrix.shard }}
     steps:
@@ -257,19 +257,25 @@ jobs:
           uv pip install -e packages/loom-benchmarks
           uv pip install -e packages/loom-benchmark-terminal-bench-2
 
-      - name: Pytest — root shard
+      - name: Pytest — manifest-owned root shard
         shell: bash
         env:
-          TEST_PATHS: ${{ matrix.test_paths }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: 2
         run: |
           set -euo pipefail
-          read -r -a test_paths <<< "${TEST_PATHS}"
+          manifest_paths_file="${RUNNER_TEMP}/tests-root-manifest.txt"
+          uv run python scripts/component_ownership.py test-paths --lane tests-root \
+            --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
+            > "${manifest_paths_file}"
+          mapfile -t test_paths < "${manifest_paths_file}"
+          [[ ${#test_paths[@]} -gt 0 ]]
           uv run pytest "${test_paths[@]}" \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
       - name: Build and exercise non-editable runtime wheel
-        if: matrix.shard == 'unit-ops'
+        if: matrix.shard_index == 0
         shell: bash
         run: |
           set -euo pipefail
@@ -394,12 +400,15 @@ jobs:
           uv pip install -e packages/loom-benchmarks
           uv pip install -e packages/loom-benchmark-terminal-bench-2
 
-      - name: Pytest — sibling packages
+      - name: Pytest — manifest-owned package lane
+        shell: bash
         run: |
-          uv run pytest \
-            packages/loom-launcher/tests \
-            packages/loom-benchmarks/tests \
-            packages/loom-benchmark-terminal-bench-2/tests \
+          set -euo pipefail
+          mapfile -t test_paths < <(
+            uv run python scripts/component_ownership.py test-paths --lane tests-packages
+          )
+          [[ ${#test_paths[@]} -gt 0 ]]
+          uv run pytest "${test_paths[@]}" \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
@@ -412,6 +421,21 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
 
+  runtime-payload:
+    name: runtime-payload
+    runs-on: ubuntu-latest
+    needs: workflow-plan
+    timeout-minutes: 10
+    if: >-
+      needs.workflow-plan.outputs.docs_only != 'true' &&
+      (needs.workflow-plan.outputs.gate_mode == 'full' ||
+       needs.workflow-plan.outputs.gate_mode == 'preflight')
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Execute manifest-owned runtime payload conformance
+        run: python3 scripts/runtime_payload_conformance.py
+
   # The fast Python checks run in parallel above; this aggregator owns
   # their result validation and the final fast-tier coverage gate.
   fast-checks:
@@ -420,6 +444,7 @@ jobs:
     needs:
       - workflow-plan
       - lint-and-static
+      - runtime-payload
       - tests-root
       - tests-packages
     timeout-minutes: 10
@@ -441,6 +466,7 @@ jobs:
           for result in \
             "${{ needs.workflow-plan.result }}" \
             "${{ needs.lint-and-static.result }}" \
+            "${{ needs.runtime-payload.result }}" \
             "${{ needs.tests-root.result }}" \
             "${{ needs.tests-packages.result }}"
           do
@@ -652,10 +678,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: a-r
-            test_glob: "tests/integration/test_[a-r]*.py"
-          - shard: s-z
-            test_glob: "tests/integration/test_[s-z]*.py"
+          - shard: 1-of-2
+            shard_index: 0
+          - shard: 2-of-2
+            shard_index: 1
     env:
       COVERAGE_FILE: .coverage.integration-${{ matrix.shard }}
     steps:
@@ -693,12 +719,18 @@ jobs:
       - name: Pytest — integration (fast tier, no docker)
         shell: bash
         env:
-          TEST_GLOB: ${{ matrix.test_glob }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: 2
         run: |
           set -euo pipefail
-          mapfile -t test_files < <(compgen -G "${TEST_GLOB}" | LC_ALL=C sort)
-          [[ ${#test_files[@]} -gt 0 ]]
-          uv run pytest "${test_files[@]}" \
+          manifest_paths_file="${RUNNER_TEMP}/integration-manifest.txt"
+          uv run python scripts/component_ownership.py test-paths --lane integration \
+            --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
+            --shard-strategy contiguous \
+            > "${manifest_paths_file}"
+          mapfile -t test_paths < "${manifest_paths_file}"
+          [[ ${#test_paths[@]} -gt 0 ]]
+          uv run pytest "${test_paths[@]}" \
             -m "not docker" \
             --durations=15 \
             --cov=src --cov=packages --cov-report=term
@@ -760,9 +792,14 @@ jobs:
           uv pip install -e packages/loom-benchmark-terminal-bench-2
 
       - name: Pytest — integration (docker tier)
+        shell: bash
         run: |
-          uv run pytest tests/integration \
-            -m "docker" \
+          set -euo pipefail
+          mapfile -t test_paths < <(
+            uv run python scripts/component_ownership.py test-paths --lane integration-docker
+          )
+          [[ ${#test_paths[@]} -gt 0 ]]
+          uv run pytest "${test_paths[@]}" \
             --durations=15
 
   # Optional PR-only combined coverage summary. The default fast-tier

@@ -9,6 +9,7 @@ import pytest
 
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
+from loom_cli.rollout.image_readiness import DEFAULT_ROLLOUT_IMAGE_PLAN
 from loom_cli.rollout.operator.redaction import rollout_redaction_scope
 from loom_cli.rollout.steps.base import RunResult
 from loom_cli.rollout.steps.s01_worktree import WorktreeStep
@@ -90,34 +91,31 @@ def test_build_failure_logs_redact_without_driver_cleanup(
     worktree.mkdir(parents=True)
     step_dir = evidence.step_dir(2, "build-images")
     ctx = make_ctx(tmp_path)
-    calls = 0
-
-    def fake_run(argv: list[str], **_kwargs: object) -> SubprocessResult:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return _result(list(argv), returncode=1)
-        return _result(
-            list(argv),
-            returncode=1,
-            stdout=f"build stdout {_SECRET}\n",
-            stderr=f"build stderr {_SECRET}\n",
-        )
-
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s02_build_images.ROLLOUT_IMAGES",
-        (("loom-service", "deploy/Dockerfile.service"),),
+        "loom_cli.rollout.steps.s02_build_images._rollout_matrix_from_candidate",
+        lambda _ctx: (
+            DEFAULT_ROLLOUT_IMAGE_PLAN[:7],
+            DEFAULT_ROLLOUT_IMAGE_PLAN[7:],
+            "f" * 64,
+        ),
     )
     monkeypatch.setattr(
-        "loom_cli.rollout.steps.s02_build_images.AUXILIARY_ROLLOUT_IMAGES",
-        (),
+        "loom_cli.rollout.steps.s02_build_images.validate_candidate_worktree_identity",
+        lambda _ctx: worktree,
     )
-    monkeypatch.setattr("loom_cli.rollout.steps.s02_build_images.run_captured", fake_run)
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s02_build_images.build_exact_images",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError(f"build failed {_SECRET}"),
+        ),
+    )
 
     with rollout_redaction_scope((_SECRET,)):
         result = BuildImagesStep().run(ctx, step_dir)
 
     assert result.exit_code == 1
+    assert result.error is not None
+    assert _SECRET not in result.error
     _assert_diagnostic_safe(step_dir.stdout_path())
     _assert_diagnostic_safe(step_dir.stderr_path())
 

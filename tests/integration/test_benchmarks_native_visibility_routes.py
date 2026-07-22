@@ -16,7 +16,16 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Benchmark, TaskSet, Team, TeamQuota, Token
+from loom.db.schema import (
+    Benchmark,
+    BenchmarkAlias,
+    Task,
+    TaskSet,
+    Team,
+    TeamQuota,
+    Token,
+    Trial,
+)
 from loom.db.task_set_visibility import visible_task_sets
 from loom_cli.benchmark_readiness import run_readiness_audit
 from loom_service.app import create_app
@@ -91,6 +100,16 @@ async def native_visibility_setup(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        # This suite asserts the *exact* native-benchmark set, so isolate it
+        # from benchmark/task rows leaked by other tests sharing this DB (test
+        # order is not fixed across shards). FK-safe wipe order: dependents of
+        # benchmarks (aliases, then benchmark-referencing tasks and their
+        # trials) before the benchmarks themselves.
+        s.execute(delete(Trial))
+        s.execute(delete(BenchmarkAlias))
+        s.execute(delete(Task))
+        s.execute(delete(Benchmark))
+        s.commit()
         for team_id, raw in ((team_a, raw_a), (team_b, raw_b)):
             s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
             s.execute(insert(TeamQuota).values(team_id=team_id))
