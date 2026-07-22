@@ -38,17 +38,19 @@ Profiles pin explicit values so a schema-default flip cannot silently break exis
 
 **Physical nodes (OLDLAB, x86_64):**
 
-| Node | Role in v1 | Rationale |
+| Node | Role | Notes |
 |---|---|---|
-| bb8-1 | k3s server + Longhorn storage node | Has existing kind cluster + Loom repo checkouts; smoothest transition point |
-| bb8-2 | k3s agent + Longhorn storage node | Fresh, no other services running |
-| bb8-3 | k3s agent + Longhorn storage node | Same |
-| bb8-4 | Slurm worker (unchanged) | Kept out of k8s to preserve OLDLAB Slurm slots |
-| bb8-5 | Slurm worker (unchanged) | Same |
+| bb8-1 (`trt-eai-oldlab-1`) | k3s server + Longhorn + Slurm worker | Control plane; holds the Loom repo checkouts |
+| bb8-2 (`trt-eai-oldlab-2`) | k3s agent + Longhorn + Slurm worker | Storage + compute |
+| bb8-3 (`trt-eai-oldlab-3`) | k3s agent + Longhorn + Slurm worker | Same |
+| bb8-4 (`trt-eai-oldlab-4`) | k3s agent + Longhorn + Slurm worker | Same |
+| bb8-5 (`trt-eai-oldlab-5`) | k3s agent + Longhorn + Slurm worker | Same |
+
+All five OLDLAB nodes are `Ready` in the k3s cluster and Longhorn-schedulable.
 
 GB10 (arm64, 15 nodes) stays worker-only under Slurm. Not part of the k3s cluster — Loom's workers connect back to the k8s cluster's services via network, they don't need to be k8s pods themselves. This keeps the k3s cluster homogeneous x86_64 and avoids arm64-specific storage/scheduling complications.
 
-**Why not colocate control plane + Slurm workers on bb8-1..3?** Analysis in the #641 review conversation: the ~12 marginal Slurm slots you'd recover aren't worth the noisy-neighbor debugging (Postgres p99 correlated with worker image-build spikes). Revisit after the multi-node cluster runs stably for a few weeks.
+**Double-duty colocation.** All five nodes run the k3s control plane + MinIO/Longhorn storage **and** OLDLAB Slurm workers on the same hardware. The noisy-neighbor risk (Postgres/MinIO p99 vs worker image-build spikes) is bounded by non-exclusive Slurm workers with headroom + per-container `cpus`/`mem`/`pids` caps (#896) and Longhorn replica placement across nodes. Activation of packed (`exclusive=false`) workers stays gated on #896's container-isolation evidence — a worker container escaping its sbatch cgroup could otherwise contend with Longhorn/MinIO/k3s unbounded.
 
 ## Postgres HA via CloudNativePG
 
@@ -120,29 +122,34 @@ MinIO's distributed mode requires all pods to be running before write quorum is 
 `topology.storage_backend` picks which storage class the templates request:
 
 - `host_path` (single-node dev): `storageClassName: ""` + `volumeName: <pinned>`. Uses local disk with explicit PV pinning. Not portable across nodes.
-- `longhorn` (multi-node production): `storageClassName: longhorn`. Longhorn provisions replicated block storage via its DaemonSet on each participating node. Volumes survive node loss up to the replica count (default 3, matching our 3-node cluster).
+- `longhorn` (multi-node production): `storageClassName: longhorn`. Longhorn provisions replicated block storage via its DaemonSet on each participating node. Volumes survive node loss up to the replica count (default 3, across the five-node cluster).
 
 Longhorn install is a runbook step, not part of `loom cluster render` output.
 
 ## Cutover from single-node to multi-node
 
-The manifests are safe to apply on any cluster where the operators are installed, but data migration is out-of-band:
+**Verified prerequisites — already in place, no action needed:**
 
-1. Land #641 (schema) and #642 (templates) on `dev` (both done).
-2. Provision k3s cluster on bb8-1..3.
-3. Install CloudNativePG operator: `kubectl apply -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/main/releases/cnpg-1.24.0.yaml` (verify current version in the CNPG release notes).
-4. Install Longhorn: `kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/master/deploy/longhorn.yaml`.
-5. In a maintenance window:
-   - Pause new trial submissions.
-   - `pg_dump` from current single-node Postgres → `pg_restore` into the fresh CNPG cluster's primary.
-   - `mc mirror` from current single-node MinIO → new distributed pool.
-   - Flip `staging.cluster.toml`'s `topology.multi_node = false` → `true` and re-render.
-   - `kubectl apply` the new manifests.
-   - Verify pgbouncer connects via the `loom-postgres` ExternalName, LISTEN watchers reach direct Postgres, workers finalize trials to distributed MinIO.
-   - Keep the old single-node Postgres/MinIO PVs on bb8-1 for 24-72h as rollback.
-6. Decommission old PVs after monitoring shows the new cluster stable.
+- k3s cluster: five OLDLAB nodes `Ready` (`trt-eai-oldlab-1..5`), bb8-1 the server.
+- CloudNativePG + Longhorn: installed and healthy; Longhorn schedulable on all five nodes.
+- 4-pod distributed MinIO: rendered from `minio-distributed.yaml.j2` with `topology.multi_node=true / minio_replicas=4 / anti_affinity=required / storage_backend=longhorn` + `persistent_storage_backend=dynamic`, deployed to a scratch namespace, and confirmed to form write quorum with all four pods spread across four distinct nodes on Longhorn (then torn down; the cutover re-creates it with the real secret).
 
-Rollback (any time in step 5): revert `topology.multi_node` to `false`, re-render, apply. All services point back at single-node Postgres/MinIO — no data loss because we didn't tear them down yet.
+Live staging still runs on the single-node **kind** cluster on bb8-1 (`loom-staging` namespace, host-path MinIO PV `loom-staging-minio-data`, ingress on host `:443`). The k3s cluster is a **fully separate** API server fronted by nginx on host `:8443` with Longhorn (not host-path) storage — so k3s staging work cannot collide with the live kind cluster.
+
+**Config change (belongs in the cutover PR, not merged early):** flip `deploy/environments/staging.cluster.toml` `[topology]` to `multi_node=true`, `storage_backend="longhorn"`, `minio_replicas=4`, add `anti_affinity="required"`, and set `persistent_storage_backend="dynamic"` (so the static host-path MinIO PV stops rendering and can't shadow the StatefulSet PVC). Merging this ahead of the window would render against the live kind cluster and strand it.
+
+**Maintenance window (irreversible — data + DNS):**
+
+1. Pause new trial submissions.
+2. `pg_dump` from the kind single-node Postgres → `pg_restore` into the k3s CNPG primary (created by `loom cluster up` from the flipped config).
+3. `mc mirror` from the kind single-node MinIO → the new 4-pod distributed pool.
+4. `loom cluster up`/`apply` the flipped staging config to k3s.
+5. Verify: pgbouncer reaches the CNPG primary via the `loom-postgres` ExternalName, LISTEN watchers reach direct Postgres, workers finalize trials to distributed MinIO, MinIO reports 4 pods online.
+6. Repoint the public entrypoint from kind (`:443`) to k3s (`:8443`) and serve a **302 `/staging → /dev` redirect** on the old cluster. The `/dev` basename is baked into the SPA build's React-Router basename and loom-service `public_base_url`, so an ingress path-rewrite alone does NOT roll a client back — a redirect or DNS re-point does (#879).
+7. Keep the kind single-node Postgres/MinIO PVs on bb8-1 for 24–72h as the rollback anchor.
+8. Decommission the kind PVs after monitoring shows the k3s cluster stable.
+
+**Rollback (any time before step 8):** re-point the entrypoint back to kind `:443` (and the `/staging → /dev` redirect back to the old cluster). No data loss — the kind Postgres/MinIO are untouched until step 8. A bare `topology.multi_node=false` re-render is NOT sufficient once DNS has moved; the entrypoint re-point is the real rollback lever.
 
 ## Failure modes and alerts
 
@@ -160,7 +167,7 @@ CNPG-side alerts come from the operator's built-in `PodMonitor` (`monitoring.ena
 
 - **Cross-region failover.** Both replicas + backups live in the same physical LAN. Disaster recovery is out of scope until we have off-site backups.
 - **Multi-writer Postgres.** CNPG runs single-primary with read replicas. No BDR-style multi-master.
-- **Colocating Slurm workers on control-plane nodes.** Deferred; see the #641 review discussion.
+- **Packed workers without isolation caps.** Double-duty colocation is the model, but `exclusive=false` (multiple workers per node) stays gated on #896's per-container caps + container-isolation evidence; `exclusive=true` (one worker per node) is the fail-closed default until then.
 - **arm64 in the control-plane cluster.** GB10 stays worker-only. If the control plane ever needs to reach 5+ nodes, add more OLDLAB or purchase more x86 hardware — do not extend into GB10.
 
 ## Related documents
