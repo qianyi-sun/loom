@@ -56,11 +56,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          enable-cache: false
-
       - name: Plan required image validation
         id: required
         shell: bash
@@ -107,7 +102,7 @@ jobs:
           if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
             PR_LABELS_JSON='[]'
           fi
-          uv run python scripts/plan_ci_validations.py \
+          python3 scripts/plan_ci_validations.py \
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \

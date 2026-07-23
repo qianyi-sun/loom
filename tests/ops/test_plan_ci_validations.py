@@ -336,6 +336,26 @@ def test_ownership_authority_change_selects_every_heavy_gate(path: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "config/uv-toolchain.toml",
+        "pyproject.toml",
+        "uv.lock",
+        "packages/loom-launcher/pyproject.toml",
+        "packages/loom-benchmarks/pyproject.toml",
+        "packages/loom-benchmark-terminal-bench-2/pyproject.toml",
+    ],
+)
+def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    expected_reason = f"dependency-authority:{path}"
+    assert all(expected_reason in plan.reasons[check] for check in HEAVY_CHECKS)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "deploy/environments/staging.cluster.toml",
         "deploy/environment-state/staging.toml",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",

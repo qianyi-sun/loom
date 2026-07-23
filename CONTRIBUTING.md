@@ -255,8 +255,12 @@ have one place to audit them.
 - **Selected Actions sources** restricts third-party actions to the repository
   allowlist. Every remote `uses:` reference must also match the full commit SHA
   and upstream version recorded in `config/ci-actions-lock.json`; run
-  `uv run python scripts/check_ci_action_pins.py` when adding or updating an
+  `uv run --no-sync python scripts/check_ci_action_pins.py` when adding or updating an
   Action.
+- **The uv toolchain is content-verified.** Keep the exact uv version and the
+  official macOS arm64/Linux x86_64/Linux arm64 archive SHA256 values in
+  `config/uv-toolchain.toml`; repository contracts require every setup step to
+  use the matching checksum.
 - **Secret scanning** is enabled at the repo level.
 
 External pull requests for issue-scoped work go through the same CI

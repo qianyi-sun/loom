@@ -1,0 +1,21 @@
+schema_version = 1
+version = "0.11.26"
+release_url = "https://github.com/astral-sh/uv/releases/tag/0.11.26"
+
+# SHA256 values are from the matching checksum assets attached to the official
+# Astral uv release. Workflows duplicate the value required by setup-uv; the
+# repository contract test rejects any drift from this authority.
+[archives.macos-arm64]
+target = "aarch64-apple-darwin"
+asset = "uv-aarch64-apple-darwin.tar.gz"
+sha256 = "8f7fbf1708399b921857bce71e1d60f0d3ccf52a30caebc1c1a2f175dce13ab6"
+
+[archives.linux-x86_64]
+target = "x86_64-unknown-linux-gnu"
+asset = "uv-x86_64-unknown-linux-gnu.tar.gz"
+sha256 = "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0"
+
+[archives.linux-arm64]
+target = "aarch64-unknown-linux-gnu"
+asset = "uv-aarch64-unknown-linux-gnu.tar.gz"
+sha256 = "befa1a59c91e96eb601b0fd9a97c03dd666f17baba644b2b4db9c59a767e387e"

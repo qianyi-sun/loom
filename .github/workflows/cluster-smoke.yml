@@ -59,9 +59,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-
       - name: Plan required cluster smoke validation
         id: plan
         shell: bash
@@ -108,7 +105,7 @@ jobs:
           if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
             PR_LABELS_JSON='[]'
           fi
-          uv run python scripts/plan_ci_validations.py \
+          python3 scripts/plan_ci_validations.py \
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
@@ -144,22 +141,29 @@ jobs:
           kubectl version --client=true
 
       - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Sync python deps (with [dev], [cluster], and [rollout] extras)
-        run: uv sync --extra dev --extra cluster --extra rollout
+        run: |
+          uv python install 3.11
+          uv sync --locked --all-packages --extra dev --extra cluster --extra rollout --python 3.11
+          uv pip check --python .venv/bin/python
 
       - name: Pytest — manifest-owned cluster smoke lane
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t test_paths < <(
-            uv run python scripts/component_ownership.py test-paths --lane cluster-smoke
+            uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run pytest "${test_paths[@]}"
+          uv run --no-sync pytest "${test_paths[@]}"
 
       - name: Create kind cluster
         run: |
@@ -176,14 +180,14 @@ jobs:
         run: |
           set -e
           kubectl --context kind-loom-smoke create namespace loom
-          eval "$(uv run loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
+          eval "$(uv run --no-sync loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
           printf '[admin]\ntoken="smoke"\n' > /tmp/admin-secrets.toml
           kubectl --context kind-loom-smoke -n loom create secret generic loom-admin-secret \
             --from-file=secrets.toml=/tmp/admin-secrets.toml
 
       - name: loom cluster render — manifests parse + match schema
         run: |
-          uv run python -m loom_cli cluster render > /tmp/manifests.yaml
+          uv run --no-sync python -m loom_cli cluster render > /tmp/manifests.yaml
           wc -l /tmp/manifests.yaml
           # Server-side dry-run validates schema against the live API.
           kubectl --context kind-loom-smoke -n loom apply \
@@ -193,7 +197,7 @@ jobs:
         # Static check: no LoadBalancer/NodePort Services, Ingress
         # backends on the allowlist, no hostPort declarations. Runs
         # before apply so a boundary regression fails fast (#77).
-        run: uv run python -m loom_cli cluster audit
+        run: uv run --no-sync python -m loom_cli cluster audit
 
       - name: loom cluster up — apply, skip preflight + wait
         # --skip-preflight: dummy Secrets pass preflight but the smoke
@@ -201,7 +205,7 @@ jobs:
         # without the real images, and we're testing the apply
         # contract, not pod readiness.
         run: |
-          uv run python -m loom_cli cluster up \
+          uv run --no-sync python -m loom_cli cluster up \
             --context kind-loom-smoke --namespace loom \
             --skip-preflight --no-wait
 
@@ -234,7 +238,7 @@ jobs:
 
       - name: loom cluster status --format json
         run: |
-          uv run python -m loom_cli cluster status \
+          uv run --no-sync python -m loom_cli cluster status \
             --context kind-loom-smoke --namespace loom \
             --format json | tee /tmp/status.json
           # Sanity: the JSON shape carries the components list with
@@ -265,7 +269,7 @@ jobs:
 
       - name: loom cluster down --yes
         run: |
-          uv run python -m loom_cli cluster down \
+          uv run --no-sync python -m loom_cli cluster down \
             --context kind-loom-smoke --namespace loom --yes
 
       - name: Verify teardown

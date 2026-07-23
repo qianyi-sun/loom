@@ -62,14 +62,10 @@ start Docker Desktop first; `docker compose version` should succeed before
 running `loom service up`.
 
 ```bash
-# One-time — uv creates .venv/ on first sync; activate it after.
-# Dependency resolution is intentionally constrained in pyproject.toml
-# to stay valid on both local macOS development and Linux x86_64 CI.
+# One-time — uv 0.11.26 creates .venv/ from the tracked universal lock.
+# The workspace lock covers macOS arm64, Linux x86_64, and Linux arm64.
 uv python install 3.11
-uv sync --extra dev --python 3.11
-uv pip install -e packages/loom-launcher \
-               -e packages/loom-benchmarks \
-               -e packages/loom-benchmark-terminal-bench-2
+uv sync --locked --all-packages --extra dev --python 3.11
 source .venv/bin/activate
 
 # Provider keys + stack bootstrap
@@ -149,10 +145,15 @@ select all heavy lanes until they gain an explicit owner.
 `repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, two
 root-test shards, and sibling-package tests run in parallel jobs, then it combines their
 coverage artifacts, applies the 70% fast-tier gate, and writes the default
-fast-tier coverage summary. The mypy step uses a GitHub Actions cache for
-`.mypy_cache`; a restored cache is only a speed-up, not a replacement for
-running `uv run mypy`. `dev` pushes skip the Python gate because the
-squash-merged PR already produced the required context.
+fast-tier coverage summary. CI restores only uv's package/download cache and
+never restores `.venv` or `.mypy_cache`; PR and merge-group runs cannot save
+cache entries. Every job creates a clean environment with `uv sync --locked`,
+then uses `uv run --no-sync` so a test command cannot silently resolve a new
+environment. The uv executable version and official per-platform archive
+SHA256 values are reviewed in `config/uv-toolchain.toml`; every setup step must
+verify the matching checksum. Go's setup cache is disabled rather than allowing
+PR code to save module or build-cache state. `dev` pushes skip the Python gate
+because the squash-merged PR already produced the required context.
 
 Frontend, SPA image/runtime-config, and frontend gate changes additionally
 select the required `web-checks` job. `repository-checks` fails when that
@@ -195,19 +196,20 @@ or critical violations. Its exact request/response fixtures are local-only and
 contain no deployment credentials.
 
 ```bash
-uv run ruff check src tests packages migrations
-uv run mypy
-mapfile -t root_tests < <(uv run python scripts/component_ownership.py test-paths --lane tests-root)
-uv run pytest "${root_tests[@]}" --cov=src --cov=packages --cov-report=term
-mapfile -t package_tests < <(uv run python scripts/component_ownership.py test-paths --lane tests-packages)
-uv run pytest "${package_tests[@]}" --cov=src --cov=packages --cov-append --cov-report=term
-uv run coverage report --fail-under=70
+uv run --no-sync ruff check src tests packages migrations
+uv run --no-sync mypy
+mapfile -t root_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root)
+uv run --no-sync pytest "${root_tests[@]}" --cov=src --cov=packages --cov-report=term
+mapfile -t package_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages)
+uv run --no-sync pytest "${package_tests[@]}" --cov=src --cov=packages --cov-append --cov-report=term
+uv run --no-sync coverage report --fail-under=70
 ```
 
 Local verification should use Python 3.11, matching the `repository-checks`
 job. The repository root `.python-version` pins uv-managed virtualenv creation
 to 3.11; if a local `.venv` was created with another interpreter, remove it and
-rerun `uv sync --extra dev --python 3.11` before running mypy.
+rerun `uv sync --locked --all-packages --extra dev --python 3.11` before
+running mypy.
 
 Heavier suites are opt-in:
 
@@ -324,17 +326,17 @@ second command:
 
 ```bash
 rm -f .coverage coverage.xml
-uv run pytest \
+uv run --no-sync pytest \
   tests/unit tests/contract tests/property tests/loom_cli tests/ops \
   --cov=src --cov=packages \
   --cov-report=term --cov-report=xml
-uv run pytest \
+uv run --no-sync pytest \
   packages/loom-launcher/tests \
   packages/loom-benchmarks/tests \
   packages/loom-benchmark-terminal-bench-2/tests \
   --cov=src --cov=packages --cov-append \
   --cov-report=term --cov-report=xml
-uv run coverage report --fail-under=70
+uv run --no-sync coverage report --fail-under=70
 ```
 
 The first pytest command alone is not the fast coverage gate: it measures the

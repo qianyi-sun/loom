@@ -214,7 +214,8 @@ def _rollout_runner_dependency_error() -> str | None:
         "rollout runner missing benchmark tooling required by catalog "
         "provisioning: "
         + ", ".join(missing)
-        + ". Run `uv sync --extra cluster --extra rollout --python 3.11` "
+        + ". Run `uv sync --locked --all-packages --extra cluster "
+        "--extra rollout --python 3.11` "
         "in the rollout driver checkout, then rerun or resume."
     )
 

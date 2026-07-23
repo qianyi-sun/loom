@@ -92,6 +92,14 @@ dev = [
   "types-docker>=7.0,<8.0",
 ]
 
+[dependency-groups]
+# Coverage aggregation runs in small, isolated CI jobs. Keeping the tool in the
+# project lock avoids a floating `pip install` without forcing those jobs to
+# install Loom's full runtime dependency set.
+ci-coverage = [
+  "coverage>=7,<8",
+]
+
 [project.scripts]
 loom = "loom_cli.__main__:main"
 
@@ -138,15 +146,31 @@ src = ["src", "tests"]
 extend-exclude = ["**/_generated.py"]
 
 [tool.uv]
-# Keep uv resolution valid for both local Mac development and Linux CI.
-required-environments = [
-  "sys_platform == 'darwin'",
+# Keep one universal lock for the three platforms that develop, validate, and
+# roll out Loom. These platform constraints do not narrow the package metadata's
+# existing Python >=3.11 support; the lock retains the required Python forks.
+required-version = "==0.11.26"
+environments = [
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
   "sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+required-environments = [
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[tool.uv.workspace]
+members = [
+  "packages/loom-launcher",
+  "packages/loom-benchmarks",
+  "packages/loom-benchmark-terminal-bench-2",
 ]
 
 [tool.uv.sources]
-loom-benchmarks = { path = "packages/loom-benchmarks", editable = true }
-loom-benchmark-terminal-bench-2 = { path = "packages/loom-benchmark-terminal-bench-2", editable = true }
+loom-benchmarks = { workspace = true }
+loom-benchmark-terminal-bench-2 = { workspace = true }
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "RUF"]

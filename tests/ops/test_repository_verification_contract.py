@@ -16,7 +16,7 @@ def test_repository_checks_ruff_scope_matches_repo_wide_local_lint() -> None:
     steps = workflow["jobs"]["lint-and-static"]["steps"]
     ruff_step = next(step for step in steps if step.get("name") == "Ruff")
 
-    assert ruff_step["run"] == "uv run ruff check src tests packages migrations"
+    assert ruff_step["run"] == "uv run --no-sync ruff check src tests packages migrations"
 
 
 def test_local_python_version_is_pinned_to_ci_interpreter() -> None:
@@ -27,7 +27,7 @@ def test_contributor_quickstart_uses_ci_python_for_local_verification() -> None:
     text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
 
     assert "uv python install 3.11" in text
-    assert "uv sync --extra dev --python 3.11" in text
+    assert "uv sync --locked --all-packages --extra dev --python 3.11" in text
 
 
 def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
@@ -54,10 +54,12 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
     assert {shard["shard_index"] for shard in root_shards} == {0, 1}
     assert "test-paths --lane tests-root" in root_pytest_step["run"]
     assert "--shard-index" in root_pytest_step["run"]
+    assert "uv run --no-sync pytest" in root_pytest_step["run"]
     assert "test-paths --lane tests-packages" in sibling_pytest_step["run"]
+    assert "uv run --no-sync pytest" in sibling_pytest_step["run"]
     assert "test-paths --lane tests-root" in normalized_text
     assert "test-paths --lane tests-packages" in normalized_text
     assert "--cov-append" in normalized_text
     assert "coverage report --fail-under=70" in coverage_gate_step["run"]
-    assert "uv run coverage report --fail-under=70" in text
+    assert "uv run --no-sync coverage report --fail-under=70" in text
     assert "first pytest command alone is not the fast coverage gate" in text

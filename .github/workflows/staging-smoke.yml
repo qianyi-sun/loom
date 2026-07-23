@@ -53,11 +53,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          enable-cache: false
-
       - name: Plan required staging smoke validation
         id: plan
         shell: bash
@@ -95,7 +90,7 @@ jobs:
           if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
             PR_LABELS_JSON='[]'
           fi
-          uv run python scripts/plan_ci_validations.py \
+          python3 scripts/plan_ci_validations.py \
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
@@ -171,10 +166,14 @@ jobs:
           sudo mv /tmp/kubectl /usr/local/bin/kubectl
           kind --version && kubectl version --client=true
 
-      - name: Install uv + sync deps
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install exact uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Sync python deps (with [cluster] and [rollout] extras)
         # Pin Python 3.11 to match what the loom Dockerfiles use
@@ -183,7 +182,8 @@ jobs:
         # transitive deps that haven't shipped 3.12 wheels.
         run: |
           uv python install 3.11
-          uv sync --extra cluster --extra rollout --python 3.11
+          uv sync --locked --all-packages --extra cluster --extra rollout --python 3.11
+          uv pip check --python .venv/bin/python
 
       - name: Build images (parallel)
         # Build every start-policy image in parallel. Each gets the smoke
@@ -324,7 +324,7 @@ jobs:
           ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"
           echo "::add-mask::${ADMIN_TOKEN}"
 
-          eval "$(uv run loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
+          eval "$(uv run --no-sync loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
 
           printf '[admin]\ntoken="%s"\n' "${ADMIN_TOKEN}" > "$admin_toml"
           kubectl --context kind-loom-staging -n loom create secret generic loom-admin-secret \
@@ -363,13 +363,13 @@ jobs:
         # All required secrets exist; storage + ingress class are
         # available via kind's default CNI + storage provisioner.
         run: |
-          uv run python -m loom_cli cluster preflight \
+          uv run --no-sync python -m loom_cli cluster preflight \
             --context kind-loom-staging --namespace loom
 
       - name: loom cluster audit
         # Boundary check on the rendered manifests before apply.
         run: |
-          uv run python -m loom_cli cluster audit \
+          uv run --no-sync python -m loom_cli cluster audit \
             --config /tmp/cluster-config.toml
 
       - name: loom cluster up (apply, no-wait)
@@ -379,7 +379,7 @@ jobs:
         # until Alembic head is reached. We orchestrate the sequence
         # explicitly below.
         run: |
-          uv run python -m loom_cli cluster up \
+          uv run --no-sync python -m loom_cli cluster up \
             --context kind-loom-staging --namespace loom \
             --config /tmp/cluster-config.toml \
             --skip-preflight --no-wait
@@ -421,7 +421,7 @@ jobs:
               | sed -E 's#@[^/]+/#@localhost:15432/#')
             echo "::add-mask::${LOCAL_DB_URL}"
             echo "::group::alembic upgrade head for ${key}"
-            LOOM_DB_URL="${LOCAL_DB_URL}" uv run alembic \
+            LOOM_DB_URL="${LOCAL_DB_URL}" uv run --no-sync alembic \
               -c migrations/alembic.ini upgrade head
             echo "::endgroup::"
           done
@@ -432,7 +432,7 @@ jobs:
         # wait-for-ready loop (apply is idempotent — kubectl apply
         # is a no-op when manifests are unchanged).
         run: |
-          uv run python -m loom_cli cluster up \
+          uv run --no-sync python -m loom_cli cluster up \
             --context kind-loom-staging --namespace loom \
             --config /tmp/cluster-config.toml \
             --skip-preflight \
@@ -440,7 +440,7 @@ jobs:
 
       - name: loom cluster status
         run: |
-          uv run python -m loom_cli cluster status \
+          uv run --no-sync python -m loom_cli cluster status \
             --context kind-loom-staging --namespace loom \
             --format table
 
@@ -472,7 +472,7 @@ jobs:
             local header_name="$2"
             local comparison="$3"
             local expected="$4"
-            uv run python - "$headers_file" "$header_name" "$comparison" "$expected" <<'PY'
+            uv run --no-sync python - "$headers_file" "$header_name" "$comparison" "$expected" <<'PY'
           import sys
           from pathlib import Path
 
@@ -516,7 +516,7 @@ jobs:
             exit 1
           fi
 
-          CI=true uv run python scripts/ops/frontend_route_smoke.py \
+          CI=true uv run --no-sync python scripts/ops/frontend_route_smoke.py \
             --insecure-for-kind \
             --route development=https://yylx.world/dev=https://yylx.world/dev/api \
             --json | tee /tmp/loom-frontend-route-smoke.json
@@ -524,7 +524,7 @@ jobs:
           # Validate the exact combined web-origin + ingress browser policy on
           # shell/config 200s, the slash-canonical 308, and a wrong-asset 404.
           # The redacted report never records response headers or bodies.
-          CI=true uv run python scripts/ops/frontend_security_headers.py \
+          CI=true uv run --no-sync python scripts/ops/frontend_security_headers.py \
             --insecure-for-kind \
             --route development=https://yylx.world/dev \
             --json | tee /tmp/loom-frontend-security-headers.json
@@ -533,7 +533,7 @@ jobs:
           # content types. Select one validated hashed route asset without
           # trusting arbitrary report data as a new request target.
           asset_path=$(
-            uv run python - <<'PY'
+            uv run --no-sync python - <<'PY'
           import json
           import re
           from pathlib import Path
@@ -707,7 +707,7 @@ jobs:
             rm -f "$health_headers"
             exit 1
           fi
-          uv run python -m json.tool /tmp/loom-service-health.json >/dev/null
+          uv run --no-sync python -m json.tool /tmp/loom-service-health.json >/dev/null
           rm -f "$health_headers"
 
           # Verify a finite www -> canonical host -> slash-canonical chain,
@@ -803,7 +803,7 @@ jobs:
             mv /usr/share/nginx/html/index.html \
                /usr/share/nginx/html/index.html.security-header-smoke
           security_restore_needed=true
-          CI=true uv run python scripts/ops/frontend_security_headers.py \
+          CI=true uv run --no-sync python scripts/ops/frontend_security_headers.py \
             --web-origin-only \
             --probe web_500=500=http://127.0.0.1:18082/dev/security-header-5xx-probe \
             --json | tee /tmp/loom-frontend-security-headers-500.json
@@ -962,7 +962,7 @@ jobs:
 
           # Pre-create reference buckets so apply has somewhere to land.
           for bucket in trajectories artifacts atif; do
-            uv run python -c "
+            uv run --no-sync python -c "
           import os, boto3
           from botocore.config import Config
           s3 = boto3.client(
@@ -980,36 +980,36 @@ jobs:
           done
 
           echo "::group::dry-run apply"
-          uv run loom cluster bootstrap-storage-lifecycle \
+          uv run --no-sync loom cluster bootstrap-storage-lifecycle \
             --config config/storage-lifecycle.example.toml \
             --endpoint "${LOOM_SVC_MINIO_ENDPOINT}" --dry-run
           echo "::endgroup::"
 
           echo "::group::first apply"
-          uv run loom cluster bootstrap-storage-lifecycle \
+          uv run --no-sync loom cluster bootstrap-storage-lifecycle \
             --config config/storage-lifecycle.example.toml \
             --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
           echo "::endgroup::"
 
           echo "::group::doctor after first apply (must exit 0)"
-          uv run loom cluster doctor \
+          uv run --no-sync loom cluster doctor \
             --context kind-loom-staging --namespace loom \
             --storage-lifecycle-config config/storage-lifecycle.example.toml \
             --storage-lifecycle-endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
           echo "::endgroup::"
 
           echo "::group::second apply (idempotency check)"
-          uv run loom cluster bootstrap-storage-lifecycle \
+          uv run --no-sync loom cluster bootstrap-storage-lifecycle \
             --config config/storage-lifecycle.example.toml \
             --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
-          uv run loom cluster doctor \
+          uv run --no-sync loom cluster doctor \
             --context kind-loom-staging --namespace loom \
             --storage-lifecycle-config config/storage-lifecycle.example.toml \
             --storage-lifecycle-endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
           echo "::endgroup::"
 
           echo "::group::tamper: remove trajectories lifecycle, doctor must fail"
-          uv run python -c "
+          uv run --no-sync python -c "
           import os, boto3
           from botocore.config import Config
           s3 = boto3.client(
@@ -1021,7 +1021,7 @@ jobs:
           )
           s3.delete_bucket_lifecycle(Bucket='trajectories')
           "
-          if uv run loom cluster doctor \
+          if uv run --no-sync loom cluster doctor \
                --context kind-loom-staging --namespace loom \
                --storage-lifecycle-config config/storage-lifecycle.example.toml \
                --storage-lifecycle-endpoint "${LOOM_SVC_MINIO_ENDPOINT}"; then
@@ -1032,10 +1032,10 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::heal: re-apply, doctor should exit 0 again"
-          uv run loom cluster bootstrap-storage-lifecycle \
+          uv run --no-sync loom cluster bootstrap-storage-lifecycle \
             --config config/storage-lifecycle.example.toml \
             --endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
-          uv run loom cluster doctor \
+          uv run --no-sync loom cluster doctor \
             --context kind-loom-staging --namespace loom \
             --storage-lifecycle-config config/storage-lifecycle.example.toml \
             --storage-lifecycle-endpoint "${LOOM_SVC_MINIO_ENDPOINT}"
@@ -1067,7 +1067,7 @@ jobs:
       - name: loom cluster down --yes
         if: always()
         run: |
-          uv run python -m loom_cli cluster down \
+          uv run --no-sync python -m loom_cli cluster down \
             --context kind-loom-staging --namespace loom --yes \
             || true
 
@@ -1091,12 +1091,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
-          enable-cache: false
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
 
       - name: Sync system-smoke dependencies
         run: |
           uv python install 3.11
-          uv sync --all-packages --extra dev --extra cluster --extra rollout --python 3.11
+          uv sync --locked --all-packages --extra dev --extra cluster --extra rollout --python 3.11
+          uv pip check --python .venv/bin/python
 
       - name: Pytest — manifest-owned system smoke lane
         shell: bash
@@ -1105,10 +1110,10 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t test_paths < <(
-            uv run python scripts/component_ownership.py test-paths --lane system-smoke
+            uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run pytest --timeout=1200 "${test_paths[@]}"
+          uv run --no-sync pytest --timeout=1200 "${test_paths[@]}"
 
       - name: Show system-smoke compose diagnostics
         if: failure()
@@ -1121,7 +1126,7 @@ jobs:
             # The helper captures the equivalent of
             # `--profile worker logs --no-color --tail=300` and redacts it
             # before writing to runner.temp.
-            uv run python -c \
+            uv run --no-sync python -c \
               'from tests.system.docker_compose import preserve_compose_diagnostics; preserve_compose_diagnostics()' \
               || true
           fi

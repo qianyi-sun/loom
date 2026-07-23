@@ -138,8 +138,11 @@ def test_pytest_jobs_consume_manifest_owned_lane_paths(job_name: str, lane: str)
     workflow = _workflow(".github/workflows/ci.yml")
     scripts = "\n".join(step.get("run", "") for step in workflow["jobs"][job_name]["steps"])
 
-    assert f"uv run python scripts/component_ownership.py test-paths --lane {lane}" in scripts
-    assert 'uv run pytest "${test_paths[@]}"' in scripts
+    assert (
+        f"uv run --no-sync python scripts/component_ownership.py test-paths --lane {lane}"
+        in scripts
+    )
+    assert 'uv run --no-sync pytest "${test_paths[@]}"' in scripts
 
 
 def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
@@ -147,9 +150,13 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     smoke = workflow["jobs"]["smoke"]
     scripts = "\n".join(step.get("run", "") for step in smoke["steps"])
 
-    assert "uv run python scripts/component_ownership.py test-paths --lane cluster-smoke" in scripts
-    assert "uv sync --extra dev --extra cluster --extra rollout" in scripts
-    assert 'uv run pytest "${test_paths[@]}"' in scripts
+    assert (
+        "uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke"
+        in scripts
+    )
+    assert "uv sync --locked --all-packages --extra dev --extra cluster --extra rollout" in scripts
+    assert "uv pip check --python .venv/bin/python" in scripts
+    assert 'uv run --no-sync pytest "${test_paths[@]}"' in scripts
     assert smoke["timeout-minutes"] >= 25
 
 
@@ -708,6 +715,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert jobs["fast-checks"]["name"] == "fast-checks"
     assert set(jobs["fast-checks"]["needs"]) == {
         "workflow-plan",
+        "locked-environments",
         "lint-and-static",
         "runtime-payload",
         "tests-root",
@@ -1377,9 +1385,13 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
 
     assert system_smoke["needs"] == "plan"
     assert "needs.plan.outputs.required == 'true'" in system_smoke["if"]
-    assert "uv sync --all-packages --extra dev --extra cluster --extra rollout" in scripts
-    assert "uv run python scripts/component_ownership.py test-paths --lane system-smoke" in scripts
-    assert 'uv run pytest --timeout=1200 "${test_paths[@]}"' in scripts
+    assert "uv sync --locked --all-packages --extra dev --extra cluster --extra rollout" in scripts
+    assert "uv pip check --python .venv/bin/python" in scripts
+    assert (
+        "uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke"
+        in scripts
+    )
+    assert 'uv run --no-sync pytest --timeout=1200 "${test_paths[@]}"' in scripts
     assert "--profile worker logs --no-color --tail=300" in scripts
     assert "--profile worker down -v --remove-orphans" in scripts
     assert pytest_step["env"]["LOOM_SYSTEM_SMOKE_DIAGNOSTICS"] == (
@@ -1419,18 +1431,17 @@ def test_repository_checks_uses_lightweight_coverage_tooling() -> None:
     step_names = {step.get("name") for step in fast_steps}
     run_blocks = "\n".join(step.get("run", "") for step in fast_steps)
 
-    assert "Install uv" not in step_names
+    assert "Install exact uv" in step_names
     assert "Set up Python 3.11" not in step_names
-    assert "python3 -m coverage combine" in run_blocks
-    assert "python3 -m coverage xml" in run_blocks
+    assert "uv sync --locked --only-group ci-coverage --python 3.11" in run_blocks
+    assert "uv run --no-sync coverage combine" in run_blocks
+    assert "uv run --no-sync coverage xml" in run_blocks
 
 
-def test_lint_and_static_caches_mypy() -> None:
+def test_lint_and_static_does_not_restore_opaque_analysis_state() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     steps = workflow["jobs"]["lint-and-static"]["steps"]
-    step_names = [step.get("name") for step in steps]
-    cache_step = steps[step_names.index("Cache mypy")]
-
-    assert step_names.index("Cache mypy") < step_names.index("Mypy (strict)")
-    assert cache_step["uses"] == f"actions/cache@{_locked_action_sha('actions/cache')}"
-    assert cache_step["with"]["path"] == ".mypy_cache"
+    assert all(
+        not str(step.get("uses", "")).startswith("actions/cache@") for step in steps
+    )
+    assert "Cache mypy" not in {step.get("name") for step in steps}

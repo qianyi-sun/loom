@@ -18,15 +18,13 @@ GPU-cluster vLLM lives in [`provider-onboarding.md`](integrations/provider-onboa
 ## Install
 
 ```bash
-uv sync                                          # core deps; creates .venv/
-uv pip install -e packages/loom-launcher \
-               -e packages/loom-benchmarks \
-               -e packages/loom-benchmark-terminal-bench-2
+uv python install 3.11
+uv sync --locked --all-packages --python 3.11    # tracked lock; creates .venv/
 source .venv/bin/activate                        # so `loom` is on PATH
 ```
 
-The last package is optional (TB-2 adapter). All others ship the core
-21-adapter slate.
+The workspace sync installs Loom plus the launcher, benchmark catalog, and TB-2
+adapter packages from the versions recorded in `uv.lock`.
 
 > Why `uv`? It's what the repo's tests + CI use; it creates the venv
 > for you on first sync, sidestepping the PEP 668 "externally managed
@@ -34,7 +32,8 @@ The last package is optional (TB-2 adapter). All others ship the core
 > Debian / Ubuntu. Install: <https://docs.astral.sh/uv/getting-started/installation/>.
 > Prefer plain `pip`? Run `python3 -m venv .venv && source
 > .venv/bin/activate` first, then `pip install -e . -e
-> packages/loom-launcher -e packages/loom-benchmarks`.
+> packages/loom-launcher -e packages/loom-benchmarks`. That convenience path
+> bypasses `uv.lock` and is not valid CI, rollout, or release evidence.
 
 ## Choose your quickstart
 
@@ -695,7 +694,7 @@ If you have weights on disk or a HuggingFace model id, install the
 optional vLLM extra and pass the spec directly:
 
 ```bash
-uv sync --extra vllm        # one-time; vLLM has GPU requirements
+uv sync --locked --all-packages --extra vllm --python 3.11  # one-time; vLLM has GPU requirements
 
 # HuggingFace model id
 loom run --task humaneval/HumanEval/0 \

@@ -162,7 +162,7 @@ If using `static-host-path` persistent storage, physically move `/data/loom-publ
 Regenerate the tunnel systemd units targeting the new namespace:
 
 ```bash
-uv run python scripts/ops/worker_service_tunnels.py install-systemd \
+uv run --no-sync python scripts/ops/worker_service_tunnels.py install-systemd \
   --namespace loom-staging \
   --context kind-loom-staging \
   --output-dir ~/.config/systemd/user/

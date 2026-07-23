@@ -79,10 +79,9 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
     )
 
     assert result.errors == ()
-    assert result.workflow_count == 9
-    assert result.reference_count == 66
+    assert result.workflow_count == 10
+    assert result.reference_count == 63
     assert set(result.remote_actions) == {
-        "actions/cache",
         "actions/checkout",
         "actions/download-artifact",
         "actions/setup-go",

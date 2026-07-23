@@ -141,7 +141,7 @@ LIVE_ADMIN_TOKEN_FINGERPRINT="$(
   kubectl -n "$K8S_NAMESPACE" get secret loom-admin-secret \
     -o jsonpath='{.data.secrets\.toml}' \
     | base64 -d \
-    | uv run python -c 'import hashlib,sys,tomllib; token=tomllib.loads(sys.stdin.read())["admin"]["token"]; print(f"sha256:{hashlib.sha256(token.encode()).hexdigest()[:12]} len={len(token)}")'
+    | uv run --no-sync python -c 'import hashlib,sys,tomllib; token=tomllib.loads(sys.stdin.read())["admin"]["token"]; print(f"sha256:{hashlib.sha256(token.encode()).hexdigest()[:12]} len={len(token)}")'
 )"
 
 loom admin environment-state apply \
@@ -212,7 +212,7 @@ credentials, and explicit secret needles as `env:VAR`, `file:PATH`, or `-`
 sources; do not expand raw secret values into argv.
 
 ```bash
-uv run python scripts/staging_smoke_gate.py \
+uv run --no-sync python scripts/staging_smoke_gate.py \
   --server-url "$PUBLIC_URL" \
   --team-a-token env:TEAM_A_TOKEN \
   --team-b-token env:TEAM_B_TOKEN \
@@ -255,7 +255,7 @@ curl -fsS \
   "$PUBLIC_URL/api/v1/models" \
   | tee "$CANARY_DIR/02-preflight/provider-models.json"
 
-uv run python scripts/benchmark_reward_gate.py readiness \
+uv run --no-sync python scripts/benchmark_reward_gate.py readiness \
   --server-url "$PUBLIC_URL" \
   --token env:TEAM_A_TOKEN \
   | tee "$CANARY_DIR/02-preflight/catalog-readiness.txt"
@@ -430,7 +430,7 @@ loom eval batch debug "$CANARY_BATCH_ID" --format json \
 loom eval diagnose batch "$CANARY_BATCH_ID" --format json \
   | tee "$CANARY_DIR/06-terminal/batch-diagnosis-final.json"
 
-uv run python scripts/staging_smoke_gate.py \
+uv run --no-sync python scripts/staging_smoke_gate.py \
   --server-url "$PUBLIC_URL" \
   --team-a-token env:TEAM_A_TOKEN \
   --team-b-token env:TEAM_B_TOKEN \
@@ -454,12 +454,12 @@ uv run python scripts/staging_smoke_gate.py \
   --markdown-output "$CANARY_DIR/06-terminal/staging-smoke.md" \
   --json-output "$CANARY_DIR/06-terminal/staging-smoke.json"
 
-uv run python scripts/benchmark_reward_gate.py readiness \
+uv run --no-sync python scripts/benchmark_reward_gate.py readiness \
   --server-url "$PUBLIC_URL" \
   --token env:TEAM_A_TOKEN \
   | tee "$CANARY_DIR/06-terminal/benchmark-readiness.txt"
 
-uv run python scripts/benchmark_reward_gate.py sweep \
+uv run --no-sync python scripts/benchmark_reward_gate.py sweep \
   --server-url "$PUBLIC_URL" \
   --token env:TEAM_A_TOKEN \
   --batch-id "$CANARY_BATCH_ID" \

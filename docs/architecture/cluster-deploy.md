@@ -373,9 +373,9 @@ or library users do not pay for it:
 ```bash
 pip install "loom[cluster]"
 # or, in a uv-managed checkout:
-uv sync --extra cluster
+uv sync --locked --extra cluster
 # staging/production rollout runners also need catalog benchmark tooling:
-uv sync --extra cluster --extra rollout
+uv sync --locked --all-packages --extra cluster --extra rollout --python 3.11
 ```
 
 ### Read-only status inspector

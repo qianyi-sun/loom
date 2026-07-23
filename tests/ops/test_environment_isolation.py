@@ -183,11 +183,15 @@ def test_repository_checks_run_environment_isolation_tests() -> None:
     shards = root_job["strategy"]["matrix"]["include"]
     assert {shard["shard_index"] for shard in shards} == {0, 1}
     steps = root_job["steps"]
-    pytest_steps = [step for step in steps if "run" in step and "uv run pytest" in str(step["run"])]
+    pytest_steps = [
+        step
+        for step in steps
+        if "run" in step and "uv run --no-sync pytest" in str(step["run"])
+    ]
     assert any(
         "component_ownership.py test-paths --lane tests-root" in str(step["run"])
         and "--shard-index" in str(step["run"])
-        and 'uv run pytest "${test_paths[@]}"' in str(step["run"])
+        and 'uv run --no-sync pytest "${test_paths[@]}"' in str(step["run"])
         for step in pytest_steps
     )
 

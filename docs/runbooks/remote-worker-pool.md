@@ -535,7 +535,7 @@ Generate the secret-safe desired-vs-observed evidence before a production
 promotion:
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
@@ -561,7 +561,7 @@ pools, or read secrets.
 Preview a two-slot staging smoke lease before a rollout:
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py lease-staging \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
@@ -580,7 +580,7 @@ sanitized evidence:
 ```bash
 LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-staging-lease.toml"
 
-uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py lease-staging \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
@@ -606,7 +606,7 @@ retryable in evidence after the configured grace period; this repo helper does
 not cancel live work.
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py status \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py status \
   --manifest "$LEASE_MANIFEST" \
   --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
   --prod-pending-count "${PROD_PENDING_COUNT:-0}" \
@@ -648,7 +648,7 @@ are not represented by the prod-pressure counts. The report separates
 still active and what was released from the desired state:
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py drain-staging \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py drain-staging \
   --manifest "$LEASE_MANIFEST" \
   --observed-json "$ROLLOUT_DIR/worker-registrations.json" \
   --reason "prod pressure before release gate" \
@@ -662,7 +662,7 @@ idempotent: rerunning it keeps staging desired slots at zero and leaves prod slo
 on eligible hosts:
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py release-staging \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py release-staging \
   --manifest "$LEASE_MANIFEST" \
   --reason "staging smoke complete" \
   --apply \

@@ -92,11 +92,16 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-      - name: Install Python + deps
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
+      - name: Sync locked workspace
         run: |
-          uv venv .venv --python 3.11
-          uv pip install -e .
-          uv pip install -e packages/loom-benchmarks
+          uv sync --locked --all-packages --python 3.11
+          uv pip check --python .venv/bin/python
       - name: Validate publish gate configuration
         env:
           # Resolves from the `huggingface-publish` environment.
@@ -134,7 +139,7 @@ jobs:
             args+=(--limit "$INPUT_LIMIT")
           fi
 
-          if .venv/bin/python -m loom_benchmark_tool publish "${args[@]}"; then
+          if uv run --no-sync python -m loom_benchmark_tool publish "${args[@]}"; then
             {
               echo ""
               echo "### Publish result"

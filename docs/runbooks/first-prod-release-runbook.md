@@ -69,6 +69,16 @@ Stop condition: `CANDIDATE_SHA` and `PROD_RELEASE_SHA` must be 40-character
 lowercase Git SHAs. The live release owner must choose a new immutable
 `PROD_TAG`; never reuse or force-move a published tag.
 
+From the exact clean candidate checkout, materialize and verify the reviewed
+workspace lock once before any runbook command. Every command below uses
+`--no-sync`; a missing or stale environment therefore stops instead of
+resolving different dependencies during release evidence collection.
+
+```bash
+uv sync --locked --all-packages --extra cluster --extra rollout --extra dev --python 3.11
+uv pip check --python .venv/bin/python
+```
+
 ## No-Secret Non-Production Dry Run
 
 This No-secret non-production dry run covers First-prod bootstrap, Staging validation lease, Frontend environment checks, Production release, Rollback preparation, and Emergency staging drain.
@@ -87,7 +97,7 @@ git fetch origin dev main --tags
 git rev-parse --verify origin/dev
 git tag -l "$PROD_TAG"
 
-uv run python scripts/validate_environment_isolation.py \
+uv run --no-sync python scripts/validate_environment_isolation.py \
   --profiles-dir deploy/environments \
   --workflow .github/workflows/deploy-environment.yml \
   --dry-run-artifact "$ROLLOUT_DIR/environment-isolation-dry-run.json"
@@ -120,7 +130,7 @@ shared physical capacity, staging/dev owns zero borrowed slots, and unreachable
 hosts stay out of both pools.
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py status \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py status \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
@@ -173,7 +183,7 @@ does not mutate live state.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py lease-staging \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
@@ -213,7 +223,7 @@ evidence, not live worker state.
 ```bash
 export LEASE_MANIFEST="$ROLLOUT_DIR/worker-capacity-staging-lease.toml"
 
-uv run python scripts/ops/worker_capacity_manifest.py lease-staging \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py lease-staging \
   --manifest deploy/worker-capacity/prod-first.toml \
   --var PROD_IMAGE_TAG="$PROD_IMAGE_TAG" \
   --var PROD_SOURCE_COMMIT="$PROD_RELEASE_SHA" \
@@ -250,7 +260,7 @@ runner rejects any attempt to add it back through `--hosts`; use the 14-host
 set below only from the fixed merged candidate. Re-admission is a separate PR.
 
 ```bash
-uv run python scripts/ops/staging_validation_capacity_runner.py \
+uv run --no-sync python scripts/ops/staging_validation_capacity_runner.py \
   --cp-url http://127.0.0.1:18081 \
   --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
   --environment staging \
@@ -306,7 +316,7 @@ validation, not the automatic production activation path.
 `LIVE PROD + STAGING AUTHORITY REQUIRED`
 
 ```bash
-uv run python scripts/ops/prod_pressure_worker_control.py \
+uv run --no-sync python scripts/ops/prod_pressure_worker_control.py \
   --prod-cp-url http://127.0.0.1:28081 \
   --prod-admin-token file:/path/to/prod-admin-token \
   --staging-cp-url http://127.0.0.1:18081 \
@@ -332,7 +342,7 @@ fenced until each node-agent confirms its active Compose worker again.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py status \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py status \
   --manifest "$LEASE_MANIFEST" \
   --prod-pending-count "${PROD_PENDING_COUNT:-3}" \
   --prod-active-count "${PROD_ACTIVE_COUNT:-0}" \
@@ -367,7 +377,7 @@ that are not represented by the prod-pressure counts.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py drain-staging \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py drain-staging \
   --manifest "$LEASE_MANIFEST" \
   --reason "prod pressure before release gate" \
   --apply \
@@ -406,7 +416,7 @@ idempotent and should be rerun until evidence shows staging slots are zero.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/worker_capacity_manifest.py release-staging \
+uv run --no-sync python scripts/ops/worker_capacity_manifest.py release-staging \
   --manifest "$LEASE_MANIFEST" \
   --reason "staging smoke complete" \
   --apply \
@@ -442,7 +452,7 @@ or local ingress that serves both `/prod` and `/dev` runtime config files.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/frontend_route_smoke.py \
+uv run --no-sync python scripts/ops/frontend_route_smoke.py \
   --route production="${LOCAL_ORIGIN:-http://127.0.0.1:4173}/prod=${LOCAL_ORIGIN:-http://127.0.0.1:4173}/prod/api" \
   --route development="${LOCAL_ORIGIN:-http://127.0.0.1:4173}/dev=${LOCAL_ORIGIN:-http://127.0.0.1:4173}/dev/api" \
   --json
@@ -453,13 +463,13 @@ For release evidence against canonical public routes:
 `READ-ONLY LIVE`
 
 ```bash
-uv run python scripts/ops/frontend_route_smoke.py \
+uv run --no-sync python scripts/ops/frontend_route_smoke.py \
   --route production=https://yylx.world/prod=https://yylx.world/prod/api \
   --route staging=https://yylx.world/staging=https://yylx.world/staging/api \
   --json \
   > "$ROLLOUT_DIR/frontend-route-smoke.json"
 
-uv run python scripts/ops/frontend_security_headers.py \
+uv run --no-sync python scripts/ops/frontend_security_headers.py \
   --route production=https://yylx.world/prod \
   --route staging=https://yylx.world/staging \
   --json \
@@ -548,7 +558,7 @@ MinIO tools, Kubernetes commands, worker SSH, or hidden admin commands.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python scripts/ops/operator_free_user_e2e_gate.py validate \
+uv run --no-sync python scripts/ops/operator_free_user_e2e_gate.py validate \
   --evidence "$ROLLOUT_DIR/operator-free-user-e2e.json" \
   --output-json "$ROLLOUT_DIR/operator-free-user-e2e-report.json"
 ```
@@ -633,7 +643,7 @@ operator-free user E2E/raw-delivery status, and rollback evidence.
 `DRY-RUN SAFE`
 
 ```bash
-uv run python - <<'PY'
+uv run --no-sync python - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -1049,7 +1059,7 @@ export PREVIOUS_PROD_IMAGE_TAG="${PREVIOUS_PROD_IMAGE_TAG:-release-prev-good}"
 export PREVIOUS_PROD_IMAGE_DIGEST="${PREVIOUS_PROD_IMAGE_DIGEST:-ghcr.io/qianyi-sun/loom-service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
 export PREVIOUS_RELEASE_GATE_RUN_ID="${PREVIOUS_RELEASE_GATE_RUN_ID:-1234567890}"
 
-uv run python - <<'PY'
+uv run --no-sync python - <<'PY'
 import json
 import os
 from pathlib import Path
