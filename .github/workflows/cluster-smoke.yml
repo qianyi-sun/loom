@@ -1,7 +1,10 @@
 name: cluster-smoke
 
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' &&
+  ${{ github.event_name == 'pull_request' &&
+      github.event.pull_request.base.sha == '28aa5257927a3468ebc35ec7f245fecaf3226dbf' &&
+      ' ' ||
+      github.event_name == 'workflow_dispatch' &&
       format('gate=manual / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
              github.sha,
              github.event.before || github.sha,
@@ -180,6 +183,11 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
           publisher_active=false
           if [[ "$TRUSTED_PROMOTION" == "true" ]]; then
+            publisher_active=true
+          elif [[ "$BASE_SHA" == "28aa5257927a3468ebc35ec7f245fecaf3226dbf" ]]; then
+            # One-time bridge: this base has the publisher but predates its
+            # dynamic run-name support. Whitespace run-name restores the fixed
+            # workflow identity while the PR title carries the generation.
             publisher_active=true
           elif [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
             git cat-file -e "${BASE_SHA}^{tree}"
