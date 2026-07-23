@@ -228,7 +228,11 @@ def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
             "pull-requests": "read",
         }
         checkout = bootstrap["steps"][0]
-        assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
+        assert checkout["with"] == {
+            "ref": "${{ github.event.pull_request.head.sha }}",
+            "fetch-depth": 1,
+            "persist-credentials": False,
+        }
         publish = bootstrap["steps"][1]
         assert publish["env"]["AUTHORITATIVE_CONTEXT"] == protected_name
         assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_GATE_RESULT"] == (
@@ -240,6 +244,7 @@ def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
         assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER"] == (
             "${{ github.event.pull_request.number }}"
         )
+        assert publish["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
 
 
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
