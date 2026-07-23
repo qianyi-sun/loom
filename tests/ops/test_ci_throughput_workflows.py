@@ -182,7 +182,7 @@ def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> N
             in fragment
         )
         assert '"${BASE_SHA}:.github/workflows/authoritative-gates.yml"' in fragment
-        assert "publisher-contract: dynamic-run-name-v1" in fragment
+        assert "publisher-contract: dynamic-run-name-v2" in fragment
         assert "HEAD_SHA" not in fragment
 
     assert len(bootstrap_fragments) == 1

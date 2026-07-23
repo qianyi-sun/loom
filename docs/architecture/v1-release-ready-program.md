@@ -125,9 +125,12 @@ authoritative replacement.
 
 The implementation bootstraps without a protection gap: until the publisher is
 present on the target base, source workflows keep their legacy protected names.
-When an already-completed publisher CheckRun is reopened, its PATCH explicitly
-clears both `conclusion` and `completed_at`; GitHub otherwise retains those
-terminal fields during a partial update. The one-time upgrade from base
+When an already-completed publisher CheckRun is reopened, its PATCH changes the
+status to `in_progress` and omits `conclusion` and `completed_at`; GitHub's
+update schema rejects JSON `null` for those terminal fields. Publisher contract
+v2 records that live-verified behavior. Bases that contain only v1 keep the
+legacy protected source names until v2 merges, so a broken publisher cannot
+strand its own repair. The earlier one-time upgrade from base
 `28aa5257927a3468ebc35ec7f245fecaf3226dbf` uses GitHub's whitespace
 `run-name` fallback so that the pre-fix publisher still sees the fixed workflow
 identity while the PR title carries a generation marker ordered after the
