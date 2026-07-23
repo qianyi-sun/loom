@@ -217,7 +217,6 @@ def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
         assert bootstrap["needs"] == [gate_id]
         assert "github.event_name == 'pull_request'" in condition
         assert "!github.event.pull_request.draft" in condition
-        assert "github.event.pull_request.number == 932" in condition
         assert "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca" in condition
         assert "codex/833-authoritative-gates-acceptance" in condition
         assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
@@ -237,6 +236,9 @@ def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
         )
         assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA"] == (
             "${{ github.event.pull_request.head.sha }}"
+        )
+        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER"] == (
+            "${{ github.event.pull_request.number }}"
         )
 
 

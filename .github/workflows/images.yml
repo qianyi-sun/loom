@@ -509,7 +509,6 @@ jobs:
       always() &&
       github.event_name == 'pull_request' &&
       !github.event.pull_request.draft &&
-      github.event.pull_request.number == 932 &&
       github.event.pull_request.base.sha == 'cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca' &&
       github.event.pull_request.head.ref == 'codex/833-authoritative-gates-acceptance' &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -533,6 +532,7 @@ jobs:
           AUTHORITATIVE_CONTEXT: images-gate
           AUTHORITATIVE_BOOTSTRAP_GATE_RESULT: ${{ needs.images-gate.result }}
           AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA: ${{ github.event.pull_request.head.sha }}
+          AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER: ${{ github.event.pull_request.number }}
           AUTHORITATIVE_BOOTSTRAP_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-

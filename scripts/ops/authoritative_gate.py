@@ -17,7 +17,6 @@ GITHUB_ACTIONS_APP_ID = 15368
 AUTHORITATIVE_WORKFLOW_PATH = ".github/workflows/authoritative-gates.yml"
 EXTERNAL_ID_PREFIX = "loom-authoritative-gate:"
 FULL_TITLE_PREFIX = "gate=full /"
-V1_BOOTSTRAP_PULL_NUMBER = 932
 V1_BOOTSTRAP_BASE_SHA = "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca"
 V1_BOOTSTRAP_HEAD_REF = "codex/833-authoritative-gates-acceptance"
 
@@ -2594,16 +2593,25 @@ def _handle_v1_bootstrap_repair(
     workflow_sha = _string(event.get("workflow_sha"))
     gate_result = _string(event.get("gate_result"))
     details_url = _string(event.get("details_url"))
+    raw_pull_number = event.get("pull_number")
+    if isinstance(raw_pull_number, bool) or not isinstance(raw_pull_number, (int, str)):
+        raise PublisherError("v1 bootstrap pull number is invalid")
+    try:
+        pull_number = int(raw_pull_number)
+    except (TypeError, ValueError) as exc:
+        raise PublisherError("v1 bootstrap pull number is invalid") from exc
+    if pull_number <= 0:
+        raise PublisherError("v1 bootstrap pull number is invalid")
     if gate_result not in {"success", "failure", "cancelled", "skipped"}:
         raise PublisherError(f"invalid v1 bootstrap gate result: {gate_result or 'missing'}")
 
-    pull = client.get_pull_request(V1_BOOTSTRAP_PULL_NUMBER)
+    pull = client.get_pull_request(pull_number)
     head = pull.get("head")
     base = pull.get("base")
     head_sha = _string(head.get("sha")) if isinstance(head, Mapping) else ""
     base_sha = _string(base.get("sha")) if isinstance(base, Mapping) else ""
     if not (
-        pull.get("number") == V1_BOOTSTRAP_PULL_NUMBER
+        pull.get("number") == pull_number
         and pull.get("state") == "open"
         and not bool(pull.get("draft"))
         and head_sha
@@ -2614,8 +2622,9 @@ def _handle_v1_bootstrap_repair(
         and base_sha == V1_BOOTSTRAP_BASE_SHA
     ):
         raise PublisherError("v1 bootstrap is not bound to the exact repair pull request")
+    _ensure_unique_pull_authority(client, pull_number=pull_number, head_sha=head_sha)
 
-    authority_events = _authority_events(client.list_issue_events(V1_BOOTSTRAP_PULL_NUMBER))
+    authority_events = _authority_events(client.list_issue_events(pull_number))
     generation = _live_authority_generation(pull, authority_events)
     if generation is None or not _generation_matches_live_pull(generation, pull):
         raise PublisherError("v1 bootstrap could not establish the live repair generation")
@@ -2685,6 +2694,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             event = {
                 "event_name": "bootstrap_v1_repair",
                 "workflow_sha": os.environ.get("AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA", ""),
+                "pull_number": os.environ.get("AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER", ""),
                 "gate_result": bootstrap_result,
                 "details_url": os.environ.get("AUTHORITATIVE_BOOTSTRAP_DETAILS_URL", ""),
             }

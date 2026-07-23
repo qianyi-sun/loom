@@ -11,7 +11,6 @@ from scripts.ops.authoritative_gate import (
     RELEVANT_LABEL_ORDER,
     V1_BOOTSTRAP_BASE_SHA,
     V1_BOOTSTRAP_HEAD_REF,
-    V1_BOOTSTRAP_PULL_NUMBER,
     DuplicateCustomCheckError,
     Generation,
     PublisherError,
@@ -455,17 +454,19 @@ def test_completed_check_is_reset_in_place_for_a_new_same_head_generation() -> N
 
 
 def test_exact_v1_bootstrap_publishes_aggregated_source_success() -> None:
+    bootstrap_pull = 933
+
     class BootstrapClient(FakeGitHubClient):
         def get_pull_request(self, number: int) -> Mapping[str, Any]:
-            assert number == V1_BOOTSTRAP_PULL_NUMBER
+            assert number == bootstrap_pull
             return deepcopy(self.pull)
 
         def list_issue_events(self, number: int) -> Sequence[Mapping[str, Any]]:
-            assert number == V1_BOOTSTRAP_PULL_NUMBER
+            assert number == bootstrap_pull
             return deepcopy(self.issue_events)
 
     client = BootstrapClient()
-    client.pull["number"] = V1_BOOTSTRAP_PULL_NUMBER
+    client.pull["number"] = bootstrap_pull
     client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
     client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
     spec = GATE_SPECS[0]
@@ -484,6 +485,7 @@ def test_exact_v1_bootstrap_publishes_aggregated_source_success() -> None:
         {
             "event_name": "bootstrap_v1_repair",
             "workflow_sha": HEAD,
+            "pull_number": str(bootstrap_pull),
             "gate_result": "success",
             "details_url": "https://github.com/qianyi-sun/loom/actions/runs/1",
         },
@@ -501,13 +503,15 @@ def test_exact_v1_bootstrap_publishes_aggregated_source_success() -> None:
 
 
 def test_v1_bootstrap_rejects_a_workflow_sha_outside_the_repair_head() -> None:
+    bootstrap_pull = 933
+
     class BootstrapClient(FakeGitHubClient):
         def get_pull_request(self, number: int) -> Mapping[str, Any]:
-            assert number == V1_BOOTSTRAP_PULL_NUMBER
+            assert number == bootstrap_pull
             return deepcopy(self.pull)
 
     client = BootstrapClient()
-    client.pull["number"] = V1_BOOTSTRAP_PULL_NUMBER
+    client.pull["number"] = bootstrap_pull
     client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
     client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
 
@@ -516,6 +520,7 @@ def test_v1_bootstrap_rejects_a_workflow_sha_outside_the_repair_head() -> None:
             {
                 "event_name": "bootstrap_v1_repair",
                 "workflow_sha": "c" * 40,
+                "pull_number": bootstrap_pull,
                 "gate_result": "success",
             },
             client,
