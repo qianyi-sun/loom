@@ -280,8 +280,10 @@ declaration order is documentation, not precedence.
 
 Route acceptance has both HTTP and browser layers. The HTTP smoke validates
 canonical redirects, runtime metadata, generated asset URLs, MIME types, and
-fail-closed path boundaries. Staging then launches the lockfile-pinned
-Playwright Chromium in a fresh logged-out context, enters the exact prefix,
+fail-closed path boundaries. In particular, nested pseudo-asset paths are
+broken relative-URL resolutions rather than SPA routes and must return `404`
+instead of the HTML shell. Staging then launches the lockfile-pinned Playwright
+Chromium in a fresh logged-out context, enters the exact prefix,
 slash-canonical URL, and supported deep SPA routes directly, and reloads each
 page. React marks the root only after its tree commits; the browser gate waits
 for that marker, an explicit settled anonymous/authenticated state, a non-empty

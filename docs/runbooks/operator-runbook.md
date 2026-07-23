@@ -5113,10 +5113,13 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    Both route documents must report the expected `environment`,
    `environmentLabel`, `routePath`, `apiBase`, and `apiRouteBase`; the response
    must be `no-store`. Production labels must not contain beta wording. The
-   security report must pass exact singleton CSP, `nosniff`, referrer,
-   permissions, and HSTS checks on 200, 308, and wrong-asset 404 responses; it
-   records no headers or response bodies. Staging CI separately proves the
-   web-origin policy on a restored, disposable-pod 500.
+   route smoke also requires a nested pseudo-asset probe such as
+   `/batches/assets/loom-route-smoke-nonexistent.js` to return `404`; a
+   `200 text/html` SPA fallback there fails the gate. The security report must
+   pass exact singleton CSP, `nosniff`, referrer, permissions, and HSTS checks
+   on 200, 308, and wrong-asset 404 responses; it records no headers or
+   response bodies. Staging CI separately proves the web-origin policy on a
+   restored, disposable-pod 500.
    Then prove that the built bundle actually mounts in a fresh logged-out
    Chromium context on the exact, slash-canonical, and supported deep routes,
    both on direct entry and after refresh:
