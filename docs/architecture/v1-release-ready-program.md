@@ -164,6 +164,12 @@ GitHub auto-merge blocked. A permissionless `pull_request_target` suite anchor
 therefore completes that carrier suite successfully without publishing or
 satisfying any protected context itself.
 
+Only the trusted `authoritative-gates` workflow may invoke the publisher or
+receive `checks: write`. The CI, images, cluster-smoke, and staging-smoke source
+workflows report attempt results without CheckRun mutation authority; contract
+tests enforce that separation so a candidate-side bootstrap cannot race the
+default-branch publisher.
+
 Changes to this publisher require a disposable pull-request acceptance pass in
 addition to contract tests. Open the probe as Draft, make it Ready with one
 deliberately failing repository test, and confirm the current authoritative

@@ -349,6 +349,23 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     )
 
 
+def test_only_authoritative_workflow_can_write_protected_checkruns() -> None:
+    for workflow_path in GATE_CONTRACTS:
+        workflow = _workflow(workflow_path)
+        workflow_source = (REPO_ROOT / workflow_path).read_text(encoding="utf-8")
+
+        assert "scripts/ops/authoritative_gate.py" not in workflow_source
+        assert "AUTHORITATIVE_CONTEXT" not in workflow_source
+        workflow_permissions = workflow.get("permissions", {})
+        assert isinstance(workflow_permissions, dict)
+        assert workflow_permissions.get("checks") != "write"
+
+        for job_name, job in workflow["jobs"].items():
+            effective_permissions = job.get("permissions", workflow_permissions)
+            assert isinstance(effective_permissions, dict), job_name
+            assert effective_permissions.get("checks") != "write", job_name
+
+
 def _gate_script(workflow_path: str, gate_id: str) -> str:
     workflow = _workflow(workflow_path)
     gate_step = next(
