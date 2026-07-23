@@ -375,7 +375,8 @@ class PreflightRuntimeSources:
                 self.baseline_probe_factory(mutation_epoch),
                 environment=self.config.environment,
                 namespace=self.config.namespace,
-                route=self.baseline_probe_route,
+                route=self.route,
+                baseline_probe_route=self.baseline_probe_route,
                 mutation_epoch=mutation_epoch,
             )
             return tier0, tier1, tier2
