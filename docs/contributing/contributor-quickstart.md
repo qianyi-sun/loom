@@ -238,6 +238,28 @@ the four protected contexts. Drafts and unrelated metadata events use only a
 `*-filtered` context. No label, author, reviewer, or merge coordinator grants
 gate authority; validation labels only add work to the path-inferred plan.
 
+The protected names are owned by the default-branch-trusted authoritative-gate publisher, not
+by an individual validation attempt. Once the publisher is present on the PR's
+base, CI, image, cluster, and staging workflows report `*-attempt` results. A
+relevant same-head event returns the four authoritative checks to `in_progress`
+as soon as the publisher observes it; only the newest full generation may finalize them. Superseded
+attempt cancellation is ignored, while a failure, timeout, cancellation, or
+missing aggregate in the newest generation remains red. The generation marker
+captures the PR identity and complete validation-relevant label snapshot; the
+publisher binds it to an ordered validation-event epoch. The publisher validates
+live state and the exact run attempt before and after a terminal update; if authority
+changed during the CheckRun write, the same check is returned to `in_progress`.
+Mask-aware event occurrences cover observable add/remove sequences whose final
+labels match. Comments and unrelated labels do not replace the epoch or share
+the authoritative source concurrency lane. Do not use an empty or
+tree-identical commit to repair a check rollup.
+
+The first same-repository `dev`-to-`main` promotion also uses this publisher
+even if `main` predates the publisher file; all other bootstrap PRs keep the
+legacy names until their target base contains the trusted workflow. Branch
+push aggregates use `*-push`, so they never duplicate a protected name on a
+later promotion PR that points at the same commit.
+
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
 network-policy + full trial e2e + Daytona live). CI selects integration for
