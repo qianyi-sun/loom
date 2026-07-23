@@ -23,6 +23,7 @@ import socket
 import stat
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1503,8 +1504,8 @@ def _materialize_env_file(
     }
 
 
-def _git_stdout(argv: list[str]) -> str:
-    result = run_captured(argv)
+def _git_stdout(argv: list[str], *, env: dict[str, str] | None = None) -> str:
+    result = run_captured(argv, env=env)
     if result.returncode != 0:
         raw_message = (result.stderr or result.stdout).strip() or (
             f"{' '.join(argv)} exited {result.returncode}"
@@ -2481,17 +2482,49 @@ def _clone_repo_checkout(
     tmp_dir: Path,
     resolved_sha: str,
 ) -> None:
-    _git_stdout(
-        [
-            "git",
-            "--no-replace-objects",
-            "clone",
-            "--quiet",
-            "--no-hardlinks",
-            str(source_repo),
-            str(tmp_dir),
-        ]
-    )
+    source_git = source_repo / ".git"
+    source_git_value = str(source_git)
+    if (
+        not source_repo.is_absolute()
+        or ".." in source_repo.parts
+        or any(character in source_git_value for character in ("\x00", "\n", "\r"))
+    ):
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner repository source authority path is unsafe",
+        )
+    escaped_source_git = source_git_value.replace("\\", "\\\\").replace('"', '\\"')
+    with tempfile.TemporaryDirectory(prefix="loom-candidate-source-git-") as raw_config_root:
+        config_path = Path(raw_config_root) / "config"
+        config_path.write_text(
+            f'[safe]\n\tdirectory = "{escaped_source_git}"\n',
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+        clone_environment = {
+            "GIT_ALLOW_PROTOCOL": "file",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_GLOBAL": str(config_path),
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_PROTOCOL_FROM_USER": "0",
+            "HOME": "/nonexistent",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        }
+        _git_stdout(
+            [
+                "git",
+                "--no-replace-objects",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                str(source_repo),
+                str(tmp_dir),
+            ],
+            env=clone_environment,
+        )
     _git_stdout(
         [
             "git",
