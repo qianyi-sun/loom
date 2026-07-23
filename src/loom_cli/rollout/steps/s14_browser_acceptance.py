@@ -86,8 +86,11 @@ def _browser_route(ctx: RolloutContext) -> str:
         route = "/" + route
     route = route.rstrip("/")
     rendered = f"https://{config.ingress_host}{route}"
-    if rendered != "https://yylx.world/dev":
-        raise ValueError("browser acceptance requires the canonical staging route")
+    # The route is derived from the cluster config's frontend_route_path (e.g.
+    # /staging after #897); require a configured host and non-root path rather
+    # than a hardcoded /dev, so it tracks the env-identity/#894 route.
+    if not config.ingress_host or route in ("", "/"):
+        raise ValueError("browser acceptance requires a configured staging route")
     return rendered
 
 
