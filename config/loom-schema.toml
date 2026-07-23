@@ -1090,6 +1090,11 @@ python_type = "str"
 default     = ""
 description = "Public path prefix prepended by the SPA API client before /api/v1. Must match frontend_route_path for protected prod/dev routes."
 
+[render_config.frontend_route_path_from]
+python_type = "str"
+default     = ""
+description = "Predecessor SPA route prefix during a route migration (e.g. \"/dev\" while migrating to \"/staging\"). When set and different from frontend_route_path, the rollout preflight probes the live service at this predecessor route (the live env has not moved yet) while the driver moves the route to frontend_route_path and the post-deploy final gate validates the target. Empty (default) means no route transition. Preflight-only: not consumed by the manifest templates."
+
 [render_config.postgres_image]
 python_type = "str"
 default     = "postgres:16"

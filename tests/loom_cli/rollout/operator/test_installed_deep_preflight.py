@@ -138,6 +138,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         browser_run=command,
         baseline_probe_factory=lambda _epoch: {},
         route="https://staging.example.invalid/dev",
+        baseline_probe_route="https://staging.example.invalid/dev",
         rehearsal_factory=lambda *_args: (
             lambda *_inner: {},
             lambda *_inner: ("rehearsal-exact", "9" * 64),
