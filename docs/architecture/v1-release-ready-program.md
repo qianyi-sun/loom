@@ -97,6 +97,50 @@ events report distinct filtered contexts. Runtime Markdown, executable files und
 non-document paths are not docs-only; unknown runtime paths select every heavy
 lane until a canonical owner is declared.
 
+A default-branch-trusted publisher owns exactly one authoritative CheckRun for each of
+the four protected names on a candidate head. Validation workflows publish
+generation-scoped `*-attempt` aggregates. As soon as the publisher observes a
+relevant same-head event, it returns all four authoritative checks to
+`in_progress`; only the newest full generation may finalize its matching check. Superseded attempts
+cannot overwrite a newer generation; the current generation fails closed on a
+failed, timed-out, cancelled, skipped, or missing aggregate. Each generation
+also carries a fixed-order six-bit snapshot of every validation-relevant label.
+The marker also carries the PR number (`none` for merge groups and non-PR runs),
+and the controller binds it to the latest ordered GitHub issue-event ID for
+validation-changing PR activity. A mask-aware source occurrence distinguishes
+observable add/remove ABA sequences even when their final label snapshot is
+identical. Once every trusted occurrence is represented, byte-identical markers
+form one generation and the highest run ID/attempt is its replacement
+execution. A relevant trusted webhook resets an existing terminal check before
+fallible history reads; a shorter history snapshot cannot lower the persisted
+event watermark. Before and immediately after publishing a terminal result,
+the controller re-reads the live PR, event epoch, exact run attempt, and latest
+source-run inventory. If authority changed across the non-atomic CheckRun API
+write, it compensates by returning that same CheckRun to `in_progress`.
+Comments and unrelated labels are excluded from the epoch and do not
+invalidate an otherwise equivalent generation. Relevant source runs and
+background metadata runs also use separate concurrency lanes, so GitHub's
+single pending slot cannot let an unrelated filtered run evict the
+authoritative replacement.
+
+The implementation bootstraps without a protection gap: until the publisher is
+present on the target base, source workflows keep their legacy protected names.
+The exact same-repository `dev`-to-`main` promotion is the one exception because
+the trusted publisher already lives on the default `dev` branch. Merge-group
+heads use the same publisher contract. Push and manual runs report distinct
+`*-push` and `*-manual` aggregate names so a `dev` push check cannot collide
+with the protected custom check on a later `dev`-to-`main` promotion head. Push
+workflow-run events and non-authoritative workflow ID/name pairs are also
+rejected by the publisher. Each head/context pair has one publisher lane and
+never cancels its in-progress invocation. This matches the SHA-scoped CheckRun
+identity and prevents concurrent events from racing the same external ID;
+delayed invocations for an old head never write the live head. Pending
+invocations may coalesce, so every invocation derives authority from live PR
+state, ordered issue events, and the exact source-run attempt instead of relying
+on delivery order. If one head is associated with multiple open PRs, the
+publisher fails closed because one SHA-level check cannot represent two PR
+metadata generations.
+
 Manual dispatch remains available, but aggregate jobs report
 `repository-checks-manual`, `images-gate-manual`,
 `cluster-smoke-gate-manual`, and `staging-smoke-gate-manual`. Those names
