@@ -182,7 +182,7 @@ def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> N
             in fragment
         )
         assert '"${BASE_SHA}:.github/workflows/authoritative-gates.yml"' in fragment
-        assert "publisher-contract: dynamic-run-name-v1" in fragment
+        assert "publisher-contract: dynamic-run-name-v[12]" in fragment
         assert "HEAD_SHA" not in fragment
 
     assert len(bootstrap_fragments) == 1
@@ -206,6 +206,64 @@ def test_source_gate_names_switch_only_after_base_publisher_is_active() -> None:
             f"'{protected_name}-filtered' "
             "}}"
         )
+
+
+def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
+    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        workflow = _workflow(workflow_path)
+        bootstrap = workflow["jobs"]["bootstrap-authoritative-v2"]
+        condition = _normalized_expression(bootstrap["if"])
+
+        assert bootstrap["needs"] == [gate_id]
+        assert "github.event_name == 'pull_request'" in condition
+        assert "!github.event.pull_request.draft" in condition
+        assert '["opened","reopened","ready_for_review","synchronize"]' in condition
+        assert '["labeled","unlabeled"]' in condition
+        assert (
+            '["ci:integration","ci:integration-docker","ci:images","cluster-smoke",'
+            '"staging-smoke","ci:coverage-summary"]'
+        ) in condition
+        assert "github.event.label.name" in condition
+        assert "github.event.action == 'edited'" in condition
+        assert "github.event.changes.base != null" in condition
+        assert "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca" in condition
+        assert "codex/833-authoritative-gates-acceptance" in condition
+        assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
+        assert bootstrap["permissions"] == {
+            "actions": "read",
+            "checks": "write",
+            "contents": "read",
+            "issues": "read",
+            "pull-requests": "read",
+        }
+        checkout = bootstrap["steps"][0]
+        assert checkout["with"] == {
+            "ref": "${{ github.event.pull_request.head.sha }}",
+            "fetch-depth": 1,
+            "persist-credentials": False,
+        }
+        publish = bootstrap["steps"][1]
+        assert publish["env"]["AUTHORITATIVE_CONTEXT"] == protected_name
+        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_GATE_RESULT"] == (
+            f"${{{{ needs.{gate_id}.result }}}}"
+        )
+        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA"] == (
+            "${{ github.event.pull_request.head.sha }}"
+        )
+        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER"] == (
+            "${{ github.event.pull_request.number }}"
+        )
+        if workflow_path == ".github/workflows/cluster-smoke.yml":
+            assert (
+                publish["env"]["AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES"]
+                == "true"
+            )
+        else:
+            assert (
+                "AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES"
+                not in publish["env"]
+            )
+        assert publish["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
 
 
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:

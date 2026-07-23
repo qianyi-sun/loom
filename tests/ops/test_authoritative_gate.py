@@ -9,6 +9,8 @@ import pytest
 from scripts.ops.authoritative_gate import (
     GATE_SPECS,
     RELEVANT_LABEL_ORDER,
+    V1_BOOTSTRAP_BASE_SHA,
+    V1_BOOTSTRAP_HEAD_REF,
     DuplicateCustomCheckError,
     Generation,
     PublisherError,
@@ -119,13 +121,17 @@ class FakeGitHubClient:
         return deepcopy(check)
 
     def update_check_run(self, check_run_id: int, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        for checks in self.checks.values():
-            for check in checks:
+        for context, checks in list(self.checks.items()):
+            for index, check in enumerate(checks):
                 if check["id"] == check_run_id:
                     check.update(deepcopy(dict(payload)))
                     if payload.get("status") == "in_progress":
                         check.pop("conclusion", None)
                         check.pop("completed_at", None)
+                    new_context = str(check["name"])
+                    if new_context != context:
+                        checks.pop(index)
+                        self.checks.setdefault(new_context, []).append(check)
                     self.updated.append((check_run_id, deepcopy(dict(payload))))
                     return deepcopy(check)
         raise AssertionError(f"unknown check id {check_run_id}")
@@ -407,7 +413,7 @@ def test_generation_parser_rejects_invalid_pull_identity(invalid_pull: str) -> N
     assert parse_full_generation(malformed) is None
 
 
-def test_completed_check_is_reset_in_place_for_a_new_same_head_generation() -> None:
+def test_completed_check_is_neutralized_before_a_new_same_head_generation() -> None:
     client = FakeGitHubClient()
     original_generation = generation()
     seed_invalidation(client, original_generation)
@@ -439,16 +445,153 @@ def test_completed_check_is_reset_in_place_for_a_new_same_head_generation() -> N
     assert result.outcome == "in_progress"
     assert len(client.checks[GATE_SPECS[0].context]) == 1
     reset_check = client.checks[GATE_SPECS[0].context][0]
-    assert reset_check["id"] == original_check_id
+    assert reset_check["id"] != original_check_id
     assert reset_check["status"] == "in_progress"
     assert "conclusion" not in reset_check
-    reopen_payload = next(
+    superseded_payload = next(
         payload
         for check_id, payload in reversed(client.updated)
-        if check_id == original_check_id and payload.get("status") == "in_progress"
+        if check_id == original_check_id
+        and payload.get("status") == "completed"
+        and payload.get("conclusion") == "neutral"
     )
-    assert reopen_payload["conclusion"] is None
-    assert reopen_payload["completed_at"] is None
+    assert superseded_payload["name"] == f"{GATE_SPECS[0].context}-superseded"
+    assert "completed_at" in superseded_payload
+    superseded_check = client.checks[f"{GATE_SPECS[0].context}-superseded"][0]
+    assert superseded_check["id"] == original_check_id
+    assert superseded_check["conclusion"] == "neutral"
+
+
+def test_exact_v1_bootstrap_publishes_aggregated_source_success() -> None:
+    bootstrap_pull = 933
+
+    class BootstrapClient(FakeGitHubClient):
+        def get_pull_request(self, number: int) -> Mapping[str, Any]:
+            assert number == bootstrap_pull
+            return deepcopy(self.pull)
+
+        def list_issue_events(self, number: int) -> Sequence[Mapping[str, Any]]:
+            assert number == bootstrap_pull
+            return deepcopy(self.issue_events)
+
+    client = BootstrapClient()
+    client.pull["number"] = bootstrap_pull
+    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
+    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
+    spec = GATE_SPECS[0]
+    client.checks[spec.context] = [
+        {
+            "id": 900,
+            "name": spec.context,
+            "external_id": spec.external_id(repository=REPOSITORY, head_sha=HEAD),
+            "app": {"id": 15368},
+            "status": "completed",
+            "conclusion": "failure",
+        }
+    ]
+
+    result = process_event(
+        {
+            "event_name": "bootstrap_v1_repair",
+            "workflow_sha": HEAD,
+            "pull_number": str(bootstrap_pull),
+            "gate_result": "success",
+            "details_url": "https://github.com/qianyi-sun/loom/actions/runs/1",
+        },
+        client,
+        context=spec.context,
+    )
+
+    assert result.outcome == "success"
+    assert result.contexts == (spec.context,)
+    assert len(client.checks[spec.context]) == 1
+    repaired = client.checks[spec.context][0]
+    assert repaired["id"] == 900
+    assert repaired["status"] == "completed"
+    assert repaired["conclusion"] == "success"
+
+
+def test_exact_cluster_bootstrap_neutralizes_only_publisher_job_failures() -> None:
+    bootstrap_pull = 933
+
+    class BootstrapClient(FakeGitHubClient):
+        def get_pull_request(self, number: int) -> Mapping[str, Any]:
+            assert number == bootstrap_pull
+            return deepcopy(self.pull)
+
+        def list_issue_events(self, number: int) -> Sequence[Mapping[str, Any]]:
+            assert number == bootstrap_pull
+            return deepcopy(self.issue_events)
+
+    client = BootstrapClient()
+    client.pull["number"] = bootstrap_pull
+    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
+    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
+    spec = next(item for item in GATE_SPECS if item.context == "cluster-smoke-gate")
+    client.checks[spec.context] = [
+        {
+            "id": 900,
+            "name": spec.context,
+            "external_id": spec.external_id(repository=REPOSITORY, head_sha=HEAD),
+            "app": {"id": 15368},
+            "status": "in_progress",
+        }
+    ]
+    for index, gate_spec in enumerate(GATE_SPECS, start=1):
+        job_name = f"publish authoritative gate ({gate_spec.context})"
+        client.checks[job_name] = [
+            {
+                "id": 900 + index,
+                "name": job_name,
+                "app": {"id": 15368},
+                "status": "completed",
+                "conclusion": "failure",
+            }
+        ]
+
+    result = process_event(
+        {
+            "event_name": "bootstrap_v1_repair",
+            "workflow_sha": HEAD,
+            "pull_number": bootstrap_pull,
+            "gate_result": "success",
+            "neutralize_publisher_failures": True,
+        },
+        client,
+        context=spec.context,
+    )
+
+    assert result.outcome == "success"
+    assert client.checks[spec.context][0]["conclusion"] == "success"
+    for gate_spec in GATE_SPECS:
+        job_name = f"publish authoritative gate ({gate_spec.context})"
+        assert client.checks[job_name][0]["conclusion"] == "neutral"
+
+
+def test_v1_bootstrap_rejects_a_workflow_sha_outside_the_repair_head() -> None:
+    bootstrap_pull = 933
+
+    class BootstrapClient(FakeGitHubClient):
+        def get_pull_request(self, number: int) -> Mapping[str, Any]:
+            assert number == bootstrap_pull
+            return deepcopy(self.pull)
+
+    client = BootstrapClient()
+    client.pull["number"] = bootstrap_pull
+    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
+    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
+
+    with pytest.raises(PublisherError, match="exact repair pull request"):
+        process_event(
+            {
+                "event_name": "bootstrap_v1_repair",
+                "workflow_sha": "c" * 40,
+                "pull_number": bootstrap_pull,
+                "gate_result": "success",
+            },
+            client,
+            context=GATE_SPECS[0].context,
+        )
 
 
 def test_check_run_response_from_an_unexpected_app_fails_closed() -> None:
@@ -2058,7 +2201,10 @@ def test_invalid_terminal_patch_response_is_compensated_to_pending() -> None:
             self, check_run_id: int, payload: Mapping[str, Any]
         ) -> Mapping[str, Any]:
             response = super().update_check_run(check_run_id, payload)
-            if payload.get("status") == "completed":
+            if (
+                payload.get("status") == "completed"
+                and payload.get("conclusion") != "neutral"
+            ):
                 response = deepcopy(response)
                 response["external_id"] = "invalid-after-write"
             return response
@@ -3114,6 +3260,7 @@ def test_post_merge_restoration_rechecks_inventory_after_terminal_patch() -> Non
             if (
                 self.restoration_armed
                 and payload.get("status") == "completed"
+                and payload.get("conclusion") != "neutral"
                 and not self.rerun_injected
             ):
                 self.rerun_injected = True

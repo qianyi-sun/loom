@@ -125,9 +125,22 @@ authoritative replacement.
 
 The implementation bootstraps without a protection gap: until the publisher is
 present on the target base, source workflows keep their legacy protected names.
-When an already-completed publisher CheckRun is reopened, its PATCH explicitly
-clears both `conclusion` and `completed_at`; GitHub otherwise retains those
-terminal fields during a partial update. The one-time upgrade from base
+GitHub does not reliably accept changing an already-completed CheckRun back to
+`in_progress`. A newer same-head generation therefore renames and neutralizes
+the old terminal check before creating one new protected `in_progress` check.
+If either API call is interrupted, the required context is absent or pending,
+so admission remains fail-closed; superseded failures no longer poison the
+current rollup.
+Publisher contract v2 records that live-verified behavior. The exact v1-to-v2 repair PR may use
+four head/base/PR-bound source jobs to publish its already-aggregated gate
+results into the existing custom CheckRuns. They accept only authoritative PR
+events (lifecycle changes, relevant CI-label changes, and base edits), so
+unrelated metadata cannot create optional repair runs. Those jobs are inert for
+every other PR. The exact cluster bootstrap also neutralizes only the four
+obsolete base-publisher invocation failures after its source result is
+published; protected custom checks remain bound to their real source results.
+All repair-only behavior is removed by the post-merge acceptance probe. The earlier
+one-time upgrade from base
 `28aa5257927a3468ebc35ec7f245fecaf3226dbf` uses GitHub's whitespace
 `run-name` fallback so that the pre-fix publisher still sees the fixed workflow
 identity while the PR title carries a generation marker ordered after the
@@ -160,6 +173,9 @@ authoritative. Enable squash auto-merge throughout the non-draft portion and
 let the final all-green generation merge naturally, without an empty or
 tree-identical re-anchor commit. Record the probe PR, exact heads, source runs,
 and protected CheckRun IDs on the tracking issue.
+Keep a durable documentation or test improvement in the probe's final tree so
+removing the deliberate failure is itself a real fix rather than a
+tree-identical re-anchor.
 
 Manual dispatch remains available, but aggregate jobs report
 `repository-checks-manual`, `images-gate-manual`,

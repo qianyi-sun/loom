@@ -177,7 +177,7 @@ jobs:
           elif [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
             git cat-file -e "${BASE_SHA}^{tree}"
             if git show "${BASE_SHA}:.github/workflows/authoritative-gates.yml" \
-                2>/dev/null | grep -Fxq '# publisher-contract: dynamic-run-name-v1'; then
+                2>/dev/null | grep -Eq '^# publisher-contract: dynamic-run-name-v[12]$'; then
               publisher_active=true
             fi
           fi
@@ -1269,3 +1269,44 @@ jobs:
             [[ "$SMOKE_RESULT" == "skipped" || "$SMOKE_RESULT" == "success" ]] || exit 1
             [[ "$SYSTEM_SMOKE_RESULT" == "skipped" || "$SYSTEM_SMOKE_RESULT" == "success" ]] || exit 1
           fi
+
+  bootstrap-authoritative-v2:
+    name: bootstrap authoritative staging-smoke-gate v2 repair
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      (contains(fromJSON('["opened","reopened","ready_for_review","synchronize"]'), github.event.action) ||
+       (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+        contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+       (github.event.action == 'edited' && github.event.changes.base != null)) &&
+      github.event.pull_request.base.sha == 'cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca' &&
+      github.event.pull_request.head.ref == 'codex/833-authoritative-gates-acceptance' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    needs: [staging-smoke-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Checkout exact repair head
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Publish exact repair gate result
+        env:
+          AUTHORITATIVE_CONTEXT: staging-smoke-gate
+          AUTHORITATIVE_BOOTSTRAP_GATE_RESULT: ${{ needs.staging-smoke-gate.result }}
+          AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA: ${{ github.event.pull_request.head.sha }}
+          AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER: ${{ github.event.pull_request.number }}
+          AUTHORITATIVE_BOOTSTRAP_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python scripts/ops/authoritative_gate.py
+          --event-path "$GITHUB_EVENT_PATH"
+          --context "$AUTHORITATIVE_CONTEXT"

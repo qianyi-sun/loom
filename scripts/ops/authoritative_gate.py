@@ -17,6 +17,9 @@ GITHUB_ACTIONS_APP_ID = 15368
 AUTHORITATIVE_WORKFLOW_PATH = ".github/workflows/authoritative-gates.yml"
 EXTERNAL_ID_PREFIX = "loom-authoritative-gate:"
 FULL_TITLE_PREFIX = "gate=full /"
+V1_BOOTSTRAP_BASE_SHA = "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca"
+V1_BOOTSTRAP_HEAD_REF = "codex/833-authoritative-gates-acceptance"
+V1_BOOTSTRAP_PUBLISH_JOB_PREFIX = "publish authoritative gate"
 
 RELEVANT_LABEL_ORDER = (
     "ci:integration",
@@ -766,6 +769,40 @@ def _upsert_check(
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     verb = "awaiting" if status == "in_progress" else conclusion or "failure"
     external_id = spec.external_id(repository=client.repository, head_sha=head_sha)
+    if (
+        status == "in_progress"
+        and existing is not None
+        and existing.get("status") == "completed"
+    ):
+        check_id = existing.get("id")
+        if not isinstance(check_id, int):
+            raise PublisherError(f"custom CheckRun for {spec.context} has no integer id")
+        superseded_name = f"{spec.context}-superseded"
+        superseded_external_id = f"{external_id}:superseded:{check_id}"
+        superseded = client.update_check_run(
+            check_id,
+            {
+                "name": superseded_name,
+                "external_id": superseded_external_id,
+                "status": "completed",
+                "conclusion": "neutral",
+                "completed_at": now,
+            },
+        )
+        superseded_app = superseded.get("app") if superseded else None
+        if (
+            not superseded
+            or superseded.get("name") != superseded_name
+            or superseded.get("external_id") != superseded_external_id
+            or superseded.get("status") != "completed"
+            or superseded.get("conclusion") != "neutral"
+            or not isinstance(superseded_app, Mapping)
+            or superseded_app.get("id") != GITHUB_ACTIONS_APP_ID
+        ):
+            raise PublisherError(
+                f"GitHub did not neutralize the superseded {spec.context} CheckRun"
+            )
+        existing = None
     payload: dict[str, Any] = {
         "name": spec.context,
         "head_sha": head_sha,
@@ -785,12 +822,6 @@ def _upsert_check(
     }
     if status == "in_progress":
         payload["started_at"] = now
-        if existing is not None:
-            # PATCH is partial: omitting terminal fields leaves GitHub's prior
-            # completed conclusion in place. Clear both fields explicitly so
-            # one publisher-owned CheckRun can re-enter the pending state.
-            payload["conclusion"] = None
-            payload["completed_at"] = None
     else:
         payload["conclusion"] = conclusion
         payload["completed_at"] = now
@@ -2585,6 +2616,134 @@ def _handle_workflow_run(
     )
 
 
+def _neutralize_v1_bootstrap_publisher_failures(
+    client: PublisherClient,
+    *,
+    head_sha: str,
+) -> None:
+    """Neutralize only the exact repair PR's obsolete publisher job failures."""
+
+    completed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    for gate_spec in GATE_SPECS:
+        job_name = f"{V1_BOOTSTRAP_PUBLISH_JOB_PREFIX} ({gate_spec.context})"
+        checks = list(client.list_check_runs(head_sha, job_name))
+        if len(checks) != 1:
+            raise PublisherError(
+                f"v1 bootstrap expected one {job_name} CheckRun, found {len(checks)}"
+            )
+        check = checks[0]
+        app = check.get("app")
+        check_id = check.get("id")
+        if (
+            check.get("name") != job_name
+            or not isinstance(check_id, int)
+            or not isinstance(app, Mapping)
+            or app.get("id") != GITHUB_ACTIONS_APP_ID
+            or check.get("status") != "completed"
+            or check.get("conclusion") not in {"failure", "neutral", "success"}
+        ):
+            raise PublisherError(f"v1 bootstrap found unsafe {job_name} CheckRun state")
+        if check.get("conclusion") != "failure":
+            continue
+        response = client.update_check_run(
+            check_id,
+            {
+                "status": "completed",
+                "conclusion": "neutral",
+                "completed_at": completed_at,
+            },
+        )
+        response_app = response.get("app") if response else None
+        if (
+            not response
+            or response.get("id") != check_id
+            or response.get("name") != job_name
+            or response.get("status") != "completed"
+            or response.get("conclusion") != "neutral"
+            or not isinstance(response_app, Mapping)
+            or response_app.get("id") != GITHUB_ACTIONS_APP_ID
+        ):
+            raise PublisherError(f"GitHub did not neutralize the obsolete {job_name} failure")
+
+
+def _handle_v1_bootstrap_repair(
+    event: Mapping[str, Any],
+    client: PublisherClient,
+    context: str | None,
+) -> PublishResult:
+    """Repair this exact publisher-upgrade PR with its source gate result."""
+    spec = next((item for item in GATE_SPECS if item.context == context), None)
+    if spec is None:
+        raise PublisherError("v1 bootstrap requires one authoritative gate context")
+    workflow_sha = _string(event.get("workflow_sha"))
+    gate_result = _string(event.get("gate_result"))
+    details_url = _string(event.get("details_url"))
+    raw_pull_number = event.get("pull_number")
+    if isinstance(raw_pull_number, bool) or not isinstance(raw_pull_number, (int, str)):
+        raise PublisherError("v1 bootstrap pull number is invalid")
+    try:
+        pull_number = int(raw_pull_number)
+    except (TypeError, ValueError) as exc:
+        raise PublisherError("v1 bootstrap pull number is invalid") from exc
+    if pull_number <= 0:
+        raise PublisherError("v1 bootstrap pull number is invalid")
+    if gate_result not in {"success", "failure", "cancelled", "skipped"}:
+        raise PublisherError(f"invalid v1 bootstrap gate result: {gate_result or 'missing'}")
+
+    pull = client.get_pull_request(pull_number)
+    head = pull.get("head")
+    base = pull.get("base")
+    head_sha = _string(head.get("sha")) if isinstance(head, Mapping) else ""
+    base_sha = _string(base.get("sha")) if isinstance(base, Mapping) else ""
+    if not (
+        pull.get("number") == pull_number
+        and pull.get("state") == "open"
+        and not bool(pull.get("draft"))
+        and head_sha
+        and workflow_sha == head_sha
+        and _pull_ref(pull, "head") == V1_BOOTSTRAP_HEAD_REF
+        and _pull_repository(pull, "head") == client.repository
+        and _pull_ref(pull, "base") == "dev"
+        and base_sha == V1_BOOTSTRAP_BASE_SHA
+    ):
+        raise PublisherError("v1 bootstrap is not bound to the exact repair pull request")
+    _ensure_unique_pull_authority(client, pull_number=pull_number, head_sha=head_sha)
+
+    authority_events = _authority_events(client.list_issue_events(pull_number))
+    generation = _live_authority_generation(pull, authority_events)
+    if generation is None or not _generation_matches_live_pull(generation, pull):
+        raise PublisherError("v1 bootstrap could not establish the live repair generation")
+    authority_match = _generation_authority_match(generation, authority_events)
+    if not (
+        authority_match.verified
+        and authority_match.history_count == len(authority_events)
+        and authority_match.epoch == _latest_authority_epoch(authority_events)
+    ):
+        raise PublisherError("v1 bootstrap authority history is incomplete")
+    existing = _existing_custom_check(client, head_sha, spec)
+    if existing is None:
+        raise PublisherError(f"v1 bootstrap cannot find {spec.context} CheckRun")
+
+    conclusion = "success" if gate_result == "success" else "failure"
+    _upsert_check(
+        client,
+        spec=spec,
+        head_sha=head_sha,
+        existing=existing,
+        status="completed",
+        conclusion=conclusion,
+        generation=generation,
+        authority_epoch=authority_match.epoch,
+        authority_history_count=authority_match.history_count,
+        details_url=details_url or _string(pull.get("html_url")),
+    )
+    if event.get("neutralize_publisher_failures") is True:
+        if spec.context != "cluster-smoke-gate":
+            raise PublisherError("only the cluster bootstrap may neutralize publisher failures")
+        _neutralize_v1_bootstrap_publisher_failures(client, head_sha=head_sha)
+    return PublishResult(conclusion, (spec.context,))
+
+
 def process_event(
     event: Mapping[str, Any],
     client: PublisherClient,
@@ -2601,6 +2760,8 @@ def process_event(
         return _handle_pull_request_target(event, client, context)
     if event_name == "workflow_run":
         return _handle_workflow_run(event, client, context)
+    if event_name == "bootstrap_v1_repair":
+        return _handle_v1_bootstrap_repair(event, client, context)
     return PublishResult("ignored")
 
 
@@ -2617,6 +2778,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         event = json.loads(args.event_path.read_text(encoding="utf-8"))
         if not isinstance(event, Mapping):
             raise PublisherError("event payload must be a JSON object")
+        bootstrap_result = os.environ.get("AUTHORITATIVE_BOOTSTRAP_GATE_RESULT", "")
+        if bootstrap_result:
+            event = {
+                "event_name": "bootstrap_v1_repair",
+                "workflow_sha": os.environ.get("AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA", ""),
+                "pull_number": os.environ.get("AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER", ""),
+                "gate_result": bootstrap_result,
+                "details_url": os.environ.get("AUTHORITATIVE_BOOTSTRAP_DETAILS_URL", ""),
+                "neutralize_publisher_failures": os.environ.get(
+                    "AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES", ""
+                )
+                == "true",
+            }
         client = GitHubClient(
             token=os.environ.get("GITHUB_TOKEN", ""),
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
