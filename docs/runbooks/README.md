@@ -25,15 +25,20 @@ environments. `docs/index.md` at the repo docs root is the task-router.
    migration from the legacy `public-beta` name to `staging`. Run this when
    the pilot cluster is drained.
 
-5. **[full-max-slot-canary-runbook.md](full-max-slot-canary-runbook.md)** —
+5. **[staging-dev-tip-cutover.md](staging-dev-tip-cutover.md)** — flip live
+   staging from the sealed candidate to the tip of `dev` in one coordinated
+   window: un-seal to merged-dev, provision, then `start` (backup → build →
+   migrate `0073` → deploy `/staging` + pool rename), with abort/rollback.
+
+6. **[full-max-slot-canary-runbook.md](full-max-slot-canary-runbook.md)** —
    preparation artifact for the unified staging canary. Wait for coordinating
    thread `GO` before actually submitting.
 
-6. **[remote-worker-pool.md](remote-worker-pool.md)** — join extra
+7. **[remote-worker-pool.md](remote-worker-pool.md)** — join extra
    Docker-capable hosts to an existing Loom control node for shared-dev or
    staging capacity before moving to full Kubernetes cluster mode.
 
-7. **[local-dev-workflow.md](local-dev-workflow.md)** — developer-facing
+8. **[local-dev-workflow.md](local-dev-workflow.md)** — developer-facing
    setup for pre-push testing on a laptop. Single-node kind, in-cluster
    `k8s_worker` by default with external Slurm as an advanced option. Local is
    not a formal environment; it is not in the identity contract or on
