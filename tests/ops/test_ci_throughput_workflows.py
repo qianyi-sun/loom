@@ -1461,6 +1461,11 @@ def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:
     assert "merge_slashes off;" in config
     assert "if ($loom_ambiguous_path) {\n        return 404;\n    }" in config
     assert "location ~ ^/(?:prod|dev)/assets/(.+)$" in config
+    assert (
+        "location ~* ^/(?:.+/)+assets(?:/|$) {\n"
+        "        return 404;\n"
+        "    }"
+    ) in config
     assert "location ~* ^/(?:prod|dev)(?:/|$) {\n        return 404;\n    }" in config
 
 
