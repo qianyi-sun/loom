@@ -121,13 +121,17 @@ class FakeGitHubClient:
         return deepcopy(check)
 
     def update_check_run(self, check_run_id: int, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        for checks in self.checks.values():
-            for check in checks:
+        for context, checks in list(self.checks.items()):
+            for index, check in enumerate(checks):
                 if check["id"] == check_run_id:
                     check.update(deepcopy(dict(payload)))
                     if payload.get("status") == "in_progress":
                         check.pop("conclusion", None)
                         check.pop("completed_at", None)
+                    new_context = str(check["name"])
+                    if new_context != context:
+                        checks.pop(index)
+                        self.checks.setdefault(new_context, []).append(check)
                     self.updated.append((check_run_id, deepcopy(dict(payload))))
                     return deepcopy(check)
         raise AssertionError(f"unknown check id {check_run_id}")
@@ -409,7 +413,7 @@ def test_generation_parser_rejects_invalid_pull_identity(invalid_pull: str) -> N
     assert parse_full_generation(malformed) is None
 
 
-def test_completed_check_is_reset_in_place_for_a_new_same_head_generation() -> None:
+def test_completed_check_is_neutralized_before_a_new_same_head_generation() -> None:
     client = FakeGitHubClient()
     original_generation = generation()
     seed_invalidation(client, original_generation)
@@ -441,16 +445,21 @@ def test_completed_check_is_reset_in_place_for_a_new_same_head_generation() -> N
     assert result.outcome == "in_progress"
     assert len(client.checks[GATE_SPECS[0].context]) == 1
     reset_check = client.checks[GATE_SPECS[0].context][0]
-    assert reset_check["id"] == original_check_id
+    assert reset_check["id"] != original_check_id
     assert reset_check["status"] == "in_progress"
     assert "conclusion" not in reset_check
-    reopen_payload = next(
+    superseded_payload = next(
         payload
         for check_id, payload in reversed(client.updated)
-        if check_id == original_check_id and payload.get("status") == "in_progress"
+        if check_id == original_check_id
+        and payload.get("status") == "completed"
+        and payload.get("conclusion") == "neutral"
     )
-    assert "conclusion" not in reopen_payload
-    assert "completed_at" not in reopen_payload
+    assert superseded_payload["name"] == f"{GATE_SPECS[0].context}-superseded"
+    assert "completed_at" in superseded_payload
+    superseded_check = client.checks[f"{GATE_SPECS[0].context}-superseded"][0]
+    assert superseded_check["id"] == original_check_id
+    assert superseded_check["conclusion"] == "neutral"
 
 
 def test_exact_v1_bootstrap_publishes_aggregated_source_success() -> None:
@@ -2135,7 +2144,10 @@ def test_invalid_terminal_patch_response_is_compensated_to_pending() -> None:
             self, check_run_id: int, payload: Mapping[str, Any]
         ) -> Mapping[str, Any]:
             response = super().update_check_run(check_run_id, payload)
-            if payload.get("status") == "completed":
+            if (
+                payload.get("status") == "completed"
+                and payload.get("conclusion") != "neutral"
+            ):
                 response = deepcopy(response)
                 response["external_id"] = "invalid-after-write"
             return response
@@ -3191,6 +3203,7 @@ def test_post_merge_restoration_rechecks_inventory_after_terminal_patch() -> Non
             if (
                 self.restoration_armed
                 and payload.get("status") == "completed"
+                and payload.get("conclusion") != "neutral"
                 and not self.rerun_injected
             ):
                 self.rerun_injected = True

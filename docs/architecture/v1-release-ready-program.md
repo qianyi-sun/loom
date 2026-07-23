@@ -125,10 +125,13 @@ authoritative replacement.
 
 The implementation bootstraps without a protection gap: until the publisher is
 present on the target base, source workflows keep their legacy protected names.
-When an already-completed publisher CheckRun is reopened, its PATCH changes the
-status to `in_progress` and omits `conclusion` and `completed_at`; GitHub's
-update schema rejects JSON `null` for those terminal fields. Publisher contract
-v2 records that live-verified behavior. The exact v1-to-v2 repair PR may use
+GitHub does not reliably accept changing an already-completed CheckRun back to
+`in_progress`. A newer same-head generation therefore renames and neutralizes
+the old terminal check before creating one new protected `in_progress` check.
+If either API call is interrupted, the required context is absent or pending,
+so admission remains fail-closed; superseded failures no longer poison the
+current rollup.
+Publisher contract v2 records that live-verified behavior. The exact v1-to-v2 repair PR may use
 four head/base/PR-bound source jobs to publish its already-aggregated gate
 results into the existing custom CheckRuns. They accept only authoritative PR
 events (lifecycle changes, relevant CI-label changes, and base edits), so

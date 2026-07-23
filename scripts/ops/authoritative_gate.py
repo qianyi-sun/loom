@@ -768,6 +768,40 @@ def _upsert_check(
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     verb = "awaiting" if status == "in_progress" else conclusion or "failure"
     external_id = spec.external_id(repository=client.repository, head_sha=head_sha)
+    if (
+        status == "in_progress"
+        and existing is not None
+        and existing.get("status") == "completed"
+    ):
+        check_id = existing.get("id")
+        if not isinstance(check_id, int):
+            raise PublisherError(f"custom CheckRun for {spec.context} has no integer id")
+        superseded_name = f"{spec.context}-superseded"
+        superseded_external_id = f"{external_id}:superseded:{check_id}"
+        superseded = client.update_check_run(
+            check_id,
+            {
+                "name": superseded_name,
+                "external_id": superseded_external_id,
+                "status": "completed",
+                "conclusion": "neutral",
+                "completed_at": now,
+            },
+        )
+        superseded_app = superseded.get("app") if superseded else None
+        if (
+            not superseded
+            or superseded.get("name") != superseded_name
+            or superseded.get("external_id") != superseded_external_id
+            or superseded.get("status") != "completed"
+            or superseded.get("conclusion") != "neutral"
+            or not isinstance(superseded_app, Mapping)
+            or superseded_app.get("id") != GITHUB_ACTIONS_APP_ID
+        ):
+            raise PublisherError(
+                f"GitHub did not neutralize the superseded {spec.context} CheckRun"
+            )
+        existing = None
     payload: dict[str, Any] = {
         "name": spec.context,
         "head_sha": head_sha,
