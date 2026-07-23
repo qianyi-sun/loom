@@ -189,6 +189,8 @@ Changes to this boundary must cover, as applicable:
 
 The focused component tests live under `web/src/__tests__/bootstrap/`,
 `web/src/__tests__/components/`, and `web/src/__tests__/AuthContext.test.tsx`.
+The production-build recovery matrix lives in `web/e2e/recovery.test.ts` and
+runs under both `/dev` and `/prod` prefixes in desktop and mobile Chromium.
 Candidate-bound browser evidence remains required for rollout acceptance; unit
 tests alone do not prove production browser event behavior.
 
@@ -200,19 +202,21 @@ ledger, accessibility checks, and fail-closed console/page-error/network
 guards. This recovery work must consume that harness rather than add another
 workflow, Playwright configuration, coverage gate, or aggregate status.
 
-Once that foundation is available, this scope owns only recovery scenarios and
-assertions: one-shot config HTTP/invalid failures, auth-session failure, root
-render failure, routed render failure, retry success and failure, navigation
-reset, redaction, focus, and basename-safe actions. A deterministic root-render
-fault must be test-build-only and activated by the harness, never by a URL,
-runtime config, live API response, or production endpoint. Lazy-route fixtures
-must wire `RouteRecoveryBoundary` with `retryPolicy="reload-required"`; ordinary
-route failures retain the transient Retry policy.
+The recovery matrix owns only recovery scenarios and assertions: one-shot
+config HTTP/invalid failures, auth-session failure, root render failure, routed
+render failure, retry success, navigation reset, redaction, focus, and
+basename-safe actions. Deterministic render faults are compiled into the
+dedicated Playwright build only and armed by the harness before navigation;
+normal production bundles must not retain the fault key or fault strings. No
+URL, runtime config, live API response, or production endpoint can activate
+them. Lazy-route fixtures must wire `RouteRecoveryBoundary` with
+`retryPolicy="reload-required"`; ordinary route failures retain the transient
+Retry policy.
 
 The staging admin browser flow remains a broker-owned, candidate-bound healthy
 acceptance check. Ephemeral kind remains a non-protected development cluster
 with only the credential-free deny probe. Neither path may inject recovery
 faults, mint or read an admin session for local tests, relax its console guard,
-or substitute for the #773 browser matrix. Recovery rollout evidence therefore
-remains unmet until #773 is merged and the next explicitly authorized brokered
-rollout validates the fixed candidate without fault injection.
+or substitute for the local browser matrix. Recovery rollout evidence remains
+unmet until the next explicitly authorized brokered rollout validates the fixed
+candidate without fault injection.

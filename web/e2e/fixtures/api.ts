@@ -31,6 +31,11 @@ export type ApiOverride = Readonly<{
   path: string;
   /** Exact cardinality. Defaults to one. */
   count?: number;
+  /**
+   * Continue through the closed router after this exact override is consumed.
+   * Without this explicit opt-in, another matching request remains an error.
+   */
+  fallbackToDefault?: boolean;
   response: FixtureResponse;
 }>;
 
@@ -314,10 +319,15 @@ export async function installApiFixture(
       return;
     }
     if (matchingOverrides.length > 0) {
-      errors.push(`override exhausted for ${method} ${safeRuleReference(relativePath)}`);
-      await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
-      ledger.push({ sequence: ledger.length + 1, method, path: relativePath, status: 500, source: "unmatched" });
-      return;
+      const fallsBackToDefault =
+        matchingOverrides.length === 1 &&
+        matchingOverrides[0].override.fallbackToDefault === true;
+      if (!fallsBackToDefault) {
+        errors.push(`override exhausted for ${method} ${safeRuleReference(relativePath)}`);
+        await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+        ledger.push({ sequence: ledger.length + 1, method, path: relativePath, status: 500, source: "unmatched" });
+        return;
+      }
     }
 
     let response: FixtureResponse | null = null;

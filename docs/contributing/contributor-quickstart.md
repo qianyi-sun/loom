@@ -126,9 +126,17 @@ npm test -- \
   src/__tests__/components/RootErrorBoundary.test.tsx \
   src/__tests__/components/RouteRecoveryBoundary.test.tsx
 npm test
+npm run typecheck
 npm run lint
+npm run test:coverage
 npm run build
+npm run test:e2e -- e2e/recovery.test.ts
+LOOM_E2E_ROUTE_PREFIX=/prod npm run test:e2e -- e2e/recovery.test.ts
 ```
+
+The render-fault scenarios must stay inside the compile-time browser-test
+build. A normal `npm run build` verifies that the emitted `dist/` assets do not
+contain the recovery fault key or the fixed test-only fault strings.
 
 ## Tests
 
