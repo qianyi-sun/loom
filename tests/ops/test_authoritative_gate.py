@@ -223,7 +223,8 @@ def workflow_run(
     return {
         "id": run_id,
         "workflow_id": spec.workflow_id,
-        "name": spec.workflow_name,
+        # GitHub replaces workflow_run.name with the dynamic run-name marker.
+        "name": title(generation),
         "event": run_event,
         "head_sha": HEAD,
         "head_repository": {"full_name": head_repository},

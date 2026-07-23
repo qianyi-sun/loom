@@ -426,7 +426,6 @@ def _matching_full_runs(
         generation = parse_full_generation(run.get("display_title"))
         if (
             run.get("workflow_id") != spec.workflow_id
-            or run.get("name") != spec.workflow_name
             or run.get("event") != event
             or head_repository.get("full_name") != expected_head_repository
             or run.get("head_sha") != head_sha
@@ -1984,7 +1983,6 @@ def _validate_workflow(event_run: Mapping[str, Any], client: PublisherClient) ->
     run_repository = event_run.get("repository")
     if (
         spec is None
-        or event_run.get("name") != spec.workflow_name
         or event_run.get("event") not in {"pull_request", "merge_group"}
         or not isinstance(head_repository, Mapping)
         or not isinstance(head_repository.get("full_name"), str)
@@ -2134,7 +2132,6 @@ def _handle_workflow_run(
     head_sha = _string(event_run.get("head_sha"))
     if (
         prevalidated_spec is None
-        or event_run.get("name") != prevalidated_spec.workflow_name
         or run_event not in {"pull_request", "merge_group"}
         or not head_sha
         or not isinstance(head_repository, Mapping)
