@@ -125,6 +125,14 @@ authoritative replacement.
 
 The implementation bootstraps without a protection gap: until the publisher is
 present on the target base, source workflows keep their legacy protected names.
+When an already-completed publisher CheckRun is reopened, its PATCH explicitly
+clears both `conclusion` and `completed_at`; GitHub otherwise retains those
+terminal fields during a partial update. The one-time upgrade from base
+`28aa5257927a3468ebc35ec7f245fecaf3226dbf` uses GitHub's whitespace
+`run-name` fallback so that the pre-fix publisher still sees the fixed workflow
+identity while the PR title carries a generation marker ordered after the
+synchronize snapshot. That exception is bound to the exact historical base and
+therefore expires automatically after the repair merges.
 The exact same-repository `dev`-to-`main` promotion is the one exception because
 the trusted publisher already lives on the default `dev` branch. Merge-group
 heads use the same publisher contract. Push and manual runs report distinct
