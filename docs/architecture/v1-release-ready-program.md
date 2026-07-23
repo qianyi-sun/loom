@@ -128,9 +128,11 @@ present on the target base, source workflows keep their legacy protected names.
 When an already-completed publisher CheckRun is reopened, its PATCH changes the
 status to `in_progress` and omits `conclusion` and `completed_at`; GitHub's
 update schema rejects JSON `null` for those terminal fields. Publisher contract
-v2 records that live-verified behavior. Bases that contain only v1 keep the
-legacy protected source names until v2 merges, so a broken publisher cannot
-strand its own repair. The earlier one-time upgrade from base
+v2 records that live-verified behavior. The exact v1-to-v2 repair PR may use
+four head/base/PR-bound source jobs to publish its already-aggregated gate
+results into the existing custom CheckRuns. Those jobs are inert for every
+other PR and are removed by the post-merge acceptance probe. The earlier
+one-time upgrade from base
 `28aa5257927a3468ebc35ec7f245fecaf3226dbf` uses GitHub's whitespace
 `run-name` fallback so that the pre-fix publisher still sees the fixed workflow
 identity while the PR title carries a generation marker ordered after the

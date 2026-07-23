@@ -17,6 +17,9 @@ GITHUB_ACTIONS_APP_ID = 15368
 AUTHORITATIVE_WORKFLOW_PATH = ".github/workflows/authoritative-gates.yml"
 EXTERNAL_ID_PREFIX = "loom-authoritative-gate:"
 FULL_TITLE_PREFIX = "gate=full /"
+V1_BOOTSTRAP_PULL_NUMBER = 932
+V1_BOOTSTRAP_BASE_SHA = "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca"
+V1_BOOTSTRAP_HEAD_REF = "codex/833-authoritative-gates-acceptance"
 
 RELEVANT_LABEL_ORDER = (
     "ci:integration",
@@ -2579,6 +2582,70 @@ def _handle_workflow_run(
     )
 
 
+def _handle_v1_bootstrap_repair(
+    event: Mapping[str, Any],
+    client: PublisherClient,
+    context: str | None,
+) -> PublishResult:
+    """Repair this exact publisher-upgrade PR with its source gate result."""
+    spec = next((item for item in GATE_SPECS if item.context == context), None)
+    if spec is None:
+        raise PublisherError("v1 bootstrap requires one authoritative gate context")
+    workflow_sha = _string(event.get("workflow_sha"))
+    gate_result = _string(event.get("gate_result"))
+    details_url = _string(event.get("details_url"))
+    if gate_result not in {"success", "failure", "cancelled", "skipped"}:
+        raise PublisherError(f"invalid v1 bootstrap gate result: {gate_result or 'missing'}")
+
+    pull = client.get_pull_request(V1_BOOTSTRAP_PULL_NUMBER)
+    head = pull.get("head")
+    base = pull.get("base")
+    head_sha = _string(head.get("sha")) if isinstance(head, Mapping) else ""
+    base_sha = _string(base.get("sha")) if isinstance(base, Mapping) else ""
+    if not (
+        pull.get("number") == V1_BOOTSTRAP_PULL_NUMBER
+        and pull.get("state") == "open"
+        and not bool(pull.get("draft"))
+        and head_sha
+        and workflow_sha == head_sha
+        and _pull_ref(pull, "head") == V1_BOOTSTRAP_HEAD_REF
+        and _pull_repository(pull, "head") == client.repository
+        and _pull_ref(pull, "base") == "dev"
+        and base_sha == V1_BOOTSTRAP_BASE_SHA
+    ):
+        raise PublisherError("v1 bootstrap is not bound to the exact repair pull request")
+
+    authority_events = _authority_events(client.list_issue_events(V1_BOOTSTRAP_PULL_NUMBER))
+    generation = _live_authority_generation(pull, authority_events)
+    if generation is None or not _generation_matches_live_pull(generation, pull):
+        raise PublisherError("v1 bootstrap could not establish the live repair generation")
+    authority_match = _generation_authority_match(generation, authority_events)
+    if not (
+        authority_match.verified
+        and authority_match.history_count == len(authority_events)
+        and authority_match.epoch == _latest_authority_epoch(authority_events)
+    ):
+        raise PublisherError("v1 bootstrap authority history is incomplete")
+    existing = _existing_custom_check(client, head_sha, spec)
+    if existing is None:
+        raise PublisherError(f"v1 bootstrap cannot find {spec.context} CheckRun")
+
+    conclusion = "success" if gate_result == "success" else "failure"
+    _upsert_check(
+        client,
+        spec=spec,
+        head_sha=head_sha,
+        existing=existing,
+        status="completed",
+        conclusion=conclusion,
+        generation=generation,
+        authority_epoch=authority_match.epoch,
+        authority_history_count=authority_match.history_count,
+        details_url=details_url or _string(pull.get("html_url")),
+    )
+    return PublishResult(conclusion, (spec.context,))
+
+
 def process_event(
     event: Mapping[str, Any],
     client: PublisherClient,
@@ -2595,6 +2662,8 @@ def process_event(
         return _handle_pull_request_target(event, client, context)
     if event_name == "workflow_run":
         return _handle_workflow_run(event, client, context)
+    if event_name == "bootstrap_v1_repair":
+        return _handle_v1_bootstrap_repair(event, client, context)
     return PublishResult("ignored")
 
 
@@ -2611,6 +2680,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         event = json.loads(args.event_path.read_text(encoding="utf-8"))
         if not isinstance(event, Mapping):
             raise PublisherError("event payload must be a JSON object")
+        bootstrap_result = os.environ.get("AUTHORITATIVE_BOOTSTRAP_GATE_RESULT", "")
+        if bootstrap_result:
+            event = {
+                "event_name": "bootstrap_v1_repair",
+                "workflow_sha": os.environ.get("AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA", ""),
+                "gate_result": bootstrap_result,
+                "details_url": os.environ.get("AUTHORITATIVE_BOOTSTRAP_DETAILS_URL", ""),
+            }
         client = GitHubClient(
             token=os.environ.get("GITHUB_TOKEN", ""),
             repository=os.environ.get("GITHUB_REPOSITORY", ""),

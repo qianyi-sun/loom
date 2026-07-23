@@ -9,6 +9,9 @@ import pytest
 from scripts.ops.authoritative_gate import (
     GATE_SPECS,
     RELEVANT_LABEL_ORDER,
+    V1_BOOTSTRAP_BASE_SHA,
+    V1_BOOTSTRAP_HEAD_REF,
+    V1_BOOTSTRAP_PULL_NUMBER,
     DuplicateCustomCheckError,
     Generation,
     PublisherError,
@@ -449,6 +452,75 @@ def test_completed_check_is_reset_in_place_for_a_new_same_head_generation() -> N
     )
     assert "conclusion" not in reopen_payload
     assert "completed_at" not in reopen_payload
+
+
+def test_exact_v1_bootstrap_publishes_aggregated_source_success() -> None:
+    class BootstrapClient(FakeGitHubClient):
+        def get_pull_request(self, number: int) -> Mapping[str, Any]:
+            assert number == V1_BOOTSTRAP_PULL_NUMBER
+            return deepcopy(self.pull)
+
+        def list_issue_events(self, number: int) -> Sequence[Mapping[str, Any]]:
+            assert number == V1_BOOTSTRAP_PULL_NUMBER
+            return deepcopy(self.issue_events)
+
+    client = BootstrapClient()
+    client.pull["number"] = V1_BOOTSTRAP_PULL_NUMBER
+    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
+    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
+    spec = GATE_SPECS[0]
+    client.checks[spec.context] = [
+        {
+            "id": 900,
+            "name": spec.context,
+            "external_id": spec.external_id(repository=REPOSITORY, head_sha=HEAD),
+            "app": {"id": 15368},
+            "status": "completed",
+            "conclusion": "failure",
+        }
+    ]
+
+    result = process_event(
+        {
+            "event_name": "bootstrap_v1_repair",
+            "workflow_sha": HEAD,
+            "gate_result": "success",
+            "details_url": "https://github.com/qianyi-sun/loom/actions/runs/1",
+        },
+        client,
+        context=spec.context,
+    )
+
+    assert result.outcome == "success"
+    assert result.contexts == (spec.context,)
+    assert len(client.checks[spec.context]) == 1
+    repaired = client.checks[spec.context][0]
+    assert repaired["id"] == 900
+    assert repaired["status"] == "completed"
+    assert repaired["conclusion"] == "success"
+
+
+def test_v1_bootstrap_rejects_a_workflow_sha_outside_the_repair_head() -> None:
+    class BootstrapClient(FakeGitHubClient):
+        def get_pull_request(self, number: int) -> Mapping[str, Any]:
+            assert number == V1_BOOTSTRAP_PULL_NUMBER
+            return deepcopy(self.pull)
+
+    client = BootstrapClient()
+    client.pull["number"] = V1_BOOTSTRAP_PULL_NUMBER
+    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
+    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
+
+    with pytest.raises(PublisherError, match="exact repair pull request"):
+        process_event(
+            {
+                "event_name": "bootstrap_v1_repair",
+                "workflow_sha": "c" * 40,
+                "gate_result": "success",
+            },
+            client,
+            context=GATE_SPECS[0].context,
+        )
 
 
 def test_check_run_response_from_an_unexpected_app_fails_closed() -> None:

@@ -182,7 +182,7 @@ def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> N
             in fragment
         )
         assert '"${BASE_SHA}:.github/workflows/authoritative-gates.yml"' in fragment
-        assert "publisher-contract: dynamic-run-name-v2" in fragment
+        assert "publisher-contract: dynamic-run-name-v[12]" in fragment
         assert "HEAD_SHA" not in fragment
 
     assert len(bootstrap_fragments) == 1
@@ -205,6 +205,38 @@ def test_source_gate_names_switch_only_after_base_publisher_is_active() -> None:
             f"{plan_ref}.gate_mode == 'full' && '{protected_name}-attempt' || "
             f"'{protected_name}-filtered' "
             "}}"
+        )
+
+
+def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
+    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        workflow = _workflow(workflow_path)
+        bootstrap = workflow["jobs"]["bootstrap-authoritative-v2"]
+        condition = _normalized_expression(bootstrap["if"])
+
+        assert bootstrap["needs"] == [gate_id]
+        assert "github.event_name == 'pull_request'" in condition
+        assert "!github.event.pull_request.draft" in condition
+        assert "github.event.pull_request.number == 932" in condition
+        assert "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca" in condition
+        assert "codex/833-authoritative-gates-acceptance" in condition
+        assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
+        assert bootstrap["permissions"] == {
+            "actions": "read",
+            "checks": "write",
+            "contents": "read",
+            "issues": "read",
+            "pull-requests": "read",
+        }
+        checkout = bootstrap["steps"][0]
+        assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
+        publish = bootstrap["steps"][1]
+        assert publish["env"]["AUTHORITATIVE_CONTEXT"] == protected_name
+        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_GATE_RESULT"] == (
+            f"${{{{ needs.{gate_id}.result }}}}"
+        )
+        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA"] == (
+            "${{ github.event.pull_request.head.sha }}"
         )
 
 
