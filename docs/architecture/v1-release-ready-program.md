@@ -160,6 +160,9 @@ authoritative. Enable squash auto-merge throughout the non-draft portion and
 let the final all-green generation merge naturally, without an empty or
 tree-identical re-anchor commit. Record the probe PR, exact heads, source runs,
 and protected CheckRun IDs on the tracking issue.
+Keep a durable documentation or test improvement in the probe's final tree so
+removing the deliberate failure is itself a real fix rather than a
+tree-identical re-anchor.
 
 Manual dispatch remains available, but aggregate jobs report
 `repository-checks-manual`, `images-gate-manual`,
