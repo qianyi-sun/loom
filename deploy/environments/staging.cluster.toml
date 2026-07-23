@@ -7,6 +7,11 @@ frontend_environment = "staging"
 frontend_environment_label = "Staging"
 frontend_route_path = "/staging"
 frontend_api_base_path = "/staging"
+# Route migration in flight: the live env still serves /dev, so the rollout
+# preflight probes the predecessor there while the driver moves the route to
+# /staging atomically (see #936/#937). Drop this line once staging serves
+# /staging cleanly.
+frontend_route_path_from = "/dev"
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
 env_state_profile = "../environment-state/staging.toml"
