@@ -1276,6 +1276,10 @@ jobs:
       always() &&
       github.event_name == 'pull_request' &&
       !github.event.pull_request.draft &&
+      (contains(fromJSON('["opened","reopened","ready_for_review","synchronize"]'), github.event.action) ||
+       (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+        contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+       (github.event.action == 'edited' && github.event.changes.base != null)) &&
       github.event.pull_request.base.sha == 'cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca' &&
       github.event.pull_request.head.ref == 'codex/833-authoritative-gates-acceptance' &&
       github.event.pull_request.head.repo.full_name == github.repository

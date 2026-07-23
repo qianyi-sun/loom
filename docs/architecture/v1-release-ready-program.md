@@ -130,8 +130,10 @@ status to `in_progress` and omits `conclusion` and `completed_at`; GitHub's
 update schema rejects JSON `null` for those terminal fields. Publisher contract
 v2 records that live-verified behavior. The exact v1-to-v2 repair PR may use
 four head/base/PR-bound source jobs to publish its already-aggregated gate
-results into the existing custom CheckRuns. Those jobs are inert for every
-other PR and are removed by the post-merge acceptance probe. The earlier
+results into the existing custom CheckRuns. They accept only authoritative PR
+events (lifecycle changes, relevant CI-label changes, and base edits), so
+unrelated metadata cannot create optional repair runs. Those jobs are inert for
+every other PR and are removed by the post-merge acceptance probe. The earlier
 one-time upgrade from base
 `28aa5257927a3468ebc35ec7f245fecaf3226dbf` uses GitHub's whitespace
 `run-name` fallback so that the pre-fix publisher still sees the fixed workflow

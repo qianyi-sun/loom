@@ -217,6 +217,15 @@ def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
         assert bootstrap["needs"] == [gate_id]
         assert "github.event_name == 'pull_request'" in condition
         assert "!github.event.pull_request.draft" in condition
+        assert '["opened","reopened","ready_for_review","synchronize"]' in condition
+        assert '["labeled","unlabeled"]' in condition
+        assert (
+            '["ci:integration","ci:integration-docker","ci:images","cluster-smoke",'
+            '"staging-smoke","ci:coverage-summary"]'
+        ) in condition
+        assert "github.event.label.name" in condition
+        assert "github.event.action == 'edited'" in condition
+        assert "github.event.changes.base != null" in condition
         assert "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca" in condition
         assert "codex/833-authoritative-gates-acceptance" in condition
         assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
