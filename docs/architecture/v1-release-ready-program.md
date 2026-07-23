@@ -141,6 +141,18 @@ on delivery order. If one head is associated with multiple open PRs, the
 publisher fails closed because one SHA-level check cannot represent two PR
 metadata generations.
 
+Changes to this publisher require a disposable pull-request acceptance pass in
+addition to contract tests. Open the probe as Draft, make it Ready with one
+deliberately failing repository test, and confirm the current authoritative
+generation remains red with auto-merge blocked. Push a real fix, then rapidly
+add or remove validation-relevant labels on that same head. The final label
+generation must own exactly one GitHub Actions App (`15368`) CheckRun for each
+protected context; cancelled superseded attempts must not remain merge
+authoritative. Enable squash auto-merge throughout the non-draft portion and
+let the final all-green generation merge naturally, without an empty or
+tree-identical re-anchor commit. Record the probe PR, exact heads, source runs,
+and protected CheckRun IDs on the tracking issue.
+
 Manual dispatch remains available, but aggregate jobs report
 `repository-checks-manual`, `images-gate-manual`,
 `cluster-smoke-gate-manual`, and `staging-smoke-gate-manual`. Those names
