@@ -785,6 +785,12 @@ def _upsert_check(
     }
     if status == "in_progress":
         payload["started_at"] = now
+        if existing is not None:
+            # PATCH is partial: omitting terminal fields leaves GitHub's prior
+            # completed conclusion in place. Clear both fields explicitly so
+            # one publisher-owned CheckRun can re-enter the pending state.
+            payload["conclusion"] = None
+            payload["completed_at"] = None
     else:
         payload["conclusion"] = conclusion
         payload["completed_at"] = now
