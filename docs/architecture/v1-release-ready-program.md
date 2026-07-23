@@ -125,6 +125,14 @@ authoritative replacement.
 
 The implementation bootstraps without a protection gap: until the publisher is
 present on the target base, source workflows keep their legacy protected names.
+When an already-completed publisher CheckRun is reopened, its PATCH explicitly
+clears both `conclusion` and `completed_at`; GitHub otherwise retains those
+terminal fields during a partial update. The one-time upgrade from base
+`28aa5257927a3468ebc35ec7f245fecaf3226dbf` uses GitHub's whitespace
+`run-name` fallback so that the pre-fix publisher still sees the fixed workflow
+identity while the PR title carries a generation marker ordered after the
+synchronize snapshot. That exception is bound to the exact historical base and
+therefore expires automatically after the repair merges.
 The exact same-repository `dev`-to-`main` promotion is the one exception because
 the trusted publisher already lives on the default `dev` branch. Merge-group
 heads use the same publisher contract. Push and manual runs report distinct
@@ -140,6 +148,18 @@ state, ordered issue events, and the exact source-run attempt instead of relying
 on delivery order. If one head is associated with multiple open PRs, the
 publisher fails closed because one SHA-level check cannot represent two PR
 metadata generations.
+
+Changes to this publisher require a disposable pull-request acceptance pass in
+addition to contract tests. Open the probe as Draft, make it Ready with one
+deliberately failing repository test, and confirm the current authoritative
+generation remains red with auto-merge blocked. Push a real fix, then rapidly
+add or remove validation-relevant labels on that same head. The final label
+generation must own exactly one GitHub Actions App (`15368`) CheckRun for each
+protected context; cancelled superseded attempts must not remain merge
+authoritative. Enable squash auto-merge throughout the non-draft portion and
+let the final all-green generation merge naturally, without an empty or
+tree-identical re-anchor commit. Record the probe PR, exact heads, source runs,
+and protected CheckRun IDs on the tracking issue.
 
 Manual dispatch remains available, but aggregate jobs report
 `repository-checks-manual`, `images-gate-manual`,

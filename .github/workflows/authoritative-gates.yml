@@ -1,3 +1,4 @@
+# publisher-contract: dynamic-run-name-v1
 name: authoritative-gates
 
 on:
@@ -20,14 +21,8 @@ jobs:
     if: >-
       (github.event_name == 'workflow_run' &&
        contains(fromJSON('["pull_request","merge_group"]'), github.event.workflow_run.event) &&
-       ((github.event.workflow_run.workflow_id == 302898379 &&
-         github.event.workflow_run.name == 'CI') ||
-        (github.event.workflow_run.workflow_id == 302898384 &&
-         github.event.workflow_run.name == 'images') ||
-        (github.event.workflow_run.workflow_id == 302898381 &&
-         github.event.workflow_run.name == 'cluster-smoke') ||
-        (github.event.workflow_run.workflow_id == 302898388 &&
-         github.event.workflow_run.name == 'staging-smoke'))) ||
+       contains(fromJSON('[302898379,302898384,302898381,302898388]'),
+                github.event.workflow_run.workflow_id)) ||
       (github.event_name == 'pull_request_target' &&
        (github.event.action == 'converted_to_draft' ||
         (!github.event.pull_request.draft &&
@@ -42,14 +37,10 @@ jobs:
           ${{ fromJSON(
             github.event_name == 'pull_request_target' &&
               '["repository-checks","images-gate","cluster-smoke-gate","staging-smoke-gate"]' ||
-            (github.event.workflow_run.workflow_id == 302898379 &&
-             github.event.workflow_run.name == 'CI') && '["repository-checks"]' ||
-            (github.event.workflow_run.workflow_id == 302898384 &&
-             github.event.workflow_run.name == 'images') && '["images-gate"]' ||
-            (github.event.workflow_run.workflow_id == 302898381 &&
-             github.event.workflow_run.name == 'cluster-smoke') && '["cluster-smoke-gate"]' ||
-            (github.event.workflow_run.workflow_id == 302898388 &&
-             github.event.workflow_run.name == 'staging-smoke') && '["staging-smoke-gate"]' ||
+            github.event.workflow_run.workflow_id == 302898379 && '["repository-checks"]' ||
+            github.event.workflow_run.workflow_id == 302898384 && '["images-gate"]' ||
+            github.event.workflow_run.workflow_id == 302898381 && '["cluster-smoke-gate"]' ||
+            github.event.workflow_run.workflow_id == 302898388 && '["staging-smoke-gate"]' ||
             '["invalid"]') }}
     concurrency:
       group: >-
