@@ -698,6 +698,56 @@ def test_render_ingress_redirect_hosts_bind_tls_and_redirect_to_canonical() -> N
     )
 
 
+def test_render_accepts_route_transition_marker_and_renders_target() -> None:
+    # frontend_route_path_from marks an in-flight route migration for the rollout
+    # preflight; the manifests still render the target route_path.
+    cfg = ClusterConfig(
+        ingress_host="yylx.world",
+        ingress_tls_secret_name="loom-staging-tls",
+        frontend_environment="staging",
+        frontend_environment_label="Staging",
+        frontend_route_path="/staging",
+        frontend_api_base_path="/staging",
+        frontend_route_path_from="/dev",
+    )
+    docs = _load_docs(render_manifests(cfg))
+    main = next(
+        d for d in docs if d["kind"] == "Ingress" and d["metadata"]["name"] == "loom-ingress"
+    )
+    paths = [p["path"] for r in main["spec"]["rules"] for p in r["http"]["paths"]]
+    assert all("staging" in p for p in paths)
+    assert not any("/(?-i:dev)" in p for p in paths)
+
+
+def test_render_rejects_noop_route_transition_marker() -> None:
+    cfg = ClusterConfig(
+        ingress_host="yylx.world",
+        frontend_environment="staging",
+        frontend_environment_label="Staging",
+        frontend_route_path="/staging",
+        frontend_api_base_path="/staging",
+        frontend_route_path_from="/staging",
+    )
+    with pytest.raises(ValueError, match="frontend_route_path_from must differ"):
+        render_manifests(cfg)
+
+
+def test_render_rejects_malformed_route_transition_marker() -> None:
+    cfg = ClusterConfig(
+        ingress_host="yylx.world",
+        frontend_environment="staging",
+        frontend_environment_label="Staging",
+        frontend_route_path="/staging",
+        frontend_api_base_path="/staging",
+        frontend_route_path_from="/nope",
+    )
+    with pytest.raises(
+        ValueError,
+        match="frontend_route_path_from must be empty, /, /prod, /staging, or /dev",
+    ):
+        render_manifests(cfg)
+
+
 def test_render_rejects_redirect_host_matching_canonical_host() -> None:
     cfg = ClusterConfig(
         ingress_host="yylx.world",

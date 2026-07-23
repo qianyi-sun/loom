@@ -194,6 +194,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(
             )
         },
         route="https://staging.example.invalid",
+        baseline_probe_route="https://staging.example.invalid",
         rehearsal_actions=lambda _candidate, _checkpoint, _isolation: {
             check_id: (lambda: None)  # type: ignore[dict-item,return-value]
             for check_id in REHEARSAL_CHECK_IDS

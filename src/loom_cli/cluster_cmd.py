@@ -1669,6 +1669,27 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
             f"frontend_route_path={route_path!r} must use ingress_host='yylx.world'",
         )
 
+    # Optional route-transition marker: the predecessor route the live env still
+    # serves while a route migration is in flight (e.g. "/dev" while moving to
+    # "/staging"). Consumed only by the rollout preflight (baseline probes hit the
+    # predecessor); the manifest templates render the target route_path. Must be a
+    # protected route distinct from the target when present.
+    route_path_from = _normalise_frontend_path(
+        config.frontend_route_path_from,
+        "frontend_route_path_from",
+    )
+    if route_path_from:
+        if route_path_from == route_path:
+            raise ValueError(
+                "frontend_route_path_from must differ from frontend_route_path "
+                "(leave it empty when no route migration is in flight)",
+            )
+        if config.ingress_host != "yylx.world":
+            raise ValueError(
+                f"frontend_route_path_from={route_path_from!r} must use "
+                "ingress_host='yylx.world'",
+            )
+
     return {
         "frontend_environment": environment,
         "frontend_environment_label": label,

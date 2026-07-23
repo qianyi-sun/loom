@@ -77,6 +77,7 @@ class InstalledDeepPreflightComposition:
     browser_run: BrowserCommandRunner
     baseline_probe_factory: Callable[[int], Mapping[str, ReadonlyProbe]]
     route: str
+    baseline_probe_route: str
     rehearsal_factory: RehearsalFactory
     final_gate_run: FinalGateCommandRunner
     read_mutation_epoch: Callable[[], int]
@@ -161,6 +162,7 @@ class InstalledDeepPreflightComposition:
             browser_token_path=self.inputs.browser_token_path,
             baseline_probe_factory=self.baseline_probe_factory,
             route=self.route,
+            baseline_probe_route=self.baseline_probe_route,
             rehearsal_actions=rehearsal_actions,
             rehearsal_identity=rehearsal_identity,
             now=self.now,

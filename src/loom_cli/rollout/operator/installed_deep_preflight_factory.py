@@ -535,6 +535,7 @@ def build_installed_deep_preflight_composition(
         browser_run=commands.simple,
         baseline_probe_factory=readonly.baseline_probes,
         route=route,
+        baseline_probe_route=readonly.baseline_probe_route,
         rehearsal_factory=rehearsal_factory,
         final_gate_run=commands.final_gate_helper,
         read_mutation_epoch=readonly.mutation_epoch,

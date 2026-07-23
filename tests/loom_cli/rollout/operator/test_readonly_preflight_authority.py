@@ -5,9 +5,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.operator.readonly_preflight_authority import (
     ReadonlyPreflightAuthority,
+    derive_staging_baseline_probe_route,
     derive_staging_route,
 )
 from loom_cli.rollout.readonly_database_authority import (
@@ -177,6 +180,68 @@ def test_route_authority_rejects_frontend_api_drift(tmp_path: Path) -> None:
         assert str(exc) == "staging cluster route authority is invalid"
     else:  # pragma: no cover - defensive
         raise AssertionError("route drift was accepted")
+
+
+def _write_transition_authority(tmp_path: Path, *, target: str, predecessor: str) -> Path:
+    cluster = tmp_path / "cluster.toml"
+    lines = [
+        'namespace = "loom-staging"',
+        'runtime_environment = "staging"',
+        'ingress_host = "staging.example.test"',
+        f'frontend_route_path = "{target}"',
+        f'frontend_api_base_path = "{target}"',
+    ]
+    if predecessor:
+        lines.append(f'frontend_route_path_from = "{predecessor}"')
+    cluster.write_text("\n".join(lines) + "\n")
+    cluster.chmod(0o600)
+    return cluster
+
+
+def test_baseline_probe_route_targets_predecessor_during_transition(tmp_path: Path) -> None:
+    # dev tip renames the staging route /dev -> /staging; the live env still
+    # serves /dev, so the baseline probes must hit the predecessor while the
+    # canonical/target route stays /staging.
+    config = _config(tmp_path)
+    cluster = _write_transition_authority(tmp_path, target="/staging", predecessor="/dev")
+    object.__setattr__(config, "cluster_config_path", cluster)
+
+    assert derive_staging_route(config, service_uid=os.getuid()) == (
+        "https://staging.example.test/staging"
+    )
+    assert derive_staging_baseline_probe_route(config, service_uid=os.getuid()) == (
+        "https://staging.example.test/dev"
+    )
+
+
+def test_baseline_probe_route_equals_target_without_transition(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    cluster = _write_transition_authority(tmp_path, target="/staging", predecessor="")
+    object.__setattr__(config, "cluster_config_path", cluster)
+
+    target = "https://staging.example.test/staging"
+    assert derive_staging_route(config, service_uid=os.getuid()) == target
+    assert derive_staging_baseline_probe_route(config, service_uid=os.getuid()) == target
+
+
+def test_route_authority_rejects_noop_route_transition(tmp_path: Path) -> None:
+    # A declared predecessor identical to the target is a no-op that must be
+    # left empty, not accepted.
+    config = _config(tmp_path)
+    cluster = _write_transition_authority(tmp_path, target="/staging", predecessor="/staging")
+    object.__setattr__(config, "cluster_config_path", cluster)
+
+    with pytest.raises(ValueError, match="staging cluster route authority is invalid"):
+        derive_staging_baseline_probe_route(config, service_uid=os.getuid())
+
+
+def test_route_authority_rejects_malformed_predecessor(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    cluster = _write_transition_authority(tmp_path, target="/staging", predecessor="dev")
+    object.__setattr__(config, "cluster_config_path", cluster)
+
+    with pytest.raises(ValueError, match="staging cluster route authority is invalid"):
+        derive_staging_baseline_probe_route(config, service_uid=os.getuid())
 
 
 def test_authority_exposes_no_database_credential_in_evidence(tmp_path: Path) -> None:

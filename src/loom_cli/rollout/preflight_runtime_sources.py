@@ -247,6 +247,10 @@ class PreflightRuntimeSources:
     browser_token_path: Path
     baseline_probe_factory: Callable[[int], Mapping[str, ReadonlyProbe]]
     route: str
+    # Live route the Tier-2 baseline probes hit. Equals ``route`` except during a
+    # declared route transition, when the live service still serves the
+    # predecessor route (see derive_staging_baseline_probe_route).
+    baseline_probe_route: str
     rehearsal_actions: RehearsalActionFactory
     rehearsal_identity: RehearsalIdentityFactory
     now: Callable[[], datetime]
@@ -265,6 +269,7 @@ class PreflightRuntimeSources:
             or not self.candidate_root.is_absolute()
             or not self.migration_policy_path.is_absolute()
             or not self.route.startswith("https://")
+            or not self.baseline_probe_route.startswith("https://")
             or not self.manifest_image_names
         ):
             raise ValueError("preflight runtime sources are outside staging authority")
@@ -370,7 +375,7 @@ class PreflightRuntimeSources:
                 self.baseline_probe_factory(mutation_epoch),
                 environment=self.config.environment,
                 namespace=self.config.namespace,
-                route=self.route,
+                route=self.baseline_probe_route,
                 mutation_epoch=mutation_epoch,
             )
             return tier0, tier1, tier2
