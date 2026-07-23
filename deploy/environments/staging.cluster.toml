@@ -22,9 +22,10 @@ persistent_storage_host_path_root = "/data/loom-staging"
 # behavior as today).
 trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
 
-# v1.0 staging validation uses GB10 only. The in-cluster loom-worker
-# Deployment is omitted so trial execution capacity comes from the
-# release-managed external GB10 pool.
+# Trial execution capacity comes from the release-managed external worker pools,
+# not an in-cluster loom-worker Deployment (omitted here). The GB10 pool is
+# active; an OLDLAB pool is defined but gated off (enabled=false) until #896
+# container isolation lands, so live capacity is GB10 until that flip.
 [replicas]
 web = 1
 

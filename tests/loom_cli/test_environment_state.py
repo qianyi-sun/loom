@@ -2136,15 +2136,25 @@ def test_committed_staging_profile_ships_active_gb10_supervisor() -> None:
     )
 
     supervisors = profile.external_slurm_autoscaler_supervisors
-    assert len(supervisors) == 1
-    gb10 = supervisors[0]
-    assert gb10["name"] == "gb10-staging"
+    assert len(supervisors) == 2
+    by_name = {supervisor["name"]: supervisor for supervisor in supervisors}
+    gb10 = by_name["gb10-staging"]
     assert gb10["pool_name"] == "gb10"
     assert gb10["service_name"] == "loom-autoscaler-gb10-staging.service"
     assert gb10["timer_name"] == "loom-autoscaler-gb10-staging.timer"
     assert gb10["enabled"] is True
     assert gb10["active"] is True
     assert "15451" in gb10["args"]
+
+    # OLDLAB staging supervisor ships fail-closed until #896: the unit renders but
+    # is not enabled/started, so live staging capacity stays GB10-only.
+    oldlab = by_name["oldlab-staging"]
+    assert oldlab["pool_name"] == "oldlab"
+    assert oldlab["service_name"] == "loom-autoscaler-oldlab-staging.service"
+    assert oldlab["timer_name"] == "loom-autoscaler-oldlab-staging.timer"
+    assert oldlab["enabled"] is False
+    assert oldlab["active"] is False
+    assert "15448" in oldlab["args"]
 
 
 def _supervisor_profile_payload(*, second_service: str, second_port: str) -> str:
@@ -2244,7 +2254,12 @@ def test_render_supervisor_service_and_timer_contain_full_execstart() -> None:
     assert "OnUnitActiveSec=30" in timer_unit
 
 
-def test_staging_profile_is_gb10_only_for_first_prod_validation() -> None:
+def test_staging_profile_defines_gated_oldlab_alongside_active_gb10() -> None:
+    # Staging defines both the active GB10 pool and a fail-closed OLDLAB pool.
+    # OLDLAB stays enabled=false (and non-exclusive, since its nodes double-duty
+    # with k3s/MinIO) until #896 lands, so live staging capacity remains GB10-only
+    # while the pool definition is in place. ("GB10 only" as an absolute gate is
+    # retired: staging now carries the gated OLDLAB pool.)
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2255,8 +2270,11 @@ def test_staging_profile_is_gb10_only_for_first_prod_validation() -> None:
         expected_environment="staging",
     )
 
-    pool_names = {policy["pool_name"] for policy in profile.autoscaler_policies}
-    assert pool_names == {"gb10"}
+    policies = {policy["pool_name"]: policy for policy in profile.autoscaler_policies}
+    assert set(policies) == {"gb10", "oldlab"}
+    assert policies["gb10"]["enabled"] is True
+    assert policies["oldlab"]["enabled"] is False
+    assert policies["oldlab"]["actuator_config"]["exclusive"] is False
 
     gb10_state = next(
         state for state in profile.gb10_desired_states if state["pool_name"] == "gb10"
