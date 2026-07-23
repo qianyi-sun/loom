@@ -2038,6 +2038,75 @@ def test_registered_staging_baseline_runs_independent_readonly_blockers() -> Non
     assert by_id["staging.release-baseline"].blocked_by == ("staging.network",)
 
 
+def test_baseline_route_transition_binds_target_context_but_probes_predecessor() -> None:
+    # #936 route transition: the plan/context carry the TARGET route (/staging)
+    # while the live readonly probes still hit the PREDECESSOR (/dev, not migrated
+    # yet). The context binding must stay on the target so bindings_match agrees;
+    # only the probe session targets the predecessor. Regression guard: binding the
+    # predecessor into the context (the original #937 defect) made every baseline
+    # check fall through to the empty "staging-baseline-unavailable" probe.
+    target = "https://yylx.world/staging"
+    predecessor = "https://yylx.world/dev"
+    check_ids = (
+        "staging.health",
+        "staging.auth",
+        "staging.catalog-task",
+        "staging.storage-db",
+        "staging.network",
+    )
+    calls: list[str] = []
+
+    def result(check_id: str) -> BaselineProbeResult:
+        calls.append(check_id)
+        return BaselineProbeResult(
+            check_id=check_id,
+            environment="staging",
+            namespace="loom-staging",
+            route=predecessor,  # the live probes hit the predecessor route
+            readonly_principal="loom-rollout-readonly",
+            observed_mutation_epoch=8,
+            resource_digest=hashlib.sha256(check_id.encode()).hexdigest(),
+            blockers={},
+        )
+
+    checks = build_staging_baseline_checks(
+        {check_id: lambda check_id=check_id: result(check_id) for check_id in check_ids},
+        environment="staging",
+        namespace="loom-staging",
+        route=target,
+        baseline_probe_route=predecessor,
+        mutation_epoch=8,
+    )
+    context = CheckContext(
+        {
+            "environment": "staging",
+            "namespace": "loom-staging",
+            "readonly.principal.sha256": readonly_authority_policy_digest(),
+            "route": target,  # the plan/context carry the TARGET route
+            "staging.mutation-epoch": 8,
+            "runner.config.sha256": "a" * 64,
+        }
+    )
+    dag = PreflightDag(
+        (
+            _passing_dependency("kubernetes.client"),
+            _passing_dependency("readonly.authority"),
+            _passing_dependency("credentials.metadata"),
+            *checks,
+        )
+    )
+
+    by_id = {e.check_id: e for e in dag.run(context, through_tier=2)}
+    assert set(calls) == set(check_ids)
+    # Every baseline check must BIND and pass — not fall through to the empty
+    # "staging-baseline-unavailable" probe that the context/probe route mismatch
+    # produced.
+    for check_id in check_ids:
+        assert by_id[check_id].passed, check_id
+        assert by_id[check_id].evidence["readonly-principal"] == "loom-rollout-readonly"
+    assert by_id["staging.release-baseline"].passed
+
+
 def test_registered_rehearsal_runs_exact_isolated_journaled_actions() -> None:
     calls: list[str] = []
 

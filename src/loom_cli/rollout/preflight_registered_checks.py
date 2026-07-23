@@ -2800,13 +2800,24 @@ def build_staging_baseline_checks(
     namespace: str,
     route: str,
     mutation_epoch: int,
+    baseline_probe_route: str | None = None,
 ) -> tuple[RegisteredCheck, ...]:
-    """Build all Tier 2 current-staging readonly baseline checks."""
+    """Build all Tier 2 current-staging readonly baseline checks.
+
+    ``route`` is the canonical/target route bound into the plan context (it must
+    equal the ``"route"`` context binding). ``baseline_probe_route`` is the route
+    the live readonly probes actually hit — identical to ``route`` except during a
+    declared route transition, when the live service still serves the predecessor
+    route while the plan/context already carry the target (see #936). The context
+    binding stays on the target so ``bindings_match`` agrees with the plan; only
+    the probe session targets the predecessor.
+    """
+    probe_route = route if baseline_probe_route is None else baseline_probe_route
     session = StagingBaselineSession(
         probes,
         expected_environment=environment,
         expected_namespace=namespace,
-        expected_route=route,
+        expected_route=probe_route,
         expected_mutation_epoch=mutation_epoch,
     )
     principal_digest = readonly_authority_policy_digest()
