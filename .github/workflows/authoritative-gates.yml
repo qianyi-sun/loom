@@ -1,4 +1,4 @@
-# publisher-contract: dynamic-run-name-v2
+# publisher-contract: dynamic-run-name-v3
 name: authoritative-gates
 
 on:
@@ -16,6 +16,19 @@ permissions:
   pull-requests: read
 
 jobs:
+  # CheckRuns created with the workflow token attach to this workflow's first
+  # GitHub Actions check suite for the head. Keep that suite successful even
+  # when a Draft PR intentionally filters every publisher matrix job.
+  suite-anchor:
+    name: keep authoritative publisher suite successful
+    if: github.event_name == 'pull_request_target'
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Complete trusted PR suite
+        run: ":"
+
   publish:
     name: publish authoritative gate (${{ matrix.context }})
     if: >-
@@ -42,12 +55,6 @@ jobs:
             github.event.workflow_run.workflow_id == 302898381 && '["cluster-smoke-gate"]' ||
             github.event.workflow_run.workflow_id == 302898388 && '["staging-smoke-gate"]' ||
             '["invalid"]') }}
-    concurrency:
-      group: >-
-        authoritative-gates-${{ github.event_name == 'workflow_run' &&
-          github.event.workflow_run.head_sha ||
-          github.event.pull_request.head.sha }}-${{ matrix.context }}
-      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

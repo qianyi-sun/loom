@@ -9,8 +9,6 @@ import pytest
 from scripts.ops.authoritative_gate import (
     GATE_SPECS,
     RELEVANT_LABEL_ORDER,
-    V1_BOOTSTRAP_BASE_SHA,
-    V1_BOOTSTRAP_HEAD_REF,
     DuplicateCustomCheckError,
     Generation,
     PublisherError,
@@ -282,6 +280,25 @@ def generation(
     )
 
 
+def assert_check_is_pending(check: Mapping[str, Any]) -> None:
+    state = json.loads(str(check["output"]["summary"]))
+    assert state["pending"] is True
+    if check["status"] == "in_progress":
+        assert "conclusion" not in check
+        return
+    assert check["status"] == "completed"
+    assert check["conclusion"] == "failure"
+
+
+def check_payload_is_pending(payload: Mapping[str, Any]) -> bool:
+    output = payload.get("output")
+    summary = output.get("summary") if isinstance(output, Mapping) else None
+    if not isinstance(summary, str):
+        return False
+    state = json.loads(summary)
+    return isinstance(state, Mapping) and state.get("pending") is True
+
+
 def seed_invalidation(client: FakeGitHubClient, value: Generation) -> None:
     relevant_labels = labels_from_mask(value.labels)
     client.pull["labels"] = [{"name": label} for label in relevant_labels]
@@ -413,7 +430,7 @@ def test_generation_parser_rejects_invalid_pull_identity(invalid_pull: str) -> N
     assert parse_full_generation(malformed) is None
 
 
-def test_completed_check_is_neutralized_before_a_new_same_head_generation() -> None:
+def test_completed_check_fails_closed_in_place_for_a_new_same_head_generation() -> None:
     client = FakeGitHubClient()
     original_generation = generation()
     seed_invalidation(client, original_generation)
@@ -429,14 +446,28 @@ def test_completed_check_is_neutralized_before_a_new_same_head_generation() -> N
 
     original_check = client.checks[GATE_SPECS[0].context][0]
     original_check_id = original_check["id"]
+    replacement_generation = generation(
+        updated="2026-07-22T10:00:01Z",
+        action="labeled",
+        label="ci:images",
+        labels=["ci:images"],
+    )
     client.pull["labels"] = [{"name": "ci:images"}]
-    client.pull["updated_at"] = "2026-07-22T10:00:01Z"
+    client.pull["updated_at"] = replacement_generation.updated
+    client.issue_events.append(
+        authority_event(
+            2,
+            "labeled",
+            replacement_generation.updated,
+            label="ci:images",
+        )
+    )
     result = process_event(
         pull_event(
             action="labeled",
             label="ci:images",
             labels=["ci:images"],
-            updated="2026-07-22T10:00:01Z",
+            updated=replacement_generation.updated,
         ),
         client,
         context=GATE_SPECS[0].context,
@@ -445,153 +476,41 @@ def test_completed_check_is_neutralized_before_a_new_same_head_generation() -> N
     assert result.outcome == "in_progress"
     assert len(client.checks[GATE_SPECS[0].context]) == 1
     reset_check = client.checks[GATE_SPECS[0].context][0]
-    assert reset_check["id"] != original_check_id
-    assert reset_check["status"] == "in_progress"
-    assert "conclusion" not in reset_check
-    superseded_payload = next(
+    assert reset_check["id"] == original_check_id
+    assert reset_check["status"] == "completed"
+    assert reset_check["conclusion"] == "failure"
+    pending_state = json.loads(reset_check["output"]["summary"])
+    assert pending_state["pending"] is True
+    assert pending_state["generation"] == replacement_generation.as_dict()
+    pending_payload = next(
         payload
         for check_id, payload in reversed(client.updated)
         if check_id == original_check_id
         and payload.get("status") == "completed"
-        and payload.get("conclusion") == "neutral"
+        and payload.get("conclusion") == "failure"
     )
-    assert superseded_payload["name"] == f"{GATE_SPECS[0].context}-superseded"
-    assert "completed_at" in superseded_payload
-    superseded_check = client.checks[f"{GATE_SPECS[0].context}-superseded"][0]
-    assert superseded_check["id"] == original_check_id
-    assert superseded_check["conclusion"] == "neutral"
-
-
-def test_exact_v1_bootstrap_publishes_aggregated_source_success() -> None:
-    bootstrap_pull = 933
-
-    class BootstrapClient(FakeGitHubClient):
-        def get_pull_request(self, number: int) -> Mapping[str, Any]:
-            assert number == bootstrap_pull
-            return deepcopy(self.pull)
-
-        def list_issue_events(self, number: int) -> Sequence[Mapping[str, Any]]:
-            assert number == bootstrap_pull
-            return deepcopy(self.issue_events)
-
-    client = BootstrapClient()
-    client.pull["number"] = bootstrap_pull
-    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
-    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
-    spec = GATE_SPECS[0]
-    client.checks[spec.context] = [
-        {
-            "id": 900,
-            "name": spec.context,
-            "external_id": spec.external_id(repository=REPOSITORY, head_sha=HEAD),
-            "app": {"id": 15368},
-            "status": "completed",
-            "conclusion": "failure",
-        }
-    ]
-
-    result = process_event(
-        {
-            "event_name": "bootstrap_v1_repair",
-            "workflow_sha": HEAD,
-            "pull_number": str(bootstrap_pull),
-            "gate_result": "success",
-            "details_url": "https://github.com/qianyi-sun/loom/actions/runs/1",
-        },
-        client,
-        context=spec.context,
+    assert pending_payload["name"] == GATE_SPECS[0].context
+    assert pending_payload["external_id"] == GATE_SPECS[0].external_id(
+        repository=REPOSITORY,
+        head_sha=HEAD,
     )
+    assert "completed_at" in pending_payload
 
-    assert result.outcome == "success"
-    assert result.contexts == (spec.context,)
-    assert len(client.checks[spec.context]) == 1
-    repaired = client.checks[spec.context][0]
-    assert repaired["id"] == 900
-    assert repaired["status"] == "completed"
-    assert repaired["conclusion"] == "success"
-
-
-def test_exact_cluster_bootstrap_neutralizes_only_publisher_job_failures() -> None:
-    bootstrap_pull = 933
-
-    class BootstrapClient(FakeGitHubClient):
-        def get_pull_request(self, number: int) -> Mapping[str, Any]:
-            assert number == bootstrap_pull
-            return deepcopy(self.pull)
-
-        def list_issue_events(self, number: int) -> Sequence[Mapping[str, Any]]:
-            assert number == bootstrap_pull
-            return deepcopy(self.issue_events)
-
-    client = BootstrapClient()
-    client.pull["number"] = bootstrap_pull
-    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
-    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
-    spec = next(item for item in GATE_SPECS if item.context == "cluster-smoke-gate")
-    client.checks[spec.context] = [
-        {
-            "id": 900,
-            "name": spec.context,
-            "external_id": spec.external_id(repository=REPOSITORY, head_sha=HEAD),
-            "app": {"id": 15368},
-            "status": "in_progress",
-        }
-    ]
-    for index, gate_spec in enumerate(GATE_SPECS, start=1):
-        job_name = f"publish authoritative gate ({gate_spec.context})"
-        client.checks[job_name] = [
-            {
-                "id": 900 + index,
-                "name": job_name,
-                "app": {"id": 15368},
-                "status": "completed",
-                "conclusion": "failure",
-            }
-        ]
-
-    result = process_event(
-        {
-            "event_name": "bootstrap_v1_repair",
-            "workflow_sha": HEAD,
-            "pull_number": bootstrap_pull,
-            "gate_result": "success",
-            "neutralize_publisher_failures": True,
-        },
-        client,
-        context=spec.context,
+    replacement = workflow_run(
+        run_id=91,
+        generation=replacement_generation,
+        status="completed",
+        conclusion="success",
     )
+    client.runs[GATE_SPECS[0].workflow_id] = [completed, replacement]
+    client.jobs[91] = [{"name": GATE_SPECS[0].attempt_job, "conclusion": "success"}]
 
-    assert result.outcome == "success"
-    assert client.checks[spec.context][0]["conclusion"] == "success"
-    for gate_spec in GATE_SPECS:
-        job_name = f"publish authoritative gate ({gate_spec.context})"
-        assert client.checks[job_name][0]["conclusion"] == "neutral"
-
-
-def test_v1_bootstrap_rejects_a_workflow_sha_outside_the_repair_head() -> None:
-    bootstrap_pull = 933
-
-    class BootstrapClient(FakeGitHubClient):
-        def get_pull_request(self, number: int) -> Mapping[str, Any]:
-            assert number == bootstrap_pull
-            return deepcopy(self.pull)
-
-    client = BootstrapClient()
-    client.pull["number"] = bootstrap_pull
-    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
-    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
-
-    with pytest.raises(PublisherError, match="exact repair pull request"):
-        process_event(
-            {
-                "event_name": "bootstrap_v1_repair",
-                "workflow_sha": "c" * 40,
-                "pull_number": bootstrap_pull,
-                "gate_result": "success",
-            },
-            client,
-            context=GATE_SPECS[0].context,
-        )
+    assert process_event(workflow_event(replacement), client).outcome == "success"
+    final_check = client.checks[GATE_SPECS[0].context][0]
+    assert final_check["id"] == original_check_id
+    assert final_check["status"] == "completed"
+    assert final_check["conclusion"] == "success"
+    assert "pending" not in json.loads(final_check["output"]["summary"])
 
 
 def test_check_run_response_from_an_unexpected_app_fails_closed() -> None:
@@ -742,7 +661,7 @@ def test_stale_completion_reconciles_without_overwriting_newer_generation() -> N
     assert result.outcome == "in_progress"
     assert len(client.updated) == updates_before + 1
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
+    assert_check_is_pending(check)
     state = json.loads(check["output"]["summary"])
     assert state["generation"] == latest_generation.as_dict()
     assert state["run_id"] == 301
@@ -771,8 +690,7 @@ def test_old_completion_cannot_green_after_live_relevant_label_change() -> None:
 
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_relevant_label_aba_cannot_revalidate_an_old_generation() -> None:
@@ -809,8 +727,7 @@ def test_relevant_label_aba_cannot_revalidate_an_old_generation() -> None:
 
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_final_live_read_rejects_a_relevant_change_during_completion() -> None:
@@ -845,8 +762,7 @@ def test_final_live_read_rejects_a_relevant_change_during_completion() -> None:
 
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_same_second_identical_label_aba_waits_for_every_source_generation() -> None:
@@ -880,7 +796,7 @@ def test_same_second_identical_label_aba_waits_for_every_source_generation() -> 
     )
 
     assert process_event(workflow_event(old_run), client).outcome == "in_progress"
-    assert client.checks[GATE_SPECS[0].context][0]["status"] == "in_progress"
+    assert_check_is_pending(client.checks[GATE_SPECS[0].context][0])
 
     latest_run = workflow_run(
         run_id=307,
@@ -1098,7 +1014,7 @@ def test_all_nonterminal_workflow_states_keep_the_gate_in_progress(
     result = process_event(workflow_event(run), client)
 
     assert result.outcome == "in_progress"
-    assert client.checks[GATE_SPECS[0].context][0]["status"] == "in_progress"
+    assert_check_is_pending(client.checks[GATE_SPECS[0].context][0])
 
 
 def test_serialized_latest_completion_can_self_heal_without_prior_invalidation() -> None:
@@ -1221,7 +1137,7 @@ def test_actual_base_retarget_rejects_the_old_generation() -> None:
     result = process_event(workflow_event(run), client)
 
     assert result.outcome == "in_progress"
-    assert client.checks[GATE_SPECS[0].context][0]["status"] == "in_progress"
+    assert_check_is_pending(client.checks[GATE_SPECS[0].context][0])
 
 
 def test_fork_pull_request_run_can_finalize_the_base_repo_check() -> None:
@@ -1502,8 +1418,7 @@ def test_a_new_attempt_during_completion_keeps_the_gate_pending() -> None:
 
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_observed_new_attempt_cannot_regress_within_one_invocation() -> None:
@@ -1540,7 +1455,7 @@ def test_observed_new_attempt_cannot_regress_within_one_invocation() -> None:
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
     state = json.loads(check["output"]["summary"])
-    assert check["status"] == "in_progress"
+    assert_check_is_pending(check)
     assert (state["run_id"], state["run_attempt"]) == (947, 2)
 
 
@@ -1607,8 +1522,7 @@ def test_terminal_patch_is_compensated_when_authority_changes_after_write() -> N
 
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_delayed_old_head_invocation_preserves_current_head_success() -> None:
@@ -1749,8 +1663,7 @@ def test_issue_history_failure_leaves_a_known_new_event_pending() -> None:
         )
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_workflow_attempt_webhook_is_an_inventory_floor() -> None:
@@ -1766,6 +1679,7 @@ def test_workflow_attempt_webhook_is_an_inventory_floor() -> None:
     client.runs[GATE_SPECS[0].workflow_id] = [first]
     client.jobs[(950, 1)] = [{"name": GATE_SPECS[0].attempt_job, "conclusion": "success"}]
     assert process_event(workflow_event(first), client).outcome == "success"
+    original_check_id = client.checks[GATE_SPECS[0].context][0]["id"]
 
     second = workflow_run(
         run_id=950,
@@ -1778,8 +1692,22 @@ def test_workflow_attempt_webhook_is_an_inventory_floor() -> None:
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
     state = json.loads(check["output"]["summary"])
-    assert check["status"] == "in_progress"
+    assert check["id"] == original_check_id
+    assert_check_is_pending(check)
     assert (state["run_id"], state["run_attempt"]) == (950, 2)
+
+    completed_second = {**second, "status": "completed", "conclusion": "success"}
+    client.runs[GATE_SPECS[0].workflow_id] = [first, completed_second]
+    client.jobs[(950, 2)] = [
+        {"name": GATE_SPECS[0].attempt_job, "conclusion": "success"}
+    ]
+
+    assert process_event(workflow_event(completed_second), client).outcome == "success"
+    final_check = client.checks[GATE_SPECS[0].context][0]
+    assert final_check["id"] == original_check_id
+    assert final_check["status"] == "completed"
+    assert final_check["conclusion"] == "success"
+    assert "pending" not in json.loads(final_check["output"]["summary"])
 
 
 def test_merge_group_new_attempt_during_completion_stays_pending() -> None:
@@ -1819,7 +1747,7 @@ def test_merge_group_new_attempt_during_completion_stays_pending() -> None:
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
     state = json.loads(check["output"]["summary"])
-    assert check["status"] == "in_progress"
+    assert_check_is_pending(check)
     assert (state["run_id"], state["run_attempt"]) == (951, 2)
 
 
@@ -1861,7 +1789,7 @@ def test_merge_group_observed_attempt_cannot_regress_within_one_invocation() -> 
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
     state = json.loads(check["output"]["summary"])
-    assert check["status"] == "in_progress"
+    assert_check_is_pending(check)
     assert (state["run_id"], state["run_attempt"]) == (966, 2)
 
 
@@ -1899,8 +1827,7 @@ def test_pull_read_failure_revokes_an_observed_same_head_transition() -> None:
         )
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_cross_second_label_aba_selects_only_the_latest_generation() -> None:
@@ -2031,8 +1958,7 @@ def test_post_terminal_history_failure_is_compensated_to_pending() -> None:
         process_event(workflow_event(run), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_publisher_deactivation_reopens_an_old_custom_success() -> None:
@@ -2062,8 +1988,7 @@ def test_publisher_deactivation_reopens_an_old_custom_success() -> None:
 
     assert result.outcome == "legacy"
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_foreign_same_head_pull_run_cannot_override_the_current_pull() -> None:
@@ -2164,8 +2089,7 @@ def test_workflow_registration_failure_revokes_a_new_attempt() -> None:
         process_event(workflow_event(second), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 @pytest.mark.parametrize("event_conclusion", ["failure", "cancelled"])
@@ -2225,8 +2149,7 @@ def test_invalid_terminal_patch_response_is_compensated_to_pending() -> None:
         process_event(workflow_event(run), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_observed_new_pr_authority_cannot_regress_within_one_invocation() -> None:
@@ -2272,7 +2195,7 @@ def test_observed_new_pr_authority_cannot_regress_within_one_invocation() -> Non
     assert result.outcome == "in_progress"
     check = client.checks[GATE_SPECS[0].context][0]
     state = json.loads(check["output"]["summary"])
-    assert check["status"] == "in_progress"
+    assert_check_is_pending(check)
     assert state["authority_epoch"] == 2
     assert state["generation"]["labels"] == label_mask(["ci:images"])
 
@@ -2474,8 +2397,7 @@ def test_converted_to_draft_trusted_event_revokes_terminal_success() -> None:
 
     check = client.checks[GATE_SPECS[0].context][0]
     state = json.loads(check["output"]["summary"])
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
     assert state["generation"]["action"] == "converted_to_draft"
 
 
@@ -2596,7 +2518,7 @@ def test_same_second_force_push_aba_waits_for_final_matching_head_run() -> None:
     client.jobs[977] = [{"name": GATE_SPECS[0].attempt_job, "conclusion": "success"}]
 
     assert process_event(workflow_event(old_run), client).outcome == "in_progress"
-    assert client.checks[GATE_SPECS[0].context][0]["status"] == "in_progress"
+    assert_check_is_pending(client.checks[GATE_SPECS[0].context][0])
 
     current_run = workflow_run(
         run_id=978,
@@ -2648,8 +2570,7 @@ def test_merged_pull_does_not_preserve_success_over_a_newer_attempt() -> None:
     process_event(workflow_event(first_attempt), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_merged_pull_rejects_cross_base_replacement_before_event_history_catches_up() -> None:
@@ -2705,8 +2626,7 @@ def test_merged_pull_rejects_cross_base_replacement_before_event_history_catches
     process_event(workflow_event(first_run), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_strict_false_base_tip_advance_then_natural_merge_preserves_success() -> None:
@@ -2775,8 +2695,7 @@ def test_merged_retarget_without_run_association_revokes_old_base_success() -> N
     process_event(workflow_event(run), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_pr_handler_never_forgets_a_newer_observed_attempt() -> None:
@@ -2958,8 +2877,7 @@ def test_newer_attempt_read_failure_revokes_an_older_terminal_success() -> None:
         )
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_partial_authority_history_cannot_hide_a_newer_attempt_failure() -> None:
@@ -3007,8 +2925,7 @@ def test_partial_authority_history_cannot_hide_a_newer_attempt_failure() -> None
     process_event(workflow_event(filtered), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_partial_history_duplicate_preserves_exact_synchronize_terminal() -> None:
@@ -3085,8 +3002,7 @@ def test_partial_history_cannot_prefer_an_older_authority_run() -> None:
     process_event(workflow_event(filtered), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_stale_compensation_preserves_a_newer_authority_terminal() -> None:
@@ -3261,6 +3177,7 @@ def test_post_merge_restoration_rechecks_inventory_after_terminal_patch() -> Non
                 self.restoration_armed
                 and payload.get("status") == "completed"
                 and payload.get("conclusion") != "neutral"
+                and not check_payload_is_pending(payload)
                 and not self.rerun_injected
             ):
                 self.rerun_injected = True
@@ -3309,8 +3226,7 @@ def test_post_merge_restoration_rechecks_inventory_after_terminal_patch() -> Non
     check = client.checks[GATE_SPECS[0].context][0]
     assert client.rerun_injected
     assert result.outcome == "in_progress"
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_post_merge_restoration_rejects_a_newer_live_snapshot_generation() -> None:
@@ -3361,8 +3277,7 @@ def test_post_merge_restoration_rejects_a_newer_live_snapshot_generation() -> No
 
     check = client.checks[GATE_SPECS[0].context][0]
     assert result.outcome == "stale"
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_post_merge_restoration_read_failure_is_compensated_to_pending() -> None:
@@ -3415,8 +3330,7 @@ def test_post_merge_restoration_read_failure_is_compensated_to_pending() -> None
         process_event(workflow_event(stale_run), client)
 
     check = client.checks[GATE_SPECS[0].context][0]
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 @pytest.mark.parametrize(
@@ -3458,8 +3372,7 @@ def test_post_merge_unsafe_terminal_delivery_cannot_restore_success(
 
     check = client.checks[GATE_SPECS[0].context][0]
     assert result.outcome == "stale"
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_post_merge_lower_id_newer_authority_cannot_restore_old_success() -> None:
@@ -3496,8 +3409,7 @@ def test_post_merge_lower_id_newer_authority_cannot_restore_old_success() -> Non
 
     check = client.checks[GATE_SPECS[0].context][0]
     assert result.outcome == "stale"
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 def test_post_merge_stale_event_cannot_restore_an_even_older_terminal() -> None:
@@ -3540,8 +3452,7 @@ def test_post_merge_stale_event_cannot_restore_an_even_older_terminal() -> None:
 
     check = client.checks[GATE_SPECS[0].context][0]
     assert result.outcome == "stale"
-    assert check["status"] == "in_progress"
-    assert "conclusion" not in check
+    assert_check_is_pending(check)
 
 
 @pytest.mark.parametrize("duplicate_mode", ["filtered", "full"])
