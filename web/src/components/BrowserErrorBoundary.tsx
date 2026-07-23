@@ -5,6 +5,7 @@ import {
   prepareBrowserFailureForBoundary,
   reportBrowserFailure,
 } from "../lib/errorReporting";
+import { clearBrowserTestRecoveryFault } from "../lib/browserTestBuild";
 
 interface BrowserErrorFallback {
   referenceId: string;
@@ -80,6 +81,9 @@ export class BrowserErrorBoundary extends React.Component<
   }
 
   private readonly retry = (): void => {
+    if (__LOOM_BROWSER_TEST_BUILD__) {
+      clearBrowserTestRecoveryFault("route-render-once");
+    }
     this.setState((state) => ({
       referenceId: null,
       renderAttempt: state.renderAttempt + 1,

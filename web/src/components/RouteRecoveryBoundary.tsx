@@ -1,6 +1,10 @@
 import React from "react";
 import { Outlet, useLocation } from "react-router-dom";
 
+import {
+  clearBrowserTestRecoveryFault,
+  shouldTriggerBrowserTestRecoveryFault,
+} from "../lib/browserTestBuild";
 import { frontendHomePath } from "../lib/frontendConfig";
 import { BrowserErrorBoundary } from "./BrowserErrorBoundary";
 import { RecoveryPanel } from "./RecoveryPanel";
@@ -20,6 +24,20 @@ function RouteLoadingStatus(): JSX.Element {
   );
 }
 
+function BrowserTestRouteFault({
+  children,
+}: {
+  children: React.ReactNode;
+}): JSX.Element {
+  if (
+    __LOOM_BROWSER_TEST_BUILD__ &&
+    shouldTriggerBrowserTestRecoveryFault("route-render-once")
+  ) {
+    throw new Error("browser-test-only route render fault");
+  }
+  return <>{children}</>;
+}
+
 /** Keep the app shell alive when one routed page or lazy module fails. */
 export function RouteRecoveryBoundary({
   children,
@@ -27,6 +45,14 @@ export function RouteRecoveryBoundary({
   retryPolicy = "transient",
 }: RouteRecoveryBoundaryProps): JSX.Element {
   const location = useLocation();
+  const faultLocationKey = React.useRef(location.key);
+  if (
+    __LOOM_BROWSER_TEST_BUILD__ &&
+    faultLocationKey.current !== location.key
+  ) {
+    faultLocationKey.current = location.key;
+    clearBrowserTestRecoveryFault("route-render-once");
+  }
 
   return (
     <BrowserErrorBoundary
@@ -48,9 +74,11 @@ export function RouteRecoveryBoundary({
         />
       )}
     >
-      <React.Suspense fallback={<RouteLoadingStatus />}>
-        {children ?? <Outlet />}
-      </React.Suspense>
+      <BrowserTestRouteFault>
+        <React.Suspense fallback={<RouteLoadingStatus />}>
+          {children ?? <Outlet />}
+        </React.Suspense>
+      </BrowserTestRouteFault>
     </BrowserErrorBoundary>
   );
 }

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/verify-production-build.mjs",
     "build:browser-test": "node scripts/build-browser-test.mjs",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --max-warnings=0",

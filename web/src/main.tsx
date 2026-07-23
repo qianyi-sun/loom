@@ -13,6 +13,7 @@ import {
   installBrowserConsoleErrorRedaction,
   installBrowserErrorEventRedaction,
 } from "./lib/errorReporting";
+import { shouldTriggerBrowserTestRecoveryFault } from "./lib/browserTestBuild";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -54,6 +55,22 @@ function MountedApp({ rootElement }: { rootElement: HTMLElement }): JSX.Element 
   return <App />;
 }
 
+// This production entrypoint is not a Fast Refresh module.
+// eslint-disable-next-line react-refresh/only-export-components
+function BrowserTestRootFault({
+  children,
+}: {
+  children: React.ReactNode;
+}): JSX.Element {
+  if (
+    __LOOM_BROWSER_TEST_BUILD__ &&
+    shouldTriggerBrowserTestRecoveryFault("root-render-once")
+  ) {
+    throw new Error("browser-test-only root render fault");
+  }
+  return <>{children}</>;
+}
+
 const rootElement = document.getElementById("root")!;
 const restoreErrorEventRedaction = installBrowserErrorEventRedaction();
 const restoreConsoleErrorRedaction = installBrowserConsoleErrorRedaction();
@@ -71,17 +88,19 @@ if (hot) {
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <RootErrorBoundary>
-      <FrontendBootstrap>
-        {(config) => (
-          <QueryClientProvider client={queryClient}>
-            <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} basename={config.routePath || undefined}>
-              <AuthProvider>
-                <MountedApp rootElement={rootElement} />
-              </AuthProvider>
-            </BrowserRouter>
-          </QueryClientProvider>
-        )}
-      </FrontendBootstrap>
+      <BrowserTestRootFault>
+        <FrontendBootstrap>
+          {(config) => (
+            <QueryClientProvider client={queryClient}>
+              <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} basename={config.routePath || undefined}>
+                <AuthProvider>
+                  <MountedApp rootElement={rootElement} />
+                </AuthProvider>
+              </BrowserRouter>
+            </QueryClientProvider>
+          )}
+        </FrontendBootstrap>
+      </BrowserTestRootFault>
     </RootErrorBoundary>
   </React.StrictMode>,
 );
