@@ -253,6 +253,16 @@ def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
         assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER"] == (
             "${{ github.event.pull_request.number }}"
         )
+        if workflow_path == ".github/workflows/cluster-smoke.yml":
+            assert (
+                publish["env"]["AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES"]
+                == "true"
+            )
+        else:
+            assert (
+                "AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES"
+                not in publish["env"]
+            )
         assert publish["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
 
 

@@ -511,6 +511,63 @@ def test_exact_v1_bootstrap_publishes_aggregated_source_success() -> None:
     assert repaired["conclusion"] == "success"
 
 
+def test_exact_cluster_bootstrap_neutralizes_only_publisher_job_failures() -> None:
+    bootstrap_pull = 933
+
+    class BootstrapClient(FakeGitHubClient):
+        def get_pull_request(self, number: int) -> Mapping[str, Any]:
+            assert number == bootstrap_pull
+            return deepcopy(self.pull)
+
+        def list_issue_events(self, number: int) -> Sequence[Mapping[str, Any]]:
+            assert number == bootstrap_pull
+            return deepcopy(self.issue_events)
+
+    client = BootstrapClient()
+    client.pull["number"] = bootstrap_pull
+    client.pull["head"]["ref"] = V1_BOOTSTRAP_HEAD_REF
+    client.pull["base"]["sha"] = V1_BOOTSTRAP_BASE_SHA
+    spec = next(item for item in GATE_SPECS if item.context == "cluster-smoke-gate")
+    client.checks[spec.context] = [
+        {
+            "id": 900,
+            "name": spec.context,
+            "external_id": spec.external_id(repository=REPOSITORY, head_sha=HEAD),
+            "app": {"id": 15368},
+            "status": "in_progress",
+        }
+    ]
+    for index, gate_spec in enumerate(GATE_SPECS, start=1):
+        job_name = f"publish authoritative gate ({gate_spec.context})"
+        client.checks[job_name] = [
+            {
+                "id": 900 + index,
+                "name": job_name,
+                "app": {"id": 15368},
+                "status": "completed",
+                "conclusion": "failure",
+            }
+        ]
+
+    result = process_event(
+        {
+            "event_name": "bootstrap_v1_repair",
+            "workflow_sha": HEAD,
+            "pull_number": bootstrap_pull,
+            "gate_result": "success",
+            "neutralize_publisher_failures": True,
+        },
+        client,
+        context=spec.context,
+    )
+
+    assert result.outcome == "success"
+    assert client.checks[spec.context][0]["conclusion"] == "success"
+    for gate_spec in GATE_SPECS:
+        job_name = f"publish authoritative gate ({gate_spec.context})"
+        assert client.checks[job_name][0]["conclusion"] == "neutral"
+
+
 def test_v1_bootstrap_rejects_a_workflow_sha_outside_the_repair_head() -> None:
     bootstrap_pull = 933
 

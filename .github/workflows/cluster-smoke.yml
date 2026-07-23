@@ -448,6 +448,7 @@ jobs:
           AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA: ${{ github.event.pull_request.head.sha }}
           AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER: ${{ github.event.pull_request.number }}
           AUTHORITATIVE_BOOTSTRAP_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           python scripts/ops/authoritative_gate.py

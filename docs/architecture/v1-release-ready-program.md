@@ -136,7 +136,10 @@ four head/base/PR-bound source jobs to publish its already-aggregated gate
 results into the existing custom CheckRuns. They accept only authoritative PR
 events (lifecycle changes, relevant CI-label changes, and base edits), so
 unrelated metadata cannot create optional repair runs. Those jobs are inert for
-every other PR and are removed by the post-merge acceptance probe. The earlier
+every other PR. The exact cluster bootstrap also neutralizes only the four
+obsolete base-publisher invocation failures after its source result is
+published; protected custom checks remain bound to their real source results.
+All repair-only behavior is removed by the post-merge acceptance probe. The earlier
 one-time upgrade from base
 `28aa5257927a3468ebc35ec7f245fecaf3226dbf` uses GitHub's whitespace
 `run-name` fallback so that the pre-fix publisher still sees the fixed workflow

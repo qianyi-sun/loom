@@ -19,6 +19,7 @@ EXTERNAL_ID_PREFIX = "loom-authoritative-gate:"
 FULL_TITLE_PREFIX = "gate=full /"
 V1_BOOTSTRAP_BASE_SHA = "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca"
 V1_BOOTSTRAP_HEAD_REF = "codex/833-authoritative-gates-acceptance"
+V1_BOOTSTRAP_PUBLISH_JOB_PREFIX = "publish authoritative gate"
 
 RELEVANT_LABEL_ORDER = (
     "ci:integration",
@@ -2615,6 +2616,56 @@ def _handle_workflow_run(
     )
 
 
+def _neutralize_v1_bootstrap_publisher_failures(
+    client: PublisherClient,
+    *,
+    head_sha: str,
+) -> None:
+    """Neutralize only the exact repair PR's obsolete publisher job failures."""
+
+    completed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    for gate_spec in GATE_SPECS:
+        job_name = f"{V1_BOOTSTRAP_PUBLISH_JOB_PREFIX} ({gate_spec.context})"
+        checks = list(client.list_check_runs(head_sha, job_name))
+        if len(checks) != 1:
+            raise PublisherError(
+                f"v1 bootstrap expected one {job_name} CheckRun, found {len(checks)}"
+            )
+        check = checks[0]
+        app = check.get("app")
+        check_id = check.get("id")
+        if (
+            check.get("name") != job_name
+            or not isinstance(check_id, int)
+            or not isinstance(app, Mapping)
+            or app.get("id") != GITHUB_ACTIONS_APP_ID
+            or check.get("status") != "completed"
+            or check.get("conclusion") not in {"failure", "neutral", "success"}
+        ):
+            raise PublisherError(f"v1 bootstrap found unsafe {job_name} CheckRun state")
+        if check.get("conclusion") != "failure":
+            continue
+        response = client.update_check_run(
+            check_id,
+            {
+                "status": "completed",
+                "conclusion": "neutral",
+                "completed_at": completed_at,
+            },
+        )
+        response_app = response.get("app") if response else None
+        if (
+            not response
+            or response.get("id") != check_id
+            or response.get("name") != job_name
+            or response.get("status") != "completed"
+            or response.get("conclusion") != "neutral"
+            or not isinstance(response_app, Mapping)
+            or response_app.get("id") != GITHUB_ACTIONS_APP_ID
+        ):
+            raise PublisherError(f"GitHub did not neutralize the obsolete {job_name} failure")
+
+
 def _handle_v1_bootstrap_repair(
     event: Mapping[str, Any],
     client: PublisherClient,
@@ -2686,6 +2737,10 @@ def _handle_v1_bootstrap_repair(
         authority_history_count=authority_match.history_count,
         details_url=details_url or _string(pull.get("html_url")),
     )
+    if event.get("neutralize_publisher_failures") is True:
+        if spec.context != "cluster-smoke-gate":
+            raise PublisherError("only the cluster bootstrap may neutralize publisher failures")
+        _neutralize_v1_bootstrap_publisher_failures(client, head_sha=head_sha)
     return PublishResult(conclusion, (spec.context,))
 
 
@@ -2731,6 +2786,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "pull_number": os.environ.get("AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER", ""),
                 "gate_result": bootstrap_result,
                 "details_url": os.environ.get("AUTHORITATIVE_BOOTSTRAP_DETAILS_URL", ""),
+                "neutralize_publisher_failures": os.environ.get(
+                    "AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES", ""
+                )
+                == "true",
             }
         client = GitHubClient(
             token=os.environ.get("GITHUB_TOKEN", ""),
