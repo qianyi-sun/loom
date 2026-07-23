@@ -51,6 +51,9 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REQUEST_RE = re.compile(r"^req-[0-9a-f]{16}$")
 _ISOLATION_RE = re.compile(r"^[0-9a-f]{24}$")
+# Env-agnostic canonical route shape; the exact path (e.g. /staging after #897)
+# is enforced upstream at the trusted-config derivation + the plan digest.
+_ROUTE_RE = re.compile(r"^https://[a-z0-9.-]+/[a-z0-9/-]+$")
 _TOP_LEVEL_KEYS = frozenset(
     {
         "schema_version",
@@ -83,7 +86,7 @@ class RolloutBrowserReportAuthority:
             or not 1 <= self.attempt_number <= 1000
             or _SHA256_RE.fullmatch(self.request_envelope_sha256) is None
             or _SHA_RE.fullmatch(self.candidate_sha) is None
-            or self.route != "https://yylx.world/dev"
+            or _ROUTE_RE.fullmatch(self.route) is None
             or self.username != BROWSER_ACCEPTANCE_USERNAME
         ):
             raise ValueError("rollout browser report authority is invalid")
@@ -102,7 +105,8 @@ class RehearsalBrowserReportAuthority:
             _SHA256_RE.fullmatch(self.plan_sha256) is None
             or _ISOLATION_RE.fullmatch(self.isolation_id) is None
             or _SHA_RE.fullmatch(self.candidate_sha) is None
-            or self.route != f"https://yylx.world/dev/rehearsal/{self.isolation_id}"
+            or _ROUTE_RE.fullmatch(self.route) is None
+            or not self.route.endswith(f"/rehearsal/{self.isolation_id}")
             or self.username != BROWSER_ACCEPTANCE_USERNAME
         ):
             raise ValueError("rehearsal browser report authority is invalid")

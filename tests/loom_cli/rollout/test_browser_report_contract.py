@@ -49,6 +49,30 @@ def _authority() -> RolloutBrowserReportAuthority:
     )
 
 
+def test_rollout_report_accepts_env_derived_staging_route() -> None:
+    # #927: the route is validated by shape (env-derived), not a hardcoded /dev.
+    # #897 migrated the staging route to /staging; it must now be accepted.
+    authority = RolloutBrowserReportAuthority(
+        request_id="req-1111111111111111",
+        attempt_number=1,
+        request_envelope_sha256="b" * 64,
+        candidate_sha="a" * 40,
+        route="https://yylx.world/staging",
+    )
+    assert authority.route == "https://yylx.world/staging"
+
+
+def test_rollout_report_rejects_malformed_route() -> None:
+    with pytest.raises(ValueError, match="browser report authority is invalid"):
+        RolloutBrowserReportAuthority(
+            request_id="req-1111111111111111",
+            attempt_number=1,
+            request_envelope_sha256="b" * 64,
+            candidate_sha="a" * 40,
+            route="http://yylx.world/staging",
+        )
+
+
 def test_rollout_report_requires_complete_single_source_contract() -> None:
     authority = _authority()
     report = _report(authority=authority)

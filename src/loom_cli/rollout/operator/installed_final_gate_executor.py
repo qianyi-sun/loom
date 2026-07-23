@@ -63,7 +63,8 @@ class BoundedStagingSmokeTransport:
             or not parsed.netloc
             or parsed.query
             or parsed.fragment
-            or parsed.path != "/dev"
+            or not parsed.path
+            or parsed.path.endswith("/")
             or not 0 < self.timeout_seconds <= 60
         ):
             raise ValueError("installed smoke transport route is invalid")
