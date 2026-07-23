@@ -39,6 +39,9 @@ _PROVIDER_PATH_RE = re.compile(
     r"^/api/v1/provider-connections/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+# base_url is plan.route (config-derived, carried in the attested plan). Pin it
+# to a canonical route shape rather than a hardcoded /dev.
+_BASE_URL_RE = re.compile(r"^https://[a-z0-9.-]+/[a-z0-9/-]*[a-z0-9]$")
 _READ_SQL = YIBUAPI_RATE_CARD_INVENTORY_SQL
 _IMPLEMENTATION_DIGEST = hashlib.sha256(
     json.dumps(
@@ -99,7 +102,7 @@ class HttpxProductionDefaultsTransport:
         timeout_seconds: float,
     ) -> tuple[int, bytes]:
         if (
-            base_url != "https://yylx.world/dev"
+            _BASE_URL_RE.fullmatch(base_url) is None
             or not (
                 (method == "GET" and path == "/api/v1/provider-connections")
                 or (method == "POST" and path == "/api/v1/rate-cards/sync/yibuapi")

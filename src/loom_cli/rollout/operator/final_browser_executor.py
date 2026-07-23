@@ -78,7 +78,6 @@ class FinalBrowserExecutor:
         if (
             plan.environment != "staging"
             or plan.namespace != "loom-staging"
-            or plan.route != "https://yylx.world/dev"
             or plan.browser_report_schema != browser_report_schema_digest()
             or plan.browser_image_digest
             != plan.image_digests.get("loom-staging-admin-browser-smoke")

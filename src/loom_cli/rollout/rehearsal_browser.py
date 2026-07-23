@@ -59,10 +59,13 @@ def build_rehearsal_browser_artifact(
 ) -> RehearsalBrowserArtifact:
     """Build one route, one browser Job and its exact egress authority."""
     plan.resources.require_isolated()
-    expected_route = "https://yylx.world/dev/rehearsal/" + plan.resources.namespace.removeprefix(
-        "loom-rehearsal-"
-    )
-    if plan.resources.route != expected_route:
+    # plan.resources.route is derived from the trusted staging route
+    # ({route_origin}/rehearsal/{suffix}) and validated by RehearsalResources;
+    # bind it to this namespace suffix without hardcoding the env route path.
+    expected_suffix = plan.resources.namespace.removeprefix("loom-rehearsal-")
+    if not plan.resources.route.startswith("https://") or not plan.resources.route.endswith(
+        f"/rehearsal/{expected_suffix}"
+    ):
         raise ValueError("rehearsal browser route authority is invalid")
     try:
         address = ipaddress.ip_address(ingress_ip)

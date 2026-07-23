@@ -313,7 +313,11 @@ def test_browser_artifact_rejects_invalid_ingress_identity(tmp_path: Path, value
 def test_browser_artifact_rejects_noncanonical_rehearsal_route(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     record = plan.to_record()
-    record["resources"]["route"] = "https://staging.example.test/dev/rehearsal/" + "5" * 24
+    # rehearsal_browser binds the route to this namespace's isolation suffix; a
+    # route for a different suffix (route/namespace drift) is rejected. The route
+    # host + path are env-derived (e.g. /staging after #897) and enforced upstream
+    # at derive_staging_route + the plan digest, not by a hardcoded /dev here.
+    record["resources"]["route"] = "https://yylx.world/staging/rehearsal/" + "6" * 24
     with pytest.raises(ValueError, match="route authority"):
         build_rehearsal_browser_artifact(
             RehearsalPlan.from_record(record),

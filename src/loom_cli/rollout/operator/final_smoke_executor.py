@@ -91,7 +91,6 @@ class FinalSmokeExecutor:
         if (
             plan.environment != "staging"
             or plan.namespace != "loom-staging"
-            or plan.route != "https://yylx.world/dev"
             or self.request.base_url != plan.route
         ):
             return self._result(plan, blocker="smoke-plan-drift", mutated=False)

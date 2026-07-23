@@ -420,7 +420,14 @@ def build_installed_deep_preflight_composition(
     route = readonly.route
     parsed_route = urlsplit(route)
     canonical_origin = f"{parsed_route.scheme}://{parsed_route.netloc}"
-    if parsed_route.path != "/dev" or canonical_origin + parsed_route.path != route:
+    # `readonly.route` is derived and fully validated from the exact trusted
+    # staging.cluster.toml by derive_staging_route (namespace/runtime_environment
+    # match, DNS host, route == api_route, _ROUTE_RE). Pin only that the route is
+    # well-formed with no extra URL components. The environment-correct path
+    # (e.g. "/staging" after #897 migrated it from "/dev") comes from the trusted
+    # config, so do NOT hardcode "/dev" here. See #927 for the remaining
+    # attestation-chain route checks that still hardcode "/dev".
+    if not parsed_route.path or canonical_origin + parsed_route.path != route:
         raise ValueError("installed staging route is not canonical")
     route_origin = route
     smoke_authority = staging_smoke_authority(config)

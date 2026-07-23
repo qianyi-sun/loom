@@ -58,8 +58,7 @@ class RehearsalResources:
             not isolation_id.startswith("rehearsal-")
             or not 16 <= len(suffix) <= 32
             or any(character not in "0123456789abcdef" for character in suffix)
-            or not route_origin.startswith("https://")
-            or not route_origin.endswith("/dev")
+            or _ROUTE_RE.fullmatch(route_origin) is None
             or route_origin.endswith("/")
         ):
             raise ValueError("rehearsal resource identity is invalid")
@@ -81,7 +80,7 @@ class RehearsalResources:
             or not self.object_prefix.startswith("rehearsal/")
             or not self.object_prefix.endswith("/")
             or _ROUTE_RE.fullmatch(self.route) is None
-            or "/dev/rehearsal/" not in self.route
+            or "/rehearsal/" not in self.route
             or not self.systemd_unit.startswith("loom-preflight-")
             or not self.systemd_unit.endswith(".service")
         ):
