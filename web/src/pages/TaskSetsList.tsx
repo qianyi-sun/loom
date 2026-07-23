@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { useEffect, useRef } from "react";
+import { Link, useLocation } from "react-router-dom";
 
 import { api, type TaskSetListItem } from "../api/client";
 import { Card } from "../components/Card";
@@ -33,10 +34,18 @@ function capabilityLabel(item: TaskSetListItem): string {
 }
 
 export default function TaskSetsList(): JSX.Element {
+  const location = useLocation();
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const { data, isLoading, error } = useQuery({
     queryKey: ["taskSets"],
     queryFn: () => api.listTaskSets(),
   });
+  const focusHeading =
+    (location.state as { focusHeading?: boolean } | null)?.focusHeading === true;
+
+  useEffect(() => {
+    if (focusHeading && !isLoading && !error) headingRef.current?.focus();
+  }, [error, focusHeading, isLoading]);
 
   if (isLoading) return <LoadingState />;
   if (error) {
@@ -55,7 +64,13 @@ export default function TaskSetsList(): JSX.Element {
     <div className="space-y-4">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Task Sets</h1>
+          <h1
+            ref={headingRef}
+            tabIndex={-1}
+            className="text-2xl font-bold text-slate-900"
+          >
+            Task Sets
+          </h1>
           <p className="text-sm text-slate-500">
             Team-owned task sets for evaluation and data-production runs.
           </p>

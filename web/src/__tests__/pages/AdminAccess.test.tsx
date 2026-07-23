@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -792,6 +792,237 @@ describe("AdminAccess", () => {
     });
   });
 
+  it("confirms every exposed invite and request rejection class", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) return jsonResponse(platformAdminMe);
+        if (url.endsWith("/api/v1/admin/teams")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "team-1",
+                name: "latent-team",
+                created_at: "2026-06-16T00:00:00Z",
+                disabled_at: null,
+                disabled_reason: null,
+                submissions_paused_at: null,
+                submissions_paused_reason: null,
+                quota: null,
+                members: [],
+                user_members: [],
+              },
+            ],
+          });
+        }
+        if (
+          url.endsWith("/api/v1/admin/registration-requests/user-req/reject") &&
+          init?.method === "POST"
+        ) {
+          return jsonResponse({
+            id: "user-req",
+            username: "ada",
+            username_normalized: "ada",
+            team_id: "team-1",
+            team_name: "latent-team",
+            role: "member",
+            status: "rejected",
+            requested_at: "2026-06-16T00:00:00Z",
+            reviewed_at: "2026-06-16T00:01:00Z",
+            reviewed_by_actor: "qianyi",
+          });
+        }
+        if (url.includes("/api/v1/admin/registration-requests")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "user-req",
+                username: "ada",
+                username_normalized: "ada",
+                team_id: "team-1",
+                team_name: "latent-team",
+                role: "member",
+                status: "pending",
+                requested_at: "2026-06-16T00:00:00Z",
+                reviewed_at: null,
+                reviewed_by_actor: null,
+              },
+            ],
+          });
+        }
+        if (
+          url.endsWith("/api/v1/admin/password-reset-requests/reset-req/reject") &&
+          init?.method === "POST"
+        ) {
+          return jsonResponse({
+            id: "reset-req",
+            username: "ada",
+            username_normalized: "ada",
+            status: "rejected",
+            requested_at: "2026-06-16T00:00:00Z",
+            reviewed_at: "2026-06-16T00:01:00Z",
+            reviewed_by_actor: "qianyi",
+          });
+        }
+        if (url.includes("/api/v1/admin/password-reset-requests")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "reset-req",
+                username: "ada",
+                username_normalized: "ada",
+                status: "pending",
+                requested_at: "2026-06-16T00:00:00Z",
+                reviewed_at: null,
+                reviewed_by_actor: null,
+              },
+            ],
+          });
+        }
+        if (
+          url.endsWith("/api/v1/admin/team-registrations/team-reg/reject") &&
+          init?.method === "POST"
+        ) {
+          return jsonResponse({
+            id: "team-reg",
+            name: "Legacy Lab",
+            contact_email: "legacy@example.com",
+            status: "rejected",
+            requested_at: "2026-06-16T00:00:00Z",
+            reviewed_at: "2026-06-16T00:01:00Z",
+            reviewed_by_actor: "qianyi",
+            approved_team_id: null,
+          });
+        }
+        if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "team-reg",
+                name: "Legacy Lab",
+                contact_email: "legacy@example.com",
+                status: "pending",
+                requested_at: "2026-06-16T00:00:00Z",
+                reviewed_at: null,
+                reviewed_by_actor: null,
+                approved_team_id: null,
+              },
+            ],
+          });
+        }
+        const invite = {
+          id: "invite-1",
+          team_id: "team-1",
+          team_name: "latent-team",
+          email: "invitee@example.com",
+          allowed_domain: null,
+          role: "member",
+          status: "pending",
+          code_prefix: "inv12345",
+          max_uses: 1,
+          accepted_uses: 0,
+          created_by_actor: "qianyi",
+          created_at: "2026-06-16T00:00:00Z",
+          expires_at: "2026-06-30T00:00:00Z",
+          last_sent_at: null,
+          accepted_at: null,
+          revoked_at: null,
+        };
+        if (
+          url.endsWith("/api/v1/invites/invite-1/revoke") &&
+          init?.method === "POST"
+        ) {
+          return jsonResponse({ ...invite, status: "revoked" });
+        }
+        if (
+          url.endsWith("/api/v1/invites/invite-1/resend") &&
+          init?.method === "POST"
+        ) {
+          return jsonResponse({
+            invite,
+            invite_code: "synthetic-invite-code",
+            invite_link: "https://example.invalid/invite/synthetic",
+          });
+        }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({ items: [invite] });
+        }
+        if (url.endsWith("/api/v1/tokens")) return jsonResponse({ items: [] });
+        if (url.includes("/api/v1/admin/audit-events")) {
+          return jsonResponse({ items: [], next_cursor: null });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<AdminAccess />);
+    await user.type(await screen.findByLabelText("Admin actor"), "qianyi");
+
+    await user.click(
+      await screen.findByRole("button", { name: "Reject account ada" }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Reject account request" }),
+    ).toHaveTextContent("ada (latent-team)");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      fetchSpy.mock.calls.some(([input, init]) =>
+        String(input).endsWith("/user-req/reject") && init?.method === "POST"
+      ),
+    ).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Reject account ada" }));
+    await user.click(screen.getByRole("button", { name: "Reject account" }));
+
+    const legacyRow = (await screen.findByText("Legacy Lab")).closest("tr");
+    expect(legacyRow).not.toBeNull();
+    await user.click(within(legacyRow!).getByRole("button", { name: "Reject" }));
+    expect(
+      screen.getByRole("dialog", { name: "Reject team registration" }),
+    ).toHaveTextContent("Legacy Lab (legacy@example.com)");
+    await user.click(
+      screen.getByRole("button", { name: "Reject registration" }),
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Accounts" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Reject reset ada" }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Reject password reset" }),
+    ).toHaveTextContent("ada");
+    await user.click(screen.getByRole("button", { name: "Reject reset" }));
+
+    await user.click(screen.getByRole("tab", { name: "Invites" }));
+    const inviteRow = (await screen.findByText("invitee@example.com")).closest("tr");
+    expect(inviteRow).not.toBeNull();
+    await user.click(within(inviteRow!).getByRole("button", { name: "Revoke" }));
+    expect(
+      screen.getByRole("dialog", { name: "Revoke invite" }),
+    ).toHaveTextContent("invitee@example.com (inv12345)");
+    await user.click(screen.getByRole("button", { name: "Revoke invite" }));
+    await user.click(within(inviteRow!).getByRole("button", { name: "Resend" }));
+    expect(
+      screen.getByRole("dialog", { name: "Resend invite" }),
+    ).toHaveTextContent("current invite link will be invalidated");
+    await user.click(screen.getByRole("button", { name: "Resend invite" }));
+
+    await waitFor(() => {
+      for (const suffix of [
+        "/user-req/reject",
+        "/team-reg/reject",
+        "/reset-req/reject",
+        "/invite-1/revoke",
+        "/invite-1/resend",
+      ]) {
+        expect(
+          fetchSpy.mock.calls.some(([input, init]) =>
+            String(input).endsWith(suffix) && init?.method === "POST"
+          ),
+        ).toBe(true);
+      }
+    });
+  });
+
   it("manages named API tokens without exposing stored raw secrets", async () => {
     setFrontendConfigForTests({
       environment: "staging",
@@ -890,6 +1121,7 @@ describe("AdminAccess", () => {
     renderWithProviders(<AdminAccess />);
 
     expect(await screen.findByRole("tab", { name: "API tokens" })).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
     await userEvent.click(screen.getByRole("tab", { name: "API tokens" }));
     expect(screen.getByRole("heading", { name: "API tokens" })).toBeInTheDocument();
     expect(await screen.findByText("CLI submit")).toBeInTheDocument();
@@ -928,11 +1160,22 @@ describe("AdminAccess", () => {
         scopes: ["read:own", "submit", "providers:manage"],
         expires_in_days: 30,
       });
+      expect((createCall?.[1]?.headers as Record<string, string>)[
+        "X-Loom-Admin-Actor"
+      ]).toBe("qianyi");
     });
 
     await userEvent.click(screen.getByRole("button", { name: "Rotate CLI submit" }));
+    expect(
+      screen.getByRole("dialog", { name: "Rotate API token" }),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Rotate token" }));
     expect(await screen.findByText("loom_api_revealed_rotate_secret")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Revoke CLI submit" }));
+    expect(
+      screen.getByRole("dialog", { name: "Revoke API token" }),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Revoke token" }));
 
     await waitFor(() => {
       expect(fetchSpy.mock.calls.some(([input, init]) =>
@@ -942,6 +1185,14 @@ describe("AdminAccess", () => {
       expect(fetchSpy.mock.calls.some(([input, init]) =>
         String(input).endsWith("/api/v1/tokens/abc12345") &&
         init?.method === "DELETE",
+      )).toBe(true);
+      const tokenMutationCalls = fetchSpy.mock.calls.filter(([input, init]) =>
+        String(input).includes("/api/v1/tokens") &&
+        (init?.method === "POST" || init?.method === "DELETE")
+      );
+      expect(tokenMutationCalls.every(([, init]) =>
+        (init?.headers as Record<string, string>)["X-Loom-Admin-Actor"] ===
+        "qianyi"
       )).toBe(true);
     });
   });

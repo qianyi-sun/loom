@@ -31,8 +31,10 @@ export function useEditConnection(id: string) {
     mutationFn: (patch: Parameters<typeof api.updateProviderConnection>[1]) =>
       api.updateProviderConnection(id, patch),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers"] });
+      qc.invalidateQueries({ queryKey: ["providers"], exact: true });
       qc.invalidateQueries({ queryKey: ["providers", id] });
+      qc.invalidateQueries({ queryKey: ["provider-connections"] });
+      qc.invalidateQueries({ queryKey: ["models"] });
     },
   });
 }
@@ -43,8 +45,10 @@ export function useRotateConnectionKey(id: string) {
     mutationFn: (newKey: string) =>
       api.updateProviderConnection(id, { api_key: newKey }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers"] });
+      qc.invalidateQueries({ queryKey: ["providers"], exact: true });
       qc.invalidateQueries({ queryKey: ["providers", id] });
+      qc.invalidateQueries({ queryKey: ["provider-connections"] });
+      qc.invalidateQueries({ queryKey: ["models"] });
     },
   });
 }
@@ -54,8 +58,10 @@ export function useDeleteConnection() {
   return useMutation({
     mutationFn: (id: string) => api.deleteProviderConnection(id),
     onSuccess: (_void, id) => {
-      qc.invalidateQueries({ queryKey: ["providers"] });
       qc.removeQueries({ queryKey: ["providers", id] });
+      qc.invalidateQueries({ queryKey: ["providers"], exact: true });
+      qc.invalidateQueries({ queryKey: ["provider-connections"] });
+      qc.invalidateQueries({ queryKey: ["models"] });
     },
   });
 }

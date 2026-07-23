@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -38,6 +38,18 @@ const betaMe = {
   role: "member",
   scopes: ["read:own", "submit"],
   csrf_token: "csrf-beta",
+};
+
+const adminMe = {
+  ...ownerMe,
+  user: {
+    ...ownerMe.user,
+    id: "platform-admin",
+    username: "PlatformAdmin",
+    is_platform_admin: true,
+  },
+  is_platform_admin: true,
+  csrf_token: "csrf-admin",
 };
 
 const teamDetail = {
@@ -307,5 +319,114 @@ describe("Settings", () => {
         String(input).endsWith("/api/v1/auth/team") && init?.method === "POST",
       )).toBe(true);
     });
+  });
+
+  it("confirms token revoke and scopes pending state to the selected token", async () => {
+    let releaseRevoke: ((response: Response) => void) | undefined;
+    const revokeResponse = new Promise<Response>((resolve) => {
+      releaseRevoke = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) return jsonResponse(ownerMe);
+        if (url.endsWith("/api/v1/teams/team-a")) return jsonResponse(teamDetail);
+        if (
+          url.endsWith("/api/v1/tokens/abc12345") &&
+          init?.method === "DELETE"
+        ) {
+          return revokeResponse;
+        }
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({
+            items: [
+              {
+                name: "CLI submit",
+                token_hash_prefix: "abc12345",
+                type: "team",
+                scopes: ["read:own", "submit"],
+                team_id: "team-a",
+                issued_at: "2026-06-22T00:00:00Z",
+                expires_at: "2026-07-22T00:00:00Z",
+                revoked_at: null,
+                last_used_at: null,
+              },
+              {
+                name: "Read only",
+                token_hash_prefix: "def67890",
+                type: "team",
+                scopes: ["read:own"],
+                team_id: "team-a",
+                issued_at: "2026-06-22T00:00:00Z",
+                expires_at: "2026-07-22T00:00:00Z",
+                revoked_at: null,
+                last_used_at: null,
+              },
+            ],
+          });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<Settings />, { route: "/settings" });
+
+    const firstRow = (await screen.findByText("CLI submit")).closest("tr");
+    const otherRow = screen.getByText("Read only").closest("tr");
+    expect(firstRow).not.toBeNull();
+    expect(otherRow).not.toBeNull();
+    await user.click(within(firstRow!).getByRole("button", { name: "Revoke" }));
+    expect(
+      screen.getByRole("dialog", { name: "Revoke API token" }),
+    ).toHaveTextContent("CLI submit (abc12345)");
+    await user.click(screen.getByRole("button", { name: "Revoke token" }));
+
+    await waitFor(() => {
+      expect(firstRow!.querySelector("button")).toBeDisabled();
+      expect(otherRow!.querySelector("button")).toBeEnabled();
+    });
+    releaseRevoke?.(new Response(null, { status: 204 }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Revoke API token" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("routes platform-admin token mutations through audited Team access", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) return jsonResponse(adminMe);
+        if (url.endsWith("/api/v1/teams/team-a")) return jsonResponse(teamDetail);
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({
+            items: [
+              {
+                name: "Admin-visible token",
+                token_hash_prefix: "admin123",
+                type: "team",
+                scopes: ["read:own"],
+                team_id: "team-a",
+                issued_at: "2026-06-22T00:00:00Z",
+                expires_at: "2027-06-22T00:00:00Z",
+                revoked_at: null,
+                last_used_at: null,
+              },
+            ],
+          });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+
+    renderWithProviders(<Settings />, { route: "/settings" });
+
+    expect(await screen.findByText("Admin-visible token")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Create CLI token" })).toHaveAttribute(
+      "href",
+      "/admin/access",
+    );
   });
 });

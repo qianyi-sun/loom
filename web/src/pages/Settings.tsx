@@ -9,6 +9,7 @@ import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
+import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
 import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
@@ -114,6 +115,7 @@ export default function Settings(): JSX.Element {
   const [registerUsername, setRegisterUsername] = useState("");
   const [registerTeamId, setRegisterTeamId] = useState("");
   const [resetUsername, setResetUsername] = useState("");
+  const [tokenToRevoke, setTokenToRevoke] = useState<ApiTokenEntry | null>(null);
   const serverOrigin = currentServerOrigin();
   const cliLoginCommand = cliLoginCommands(serverOrigin).join("\n");
 
@@ -157,8 +159,17 @@ export default function Settings(): JSX.Element {
 
   const revoke = useMutation({
     mutationFn: (prefix: string) => api.revokeToken(prefix),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tokens"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tokens"] });
+      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+    },
   });
+
+  const confirmTokenRevoke = async (): Promise<void> => {
+    if (!tokenToRevoke) return;
+    await revoke.mutateAsync(tokenToRevoke.token_hash_prefix);
+    setTokenToRevoke(null);
+  };
   const requestAccess = useMutation({
     mutationFn: () =>
       api.requestRegistration({
@@ -538,12 +549,18 @@ export default function Settings(): JSX.Element {
                           <td className="px-4 py-3 text-xs text-slate-500">{formatDate(token.expires_at)}</td>
                           <td className="px-4 py-3">{tokenStatus(token)}</td>
                           <td className="px-4 py-3 text-right">
-                            {!token.revoked_at ? (
+                            {!token.revoked_at && !isAdmin ? (
                               <Button
                                 size="sm"
                                 variant="danger"
-                                onClick={() => revoke.mutate(token.token_hash_prefix)}
-                                disabled={revoke.isPending}
+                                onClick={() => {
+                                  revoke.reset();
+                                  setTokenToRevoke(token);
+                                }}
+                                disabled={
+                                  revoke.isPending &&
+                                  revoke.variables === token.token_hash_prefix
+                                }
                                 title="Revoke this token so it can no longer call the API."
                               >
                                 Revoke
@@ -560,6 +577,29 @@ export default function Settings(): JSX.Element {
           </Card.Body>
         </Card>
       ) : null}
+      <DestructiveActionDialog
+        open={tokenToRevoke !== null}
+        onClose={() => {
+          revoke.reset();
+          setTokenToRevoke(null);
+        }}
+        title="Revoke API token"
+        target={
+          tokenToRevoke
+            ? `${tokenToRevoke.name?.trim() || tokenToRevoke.token_hash_prefix} (${tokenToRevoke.token_hash_prefix})`
+            : ""
+        }
+        consequence="This token will no longer be able to authenticate to the Loom API."
+        confirmLabel="Revoke token"
+        pendingLabel="Revoking…"
+        confirmation={{ type: "simple" }}
+        pending={
+          revoke.isPending &&
+          revoke.variables === tokenToRevoke?.token_hash_prefix
+        }
+        error={revoke.error}
+        onConfirm={confirmTokenRevoke}
+      />
     </div>
   );
 }

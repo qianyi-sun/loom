@@ -12,6 +12,7 @@ import {
   type InviteRole,
   type InviteStatus,
   type PasswordResetRequestEntry,
+  type TeamRegistrationEntry,
   type TeamRegistrationApproval,
   type UserRegistrationEntry,
 } from "../api/client";
@@ -19,6 +20,7 @@ import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import AdminAuditLog from "../components/admin/AdminAuditLog";
+import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
@@ -154,6 +156,15 @@ type RevealedAccountLink = {
 
 type AccessSection = "requests" | "accounts" | "teams" | "invites" | "tokens" | "audit";
 
+type AccessDestructiveAction =
+  | { kind: "reject-user-registration"; request: UserRegistrationEntry }
+  | { kind: "reject-password-reset"; request: PasswordResetRequestEntry }
+  | { kind: "reject-team-registration"; request: TeamRegistrationEntry }
+  | { kind: "rotate-token"; token: ApiTokenEntry }
+  | { kind: "revoke-token"; token: ApiTokenEntry }
+  | { kind: "revoke-invite"; invite: InviteEntry }
+  | { kind: "resend-invite"; invite: InviteEntry };
+
 const ADMIN_ACCESS_SECTIONS: Array<{ value: AccessSection; label: string }> = [
   { value: "requests", label: "Requests" },
   { value: "accounts", label: "Accounts" },
@@ -190,6 +201,8 @@ export default function AdminAccess(): JSX.Element {
   const [approvalTeamIds, setApprovalTeamIds] = useState<Record<string, string>>({});
   const [approvalRoles, setApprovalRoles] = useState<Record<string, InviteRole>>({});
   const [accountApprovalRoles, setAccountApprovalRoles] = useState<Record<string, InviteRole>>({});
+  const [destructiveAction, setDestructiveAction] =
+    useState<AccessDestructiveAction | null>(null);
   const queryClient = useQueryClient();
   const currentRole = me?.current_team?.role ?? null;
   const canManageTeam = isAdmin || currentRole === "owner";
@@ -348,31 +361,39 @@ export default function AdminAccess(): JSX.Element {
   });
   const createToken = useMutation({
     mutationFn: () =>
-      api.createToken({
-        name: tokenNameInput.trim(),
-        type: "team",
-        scopes: tokenScopes,
-        expires_in_days: tokenLifetimeDays(tokenExpiresDays),
-      }),
+      api.createToken(
+        {
+          name: tokenNameInput.trim(),
+          type: "team",
+          scopes: tokenScopes,
+          expires_in_days: tokenLifetimeDays(tokenExpiresDays),
+        },
+        actor.trim() || undefined,
+      ),
     onSuccess: (data) => {
       setRevealedToken(data);
       setTokenNameInput("");
       queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      queryClient.invalidateQueries({ queryKey: ["tokens"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
     },
   });
   const rotateToken = useMutation({
-    mutationFn: (token: ApiTokenEntry) => api.rotateToken(token.token_hash_prefix),
+    mutationFn: (token: ApiTokenEntry) =>
+      api.rotateToken(token.token_hash_prefix, actor.trim() || undefined),
     onSuccess: (data) => {
       setRevealedToken(data);
       queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      queryClient.invalidateQueries({ queryKey: ["tokens"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
     },
   });
   const revokeToken = useMutation({
-    mutationFn: (token: ApiTokenEntry) => api.revokeToken(token.token_hash_prefix),
+    mutationFn: (token: ApiTokenEntry) =>
+      api.revokeToken(token.token_hash_prefix, actor.trim() || undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      queryClient.invalidateQueries({ queryKey: ["tokens"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
     },
   });
@@ -416,6 +437,7 @@ export default function AdminAccess(): JSX.Element {
 
   const actorMissing = isAdmin && actor.trim().length === 0;
   const tokenCreateDisabled =
+    actorMissing ||
     tokenNameInput.trim().length === 0 ||
     tokenScopes.length === 0 ||
     createToken.isPending;
@@ -425,6 +447,205 @@ export default function AdminAccess(): JSX.Element {
     (isAdmin && !selectedInviteTeamId) ||
     createInvite.isPending;
   const latestRevealedInvite = revealedInvites[0];
+
+  function resetDestructiveMutation(
+    action: AccessDestructiveAction | null,
+  ): void {
+    switch (action?.kind) {
+      case "reject-user-registration":
+        rejectUserRegistration.reset();
+        break;
+      case "reject-password-reset":
+        rejectPasswordReset.reset();
+        break;
+      case "reject-team-registration":
+        reject.reset();
+        break;
+      case "rotate-token":
+        rotateToken.reset();
+        break;
+      case "revoke-token":
+        revokeToken.reset();
+        break;
+      case "revoke-invite":
+        revokeInvite.reset();
+        break;
+      case "resend-invite":
+        resendInvite.reset();
+        break;
+    }
+  }
+
+  function openDestructiveAction(action: AccessDestructiveAction): void {
+    resetDestructiveMutation(action);
+    setDestructiveAction(action);
+  }
+
+  function closeDestructiveAction(): void {
+    resetDestructiveMutation(destructiveAction);
+    setDestructiveAction(null);
+  }
+
+  async function confirmDestructiveAction(): Promise<void> {
+    if (!destructiveAction) return;
+    switch (destructiveAction.kind) {
+      case "reject-user-registration":
+        await rejectUserRegistration.mutateAsync(destructiveAction.request);
+        break;
+      case "reject-password-reset":
+        await rejectPasswordReset.mutateAsync(destructiveAction.request);
+        break;
+      case "reject-team-registration":
+        await reject.mutateAsync(destructiveAction.request.id);
+        break;
+      case "rotate-token":
+        await rotateToken.mutateAsync(destructiveAction.token);
+        break;
+      case "revoke-token":
+        await revokeToken.mutateAsync(destructiveAction.token);
+        break;
+      case "revoke-invite":
+        await revokeInvite.mutateAsync(destructiveAction.invite);
+        break;
+      case "resend-invite":
+        await resendInvite.mutateAsync(destructiveAction.invite);
+        break;
+    }
+    setDestructiveAction(null);
+  }
+
+  const destructiveDialog = (() => {
+    switch (destructiveAction?.kind) {
+      case "reject-user-registration":
+        return {
+          title: "Reject account request",
+          target: `${destructiveAction.request.username} (${destructiveAction.request.team_name ?? destructiveAction.request.team_id})`,
+          consequence:
+            "The pending account request will be rejected and no password setup link will be issued.",
+          confirmLabel: "Reject account",
+          pendingLabel: "Rejecting…",
+          pending: rejectUserRegistration.isPending,
+          error: rejectUserRegistration.error,
+        };
+      case "reject-password-reset":
+        return {
+          title: "Reject password reset",
+          target: destructiveAction.request.username,
+          consequence:
+            "The pending password-reset request will be rejected and no reset link will be issued.",
+          confirmLabel: "Reject reset",
+          pendingLabel: "Rejecting…",
+          pending: rejectPasswordReset.isPending,
+          error: rejectPasswordReset.error,
+        };
+      case "reject-team-registration":
+        return {
+          title: "Reject team registration",
+          target: `${destructiveAction.request.name} (${destructiveAction.request.contact_email})`,
+          consequence:
+            "The legacy team-registration request will be rejected and no invite will be issued.",
+          confirmLabel: "Reject registration",
+          pendingLabel: "Rejecting…",
+          pending: reject.isPending,
+          error: reject.error,
+        };
+      case "rotate-token":
+        return {
+          title: "Rotate API token",
+          target: `${tokenName(destructiveAction.token)} (${destructiveAction.token.token_hash_prefix})`,
+          consequence:
+            "The current token will be revoked. Its replacement is shown once after server confirmation.",
+          confirmLabel: "Rotate token",
+          pendingLabel: "Rotating…",
+          pending: rotateToken.isPending,
+          error: rotateToken.error,
+        };
+      case "revoke-token":
+        return {
+          title: "Revoke API token",
+          target: `${tokenName(destructiveAction.token)} (${destructiveAction.token.token_hash_prefix})`,
+          consequence:
+            "This token will no longer be able to authenticate to the Loom API.",
+          confirmLabel: "Revoke token",
+          pendingLabel: "Revoking…",
+          pending: revokeToken.isPending,
+          error: revokeToken.error,
+        };
+      case "revoke-invite":
+        return {
+          title: "Revoke invite",
+          target: `${destructiveAction.invite.email} (${destructiveAction.invite.code_prefix})`,
+          consequence:
+            "The pending invite link will no longer be accepted.",
+          confirmLabel: "Revoke invite",
+          pendingLabel: "Revoking…",
+          pending: revokeInvite.isPending,
+          error: revokeInvite.error,
+        };
+      case "resend-invite":
+        return {
+          title: "Resend invite",
+          target: `${destructiveAction.invite.email} (${destructiveAction.invite.code_prefix})`,
+          consequence:
+            "The current invite link will be invalidated. Its replacement is shown once after server confirmation.",
+          confirmLabel: "Resend invite",
+          pendingLabel: "Resending…",
+          pending: resendInvite.isPending,
+          error: resendInvite.error,
+        };
+      default:
+        return {
+          title: "",
+          target: "",
+          consequence: "",
+          confirmLabel: "Confirm",
+          pendingLabel: "Working…",
+          pending: false,
+          error: null,
+        };
+    }
+  })();
+
+  function userRegistrationBusy(request: UserRegistrationEntry): boolean {
+    return (
+      (approveUserRegistration.isPending &&
+        approveUserRegistration.variables?.id === request.id) ||
+      (rejectUserRegistration.isPending &&
+        rejectUserRegistration.variables?.id === request.id)
+    );
+  }
+
+  function passwordResetBusy(request: PasswordResetRequestEntry): boolean {
+    return (
+      (approvePasswordReset.isPending &&
+        approvePasswordReset.variables?.id === request.id) ||
+      (rejectPasswordReset.isPending &&
+        rejectPasswordReset.variables?.id === request.id)
+    );
+  }
+
+  function teamRegistrationBusy(request: TeamRegistrationEntry): boolean {
+    return (
+      (approve.isPending && approve.variables?.id === request.id) ||
+      (reject.isPending && reject.variables === request.id)
+    );
+  }
+
+  function tokenBusy(token: ApiTokenEntry): boolean {
+    return (
+      (rotateToken.isPending &&
+        rotateToken.variables?.token_hash_prefix === token.token_hash_prefix) ||
+      (revokeToken.isPending &&
+        revokeToken.variables?.token_hash_prefix === token.token_hash_prefix)
+    );
+  }
+
+  function inviteBusy(invite: InviteEntry): boolean {
+    return (
+      (revokeInvite.isPending && revokeInvite.variables?.id === invite.id) ||
+      (resendInvite.isPending && resendInvite.variables?.id === invite.id)
+    );
+  }
 
   function toggleTokenScope(scope: string, checked: boolean): void {
     setTokenScopes((current) => {
@@ -521,7 +742,7 @@ export default function AdminAccess(): JSX.Element {
                             <Button
                               size="sm"
                               aria-label={`Approve account ${request.username}`}
-                              disabled={approveUserRegistration.isPending}
+                              disabled={userRegistrationBusy(request)}
                               onClick={() => approveUserRegistration.mutate(request)}
                             >
                               Approve
@@ -530,8 +751,13 @@ export default function AdminAccess(): JSX.Element {
                               size="sm"
                               variant="secondary"
                               aria-label={`Reject account ${request.username}`}
-                              disabled={rejectUserRegistration.isPending}
-                              onClick={() => rejectUserRegistration.mutate(request)}
+                              disabled={userRegistrationBusy(request)}
+                              onClick={() =>
+                                openDestructiveAction({
+                                  kind: "reject-user-registration",
+                                  request,
+                                })
+                              }
                             >
                               Reject
                             </Button>
@@ -547,9 +773,6 @@ export default function AdminAccess(): JSX.Element {
         ) : null}
         {approveUserRegistration.isError ? (
           <ErrorState error={approveUserRegistration.error} />
-        ) : null}
-        {rejectUserRegistration.isError ? (
-          <ErrorState error={rejectUserRegistration.error} />
         ) : null}
       </Card.Body>
     </Card>
@@ -849,7 +1072,7 @@ export default function AdminAccess(): JSX.Element {
                                 <Button
                                   size="sm"
                                   aria-label={`Approve reset ${request.username}`}
-                                  disabled={approvePasswordReset.isPending}
+                                  disabled={passwordResetBusy(request)}
                                   onClick={() => approvePasswordReset.mutate(request)}
                                 >
                                   Approve
@@ -858,8 +1081,13 @@ export default function AdminAccess(): JSX.Element {
                                   size="sm"
                                   variant="secondary"
                                   aria-label={`Reject reset ${request.username}`}
-                                  disabled={rejectPasswordReset.isPending}
-                                  onClick={() => rejectPasswordReset.mutate(request)}
+                                  disabled={passwordResetBusy(request)}
+                                  onClick={() =>
+                                    openDestructiveAction({
+                                      kind: "reject-password-reset",
+                                      request,
+                                    })
+                                  }
                                 >
                                   Reject
                                 </Button>
@@ -874,9 +1102,6 @@ export default function AdminAccess(): JSX.Element {
               ) : null}
               {approvePasswordReset.isError ? (
                 <ErrorState error={approvePasswordReset.error} />
-              ) : null}
-              {rejectPasswordReset.isError ? (
-                <ErrorState error={rejectPasswordReset.error} />
               ) : null}
             </Card.Body>
           </Card>
@@ -1009,8 +1234,13 @@ export default function AdminAccess(): JSX.Element {
                               <Button
                                 size="sm"
                                 aria-label={`Rotate ${label}`}
-                                disabled={inactive || rotateToken.isPending}
-                                onClick={() => rotateToken.mutate(token)}
+                                disabled={inactive || actorMissing || tokenBusy(token)}
+                                onClick={() =>
+                                  openDestructiveAction({
+                                    kind: "rotate-token",
+                                    token,
+                                  })
+                                }
                               >
                                 Rotate
                               </Button>
@@ -1018,8 +1248,13 @@ export default function AdminAccess(): JSX.Element {
                                 size="sm"
                                 variant="danger"
                                 aria-label={`Revoke ${label}`}
-                                disabled={inactive || revokeToken.isPending}
-                                onClick={() => revokeToken.mutate(token)}
+                                disabled={inactive || actorMissing || tokenBusy(token)}
+                                onClick={() =>
+                                  openDestructiveAction({
+                                    kind: "revoke-token",
+                                    token,
+                                  })
+                                }
                               >
                                 Revoke
                               </Button>
@@ -1034,8 +1269,6 @@ export default function AdminAccess(): JSX.Element {
             )
           ) : null}
           {createToken.isError ? <ErrorState error={createToken.error} /> : null}
-          {rotateToken.isError ? <ErrorState error={rotateToken.error} /> : null}
-          {revokeToken.isError ? <ErrorState error={revokeToken.error} /> : null}
         </Card.Body>
       </Card>
       ) : null}
@@ -1124,7 +1357,7 @@ export default function AdminAccess(): JSX.Element {
                                     disabled={
                                       actorMissing ||
                                       !selectedTeamId ||
-                                      approve.isPending
+                                      teamRegistrationBusy(item)
                                     }
                                     onClick={() =>
                                       approve.mutate({
@@ -1151,8 +1384,15 @@ export default function AdminAccess(): JSX.Element {
                                   <Button
                                     size="sm"
                                     variant="danger"
-                                    disabled={actorMissing || reject.isPending}
-                                    onClick={() => reject.mutate(item.id)}
+                                    disabled={
+                                      actorMissing || teamRegistrationBusy(item)
+                                    }
+                                    onClick={() =>
+                                      openDestructiveAction({
+                                        kind: "reject-team-registration",
+                                        request: item,
+                                      })
+                                    }
                                   >
                                     Reject
                                   </Button>
@@ -1167,7 +1407,6 @@ export default function AdminAccess(): JSX.Element {
                 )
               ) : null}
               {approve.isError ? <ErrorState error={approve.error} /> : null}
-              {reject.isError ? <ErrorState error={reject.error} /> : null}
             </Card.Body>
           </Card>
         </div>
@@ -1314,8 +1553,13 @@ export default function AdminAccess(): JSX.Element {
                               <Button
                                 size="sm"
                                 variant="danger"
-                                disabled={actorMissing || revokeInvite.isPending}
-                                onClick={() => revokeInvite.mutate(invite)}
+                                disabled={actorMissing || inviteBusy(invite)}
+                                onClick={() =>
+                                  openDestructiveAction({
+                                    kind: "revoke-invite",
+                                    invite,
+                                  })
+                                }
                               >
                                 Revoke
                               </Button>
@@ -1323,8 +1567,13 @@ export default function AdminAccess(): JSX.Element {
                             {invite.status === "pending" || invite.status === "expired" ? (
                               <Button
                                 size="sm"
-                                disabled={actorMissing || resendInvite.isPending}
-                                onClick={() => resendInvite.mutate(invite)}
+                                disabled={actorMissing || inviteBusy(invite)}
+                                onClick={() =>
+                                  openDestructiveAction({
+                                    kind: "resend-invite",
+                                    invite,
+                                  })
+                                }
                               >
                                 Resend
                               </Button>
@@ -1338,8 +1587,6 @@ export default function AdminAccess(): JSX.Element {
               </div>
             )
           ) : null}
-          {revokeInvite.isError ? <ErrorState error={revokeInvite.error} /> : null}
-          {resendInvite.isError ? <ErrorState error={resendInvite.error} /> : null}
         </Card.Body>
       </Card>
         </>
@@ -1348,6 +1595,19 @@ export default function AdminAccess(): JSX.Element {
             {isAdmin && activeSection === "audit" ? <AdminAuditLog /> : null}
           </>
         )}
+      />
+      <DestructiveActionDialog
+        open={destructiveAction !== null}
+        onClose={closeDestructiveAction}
+        title={destructiveDialog.title}
+        target={destructiveDialog.target}
+        consequence={destructiveDialog.consequence}
+        confirmLabel={destructiveDialog.confirmLabel}
+        pendingLabel={destructiveDialog.pendingLabel}
+        confirmation={{ type: "simple" }}
+        pending={destructiveDialog.pending}
+        error={destructiveDialog.error}
+        onConfirm={confirmDestructiveAction}
       />
     </div>
   );

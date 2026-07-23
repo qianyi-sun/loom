@@ -5,7 +5,7 @@ humanizer libraries live under `web/src/lib/humanize*.ts`. The canonical SPA
 specification is now [`loom-spa-v3.md`](loom-spa-v3.md); this document is
 retained as the originating design.
 
-Last updated: 2026-06-19
+Last updated: 2026-07-23
 
 ## Context
 
@@ -130,6 +130,34 @@ Create small pure functions under `web/src/lib/`:
 
 Each humanizer must return structured data, not JSX, so tests can cover the
 translation logic without rendering full pages.
+
+### Destructive actions
+
+All exposed destructive and credential-invalidating actions use
+`DestructiveActionDialog` on top of the shared accessible `Modal`.
+
+- Provider connection deletion, provider credential rotation, and TaskSet
+  deletion require an exact, case-sensitive typed target.
+- Batch cancellation; token rotation/revocation; invite resend/revocation; and
+  registration/password-reset rejection use a simple explicit confirmation
+  that names the target and consequence.
+- Retrying an idempotent read, test, refresh, or preflight does not require
+  confirmation.
+- Submission is locked synchronously before React Query rerenders. While the
+  request is pending, confirm, Cancel, Escape, backdrop, and close-button
+  dismissal are disabled.
+- The selected target and entered fields remain mounted across HTTP, timeout,
+  and network failures. A single redacted inline alert remains available for
+  retry or cancel.
+- Dialogs close and destructive navigation occurs only after the server
+  confirms success. Navigation that removes the opener focuses the destination
+  page heading.
+- Busy state is scoped to the exact target. Conflicting actions for that target
+  are disabled while unrelated rows remain enabled.
+- Platform-admin token mutations are exposed only through Team access, where
+  the required audit actor is collected and sent with the request.
+- React Query invalidation remains resource-scoped; backend authorization,
+  audit, CSRF, and conflict handling remain authoritative.
 
 ## Page Requirements
 

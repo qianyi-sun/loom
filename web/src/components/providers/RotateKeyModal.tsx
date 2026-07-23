@@ -1,75 +1,61 @@
 import { useId, useState } from "react";
 
-import { Button } from "../Button";
+import { DestructiveActionDialog } from "../DestructiveActionDialog";
 import { Input } from "../Input";
-import { Modal } from "../Modal";
 
 export type RotateKeyModalProps = {
   connectionName: string;
+  error?: unknown | null;
   onClose: () => void;
-  onSubmit: (newKey: string) => void;
+  onSubmit: (newKey: string) => Promise<void>;
   pending?: boolean;
 };
 
 export default function RotateKeyModal({
-  connectionName, onClose, onSubmit, pending,
+  connectionName,
+  error = null,
+  onClose,
+  onSubmit,
+  pending = false,
 }: RotateKeyModalProps): JSX.Element {
   const [newKey, setNewKey] = useState("");
-  const [confirmName, setConfirmName] = useState("");
   const newKeyInputId = useId();
-  const confirmNameInputId = useId();
-  const canSubmit = newKey.trim().length > 0 && confirmName === connectionName;
 
   return (
-    <Modal
+    <DestructiveActionDialog
       open
       onClose={onClose}
       title="Rotate API key"
-      description="Replaces the stored API key. Calls in flight may complete with either the old or new key depending on timing. New trials use the new key."
-      size="sm"
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button
-            variant="primary"
-            onClick={() => onSubmit(newKey)}
-            disabled={!canSubmit || pending}
-          >
-            Rotate key
-          </Button>
-        </>
-      }
+      target={connectionName}
+      consequence="The stored credential will be replaced. In-flight calls may use either key depending on timing; new trials use the new key."
+      confirmLabel="Rotate API key"
+      pendingLabel="Rotating…"
+      confirmation={{
+        type: "typed",
+        expected: connectionName,
+        inputLabel: `Type connection name to confirm: ${connectionName}`,
+      }}
+      pending={pending}
+      error={error}
+      confirmDisabled={newKey.trim().length === 0}
+      onConfirm={() => onSubmit(newKey)}
     >
-      <div className="space-y-4">
-        <div>
-          <label
-            htmlFor={newKeyInputId}
-            className="block text-sm font-medium text-slate-700"
-          >
-            New API key
-          </label>
-          <Input
-            id={newKeyInputId}
-            type="password"
-            autoComplete="off"
-            value={newKey}
-            onChange={(e) => setNewKey(e.target.value)}
-          />
-        </div>
-        <div>
-          <label
-            htmlFor={confirmNameInputId}
-            className="block text-sm font-medium text-slate-700"
-          >
-            Type connection name to confirm: <code>{connectionName}</code>
-          </label>
-          <Input
-            id={confirmNameInputId}
-            value={confirmName}
-            onChange={(e) => setConfirmName(e.target.value)}
-          />
-        </div>
+      <div>
+        <label
+          htmlFor={newKeyInputId}
+          className="block text-sm font-medium text-slate-700"
+        >
+          New API key
+        </label>
+        <Input
+          id={newKeyInputId}
+          type="password"
+          autoComplete="off"
+          value={newKey}
+          onChange={(event) => setNewKey(event.target.value)}
+          disabled={pending}
+        />
       </div>
-    </Modal>
+    </DestructiveActionDialog>
   );
 }

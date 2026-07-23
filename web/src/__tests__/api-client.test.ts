@@ -357,6 +357,89 @@ describe("auth session loader", () => {
   });
 });
 
+describe("API token actor transport", () => {
+  beforeEach(() => {
+    setCsrfToken("csrf-token");
+    vi.restoreAllMocks();
+  });
+
+  it("sends the optional admin actor for create, rotate, and revoke", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ token: "synthetic", item: {} }), {
+          status: 201,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ token: "synthetic", item: {} }), {
+          status: 201,
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const body = {
+      name: "CLI",
+      type: "team",
+      scopes: ["read:own"],
+      expires_in_days: 30,
+    };
+
+    await api.createToken(body, "qianyi");
+    await api.rotateToken("abc/123", "qianyi");
+    await api.revokeToken("abc/123", "qianyi");
+
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/tokens",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "X-Loom-Admin-Actor": "qianyi",
+        }),
+        body: JSON.stringify(body),
+      }),
+    );
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/tokens/abc%2F123/rotate",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "X-Loom-Admin-Actor": "qianyi",
+        }),
+      }),
+    );
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      3,
+      "/api/v1/tokens/abc%2F123",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({
+          "X-Loom-Admin-Actor": "qianyi",
+        }),
+      }),
+    );
+  });
+
+  it("omits the admin actor for ordinary owner token mutations", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ token: "synthetic", item: {} }), {
+          status: 201,
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await api.rotateToken("owner-token");
+    await api.revokeToken("owner-token");
+
+    for (const [, init] of fetchSpy.mock.calls) {
+      expect(
+        (init?.headers as Record<string, string>)["X-Loom-Admin-Actor"],
+      ).toBeUndefined();
+    }
+  });
+});
+
 describe("provider connection management endpoints", () => {
   beforeEach(() => {
     setCsrfToken("csrf-xyz");

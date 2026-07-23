@@ -4,12 +4,14 @@
  * while the batch is active, stops once terminal.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api, type DeliveryExport } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
+import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosisCard } from "../components/DiagnosisCard";
 import { DiagnosticPanel } from "../components/DiagnosticPanel";
@@ -98,6 +100,7 @@ function deliveryReady(
 export default function BatchDetail(): JSX.Element {
   const { batchId } = useParams<{ batchId: string }>();
   const queryClient = useQueryClient();
+  const [cancelOpen, setCancelOpen] = useState(false);
 
   const polling = useAdaptivePolling({
     baseIntervalMs: 5_000,
@@ -138,9 +141,23 @@ export default function BatchDetail(): JSX.Element {
 
   const cancel = useMutation({
     mutationFn: () => api.cancelBatch(batchId!),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["batch", batchId] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["batch", batchId] });
+      queryClient.invalidateQueries({ queryKey: ["batches"] });
+      queryClient.invalidateQueries({ queryKey: ["trials"] });
+      queryClient.invalidateQueries({ queryKey: ["overview"] });
+      queryClient.invalidateQueries({ queryKey: ["monitor-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["run-library"] });
+      queryClient.invalidateQueries({
+        queryKey: ["run-library-batch", batchId],
+      });
+    },
   });
+
+  const handleCancel = async (): Promise<void> => {
+    await cancel.mutateAsync();
+    setCancelOpen(false);
+  };
 
   const rerunFailed = useMutation({
     mutationFn: () => api.rerunFailedBatch(batchId!),
@@ -472,13 +489,14 @@ export default function BatchDetail(): JSX.Element {
             <div className="space-y-2">
               <Button
                 variant="danger"
-                onClick={() => cancel.mutate()}
-                disabled={cancel.isPending}
+                onClick={() => {
+                  cancel.reset();
+                  setCancelOpen(true);
+                }}
                 title="Stop queued or running trials in this batch."
               >
-                {cancel.isPending ? "Cancelling…" : "Cancel batch"}
+                Cancel batch
               </Button>
-              {cancel.isError ? <ErrorState error={cancel.error} /> : null}
             </div>
           ) : null}
 
@@ -817,6 +835,22 @@ export default function BatchDetail(): JSX.Element {
           <DiagnosticPanel blocks={diagnostics} />
         </Card.Body>
       </Card>
+      <DestructiveActionDialog
+        open={cancelOpen}
+        onClose={() => {
+          cancel.reset();
+          setCancelOpen(false);
+        }}
+        title="Cancel batch"
+        target={`${c.name} (${c.id})`}
+        consequence="Queued and running trials will transition to cancellation. Completed results remain."
+        confirmLabel="Cancel batch"
+        pendingLabel="Cancelling…"
+        confirmation={{ type: "simple" }}
+        pending={cancel.isPending}
+        error={cancel.error}
+        onConfirm={handleCancel}
+      />
     </div>
   );
 }
