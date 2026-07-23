@@ -17,7 +17,10 @@ import httpx
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.credential_authority import read_trusted_file
-from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
+from loom_cli.rollout.readonly_database_authority import (
+    _CAPACITY_FIRST_REVISION,
+    ReadonlyDatabaseEvidence,
+)
 from loom_cli.rollout.staging_baseline_readiness import (
     BaselineProbeResult,
     ReadonlyProbe,
@@ -559,7 +562,16 @@ class CrossVersionStagingBaselineProbeSource:
         blockers: dict[str, str] = {}
         if not object_store.ready:
             blockers["object-store"] = "object-store-readiness-failed"
-        if int(self._database.schema_revision) >= 69 and self._database.capacity is None:
+        # Require capacity exactly when the readonly authority reads it — i.e. at
+        # or past the capacity migration. Below it (a predecessor schema mid
+        # migration, e.g. staging at 0069 before dev-tip's 0070), capacity is
+        # legitimately absent and must not fail storage-db. Track the authority's
+        # threshold by the shared constant so the two can never drift again (they
+        # did across the #857 renumbering: this read 69 while the authority read 70).
+        if (
+            int(self._database.schema_revision) >= _CAPACITY_FIRST_REVISION
+            and self._database.capacity is None
+        ):
             blockers["capacity"] = "dependency-capacity-unready"
         return self._result(
             "staging.storage-db",

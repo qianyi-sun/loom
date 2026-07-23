@@ -279,6 +279,39 @@ def test_cross_version_baseline_localizes_missing_capacity_to_storage() -> None:
     )
 
 
+def test_cross_version_baseline_tolerates_missing_capacity_below_capacity_migration() -> None:
+    # A predecessor schema mid-migration (e.g. staging at 0069 before dev-tip's
+    # 0070 capacity migration): the authority does not read capacity yet, so its
+    # absence must NOT fail storage-db. Regression guard for the #857-renumbering
+    # threshold drift (this check read 69 while the authority read 70).
+    database = ReadonlyDatabaseEvidence(
+        schema_revision="0069",
+        mutation_epoch=9,
+        epoch_authority="staging-mutation-epoch-v1",
+        baseline_counts={
+            "agents": 2,
+            "provider_models": 3,
+            "tasks": 4,
+            "teams": 5,
+            "users": 6,
+        },
+        capacity=None,
+        evidence_sha256="d" * 64,
+    )
+    source = CrossVersionStagingBaselineProbeSource(
+        route=ROUTE,
+        database=database,
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "e" * 64),
+        public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
+        tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),
+    )
+
+    results = {check_id: probe() for check_id, probe in source.probes().items()}
+
+    assert results["staging.storage-db"].ready
+    assert all(result.ready for result in results.values())
+
+
 def _body_names() -> tuple[str, ...]:
     return ("ready", "whoami", "agents", "models", "tasks", "health")
 
