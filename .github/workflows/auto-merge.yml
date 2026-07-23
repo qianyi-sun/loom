@@ -16,6 +16,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  suite-anchor:
+    name: keep auto-merge carrier suite successful
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Complete trusted PR suite
+        run: echo "Keep the first pull_request_target suite successful."
+
   enable:
     name: enable squash auto-merge
     if: >-
