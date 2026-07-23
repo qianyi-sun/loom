@@ -1078,12 +1078,20 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clone_commands: list[list[str]] = []
+    clone_environments: list[dict[str, str]] = []
+    clone_safe_directories: list[str] = []
+    clone_config_modes: list[int] = []
     shared_git_environments: list[dict[str, str]] = []
     original_run_captured = env_state_module.run_captured
 
     def record_git_commands(argv: list[str], **kwargs: Any) -> SubprocessResult:
         if argv[:3] == ["git", "--no-replace-objects", "clone"]:
             clone_commands.append(argv)
+            environment = dict(kwargs["env"])
+            clone_environments.append(environment)
+            config_path = Path(environment["GIT_CONFIG_GLOBAL"])
+            clone_safe_directories.append(config_path.read_text(encoding="utf-8"))
+            clone_config_modes.append(stat.S_IMODE(config_path.stat().st_mode))
         if argv[:1] == ["/usr/bin/git"]:
             shared_git_environments.append(dict(kwargs["env"]))
         return original_run_captured(argv, **kwargs)
@@ -1143,6 +1151,24 @@ def test_materialize_repo_dir_uses_no_hardlinks_and_preserves_tracked_symlinks(
     )
     assert clone_commands
     assert all("--no-hardlinks" in command for command in clone_commands)
+    assert clone_safe_directories == [f'[safe]\n\tdirectory = "{source_repo / ".git"}"\n']
+    assert clone_config_modes == [0o600]
+    assert clone_environments == [
+        {
+            "GIT_ALLOW_PROTOCOL": "file",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_GLOBAL": clone_environments[0]["GIT_CONFIG_GLOBAL"],
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_PROTOCOL_FROM_USER": "0",
+            "HOME": "/nonexistent",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        }
+    ]
+    assert not Path(clone_environments[0]["GIT_CONFIG_GLOBAL"]).exists()
     assert shared_git_environments
     assert all(
         environment["GIT_INDEX_FILE"] == "/dev/null" for environment in shared_git_environments
