@@ -100,8 +100,8 @@ lane until a canonical owner is declared.
 A default-branch-trusted publisher owns exactly one authoritative CheckRun for each of
 the four protected names on a candidate head. Validation workflows publish
 generation-scoped `*-attempt` aggregates. As soon as the publisher observes a
-relevant same-head event, it returns all four authoritative checks to
-`in_progress`; only the newest full generation may finalize its matching check. Superseded attempts
+relevant same-head event, it returns all four authoritative checks to a
+fail-closed pending state; only the newest full generation may finalize its matching check. Superseded attempts
 cannot overwrite a newer generation; the current generation fails closed on a
 failed, timed-out, cancelled, skipped, or missing aggregate. Each generation
 also carries a fixed-order six-bit snapshot of every validation-relevant label.
@@ -116,7 +116,8 @@ fallible history reads; a shorter history snapshot cannot lower the persisted
 event watermark. Before and immediately after publishing a terminal result,
 the controller re-reads the live PR, event epoch, exact run attempt, and latest
 source-run inventory. If authority changed across the non-atomic CheckRun API
-write, it compensates by returning that same CheckRun to `in_progress`.
+write, it compensates by returning that same CheckRun to its fail-closed pending
+state.
 Comments and unrelated labels are excluded from the epoch and do not
 invalidate an otherwise equivalent generation. Relevant source runs and
 background metadata runs also use separate concurrency lanes, so GitHub's
@@ -126,41 +127,42 @@ authoritative replacement.
 The implementation bootstraps without a protection gap: until the publisher is
 present on the target base, source workflows keep their legacy protected names.
 GitHub does not reliably accept changing an already-completed CheckRun back to
-`in_progress`. A newer same-head generation therefore renames and neutralizes
-the old terminal check before creating one new protected `in_progress` check.
-If either API call is interrupted, the required context is absent or pending,
-so admission remains fail-closed; superseded failures no longer poison the
+`in_progress`, and replacing it with a new CheckRun id can leave auto-merge
+pinned to the retired identity even after the required-context rollup turns
+green. A newer same-head generation therefore preserves the one protected
+CheckRun id and updates it to a completed/failure sentinel whose signed state
+marks the result as pending. The exact source attempt updates that same id to
+its real success or failure. An interrupted write remains red, genuine failures
+remain red, and no superseded required-context object can poison or detach the
 current rollup.
-Publisher contract v2 records that live-verified behavior. The exact v1-to-v2 repair PR may use
-four head/base/PR-bound source jobs to publish its already-aggregated gate
-results into the existing custom CheckRuns. They accept only authoritative PR
-events (lifecycle changes, relevant CI-label changes, and base edits), so
-unrelated metadata cannot create optional repair runs. Those jobs are inert for
-every other PR. The exact cluster bootstrap also neutralizes only the four
-obsolete base-publisher invocation failures after its source result is
-published; protected custom checks remain bound to their real source results.
-All repair-only behavior is removed by the post-merge acceptance probe. The earlier
-one-time upgrade from base
-`28aa5257927a3468ebc35ec7f245fecaf3226dbf` uses GitHub's whitespace
-`run-name` fallback so that the pre-fix publisher still sees the fixed workflow
-identity while the PR title carries a generation marker ordered after the
-synchronize snapshot. That exception is bound to the exact historical base and
-therefore expires automatically after the repair merges.
+Publisher contract v3 records that live-verified behavior together with the
+successful carrier-suite anchor; source workflows recognize v1-v3 during the
+rolling upgrade.
 The exact same-repository `dev`-to-`main` promotion is the one exception because
 the trusted publisher already lives on the default `dev` branch. Merge-group
 heads use the same publisher contract. Push and manual runs report distinct
 `*-push` and `*-manual` aggregate names so a `dev` push check cannot collide
 with the protected custom check on a later `dev`-to-`main` promotion head. Push
 workflow-run events and non-authoritative workflow ID/name pairs are also
-rejected by the publisher. Each head/context pair has one publisher lane and
-never cancels its in-progress invocation. This matches the SHA-scoped CheckRun
-identity and prevents concurrent events from racing the same external ID;
-delayed invocations for an old head never write the live head. Pending
-invocations may coalesce, so every invocation derives authority from live PR
-state, ordered issue events, and the exact source-run attempt instead of relying
-on delivery order. If one head is associated with multiple open PRs, the
-publisher fails closed because one SHA-level check cannot represent two PR
-metadata generations.
+rejected by the publisher. Publisher jobs deliberately have no Actions
+concurrency group. GitHub keeps at most one pending member of a concurrency
+group and cancels the older pending job even when `cancel-in-progress` is
+`false`; that cancelled GitHub-managed job CheckRun can poison the PR rollup
+and cannot be rewritten by the workflow token. Every trusted publisher
+invocation therefore executes. The state machine arbitrates concurrent and
+out-of-order invocations from live PR state, ordered issue events, the exact
+source-run attempt, and final authority re-reads rather than delivery order.
+Delayed invocations for an old head never write the live head. If one head is
+associated with multiple open PRs, the publisher fails closed because one
+SHA-level check cannot represent two PR metadata generations.
+
+CheckRuns created with the workflow token are attached to the publisher's
+first GitHub Actions check suite for the candidate head. A Draft PR can
+legitimately filter every publisher matrix job, but an all-skipped suite remains
+`skipped` even after its custom protected CheckRuns turn green and can leave
+GitHub auto-merge blocked. A permissionless `pull_request_target` suite anchor
+therefore completes that carrier suite successfully without publishing or
+satisfying any protected context itself.
 
 Changes to this publisher require a disposable pull-request acceptance pass in
 addition to contract tests. Open the probe as Draft, make it Ready with one
