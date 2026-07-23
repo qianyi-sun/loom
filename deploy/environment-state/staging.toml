@@ -54,6 +54,52 @@ time_limit = "2-00:00:00"
 exclusive = true
 external_runner = true
 
+# GATED: enabled=false until #896 lands. OLDLAB nodes (trt-eai-oldlab-1..5) also
+# run the k3s control plane + MinIO/Longhorn, so workers must be non-exclusive
+# (cannot claim a whole node) and capped with headroom for k8s/MinIO. The
+# resource values below are PROVISIONAL placeholders reduced from the historical
+# single-tenant profile; #896 must measure real double-duty headroom and set the
+# final values before flipping enabled=true.
+[[worker_pool_autoscaler_policies]]
+pool_name = "oldlab"
+actuator = "slurm"
+enabled = false
+disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; exclusive=true is not viable on nodes shared with k3s/MinIO, so the disable IS the safety gate"
+min_slots = 0
+max_slots = 4
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[worker_pool_autoscaler_policies.actuator_config]
+backend = "docker"
+cpu_arch = "x86_64"
+# OLDLAB jobs target the default partition (addressed by --nodelist), matching
+# the validated 2026-06-24 dry-run which passed no --partition.
+partition = ""
+allowed_nodes = [
+  "trt-eai-oldlab-1",
+  "trt-eai-oldlab-2",
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
+env_file = "/var/lib/loom-staging-rollout/generated/staging-oldlab-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
+# PROVISIONAL (pending #896 headroom measurement): leave CPU/mem for k3s+MinIO.
+requested_cpus = 4
+requested_memory_mib = 16000
+requested_concurrency = 2
+max_jobs = 2
+pending_job_cap = 1
+time_limit = "2-00:00:00"
+# Double-duty: cannot own the whole node — MinIO/k8s share it.
+exclusive = false
+external_runner = true
+
 [[gb10_worker_pool_desired_states]]
 pool_name = "gb10"
 image_tag = "${IMAGE_TAG}"
@@ -159,3 +205,32 @@ args = [
 ]
 enabled = true
 active = true
+
+# OLDLAB staging autoscaler supervisor — GATED enabled=false/active=false until
+# #896 (container isolation) + #827 (external-Slurm acceptance), mirroring the
+# oldlab pool's own disable above. Applying writes the unit files but does NOT
+# enable or start the timer. Port 15448 per the reserved oldlab-staging slot.
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab-staging"
+pool_name = "oldlab"
+service_name = "loom-autoscaler-oldlab-staging.service"
+timer_name = "loom-autoscaler-oldlab-staging.timer"
+working_directory = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo"
+python_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/venv/bin/python"
+script_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo/scripts/ops/worker_pool_autoscaler_external_once.py"
+args = [
+  "--environment", "staging",
+  "--pool-name", "oldlab",
+  "--namespace", "loom-staging",
+  "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--db-local-host", "127.0.0.1",
+  "--db-local-port", "15448",
+  "--db-service", "service/loom-postgres",
+  "--db-remote-port", "5432",
+  "--db-port-forward-ready-timeout-sec", "10",
+  "--db-port-forward-stop-timeout-sec", "5",
+  "--db-connect-timeout-sec", "10",
+  "--freshness-sec", "120",
+]
+enabled = false
+active = false
