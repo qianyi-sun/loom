@@ -1,5 +1,56 @@
 name: staging-smoke
 
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' &&
+      format('gate=manual / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
+             github.sha,
+             github.event.before || github.sha,
+             github.event.pull_request.updated_at || 'none',
+             github.event.action || github.event_name,
+             github.event.label.name || 'none',
+             format('{0}{1}{2}{3}{4}{5}',
+                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
+             github.event.pull_request.number || 'none') ||
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.draft ||
+       github.event.action == 'converted_to_draft' ||
+       (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+       (github.event.action == 'edited' && github.event.changes.base == null)) &&
+      format('gate=filtered / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
+             github.event.pull_request.head.sha,
+             github.event.pull_request.base.sha,
+             github.event.pull_request.updated_at,
+             github.event.action,
+             github.event.label.name || 'none',
+             format('{0}{1}{2}{3}{4}{5}',
+                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
+             github.event.pull_request.number || 'none') ||
+      format('gate=full / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
+             github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha,
+             github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || github.sha,
+             github.event.pull_request.updated_at || 'none',
+             github.event.action || github.event_name,
+             github.event.label.name || 'none',
+             format('{0}{1}{2}{3}{4}{5}',
+                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
+                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
+             github.event.pull_request.number || 'none') }}
+
 # Closes step 1-3 + 12 of the manual staging smoke gate in
 # docs/runbooks/operator-runbook.md by automating the deploy-and-verify
 # round-trip with REAL images. Where the kind smoke (#107) uses
@@ -32,7 +83,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: staging-smoke-${{ github.event.pull_request.number || github.ref }}
+  # Irrelevant metadata runs use a separate pending slot. Otherwise GitHub's
+  # one-pending-run rule lets a filtered event evict the authoritative
+  # replacement that must follow a canceled full run.
+  group: >-
+    staging-smoke-${{ github.event.pull_request.number || github.ref }}-${{
+      github.event_name == 'pull_request' &&
+      (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
+       (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+        contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+       (github.event.action == 'edited' && github.event.changes.base != null)) &&
+      'authoritative' || 'background'
+    }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' &&
         (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
@@ -47,6 +109,7 @@ jobs:
     outputs:
       required: ${{ steps.plan.outputs.staging_smoke }}
       gate_mode: ${{ steps.plan.outputs.gate_mode }}
+      publisher_active: ${{ steps.plan.outputs.publisher_active }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -65,6 +128,7 @@ jobs:
           PR_ACTION_LABEL: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft || false }}
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
+          TRUSTED_PROMOTION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev' && github.event.pull_request.base.ref == 'main' }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -99,6 +163,17 @@ jobs:
             --pull-request-draft "$PR_DRAFT" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
+          publisher_active=false
+          if [[ "$TRUSTED_PROMOTION" == "true" ]]; then
+            publisher_active=true
+          elif [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
+            git cat-file -e "${BASE_SHA}^{tree}"
+            if git cat-file -e \
+              "${BASE_SHA}:.github/workflows/authoritative-gates.yml" 2>/dev/null; then
+              publisher_active=true
+            fi
+          fi
+          printf 'publisher_active=%s\n' "$publisher_active" >> "$GITHUB_OUTPUT"
 
   smoke:
     name: kind staging smoke (build images → cluster up → verify ready)
@@ -1147,7 +1222,11 @@ jobs:
   staging-smoke-gate:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
-          needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
+          github.event_name == 'push' && 'staging-smoke-gate-push' ||
+          needs.plan.outputs.gate_mode == 'full' &&
+          needs.plan.outputs.publisher_active == 'false' &&
+          'staging-smoke-gate' ||
+          needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate-attempt' ||
           'staging-smoke-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()

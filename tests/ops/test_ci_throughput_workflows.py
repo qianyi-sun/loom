@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 import scripts.component_ownership as component_ownership
 import yaml
+from scripts.ops.authoritative_gate import GATE_SPECS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -96,6 +97,234 @@ GATE_CONTRACTS = {
         "staging-smoke-gate",
     ),
 }
+
+SOURCE_PLAN_CONTRACTS = {
+    ".github/workflows/ci.yml": ("workflow-plan", "plan"),
+    ".github/workflows/images.yml": ("plan", "required"),
+    ".github/workflows/cluster-smoke.yml": ("plan", "plan"),
+    ".github/workflows/staging-smoke.yml": ("plan", "plan"),
+}
+
+
+def _normalized_expression(value: str) -> str:
+    return " ".join(value.split())
+
+
+def test_source_workflows_share_authoritative_generation_marker() -> None:
+    workflows = {path: _workflow(path) for path in GATE_CONTRACTS}
+    run_names = {workflow["run-name"] for workflow in workflows.values()}
+
+    assert len(run_names) == 1
+    run_name = run_names.pop()
+    for mode in ("manual", "filtered", "full"):
+        assert f"gate={mode} / head={{0}} / base={{1}}" in run_name
+    for field in ("updated={2}", "action={3}", "label={4}", "labels={5}", "pull={6}"):
+        assert field in run_name
+    assert run_name.count("format('{0}{1}{2}{3}{4}{5}'") == 3
+
+    assert "github.event.pull_request.draft" in run_name
+    assert "github.event.action == 'converted_to_draft'" in run_name
+    assert """fromJSON('["labeled","unlabeled"]')""" in run_name
+    assert "github.event.action == 'edited'" in run_name
+    assert "github.event.changes.base == null" in run_name
+    for label in (
+        "ci:integration",
+        "ci:integration-docker",
+        "ci:images",
+        "cluster-smoke",
+        "staging-smoke",
+        "ci:coverage-summary",
+    ):
+        assert label in run_name
+        assert run_name.count(f"contains(github.event.pull_request.labels.*.name, '{label}')") == 3
+
+    expected_pr_types = {
+        "opened",
+        "synchronize",
+        "reopened",
+        "ready_for_review",
+        "converted_to_draft",
+        "labeled",
+        "unlabeled",
+        "edited",
+    }
+    for workflow in workflows.values():
+        assert set(_workflow_on(workflow)["pull_request"]["types"]) == expected_pr_types
+
+
+def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> None:
+    bootstrap_fragments: set[str] = set()
+
+    for workflow_path, (plan_job_id, plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+        workflow = _workflow(workflow_path)
+        plan_job = workflow["jobs"][plan_job_id]
+        plan_step = next(step for step in plan_job["steps"] if step.get("id") == plan_step_id)
+        expected_output = f"${{{{ steps.{plan_step_id}.outputs.publisher_active }}}}"
+
+        assert plan_job["outputs"]["publisher_active"] == expected_output
+        assert plan_step["env"]["BASE_SHA"].startswith("${{ ")
+        assert plan_step["env"]["TRUSTED_PROMOTION"] == (
+            "${{ github.event_name == 'pull_request' && "
+            "github.event.pull_request.head.repo.full_name == github.repository && "
+            "github.event.pull_request.head.ref == 'dev' && "
+            "github.event.pull_request.base.ref == 'main' }}"
+        )
+        assert "publisher_active=false" in plan_step["run"]
+        fragment = plan_step["run"].split("publisher_active=false", maxsplit=1)[1]
+        bootstrap_fragments.add(fragment)
+        assert 'git cat-file -e "${BASE_SHA}^{tree}"' in fragment
+        assert '[[ "$TRUSTED_PROMOTION" == "true" ]]' in fragment
+        assert '"${BASE_SHA}:.github/workflows/authoritative-gates.yml"' in fragment
+        assert "HEAD_SHA" not in fragment
+
+    assert len(bootstrap_fragments) == 1
+
+
+def test_source_gate_names_switch_only_after_base_publisher_is_active() -> None:
+    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        workflow = _workflow(workflow_path)
+        plan_job_id, _ = SOURCE_PLAN_CONTRACTS[workflow_path]
+        plan_ref = f"needs.{plan_job_id}.outputs"
+        expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
+
+        assert expression == _normalized_expression(
+            "${{ "
+            f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
+            f"github.event_name == 'push' && '{protected_name}-push' || "
+            f"{plan_ref}.gate_mode == 'full' && "
+            f"{plan_ref}.publisher_active == 'false' && "
+            f"'{protected_name}' || "
+            f"{plan_ref}.gate_mode == 'full' && '{protected_name}-attempt' || "
+            f"'{protected_name}-filtered' "
+            "}}"
+        )
+
+
+def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
+    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        expression = _normalized_expression(_workflow(workflow_path)["jobs"][gate_id]["name"])
+
+        assert f"github.event_name == 'push' && '{protected_name}-push'" in expression
+
+
+def test_trusted_dev_to_main_promotion_activates_the_publisher() -> None:
+    for workflow_path, (gate_id, _protected_name) in GATE_CONTRACTS.items():
+        workflow = _workflow(workflow_path)
+        plan_job_id, plan_step_id = SOURCE_PLAN_CONTRACTS[workflow_path]
+        plan_step = next(
+            step
+            for step in workflow["jobs"][plan_job_id]["steps"]
+            if step.get("id") == plan_step_id
+        )
+        assert (
+            "github.event.pull_request.head.ref == 'dev'" in plan_step["env"]["TRUSTED_PROMOTION"]
+        )
+        assert (
+            "github.event.pull_request.base.ref == 'main'" in plan_step["env"]["TRUSTED_PROMOTION"]
+        )
+        assert "publisher_active=true" in plan_step["run"]
+        assert "-attempt" in workflow["jobs"][gate_id]["name"]
+
+
+def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
+    workflow = _workflow(".github/workflows/authoritative-gates.yml")
+    on_config = _workflow_on(workflow)
+
+    assert set(on_config) == {"pull_request_target", "workflow_run"}
+    assert set(on_config["pull_request_target"]["types"]) == {
+        "opened",
+        "synchronize",
+        "reopened",
+        "ready_for_review",
+        "converted_to_draft",
+        "labeled",
+        "unlabeled",
+        "edited",
+    }
+    assert on_config["workflow_run"] == {
+        "workflows": ["CI", "images", "cluster-smoke", "staging-smoke"],
+        "types": ["requested", "in_progress", "completed"],
+    }
+    assert workflow["permissions"] == {
+        "actions": "read",
+        "checks": "write",
+        "contents": "read",
+        "issues": "read",
+        "pull-requests": "read",
+    }
+
+    assert "concurrency" not in workflow
+
+    assert set(workflow["jobs"]) == {"publish"}
+    publish = workflow["jobs"]["publish"]
+    job_filter = publish["if"]
+    assert "github.event_name == 'workflow_run'" in job_filter
+    assert (
+        'contains(fromJSON(\'["pull_request","merge_group"]\'), github.event.workflow_run.event)'
+    ) in _normalized_expression(job_filter)
+    assert "!github.event.pull_request.draft" in job_filter
+    assert "ready_for_review" in job_filter
+    assert "converted_to_draft" in job_filter
+    assert "synchronize" in job_filter
+    assert "github.event.changes.base != null" in job_filter
+    for label in (
+        "ci:integration",
+        "ci:integration-docker",
+        "ci:images",
+        "cluster-smoke",
+        "staging-smoke",
+        "ci:coverage-summary",
+    ):
+        assert label in job_filter
+    matrix = publish["strategy"]["matrix"]["context"]
+    for context in (
+        "repository-checks",
+        "images-gate",
+        "cluster-smoke-gate",
+        "staging-smoke-gate",
+    ):
+        assert context in matrix
+    for spec in GATE_SPECS:
+        source_pair = (
+            f"github.event.workflow_run.workflow_id == {spec.workflow_id} && "
+            f"github.event.workflow_run.name == '{spec.workflow_name}'"
+        )
+        assert source_pair in _normalized_expression(job_filter)
+        assert source_pair in _normalized_expression(matrix)
+
+    concurrency = publish["concurrency"]
+    assert concurrency["cancel-in-progress"] is False
+    assert "github.event.workflow_run.head_sha" in concurrency["group"]
+    assert "github.event.pull_request.head.sha" in concurrency["group"]
+    assert "matrix.context" in concurrency["group"]
+
+    assert publish["timeout-minutes"] == 5
+    checkout = next(
+        step
+        for step in publish["steps"]
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert checkout["uses"] == (f"actions/checkout@{_locked_action_sha('actions/checkout')}")
+    assert checkout["with"] == {
+        "ref": "${{ github.workflow_sha }}",
+        "fetch-depth": 1,
+        "persist-credentials": False,
+    }
+    assert "pull_request" not in checkout["with"]["ref"]
+    assert "workflow_run" not in checkout["with"]["ref"]
+
+    publisher = next(
+        step for step in publish["steps"] if step.get("name") == "Publish authoritative gate state"
+    )
+    assert publisher["env"] == {
+        "AUTHORITATIVE_CONTEXT": "${{ matrix.context }}",
+        "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+    }
+    assert _normalized_expression(publisher["run"]) == _normalized_expression(
+        "python scripts/ops/authoritative_gate.py "
+        '--event-path "$GITHUB_EVENT_PATH" '
+        '--context "$AUTHORITATIVE_CONTEXT"'
+    )
 
 
 def _gate_script(workflow_path: str, gate_id: str) -> str:
@@ -922,6 +1151,23 @@ def test_protected_workflows_cancel_only_superseded_gate_runs() -> None:
         assert "ci:coverage-summary" in cancel
         assert "github.event.changes.base != null" in cancel
         assert "ci:merge-ready" not in cancel
+
+
+def test_protected_workflows_isolate_irrelevant_metadata_pending_runs() -> None:
+    for workflow_path in GATE_CONTRACTS:
+        workflow = _workflow(workflow_path)
+        group = workflow["concurrency"]["group"]
+
+        assert "authoritative" in group
+        assert "background" in group
+        assert "github.event_name == 'pull_request'" in group
+        assert "synchronize" in group
+        assert "ready_for_review" in group
+        assert "converted_to_draft" in group
+        assert "ci:integration" in group
+        assert "ci:coverage-summary" in group
+        assert "github.event.changes.base != null" in group
+        assert "ci:merge-ready" not in group
 
 
 def test_cluster_deploy_spikes_cancel_superseded_pr_runs() -> None:
