@@ -223,7 +223,8 @@ def workflow_run(
     return {
         "id": run_id,
         "workflow_id": spec.workflow_id,
-        "name": spec.workflow_name,
+        # GitHub replaces workflow_run.name with the dynamic run-name marker.
+        "name": title(generation),
         "event": run_event,
         "head_sha": HEAD,
         "head_repository": {"full_name": head_repository},
@@ -441,6 +442,13 @@ def test_completed_check_is_reset_in_place_for_a_new_same_head_generation() -> N
     assert reset_check["id"] == original_check_id
     assert reset_check["status"] == "in_progress"
     assert "conclusion" not in reset_check
+    reopen_payload = next(
+        payload
+        for check_id, payload in reversed(client.updated)
+        if check_id == original_check_id and payload.get("status") == "in_progress"
+    )
+    assert reopen_payload["conclusion"] is None
+    assert reopen_payload["completed_at"] is None
 
 
 def test_check_run_response_from_an_unexpected_app_fails_closed() -> None:

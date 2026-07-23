@@ -116,6 +116,9 @@ def test_source_workflows_share_authoritative_generation_marker() -> None:
 
     assert len(run_names) == 1
     run_name = run_names.pop()
+    assert "github.event.pull_request.base.sha == " in run_name
+    assert "28aa5257927a3468ebc35ec7f245fecaf3226dbf" in run_name
+    assert "' ' ||" in run_name
     for mode in ("manual", "filtered", "full"):
         assert f"gate={mode} / head={{0}} / base={{1}}" in run_name
     for field in ("updated={2}", "action={3}", "label={4}", "labels={5}", "pull={6}"):
@@ -174,7 +177,12 @@ def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> N
         bootstrap_fragments.add(fragment)
         assert 'git cat-file -e "${BASE_SHA}^{tree}"' in fragment
         assert '[[ "$TRUSTED_PROMOTION" == "true" ]]' in fragment
+        assert (
+            '[[ "$BASE_SHA" == "28aa5257927a3468ebc35ec7f245fecaf3226dbf" ]]'
+            in fragment
+        )
         assert '"${BASE_SHA}:.github/workflows/authoritative-gates.yml"' in fragment
+        assert "publisher-contract: dynamic-run-name-v1" in fragment
         assert "HEAD_SHA" not in fragment
 
     assert len(bootstrap_fragments) == 1
@@ -285,12 +293,11 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     ):
         assert context in matrix
     for spec in GATE_SPECS:
-        source_pair = (
-            f"github.event.workflow_run.workflow_id == {spec.workflow_id} && "
-            f"github.event.workflow_run.name == '{spec.workflow_name}'"
-        )
-        assert source_pair in _normalized_expression(job_filter)
-        assert source_pair in _normalized_expression(matrix)
+        source_identity = f"github.event.workflow_run.workflow_id == {spec.workflow_id}"
+        assert str(spec.workflow_id) in _normalized_expression(job_filter)
+        assert source_identity in _normalized_expression(matrix)
+    assert "github.event.workflow_run.name" not in job_filter
+    assert "github.event.workflow_run.name" not in matrix
 
     concurrency = publish["concurrency"]
     assert concurrency["cancel-in-progress"] is False
