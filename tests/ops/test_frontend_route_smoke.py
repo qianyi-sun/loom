@@ -847,6 +847,9 @@ def _mock_dev_route_responses(
     ]
     javascript_url = f"{route_url}/assets/index.js"
     stylesheet_url = f"{route_url}/assets/index.css"
+    nested_pseudo_asset_url = (
+        f"{route_url}/batches/assets/loom-route-smoke-nonexistent.js"
+    )
     if shell_body is None:
         shell_body = (
             b'<link rel="stylesheet" href="/dev/assets/index.css">'
@@ -897,6 +900,12 @@ def _mock_dev_route_responses(
             headers={"content-type": "text/css"},
             body=b"#root {}",
         ),
+        nested_pseudo_asset_url: HttpResponse(
+            url=nested_pseudo_asset_url,
+            status=404,
+            headers={"content-type": "text/html"},
+            body=b"",
+        ),
     }
 
 
@@ -934,6 +943,9 @@ def test_check_route_fetches_redirect_deep_shells_and_unique_assets() -> None:
     ]
     javascript_url = f"{route_url}/assets/index.js"
     stylesheet_url = f"{route_url}/assets/index.css"
+    nested_pseudo_asset_url = (
+        f"{route_url}/batches/assets/loom-route-smoke-nonexistent.js"
+    )
     responses = _mock_dev_route_responses()
     calls: list[tuple[str, str, bool]] = []
 
@@ -963,6 +975,7 @@ def test_check_route_fetches_redirect_deep_shells_and_unique_assets() -> None:
     assert all(("GET", url, False) in calls for url in [config_url, *shell_urls])
     assert calls.count(("GET", javascript_url, False)) == 1
     assert calls.count(("GET", stylesheet_url, False)) == 1
+    assert calls.count(("GET", nested_pseudo_asset_url, False)) == 1
     assert all(follow_redirects is False for _, _, follow_redirects in calls)
     evidence = asdict(check)
     assert {item["url"] for item in evidence["responses"]} == set(responses)
@@ -973,6 +986,28 @@ def test_check_route_fetches_redirect_deep_shells_and_unique_assets() -> None:
     }
     assert all(
         set(item) == {"url", "method", "status", "content_type"} for item in evidence["responses"]
+    )
+
+
+def test_check_route_rejects_nested_pseudo_asset_spa_fallback() -> None:
+    pseudo_asset_url = (
+        "https://yylx.world/dev/batches/assets/"
+        "loom-route-smoke-nonexistent.js"
+    )
+    responses = _mock_dev_route_responses()
+    responses[pseudo_asset_url] = HttpResponse(
+        url=pseudo_asset_url,
+        status=200,
+        headers={"content-type": "text/html"},
+        body=b'<!doctype html><div id="root"></div>',
+    )
+
+    check = _check_mock_dev_route(responses)
+
+    assert check.status == "fail"
+    assert (
+        "nested pseudo-asset path returned HTTP 200; expected 404"
+        in check.errors
     )
 
 

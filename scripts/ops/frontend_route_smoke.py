@@ -658,6 +658,19 @@ def _canonical_route_url(route_url: str) -> str:
     ).geturl()
 
 
+def _nested_pseudo_asset_url(route_url: str) -> str:
+    parsed = urlparse(route_url)
+    return parsed._replace(
+        path=(
+            f"{parsed.path.rstrip('/')}/batches/assets/"
+            "loom-route-smoke-nonexistent.js"
+        ),
+        params="",
+        query="",
+        fragment="",
+    ).geturl()
+
+
 def _checked_response(response: HttpResponse, *, method: str) -> CheckedResponse:
     content_types = _header_values(response, "content-type")
     content_type = ""
@@ -750,6 +763,17 @@ def check_route(
         )
     except Exception as exc:  # pragma: no cover - operator network failure
         errors.append(f"runtime config request failed: {exc}")
+
+    pseudo_asset_url = _nested_pseudo_asset_url(route_url)
+    try:
+        pseudo_asset = fetch_and_record(pseudo_asset_url)
+        if pseudo_asset.status != 404:
+            errors.append(
+                "nested pseudo-asset path returned "
+                f"HTTP {pseudo_asset.status}; expected 404"
+            )
+    except Exception as exc:  # pragma: no cover - operator network failure
+        errors.append(f"nested pseudo-asset request failed: {exc}")
 
     shell_responses: list[HttpResponse] = []
     refs_by_shell: dict[str, list[_ClassifiedAssetReference]] = {}
