@@ -138,13 +138,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
 
-    assert set(jobs) == {
-        "plan",
-        "build",
-        "publish",
-        "images-gate",
-        "bootstrap-authoritative-v2",
-    }
+    assert set(jobs) == {"plan", "build", "publish", "images-gate"}
     for job_name in ("plan", "build", "images-gate"):
         effective = jobs[job_name].get("permissions", workflow["permissions"])
         assert effective == {"contents": "read"}
@@ -158,17 +152,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     }
     assert "environment" not in jobs["publish"]
 
-    bootstrap = jobs["bootstrap-authoritative-v2"]
-    assert bootstrap["permissions"] == {
-        "actions": "read",
-        "checks": "write",
-        "contents": "read",
-        "issues": "read",
-        "pull-requests": "read",
-    }
-    assert "environment" not in bootstrap
-    assert "id-token" not in bootstrap["permissions"]
-
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
     workflow = _workflow(".github/workflows/images.yml")
@@ -180,10 +163,7 @@ def test_images_secret_and_cache_authority_is_exact() -> None:
         if isinstance(value, str) and "secrets." in value
     ]
 
-    assert secret_references == [
-        "${{ secrets.GITHUB_TOKEN }}",
-        "${{ secrets.GITHUB_TOKEN }}",
-    ]
+    assert secret_references == ["${{ secrets.GITHUB_TOKEN }}"]
     for job in workflow["jobs"].values():
         assert job.get("continue-on-error") is not True
         for step in job.get("steps", []):
@@ -230,30 +210,15 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
     gate_step = _named_step(gate, "Enforce selected staging smoke results")
     assert "AWS_S3_RESULT" not in gate_step["env"]
     assert "AWS_S3_RESULT" not in gate_step["run"]
+    assert "${{ secrets." not in str(workflow)
     assert "ci-aws" not in str(workflow)
 
-    bootstrap = jobs["bootstrap-authoritative-v2"]
-    assert bootstrap["permissions"] == {
-        "actions": "read",
-        "checks": "write",
-        "contents": "read",
-        "issues": "read",
-        "pull-requests": "read",
-    }
-    publish = _named_step(bootstrap, "Publish exact repair gate result")
-    assert publish["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
-    assert "${{ secrets." not in str(
-        {name: job for name, job in jobs.items() if name != "bootstrap-authoritative-v2"}
-    )
-
-    for job_name, job in jobs.items():
+    for job in jobs.values():
         effective = job.get("permissions", workflow["permissions"])
-        if job_name != "bootstrap-authoritative-v2":
-            assert effective == {"contents": "read"}
+        assert effective == {"contents": "read"}
         assert "environment" not in job
         assert "id-token" not in effective
-        if job_name != "bootstrap-authoritative-v2":
-            assert all(value != "write" for value in effective.values())
+        assert all(value != "write" for value in effective.values())
         assert all(
             step.get("with", {}).get("persist-credentials") is False
             for step in _checkout_steps(job)

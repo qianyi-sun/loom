@@ -182,7 +182,7 @@ def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> N
             in fragment
         )
         assert '"${BASE_SHA}:.github/workflows/authoritative-gates.yml"' in fragment
-        assert "publisher-contract: dynamic-run-name-v[12]" in fragment
+        assert "publisher-contract: dynamic-run-name-v[123]" in fragment
         assert "HEAD_SHA" not in fragment
 
     assert len(bootstrap_fragments) == 1
@@ -206,64 +206,6 @@ def test_source_gate_names_switch_only_after_base_publisher_is_active() -> None:
             f"'{protected_name}-filtered' "
             "}}"
         )
-
-
-def test_v1_bootstrap_jobs_are_bound_to_the_exact_repair_pull() -> None:
-    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        workflow = _workflow(workflow_path)
-        bootstrap = workflow["jobs"]["bootstrap-authoritative-v2"]
-        condition = _normalized_expression(bootstrap["if"])
-
-        assert bootstrap["needs"] == [gate_id]
-        assert "github.event_name == 'pull_request'" in condition
-        assert "!github.event.pull_request.draft" in condition
-        assert '["opened","reopened","ready_for_review","synchronize"]' in condition
-        assert '["labeled","unlabeled"]' in condition
-        assert (
-            '["ci:integration","ci:integration-docker","ci:images","cluster-smoke",'
-            '"staging-smoke","ci:coverage-summary"]'
-        ) in condition
-        assert "github.event.label.name" in condition
-        assert "github.event.action == 'edited'" in condition
-        assert "github.event.changes.base != null" in condition
-        assert "cfe71eddd9a8e768aa84d003bbf6a0bd0110f9ca" in condition
-        assert "codex/833-authoritative-gates-acceptance" in condition
-        assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
-        assert bootstrap["permissions"] == {
-            "actions": "read",
-            "checks": "write",
-            "contents": "read",
-            "issues": "read",
-            "pull-requests": "read",
-        }
-        checkout = bootstrap["steps"][0]
-        assert checkout["with"] == {
-            "ref": "${{ github.event.pull_request.head.sha }}",
-            "fetch-depth": 1,
-            "persist-credentials": False,
-        }
-        publish = bootstrap["steps"][1]
-        assert publish["env"]["AUTHORITATIVE_CONTEXT"] == protected_name
-        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_GATE_RESULT"] == (
-            f"${{{{ needs.{gate_id}.result }}}}"
-        )
-        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_WORKFLOW_SHA"] == (
-            "${{ github.event.pull_request.head.sha }}"
-        )
-        assert publish["env"]["AUTHORITATIVE_BOOTSTRAP_PULL_NUMBER"] == (
-            "${{ github.event.pull_request.number }}"
-        )
-        if workflow_path == ".github/workflows/cluster-smoke.yml":
-            assert (
-                publish["env"]["AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES"]
-                == "true"
-            )
-        else:
-            assert (
-                "AUTHORITATIVE_BOOTSTRAP_NEUTRALIZE_PUBLISHER_FAILURES"
-                not in publish["env"]
-            )
-        assert publish["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
 
 
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
@@ -296,6 +238,11 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     workflow = _workflow(".github/workflows/authoritative-gates.yml")
     on_config = _workflow_on(workflow)
 
+    workflow_source = (REPO_ROOT / ".github/workflows/authoritative-gates.yml").read_text(
+        encoding="utf-8",
+    )
+    assert workflow_source.startswith("# publisher-contract: dynamic-run-name-v3\n")
+
     assert set(on_config) == {"pull_request_target", "workflow_run"}
     assert set(on_config["pull_request_target"]["types"]) == {
         "opened",
@@ -321,7 +268,17 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
 
     assert "concurrency" not in workflow
 
-    assert set(workflow["jobs"]) == {"publish"}
+    assert set(workflow["jobs"]) == {"suite-anchor", "publish"}
+    suite_anchor = workflow["jobs"]["suite-anchor"]
+    assert suite_anchor == {
+        "name": "keep authoritative publisher suite successful",
+        "if": "github.event_name == 'pull_request_target'",
+        "permissions": {},
+        "runs-on": "ubuntu-latest",
+        "timeout-minutes": 1,
+        "steps": [{"name": "Complete trusted PR suite", "run": ":"}],
+    }
+
     publish = workflow["jobs"]["publish"]
     job_filter = publish["if"]
     assert "github.event_name == 'workflow_run'" in job_filter
@@ -357,11 +314,11 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     assert "github.event.workflow_run.name" not in job_filter
     assert "github.event.workflow_run.name" not in matrix
 
-    concurrency = publish["concurrency"]
-    assert concurrency["cancel-in-progress"] is False
-    assert "github.event.workflow_run.head_sha" in concurrency["group"]
-    assert "github.event.pull_request.head.sha" in concurrency["group"]
-    assert "matrix.context" in concurrency["group"]
+    # Actions always replaces an older pending member of a concurrency group,
+    # even when cancel-in-progress is false. A cancelled publisher job is itself
+    # a failing CheckRun in the PR rollup, so the publisher must let every trusted
+    # invocation execute and rely on its live authority reconciliation instead.
+    assert "concurrency" not in publish
 
     assert publish["timeout-minutes"] == 5
     checkout = next(
@@ -390,6 +347,27 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
         '--event-path "$GITHUB_EVENT_PATH" '
         '--context "$AUTHORITATIVE_CONTEXT"'
     )
+
+
+def test_only_authoritative_workflow_can_write_protected_checkruns() -> None:
+    workflow_paths = sorted((REPO_ROOT / ".github/workflows").glob("*.yml"))
+    for workflow_file in workflow_paths:
+        workflow_path = workflow_file.relative_to(REPO_ROOT).as_posix()
+        if workflow_path == ".github/workflows/authoritative-gates.yml":
+            continue
+        workflow = _workflow(workflow_path)
+        workflow_source = workflow_file.read_text(encoding="utf-8")
+
+        assert "scripts/ops/authoritative_gate.py" not in workflow_source
+        assert "AUTHORITATIVE_CONTEXT" not in workflow_source
+        workflow_permissions = workflow.get("permissions", {})
+        assert isinstance(workflow_permissions, dict)
+        assert workflow_permissions.get("checks") != "write"
+
+        for job_name, job in workflow["jobs"].items():
+            effective_permissions = job.get("permissions", workflow_permissions)
+            assert isinstance(effective_permissions, dict), job_name
+            assert effective_permissions.get("checks") != "write", job_name
 
 
 def _gate_script(workflow_path: str, gate_id: str) -> str:
