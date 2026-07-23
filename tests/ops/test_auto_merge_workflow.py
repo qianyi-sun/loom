@@ -37,6 +37,17 @@ def test_auto_merge_controller_uses_trusted_metadata_only_event() -> None:
     assert "uses" not in str(job)
 
 
+def test_auto_merge_controller_keeps_draft_carrier_suite_successful() -> None:
+    workflow = _workflow()
+    anchor = workflow["jobs"]["suite-anchor"]
+
+    assert anchor["name"] == "keep auto-merge carrier suite successful"
+    assert anchor["permissions"] == {}
+    assert "if" not in anchor
+    assert all("actions/checkout" not in str(step) for step in anchor["steps"])
+    assert all("uses" not in step for step in anchor["steps"])
+
+
 def test_auto_merge_controller_is_author_neutral_and_ci_dependent() -> None:
     workflow = _workflow()
     job = workflow["jobs"]["enable"]
