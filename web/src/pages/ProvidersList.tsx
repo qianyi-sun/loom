@@ -3,7 +3,8 @@
  * Empty state CTA + populated table. Closes #167 (slice 1 of 5).
  */
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { useEffect, useRef } from "react";
+import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../api/client";
 import { Card } from "../components/Card";
@@ -22,10 +23,18 @@ type Conn = {
 };
 
 export default function ProvidersList(): JSX.Element {
+  const location = useLocation();
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const { data, isLoading, error } = useQuery({
     queryKey: ["providers"],
     queryFn: () => api.listProviderConnections(),
   });
+  const focusHeading =
+    (location.state as { focusHeading?: boolean } | null)?.focusHeading === true;
+
+  useEffect(() => {
+    if (focusHeading && !isLoading && !error) headingRef.current?.focus();
+  }, [error, focusHeading, isLoading]);
 
   if (isLoading) return <LoadingState />;
   if (error) {
@@ -44,7 +53,13 @@ export default function ProvidersList(): JSX.Element {
     return (
       <Card>
         <Card.Body className="space-y-4">
-          <h1 className="text-2xl font-bold text-slate-900">Provider connections</h1>
+          <h1
+            ref={headingRef}
+            tabIndex={-1}
+            className="text-2xl font-bold text-slate-900"
+          >
+            Provider connections
+          </h1>
           <p className="text-sm text-slate-500">
             No provider connections yet. Create one to launch evaluations against
             your own model provider.
@@ -68,7 +83,13 @@ export default function ProvidersList(): JSX.Element {
   return (
     <div className="space-y-4">
       <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-slate-900">Provider connections</h1>
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className="text-2xl font-bold text-slate-900"
+        >
+          Provider connections
+        </h1>
         <Link
           to="/providers/new"
           className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"

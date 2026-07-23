@@ -1,3 +1,4 @@
+import { QueryClient } from "@tanstack/react-query";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
@@ -149,11 +150,30 @@ function mockBatch(
     status: "not_ready",
     reason: "no_delivery_export",
   },
+  cancelStatus = 200,
 ): FetchMock {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : String(input);
+      if (
+        url.endsWith(`/api/v1/batches/${BATCH_ID}/cancel`) &&
+        init?.method === "POST"
+      ) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              cancelStatus >= 400
+                ? { detail: "cancel conflict sk-proj-abcdefghijklmnopqrstuvwxyz" }
+                : { batch_id: BATCH_ID, state: "cancelling" },
+            ),
+            {
+              status: cancelStatus,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        );
+      }
       if (
         url.endsWith(`/api/v1/batches/${BATCH_ID}/delivery-export`) &&
         init?.method === "POST"
@@ -256,6 +276,59 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("Defaults only")).toBeInTheDocument();
     expect(screen.queryByText("task_filter")).not.toBeInTheDocument();
     expect(screen.queryByText("trial_config")).not.toBeInTheDocument();
+  });
+
+  it("confirms cancellation and closes only after server success", async () => {
+    const fetchMock = mockBatch();
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    const user = userEvent.setup();
+    renderBatchDetail();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Cancel batch" }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Cancel batch" }),
+    ).toHaveTextContent(`qwen2.5-litellm (${BATCH_ID})`);
+    await user.click(screen.getByRole("button", { name: "Cancel batch" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/v1/batches/${BATCH_ID}/cancel`),
+        expect.objectContaining({ method: "POST" }),
+      );
+      expect(
+        screen.queryByRole("dialog", { name: "Cancel batch" }),
+      ).not.toBeInTheDocument();
+    });
+    for (const queryKey of [
+      ["batch", BATCH_ID],
+      ["batches"],
+      ["trials"],
+      ["overview"],
+      ["monitor-summary"],
+      ["run-library"],
+      ["run-library-batch", BATCH_ID],
+    ]) {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey });
+    }
+  });
+
+  it("keeps cancellation failure and context available for retry", async () => {
+    mockBatch(BATCH_BODY, null, {}, undefined, 409);
+    const user = userEvent.setup();
+    renderBatchDetail();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Cancel batch" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel batch" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Error 409");
+    expect(screen.getByRole("alert")).toHaveTextContent("[REDACTED]");
+    expect(
+      screen.getByRole("dialog", { name: "Cancel batch" }),
+    ).toBeInTheDocument();
   });
 
   it("shows submitting user owner, share status, and provenance on the detail header", async () => {

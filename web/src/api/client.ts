@@ -1160,26 +1160,39 @@ export const api = {
       { method: "POST" },
     ),
   listTokens: () => apiFetch<ApiTokenList>("/api/v1/tokens"),
-  createToken: (body: {
-    name: string;
-    type: string;
-    scopes: string[];
-    expires_in_days: number;
-    team_id?: string;
-  }) =>
+  createToken: (
+    body: {
+      name: string;
+      type: string;
+      scopes: string[];
+      expires_in_days: number;
+      team_id?: string;
+    },
+    actor?: string,
+  ) =>
     apiFetch<ApiTokenReveal>(
       "/api/v1/tokens",
-      { method: "POST", body: JSON.stringify(body) },
+      {
+        method: "POST",
+        headers: actor ? { "X-Loom-Admin-Actor": actor } : undefined,
+        body: JSON.stringify(body),
+      },
     ),
-  rotateToken: (prefix: string) =>
+  rotateToken: (prefix: string, actor?: string) =>
     apiFetch<ApiTokenReveal>(
       `/api/v1/tokens/${encodeURIComponent(prefix)}/rotate`,
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: actor ? { "X-Loom-Admin-Actor": actor } : undefined,
+      },
     ),
-  revokeToken: (prefix: string) =>
+  revokeToken: (prefix: string, actor?: string) =>
     apiFetch<void>(
       `/api/v1/tokens/${encodeURIComponent(prefix)}`,
-      { method: "DELETE" },
+      {
+        method: "DELETE",
+        headers: actor ? { "X-Loom-Admin-Actor": actor } : undefined,
+      },
     ),
   requestTeamRegistration: (body: TeamRegistrationRequestBody) =>
     apiFetch<TeamRegistrationEntry>("/api/v1/teams/register", {

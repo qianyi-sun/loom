@@ -23,16 +23,23 @@ const TASK_SET = {
   materialization_job_state: null,
 };
 
-function renderPage(initialPath = "/task-sets/task-set-1"): void {
+function renderPage(
+  initialPath = "/task-sets/task-set-1",
+  fetchImpl?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+): void {
   vi.stubGlobal(
     "fetch",
-    vi.fn().mockImplementation(() =>
-      Promise.resolve(
-        new Response(JSON.stringify(TASK_SET), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
+    vi.fn().mockImplementation(
+      fetchImpl ??
+        ((_input: RequestInfo | URL, init?: RequestInit) =>
+          Promise.resolve(
+            init?.method === "DELETE"
+              ? new Response(null, { status: 204 })
+              : new Response(JSON.stringify(TASK_SET), {
+                  status: 200,
+                  headers: { "Content-Type": "application/json" },
+                }),
+          )),
     ),
   );
   const queryClient = new QueryClient({
@@ -43,6 +50,7 @@ function renderPage(initialPath = "/task-sets/task-set-1"): void {
       <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[initialPath]}>
         <Routes>
           <Route path="/task-sets/:id" element={<TaskSetDetail />} />
+          <Route path="/task-sets" element={<h1>Task sets</h1>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -93,5 +101,68 @@ describe("TaskSetDetail tabs", () => {
       );
     });
     expect(screen.getByRole("tabpanel")).toHaveTextContent("Task is invalid");
+  });
+
+  it("requires the exact TaskSet id and navigates only after success", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+    expect(
+      screen.getByRole("dialog", { name: "Delete task set" }),
+    ).toBeInTheDocument();
+    const confirm = screen.getByRole("button", { name: "Delete TaskSet" });
+    const input = screen.getByLabelText("Type the TaskSet id to confirm");
+    expect(confirm).toBeDisabled();
+    await user.type(input, "Task-Set-1");
+    expect(confirm).toBeDisabled();
+    await user.clear(input);
+    await user.type(input, "task-set-1");
+    await user.click(confirm);
+
+    await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        "/api/v1/tasksets/task-set-1",
+        expect.objectContaining({ method: "DELETE" }),
+      );
+      expect(
+        screen.queryByRole("dialog", { name: "Delete task set" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps the delete context open for a retryable failure", async () => {
+    const user = userEvent.setup();
+    renderPage(
+      "/task-sets/task-set-1",
+      (_input, init) =>
+        Promise.resolve(
+          init?.method === "DELETE"
+            ? new Response(
+                JSON.stringify({ detail: "conflict sk-proj-abcdefghijklmnopqrstuvwxyz" }),
+                {
+                  status: 409,
+                  headers: { "Content-Type": "application/json" },
+                },
+              )
+            : new Response(JSON.stringify(TASK_SET), {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              }),
+        ),
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+    await user.type(
+      screen.getByLabelText("Type the TaskSet id to confirm"),
+      "task-set-1",
+    );
+    await user.click(screen.getByRole("button", { name: "Delete TaskSet" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Error 409");
+    expect(screen.getByRole("alert")).toHaveTextContent("[REDACTED]");
+    expect(
+      screen.getByLabelText("Type the TaskSet id to confirm"),
+    ).toHaveValue("task-set-1");
   });
 });

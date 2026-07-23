@@ -153,7 +153,9 @@ export default function ProviderDetail(): JSX.Element {
             <SettingsTab
               conn={conn}
               id={id}
-              onDeleted={() => navigate("/providers")}
+              onDeleted={() =>
+                navigate("/providers", { state: { focusHeading: true } })
+              }
             />
           );
         }}
@@ -376,13 +378,26 @@ function SettingsTab({
             <p className="text-sm text-slate-700">
               Rotate API key — replaces the stored credential.
             </p>
-            <Button onClick={() => setShowRotate(true)}>Rotate</Button>
+            <Button
+              onClick={() => {
+                rotate.reset();
+                setShowRotate(true);
+              }}
+            >
+              Rotate
+            </Button>
           </div>
           <div className="flex items-center justify-between gap-4 border-t border-slate-200 pt-3">
             <p className="text-sm text-slate-700">
               Delete connection — soft-delete, hides from team.
             </p>
-            <Button variant="danger" onClick={() => setShowDelete(true)}>
+            <Button
+              variant="danger"
+              onClick={() => {
+                del.reset();
+                setShowDelete(true);
+              }}
+            >
               Delete
             </Button>
           </div>
@@ -392,7 +407,11 @@ function SettingsTab({
         <RotateKeyModal
           connectionName={conn.name}
           pending={rotate.isPending}
-          onClose={() => setShowRotate(false)}
+          error={rotate.error}
+          onClose={() => {
+            rotate.reset();
+            setShowRotate(false);
+          }}
           onSubmit={handleRotate}
         />
       )}
@@ -400,7 +419,11 @@ function SettingsTab({
         <DeleteConnectionModal
           connectionName={conn.name}
           pending={del.isPending}
-          onClose={() => setShowDelete(false)}
+          error={del.error}
+          onClose={() => {
+            del.reset();
+            setShowDelete(false);
+          }}
           onSubmit={handleDelete}
         />
       )}

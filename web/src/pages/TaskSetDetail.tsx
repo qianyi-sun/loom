@@ -5,8 +5,8 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, type TaskSetDetailResponse } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
 import LoadingState from "../components/LoadingState";
-import { Modal } from "../components/Modal";
 import { StatusPill, type StatusVariant } from "../components/StatusPill";
 import { Tabs, type TabItem } from "../components/Tabs";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
@@ -81,10 +81,19 @@ export default function TaskSetDetail(): JSX.Element {
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteTaskSet(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["taskSets"] });
-      navigate("/task-sets");
+      queryClient.removeQueries({ queryKey: ["taskSets", id] });
+      queryClient.invalidateQueries({ queryKey: ["taskSets"], exact: true });
+      queryClient.invalidateQueries({
+        queryKey: ["taskSets", "evaluation-ready"],
+      });
     },
   });
+
+  const handleDelete = async (): Promise<void> => {
+    await deleteMutation.mutateAsync();
+    setDeleteOpen(false);
+    navigate("/task-sets", { state: { focusHeading: true } });
+  };
 
   const setTab = (nextTab: TabName): void => {
     const next = new URLSearchParams(searchParams);
@@ -157,7 +166,10 @@ export default function TaskSetDetail(): JSX.Element {
           <Button
             variant="danger"
             size="sm"
-            onClick={() => setDeleteOpen(true)}
+            onClick={() => {
+              deleteMutation.reset();
+              setDeleteOpen(true);
+            }}
           >
             Delete
           </Button>
@@ -193,34 +205,26 @@ export default function TaskSetDetail(): JSX.Element {
         }
       />
 
-      <Modal
+      <DestructiveActionDialog
         open={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
+        onClose={() => {
+          deleteMutation.reset();
+          setDeleteOpen(false);
+        }}
         title="Delete task set"
-        description="This will soft-delete the task set. Run history referencing it will be preserved."
-        size="sm"
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setDeleteOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                deleteMutation.mutate();
-                setDeleteOpen(false);
-              }}
-            >
-              Delete
-            </Button>
-          </>
-        }
-      >
-        <p className="text-sm text-slate-700">
-          Are you sure you want to delete{" "}
-          <span className="font-medium">{ts.task_set_id}</span>?
-        </p>
-      </Modal>
+        target={ts.task_set_id}
+        consequence="The TaskSet will be soft-deleted and active materialization will be cancelled. Run history remains."
+        confirmLabel="Delete TaskSet"
+        pendingLabel="Deleting…"
+        confirmation={{
+          type: "typed",
+          expected: ts.task_set_id,
+          inputLabel: "Type the TaskSet id to confirm",
+        }}
+        pending={deleteMutation.isPending}
+        error={deleteMutation.error}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }
