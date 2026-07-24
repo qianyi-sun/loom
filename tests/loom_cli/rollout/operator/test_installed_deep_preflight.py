@@ -278,6 +278,44 @@ def test_installed_external_supervisor_predecessor_source_binds_merged_provenanc
     assert snapshot.runtime_ready is True
 
 
+def test_installed_external_supervisor_predecessor_source_declares_safe_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The root installer owns the candidate repo; every git invocation must
+    # declare the safe.directory exception or git fails-closed as the service
+    # user (dubious ownership), which the check masks as provenance-unavailable.
+    candidate_root = Path(__file__).resolve().parents[4]
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: _LegacyExternalSupervisorStore(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: _ReadyLegacyExternalSupervisorControl(),
+    )
+
+    seen: list[list[str]] = []
+
+    def spy_git_run(arguments: list[str]):
+        seen.append(list(arguments))
+        return _git_run(arguments)
+
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=spy_git_run,
+        service_uid=501,
+        pool_identity_source=_pool_identity,
+    )
+    source(_installed_predecessor_context(candidate_root))
+
+    assert seen
+    for argv in seen:
+        assert argv[0] == "git"
+        assert f"safe.directory={candidate_root}" in argv
+
+
 def test_installed_external_supervisor_predecessor_source_rejects_source_blob_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
