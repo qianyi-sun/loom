@@ -387,30 +387,28 @@ def test_installed_external_supervisor_predecessor_source_bootstraps_absent_pred
     assert snapshot.runtime_ready is True
 
 
-def test_absent_predecessor_kind_is_valid_at_any_pool_revision_but_pool_rows_still_gate() -> None:
-    # The absent bootstrap is orthogonal to the gb10-arm64->gb10 rename: it is
-    # accepted pre- and post-0067, but the pool-row invariants still gate the
-    # actual rename state so drift is not masked.
-    pre = ExternalSupervisorPoolIdentity.build(
-        schema_revision="0066",
+def test_absent_predecessor_kind_skips_pool_identity_but_present_kinds_still_gate() -> None:
+    # An absent predecessor has no supervisor to place in the pool, so it does
+    # not gate on the gb10-arm64->gb10 rename state -- it is accepted even on a
+    # lineage-diverged live database (post-0067 revision still carrying legacy
+    # rows), which the rollout migration reconciles during the deploy.
+    diverged = ExternalSupervisorPoolIdentity.build(
+        schema_revision="0069",
         legacy_rows={name: 1 for name in _POOL_IDENTITY_TABLES},
         target_rows={name: 0 for name in _POOL_IDENTITY_TABLES},
     )
-    pre.require_predecessor_kind("absent")  # no raise
-    post = ExternalSupervisorPoolIdentity.build(
-        schema_revision="0067",
-        legacy_rows={name: 0 for name in _POOL_IDENTITY_TABLES},
-        target_rows={name: 1 for name in _POOL_IDENTITY_TABLES},
-    )
-    post.require_predecessor_kind("absent")  # no raise
-    # a post-0067 identity that still carries legacy rows is drift even for absent
-    drifted = ExternalSupervisorPoolIdentity.build(
-        schema_revision="0067",
+    diverged.require_predecessor_kind("absent")  # no raise
+
+    # A *present* predecessor still gates on the rename state so drift is caught:
+    with pytest.raises(ValueError, match="post-0067 pool identity drifted"):
+        diverged.require_predecessor_kind("canonical")
+    pre = ExternalSupervisorPoolIdentity.build(
+        schema_revision="0066",
         legacy_rows={name: 1 for name in _POOL_IDENTITY_TABLES},
         target_rows={name: 1 for name in _POOL_IDENTITY_TABLES},
     )
-    with pytest.raises(ValueError, match="post-0067 pool identity drifted"):
-        drifted.require_predecessor_kind("absent")
+    with pytest.raises(ValueError, match="pre-0067 pool identity drifted"):
+        pre.require_predecessor_kind("legacy-manifest")
 
 
 def test_installed_external_supervisor_predecessor_source_rejects_source_blob_drift(
