@@ -306,6 +306,90 @@ def test_rehearsal_accepts_checkpoint_transition_for_backup_rotation_capacity(
     assert rehearsal.passed
 
 
+def _registry_failing_at_transition(marker_check_id: str, marker: str) -> PreflightRegistry:
+    """Registry whose marker check fails only when its input carries ``marker``.
+
+    Models a backup-admission check that passes in the gating assessment but is
+    admission-blocked (fails) once the checkpoint transitions its input in the
+    restore rehearsal.
+    """
+    manifest = load_coverage_manifest()
+    checks: list[RegisteredCheck] = []
+    for entry in manifest.checks:
+        if entry.tier > 3:
+            continue
+        input_key = f"input.{entry.check_id}"
+
+        def probe(
+            context: CheckContext,
+            *,
+            check_id: str = entry.check_id,
+            input_key: str = input_key,
+        ) -> CheckProbe:
+            passed = not (check_id == marker_check_id and context.bindings.get(input_key) == marker)
+            return CheckProbe(passed=passed, evidence={"result": "ok"})  # type: ignore[arg-type]
+
+        checks.append(
+            RegisteredCheck(
+                spec=CheckSpec(
+                    check_id=entry.check_id,
+                    failure_code=entry.failure_code,
+                    tier=entry.tier,
+                    stage=entry.stage,
+                    dependencies=entry.dependencies,
+                    mutation_class=entry.mutation_class,
+                    input_keys=(input_key,),
+                    evidence_schema=(EvidenceField("result", "string"),),
+                    timeout_seconds=10,
+                    freshness_ttl_seconds=300,
+                    remediation="restore the exact declared test preflight invariant",
+                    secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                    final_only_justification=entry.final_only_justification,
+                ),
+                implementation_version="v1",
+                operations={CheckOperation.PROBE: probe},
+            )
+        )
+    return PreflightRegistry.build(checks, through_tier=3)
+
+
+def test_rehearsal_tolerates_admission_check_blocked_by_checkpoint(
+    tmp_path: Path,
+) -> None:
+    # The checkpoint reserves the rotation candidate before the restore
+    # rehearsal, so backup.rotation-capacity is admission-blocked (fails) and its
+    # dependent backup.lease-eligibility is skipped. Both are validated in the
+    # gating assessment; the restore rehearsal proves restore integrity, not
+    # backup admission, so their expected post-checkpoint failure must neither
+    # fail the assessment match nor block the rehearsal.
+    marker = "candidate-reserved-at-checkpoint"
+    registry = _registry_failing_at_transition("backup.rotation-capacity", marker)
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+    assessment = pipeline.assess(context=context)
+    assert assessment.passed
+    transitioned = dict(context.bindings)
+    transitioned["input.backup.rotation-capacity"] = marker
+
+    rehearsal = pipeline.rehearse(
+        context=CheckContext(transitioned),
+        assessment=assessment,
+    )
+
+    # backup.rotation-capacity is admission-blocked in the rehearsal, yet the
+    # rehearsal still passes because admission checks are excluded from it.
+    assert not next(
+        execution
+        for execution in rehearsal.executions
+        if execution.check_id == "backup.rotation-capacity"
+    ).passed
+    assert rehearsal.passed
+
+
 def test_rehearsal_and_attestation_are_separate_restore_authority_steps(
     tmp_path: Path,
 ) -> None:

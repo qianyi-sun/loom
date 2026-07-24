@@ -258,10 +258,17 @@ class PreflightRehearsal:
         executions: Sequence[CheckExecution],
     ) -> PreflightRehearsal:
         stable = tuple(executions)
+        # Backup-admission checks legitimately fail in the restore rehearsal --
+        # the checkpoint reserves the rotation candidate (blocking
+        # backup.rotation-capacity) and skips its dependent
+        # backup.lease-eligibility. They are validated in the gating assessment;
+        # the rehearsal proves restore integrity, not backup admission, so their
+        # expected post-checkpoint failure must not block it.
         blockers = tuple(
             PreflightBlocker.from_execution(execution)
             for execution in stable
             if not execution.passed
+            and execution.check_id not in _CHECKPOINT_TRANSITION_CHECK_IDS
         )
         rehearsal = cls(
             registry_digest=registry_digest,
@@ -503,15 +510,22 @@ class PreflightPipeline:
         if set(prior) != set(current):
             raise ValueError("pre-backup assessment coverage drifted")
         for check_id, earlier in prior.items():
+            if check_id in _CHECKPOINT_TRANSITION_CHECK_IDS:
+                # Backup-admission checks are validated in the gating assessment
+                # and legitimately transition across the checkpoint: the
+                # coordinator reserves the rotation candidate (so
+                # backup.rotation-capacity reports admission "blocked") and its
+                # dependent backup.lease-eligibility is skipped, before the
+                # restore rehearsal runs. Exclude them from the post-checkpoint
+                # match entirely; the rehearsal verifies restore integrity, not
+                # backup admission.
+                continue
             later = current[check_id]
             if (
                 later.expires_at <= now
                 or not later.passed
                 or earlier.implementation_digest != later.implementation_digest
-                or (
-                    check_id not in _CHECKPOINT_TRANSITION_CHECK_IDS
-                    and earlier.input_fingerprint != later.input_fingerprint
-                )
+                or earlier.input_fingerprint != later.input_fingerprint
             ):
                 raise ValueError("pre-backup assessment evidence drifted")
 
