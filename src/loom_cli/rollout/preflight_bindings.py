@@ -11,6 +11,7 @@ from loom_cli.rollout.preflight_contract import (
     CheckExecution,
     external_supervisor_transition_digest,
     external_supervisor_unit_set_digest,
+    external_supervisor_unit_set_digest_or_empty,
 )
 
 
@@ -28,6 +29,18 @@ def _string_map(value: object, label: str) -> dict[str, str]:
             isinstance(key, str) and isinstance(item, str) and key and item
             for key, item in value.items()
         )
+    ):
+        raise ValueError(f"preflight binding evidence {label} is missing")
+    return dict(value)
+
+
+def _string_map_allow_empty(value: object, label: str) -> dict[str, str]:
+    # An absent external-supervisor predecessor (first introduction of the
+    # supervisor) carries an empty unit map; the unit-set-digest recompute is the
+    # authoritative gate for that case, so the map itself may legitimately be empty.
+    if not isinstance(value, Mapping) or not all(
+        isinstance(key, str) and isinstance(item, str) and key and item
+        for key, item in value.items()
     ):
         raise ValueError(f"preflight binding evidence {label} is missing")
     return dict(value)
@@ -115,7 +128,7 @@ def derive_attestation_bindings(
         evidence("external-supervisor.predecessor", "authority-kind"),
         "external supervisor predecessor kind",
     )
-    if predecessor_kind not in {"legacy-manifest", "canonical"}:
+    if predecessor_kind not in {"legacy-manifest", "canonical", "absent"}:
         raise ValueError("external supervisor predecessor evidence is not authoritative")
     predecessor_digest = _string(
         evidence("external-supervisor.predecessor", "authority-digest"),
@@ -125,7 +138,7 @@ def derive_attestation_bindings(
         evidence("external-supervisor.predecessor", "pointer-digest"),
         "external supervisor predecessor pointer",
     )
-    predecessor_units = _string_map(
+    predecessor_units = _string_map_allow_empty(
         evidence("external-supervisor.predecessor", "unit-digests"),
         "external supervisor predecessor units",
     )
@@ -144,7 +157,8 @@ def derive_attestation_bindings(
     if (
         evidence("external-supervisor.predecessor", "transition-clear") is not True
         or evidence("external-supervisor.predecessor", "runtime-ready") is not True
-        or external_supervisor_unit_set_digest(predecessor_units) != predecessor_unit_set_digest
+        or external_supervisor_unit_set_digest_or_empty(predecessor_units)
+        != predecessor_unit_set_digest
     ):
         raise ValueError("external supervisor predecessor evidence is not authoritative")
 

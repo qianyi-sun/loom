@@ -21,6 +21,7 @@ from loom_cli.rollout.preflight_contract import (
     PreflightAttestation,
     external_supervisor_transition_digest,
     external_supervisor_unit_set_digest,
+    external_supervisor_unit_set_digest_or_empty,
 )
 from loom_cli.rollout.systemd_unit_readiness import UNIT_PATHS
 
@@ -312,10 +313,16 @@ class FinalGatePlan:
             != _hash_json({"failed": {}, "units": dict(self.systemd_unit_digests)})
         ):
             raise ValueError("final gate systemd supervisor coverage is invalid")
+        # An absent predecessor (first introduction of the supervisor) carries no
+        # units and the absent authority/pointer digests; a present predecessor
+        # (legacy-manifest or canonical) carries a complete paired unit set.
+        supervisor_predecessor_absent = self.supervisor_predecessor_kind == "absent"
         if (
-            self.supervisor_predecessor_kind not in {"legacy-manifest", "canonical"}
-            or self.supervisor_predecessor_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
-            or external_supervisor_unit_set_digest(self.supervisor_predecessor_unit_sha256)
+            self.supervisor_predecessor_kind not in {"legacy-manifest", "canonical", "absent"}
+            or bool(self.supervisor_predecessor_unit_sha256) == supervisor_predecessor_absent
+            or (self.supervisor_predecessor_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST)
+            != supervisor_predecessor_absent
+            or external_supervisor_unit_set_digest_or_empty(self.supervisor_predecessor_unit_sha256)
             != self.supervisor_predecessor_unit_set_digest
             or (
                 self.supervisor_predecessor_kind == "legacy-manifest"
@@ -324,6 +331,10 @@ class FinalGatePlan:
             or (
                 self.supervisor_predecessor_kind == "canonical"
                 and self.supervisor_predecessor_pointer_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            )
+            or (
+                supervisor_predecessor_absent
+                and self.supervisor_predecessor_pointer_digest != EXTERNAL_SUPERVISOR_ABSENT_DIGEST
             )
         ):
             raise ValueError("final gate supervisor predecessor authority is invalid")
@@ -877,11 +888,21 @@ def _parse_external_supervisor_predecessor_evidence(
         "live_evidence_digest": value.get("live-evidence-digest"),
         "pending_transition_digest": value.get("pending-transition-digest"),
     }
+    # An absent predecessor (first introduction of the supervisor) carries no
+    # units and the absent authority/pointer digests; a present predecessor
+    # (legacy-manifest or canonical) carries a complete paired unit set.
+    supervisor_predecessor_absent = strings["kind"] == "absent"
     if (
         set(value) != expected_fields
-        or strings["kind"] not in {"legacy-manifest", "canonical"}
+        or strings["kind"] not in {"legacy-manifest", "canonical", "absent"}
         or not isinstance(units, Mapping)
-        or not units
+        or bool(units) == supervisor_predecessor_absent
+        or (strings["authority_digest"] == EXTERNAL_SUPERVISOR_ABSENT_DIGEST)
+        != supervisor_predecessor_absent
+        or (
+            supervisor_predecessor_absent
+            and strings["pointer_digest"] != EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+        )
         or value.get("transition-clear") is not True
         or value.get("runtime-ready") is not True
         or any(
@@ -896,7 +917,7 @@ def _parse_external_supervisor_predecessor_evidence(
             for name, item in strings.items()
             if name != "kind"
         )
-        or external_supervisor_unit_set_digest(units) != strings["unit_set_digest"]
+        or external_supervisor_unit_set_digest_or_empty(units) != strings["unit_set_digest"]
     ):
         raise ValueError("final gate external supervisor predecessor evidence is invalid")
     return {

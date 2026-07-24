@@ -521,6 +521,18 @@ class ExternalSupervisorLiveObservation:
                         authority_digest=legacy.manifest_digest,
                         unit_sha256=legacy.unit_sha256,
                     )
+                elif not live_digests:
+                    # First introduction of the external supervisor: no canonical
+                    # predecessor was ever recorded and no supervisor units are
+                    # live, so there is genuinely no predecessor to validate. An
+                    # absent predecessor is a valid bootstrap (nothing to clobber).
+                    # A live unit set that merely *differs* from the manifest is
+                    # still rejected below as drift.
+                    authority = ExternalSupervisorPredecessorAuthority(
+                        kind="absent",
+                        authority_digest=ABSENT_PREDECESSOR_DIGEST,
+                        unit_sha256={},
+                    )
                 else:
                     raise ValueError(
                         "protected external supervisor predecessor is not authoritative"

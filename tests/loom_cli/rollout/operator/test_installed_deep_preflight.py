@@ -203,6 +203,45 @@ class _ReadyLegacyExternalSupervisorControl:
         )
 
 
+class _AbsentExternalSupervisorStore:
+    """First introduction: the manifest unit names exist but nothing is live."""
+
+    def __init__(self) -> None:
+        self.manifest = load_predecessor_manifest()
+
+    def list_units(self) -> tuple[str, ...]:
+        return ()
+
+    def read_unit(self, name: str) -> bytes | None:
+        return None
+
+    def read_canonical(self):
+        return None
+
+    def compensation_blockers(self) -> dict[str, str]:
+        return {}
+
+
+class _AbsentExternalSupervisorControl:
+    def timer_status(self, name: str) -> TimerRuntimeStatus:
+        return TimerRuntimeStatus(
+            load_state="not-found",
+            unit_file_state="not-found",
+            active_state="inactive",
+            fragment_path="",
+            need_daemon_reload="no",
+        )
+
+    def service_status(self, name: str) -> ServiceRuntimeStatus:
+        return ServiceRuntimeStatus(
+            load_state="not-found",
+            result="",
+            exec_main_status=None,
+            fragment_path="",
+            need_daemon_reload="no",
+        )
+
+
 def _git_run(arguments: list[str]):
     return subprocess.run(arguments, capture_output=True, check=False, text=True)
 
@@ -314,6 +353,64 @@ def test_installed_external_supervisor_predecessor_source_declares_safe_director
     for argv in seen:
         assert argv[0] == "git"
         assert f"safe.directory={candidate_root}" in argv
+
+
+def test_installed_external_supervisor_predecessor_source_bootstraps_absent_predecessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # First introduction of the external supervisor: no canonical record and no
+    # live units. The predecessor is genuinely absent (nothing to clobber), so
+    # the source binds an absent authority instead of failing not-authoritative.
+    candidate_root = Path(__file__).resolve().parents[4]
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: _AbsentExternalSupervisorStore(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: _AbsentExternalSupervisorControl(),
+    )
+
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=_pool_identity,
+    )
+    snapshot = source(_installed_predecessor_context(candidate_root))
+
+    assert snapshot.kind == "absent"
+    assert dict(snapshot.unit_sha256) == {}
+    assert snapshot.transition_clear is True
+    assert snapshot.runtime_ready is True
+
+
+def test_absent_predecessor_kind_is_valid_at_any_pool_revision_but_pool_rows_still_gate() -> None:
+    # The absent bootstrap is orthogonal to the gb10-arm64->gb10 rename: it is
+    # accepted pre- and post-0067, but the pool-row invariants still gate the
+    # actual rename state so drift is not masked.
+    pre = ExternalSupervisorPoolIdentity.build(
+        schema_revision="0066",
+        legacy_rows={name: 1 for name in _POOL_IDENTITY_TABLES},
+        target_rows={name: 0 for name in _POOL_IDENTITY_TABLES},
+    )
+    pre.require_predecessor_kind("absent")  # no raise
+    post = ExternalSupervisorPoolIdentity.build(
+        schema_revision="0067",
+        legacy_rows={name: 0 for name in _POOL_IDENTITY_TABLES},
+        target_rows={name: 1 for name in _POOL_IDENTITY_TABLES},
+    )
+    post.require_predecessor_kind("absent")  # no raise
+    # a post-0067 identity that still carries legacy rows is drift even for absent
+    drifted = ExternalSupervisorPoolIdentity.build(
+        schema_revision="0067",
+        legacy_rows={name: 1 for name in _POOL_IDENTITY_TABLES},
+        target_rows={name: 1 for name in _POOL_IDENTITY_TABLES},
+    )
+    with pytest.raises(ValueError, match="post-0067 pool identity drifted"):
+        drifted.require_predecessor_kind("absent")
 
 
 def test_installed_external_supervisor_predecessor_source_rejects_source_blob_drift(
