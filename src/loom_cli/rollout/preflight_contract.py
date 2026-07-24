@@ -32,6 +32,7 @@ from loom_cli.rollout.external_supervisor_predecessor import (
 )
 from loom_cli.rollout.external_supervisor_predecessor import (
     external_supervisor_unit_set_digest,
+    external_supervisor_unit_set_digest_or_empty,
 )
 from loom_cli.rollout.operator.redaction import redact_rollout_mapping, redact_rollout_text
 
@@ -75,7 +76,7 @@ def external_supervisor_transition_digest(
         or any(character not in "0123456789abcdef" for character in candidate_sha)
         or any(character not in "0123456789abcdef" for character in candidate_tree)
         or environment != "staging"
-        or predecessor_kind not in {"legacy-manifest", "canonical"}
+        or predecessor_kind not in {"legacy-manifest", "canonical", "absent"}
         or any(
             _SHA256_RE.fullmatch(value) is None
             for value in (
@@ -89,7 +90,7 @@ def external_supervisor_transition_digest(
                 target_unit_set_digest,
             )
         )
-        or external_supervisor_unit_set_digest(predecessor_unit_sha256)
+        or external_supervisor_unit_set_digest_or_empty(predecessor_unit_sha256)
         != predecessor_unit_set_digest
         or external_supervisor_unit_set_digest(target_unit_sha256) != target_unit_set_digest
         or not target_script_sha256
@@ -1233,11 +1234,16 @@ class AttestationBindings:
         if self.staging_mutation_epoch < 0 or self.environment != "staging":
             raise ValueError("attestation staging epoch binding is invalid")
         predecessor_units = dict(self.supervisor_predecessor_unit_sha256)
+        # An absent predecessor (first introduction of the supervisor) carries no
+        # units and the absent authority/pointer digests; a present predecessor
+        # (legacy-manifest or canonical) carries a complete paired unit set.
+        supervisor_predecessor_absent = self.supervisor_predecessor_kind == "absent"
         if (
-            self.supervisor_predecessor_kind not in {"legacy-manifest", "canonical"}
-            or not predecessor_units
-            or self.supervisor_predecessor_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
-            or external_supervisor_unit_set_digest(predecessor_units)
+            self.supervisor_predecessor_kind not in {"legacy-manifest", "canonical", "absent"}
+            or bool(predecessor_units) == supervisor_predecessor_absent
+            or (self.supervisor_predecessor_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST)
+            != supervisor_predecessor_absent
+            or external_supervisor_unit_set_digest_or_empty(predecessor_units)
             != self.supervisor_predecessor_unit_set_digest
             or (
                 self.supervisor_predecessor_kind == "legacy-manifest"
@@ -1246,6 +1252,10 @@ class AttestationBindings:
             or (
                 self.supervisor_predecessor_kind == "canonical"
                 and self.supervisor_predecessor_pointer_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            )
+            or (
+                supervisor_predecessor_absent
+                and self.supervisor_predecessor_pointer_digest != EXTERNAL_SUPERVISOR_ABSENT_DIGEST
             )
         ):
             raise ValueError("attestation supervisor predecessor binding is invalid")
@@ -1599,4 +1609,5 @@ __all__ = [
     "StageCapability",
     "external_supervisor_transition_digest",
     "external_supervisor_unit_set_digest",
+    "external_supervisor_unit_set_digest_or_empty",
 ]

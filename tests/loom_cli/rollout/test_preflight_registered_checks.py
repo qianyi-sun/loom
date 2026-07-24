@@ -640,19 +640,32 @@ def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> 
     assert "schema.revision" in check.spec.input_keys
 
 
-def test_registered_external_supervisor_predecessor_rejects_absent_or_pending() -> None:
+def test_registered_external_supervisor_predecessor_accepts_absent_but_rejects_malformed_or_pending() -> (
+    None
+):
+    # First introduction of the supervisor: an absent predecessor (no units, the
+    # absent authority/pointer digests, clear transition) is a legitimate
+    # bootstrap and the check passes.
+    absent = ExternalSupervisorPredecessorSnapshot(
+        kind="absent",
+        authority_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        unit_sha256={},
+        live_evidence_digest="e" * 64,
+        pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+        transition_clear=True,
+        runtime_ready=True,
+        pool_identity_digest="f" * 64,
+    )
+    check = build_external_supervisor_predecessor_check(lambda _context: absent)
+    assert check.operations[CheckOperation.PROBE](_external_supervisor_context()).passed
+
+    # But absent stays tightly gated: it may not carry units, and it must carry
+    # the absent authority digest (a present predecessor can never masquerade).
     with pytest.raises(ValueError, match="snapshot is invalid"):
-        ExternalSupervisorPredecessorSnapshot(
-            kind="absent",
-            authority_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
-            pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
-            unit_sha256={},
-            live_evidence_digest="e" * 64,
-            pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
-            transition_clear=True,
-            runtime_ready=True,
-            pool_identity_digest="f" * 64,
-        )
+        replace(absent, unit_sha256={"loom-autoscaler-gb10-staging.service": "a" * 64})
+    with pytest.raises(ValueError, match="snapshot is invalid"):
+        replace(absent, authority_digest="a" * 64)
 
     pending = replace(
         _external_supervisor_snapshot(),

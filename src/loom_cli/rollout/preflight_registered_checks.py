@@ -110,6 +110,7 @@ from loom_cli.rollout.preflight_contract import (
     SecretRedactionPolicy,
     StageCapability,
     external_supervisor_unit_set_digest,
+    external_supervisor_unit_set_digest_or_empty,
 )
 from loom_cli.rollout.production_defaults_readiness import (
     ProductionDefaultsArtifact,
@@ -194,13 +195,18 @@ class ExternalSupervisorPredecessorSnapshot:
 
     def __post_init__(self) -> None:
         units = dict(self.unit_sha256)
-        try:
-            external_supervisor_unit_set_digest(units)
-        except ValueError as exc:
-            raise ValueError("external supervisor predecessor snapshot is invalid") from exc
+        # An absent predecessor (first introduction of the supervisor) carries no
+        # units and the absent authority/pointer digests; a present predecessor
+        # (legacy-manifest or canonical) carries a complete paired unit set.
+        absent = self.kind == "absent"
+        if not absent:
+            try:
+                external_supervisor_unit_set_digest(units)
+            except ValueError as exc:
+                raise ValueError("external supervisor predecessor snapshot is invalid") from exc
         if (
-            self.kind not in {"legacy-manifest", "canonical"}
-            or not units
+            self.kind not in {"legacy-manifest", "canonical", "absent"}
+            or bool(units) == absent
             or any(
                 len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
                 for value in (
@@ -213,7 +219,7 @@ class ExternalSupervisorPredecessorSnapshot:
             )
             or type(self.transition_clear) is not bool
             or type(self.runtime_ready) is not bool
-            or self.authority_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+            or (self.authority_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST) != absent
             or (
                 self.kind == "legacy-manifest"
                 and self.pointer_digest != EXTERNAL_SUPERVISOR_ABSENT_DIGEST
@@ -222,6 +228,7 @@ class ExternalSupervisorPredecessorSnapshot:
                 self.kind == "canonical"
                 and self.pointer_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST
             )
+            or (absent and self.pointer_digest != EXTERNAL_SUPERVISOR_ABSENT_DIGEST)
             or (
                 self.transition_clear
                 and self.pending_transition_digest != _CLEAR_EXTERNAL_SUPERVISOR_TRANSITION_DIGEST
@@ -236,7 +243,7 @@ class ExternalSupervisorPredecessorSnapshot:
 
     @property
     def unit_set_digest(self) -> str:
-        return external_supervisor_unit_set_digest(self.unit_sha256)
+        return external_supervisor_unit_set_digest_or_empty(self.unit_sha256)
 
 
 ExternalSupervisorPredecessorSource = Callable[
@@ -874,7 +881,7 @@ def build_external_supervisor_predecessor_check(
             return _empty_external_supervisor_predecessor_probe()
         return CheckProbe(
             passed=(
-                snapshot.kind in {"legacy-manifest", "canonical"}
+                snapshot.kind in {"legacy-manifest", "canonical", "absent"}
                 and snapshot.transition_clear
                 and snapshot.runtime_ready
             ),

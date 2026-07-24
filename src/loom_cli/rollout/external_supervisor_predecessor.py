@@ -76,6 +76,21 @@ def external_supervisor_unit_set_digest(unit_sha256: Mapping[str, str]) -> str:
     return _hash_json({"units": dict(sorted(unit_sha256.items()))})
 
 
+# Canonical digest of the empty unit set, used only by an absent predecessor
+# (first introduction of the supervisor). ``external_supervisor_unit_set_digest``
+# deliberately rejects an empty set so a *present* predecessor can never claim
+# zero units; the absent case carries this sentinel instead.
+EMPTY_EXTERNAL_SUPERVISOR_UNIT_SET_DIGEST = _hash_json({"units": {}})
+
+
+def external_supervisor_unit_set_digest_or_empty(unit_sha256: Mapping[str, str]) -> str:
+    """Unit-set digest tolerant of an absent predecessor (empty unit set)."""
+
+    if not unit_sha256:
+        return EMPTY_EXTERNAL_SUPERVISOR_UNIT_SET_DIGEST
+    return external_supervisor_unit_set_digest(unit_sha256)
+
+
 def _strict_json_object(payload: bytes, *, label: str) -> dict[str, object]:
     def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -296,12 +311,16 @@ class ExternalSupervisorPoolIdentity:
 
         if type(kind) is not str:
             raise ValueError("external supervisor predecessor kind is invalid")
+        # An absent predecessor (first introduction of the supervisor, with no
+        # units live and no canonical record) has no supervisor to place in the
+        # pool, so it is valid at any schema revision; the pool-row invariants
+        # below still gate the actual gb10-arm64->gb10 rename state independently.
         revision = int(self.schema_revision)
         if revision <= 66:
-            if kind != "legacy-manifest" or any(self.target_rows.values()):
+            if kind not in {"legacy-manifest", "absent"} or any(self.target_rows.values()):
                 raise ValueError("external supervisor pre-0067 pool identity drifted")
             return
-        if kind != "canonical" or any(self.legacy_rows.values()):
+        if kind not in {"canonical", "absent"} or any(self.legacy_rows.values()):
             raise ValueError("external supervisor post-0067 pool identity drifted")
 
 
