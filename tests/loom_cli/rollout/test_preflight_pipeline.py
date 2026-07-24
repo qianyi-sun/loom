@@ -279,6 +279,33 @@ def test_rehearsal_accepts_checkpoint_transition_for_backup_lease(
     assert rehearsal.passed
 
 
+def test_rehearsal_accepts_checkpoint_transition_for_backup_rotation_capacity(
+    tmp_path: Path,
+) -> None:
+    # The backup checkpoint reserves the rotation candidate and records the
+    # manifest before the restore rehearsal runs, so backup.rotation-capacity's
+    # rotation-digest input legitimately transitions across the checkpoint --
+    # exactly like backup.lease-eligibility. The rehearsal must tolerate that
+    # input transition rather than reject it as pre-backup assessment drift.
+    registry = _registry()
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+    assessment = pipeline.assess(context=context)
+    transitioned = dict(context.bindings)
+    transitioned["input.backup.rotation-capacity"] = "restore-verified-checkpoint"
+
+    rehearsal = pipeline.rehearse(
+        context=CheckContext(transitioned),
+        assessment=assessment,
+    )
+
+    assert rehearsal.passed
+
+
 def test_rehearsal_and_attestation_are_separate_restore_authority_steps(
     tmp_path: Path,
 ) -> None:

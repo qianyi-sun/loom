@@ -28,7 +28,9 @@ from loom_cli.rollout.preflight_contract import (
 )
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
-_CHECKPOINT_TRANSITION_CHECK_IDS = frozenset({"backup.lease-eligibility"})
+_CHECKPOINT_TRANSITION_CHECK_IDS = frozenset(
+    {"backup.lease-eligibility", "backup.rotation-capacity"}
+)
 
 
 @dataclass(frozen=True, slots=True)
