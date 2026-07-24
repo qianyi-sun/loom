@@ -178,7 +178,12 @@ def _external_supervisor_predecessor_source(
     control = FixedUserSystemdControl(service_uid=service_uid)
 
     def git_output(*arguments: str) -> str:
-        result = git_run(["git", "-C", str(candidate_root), *arguments])
+        # The root installer owns the candidate repo; git refuses to operate on
+        # it as the unprivileged service user without an explicit safe.directory
+        # exception (matches _git_argv and protected_gb10_transport).
+        result = git_run(
+            ["git", "-c", f"safe.directory={candidate_root}", "-C", str(candidate_root), *arguments]
+        )
         if result.returncode != 0:
             raise ValueError("external supervisor predecessor Git provenance is unavailable")
         return result.stdout
@@ -192,6 +197,8 @@ def _external_supervisor_predecessor_source(
         ancestor = git_run(
             [
                 "git",
+                "-c",
+                f"safe.directory={candidate_root}",
                 "-C",
                 str(candidate_root),
                 "merge-base",
