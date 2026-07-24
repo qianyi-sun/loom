@@ -39,8 +39,10 @@ from loom_cli.rollout.image_readiness import (
 from loom_cli.rollout.lifecycle_protocol import lifecycle_protocol_digest
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.backup_rotation import (
+    BackupPayloadPhase,
     BackupRetirementRecord,
     BackupRotationState,
+    begin_candidate,
 )
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -49,6 +51,7 @@ from loom_cli.rollout.preflight_contract import (
     EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
     CheckContext,
+    CheckExecution,
     CheckOperation,
     CheckProbe,
     CheckSpec,
@@ -1173,6 +1176,99 @@ def test_registered_backup_rotation_capacity_reports_retirement_limit() -> None:
     assert result.evidence["payload-count"] == 2
     assert result.evidence["retirement-count"] == 2
     assert result.evidence["blockers"] == {"transient-limit": "reached"}
+
+
+def _run_rotation_capacity_check(
+    check: RegisteredCheck, rotation_digest: str
+) -> CheckExecution:
+    dag = PreflightDag(
+        (
+            _passing_dependency("capacity.high-water"),
+            _passing_dependency("lifecycle.launch-cancel"),
+            check,
+        )
+    )
+    return next(
+        item
+        for item in dag.run(
+            CheckContext(
+                {
+                    "backup.rotation.sha256": rotation_digest,
+                    "runner.config.sha256": "a" * 64,
+                }
+            )
+        )
+        if item.check_id == "backup.rotation-capacity"
+    )
+
+
+def test_registered_backup_rotation_capacity_permits_own_reserved_candidate() -> None:
+    # The checkpoint coordinator reserves this backup's own CREATING candidate
+    # before the restore rehearsal. The gating admission check (permit=False)
+    # must still block on it, but the restore rehearsal (permit=True) must
+    # tolerate the backup's own reservation so it can attest.
+    reserved = begin_candidate(
+        BackupRotationState(),
+        payload_id="payload-own000001",
+        request_id="req-own0000000001",
+        bundle_name="20260724T210000Z-req-own0000000001",
+        created_at=datetime(2026, 7, 24, 21, tzinfo=UTC),
+    ).state
+    assert reserved.candidate is not None
+    assert reserved.candidate.phase is BackupPayloadPhase.CREATING
+
+    gating = _run_rotation_capacity_check(
+        build_backup_rotation_capacity_check(
+            lambda: reserved,
+            expected_rotation_digest=reserved.evidence_digest,
+        ),
+        reserved.evidence_digest,
+    )
+    assert not gating.passed
+    assert gating.evidence["blockers"] == {"candidate": "present"}
+
+    rehearsal = _run_rotation_capacity_check(
+        build_backup_rotation_capacity_check(
+            lambda: reserved,
+            expected_rotation_digest=reserved.evidence_digest,
+            permit_reserved_candidate=True,
+        ),
+        reserved.evidence_digest,
+    )
+    assert rehearsal.passed
+    assert rehearsal.evidence["candidate-present"] is True
+    assert rehearsal.evidence["blockers"] == {}
+
+
+def test_registered_backup_rotation_capacity_permit_still_blocks_digest_drift() -> None:
+    # permit=True must NOT tolerate a candidate whose state drifts from the
+    # pinned expectation (an unexpected/foreign candidate is not the backup's own).
+    reserved = begin_candidate(
+        BackupRotationState(),
+        payload_id="payload-own000001",
+        request_id="req-own0000000001",
+        bundle_name="20260724T210000Z-req-own0000000001",
+        created_at=datetime(2026, 7, 24, 21, tzinfo=UTC),
+    ).state
+    drifted = begin_candidate(
+        BackupRotationState(generation=99),
+        payload_id="payload-own000001",
+        request_id="req-own0000000001",
+        bundle_name="20260724T210000Z-req-own0000000001",
+        created_at=datetime(2026, 7, 24, 21, tzinfo=UTC),
+    ).state
+
+    result = _run_rotation_capacity_check(
+        build_backup_rotation_capacity_check(
+            lambda: drifted,
+            expected_rotation_digest=reserved.evidence_digest,
+            permit_reserved_candidate=True,
+        ),
+        reserved.evidence_digest,
+    )
+    assert not result.passed
+    assert result.evidence["blockers"]["rotation-digest"] == "drifted"
+    assert result.evidence["blockers"].get("candidate") == "present"
 
 
 def test_registered_backup_rotation_capacity_rejects_digest_drift() -> None:

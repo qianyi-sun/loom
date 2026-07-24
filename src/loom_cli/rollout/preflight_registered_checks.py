@@ -84,6 +84,7 @@ from loom_cli.rollout.operator.backup_lease import (
     evaluate_backup_lease,
 )
 from loom_cli.rollout.operator.backup_rotation import (
+    BackupPayloadPhase,
     BackupRotationState,
     backup_rotation_admission_blockers,
 )
@@ -1195,8 +1196,19 @@ def build_backup_rotation_capacity_check(
     rotation_source: Callable[[], BackupRotationState],
     *,
     expected_rotation_digest: str,
+    permit_reserved_candidate: bool = False,
 ) -> RegisteredCheck:
-    """Build the Tier 0 bounded backup-rotation admission invariant."""
+    """Build the Tier 0 bounded backup-rotation admission invariant.
+
+    ``permit_reserved_candidate`` is set ONLY for the isolated restore
+    rehearsal, which runs after the checkpoint coordinator has already reserved
+    this backup's own in-progress (``CREATING``) candidate. There the admission
+    "candidate present" blocker is the expected post-checkpoint state, not a
+    concurrent/orphaned reservation, so it is tolerated when the live rotation
+    state matches the pinned ``expected_rotation_digest`` exactly. Pre-backup
+    admission (the gating assessment and the driver's final admission) leaves it
+    ``False`` and still blocks on any candidate.
+    """
     if len(expected_rotation_digest) != 64 or any(
         character not in "0123456789abcdef" for character in expected_rotation_digest
     ):
@@ -1224,6 +1236,16 @@ def build_backup_rotation_capacity_check(
         except (OSError, RuntimeError, ValueError):
             return failed(blockers={"rotation-authority": "unavailable"})
         blockers = backup_rotation_admission_blockers(state)
+        if (
+            permit_reserved_candidate
+            and blockers.get("candidate") == "present"
+            and state.candidate is not None
+            and state.candidate.phase is BackupPayloadPhase.CREATING
+            and state.evidence_digest == expected_rotation_digest
+        ):
+            # The restore rehearsal's own reserved candidate, pinned exactly into
+            # expected_rotation_digest, is not an admission blocker here.
+            del blockers["candidate"]
         if state.evidence_digest != expected_rotation_digest:
             blockers["rotation-digest"] = "drifted"
         return CheckProbe(
