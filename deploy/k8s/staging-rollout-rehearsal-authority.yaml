@@ -32,6 +32,15 @@ rules:
       - "serviceaccounts"
       - "services"
     verbs: ["create", "delete", "patch", "update"]
+  # The external-supervisor rehearsal validates the supervisor unit by
+  # port-forwarding to the cloned Postgres in its isolated loom-rehearsal-*
+  # namespace (`kubectl port-forward service/loom-postgres`). That upgrade needs
+  # CREATE on the pods/portforward subresource; the namespace admission policy
+  # already confines the rehearsal principal's CONNECT operations to
+  # loom-rehearsal-* namespaces, so this grant is unusable against staging.
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
   - apiGroups: ["apps"]
     resources: ["deployments", "replicasets", "statefulsets"]
     verbs: ["create", "delete", "patch", "update"]
