@@ -25,7 +25,7 @@ _EXPECTED_KINDS = (
     "RoleBinding",
 )
 _MUTATING_VERBS = frozenset({"create", "delete", "patch", "update"})
-_EXPECTED_CANONICAL_SHA256 = "b51ded34c8f29a93c7dcb3d45329ba4904684c1e489bcf5f21d8861c643356c1"
+_EXPECTED_CANONICAL_SHA256 = "e5f6037033c20128b98c8c40ae0e103633b4199b78028384ba938b4b685251e7"
 _MUTATOR_RULES = [
     {
         "apiGroups": [""],
@@ -46,6 +46,11 @@ _MUTATOR_RULES = [
             "services",
         ],
         "verbs": ["create", "delete", "patch", "update"],
+    },
+    {
+        "apiGroups": [""],
+        "resources": ["pods/portforward"],
+        "verbs": ["create"],
     },
     {
         "apiGroups": ["apps"],
