@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 const ADMIN_ACTOR = "staging-admin-browser-smoke";
 const AUDIT_ACTION = "auth.staging_admin_browser_session.create";
 const BOOTSTRAP_PATH = "/api/v1/auth/staging-admin-browser-session";
-const CANONICAL_STAGING_ROUTE = "https://yylx.world/dev";
+const CANONICAL_STAGING_ROUTE = "https://yylx.world/staging";
 const EXPECTED_TTL_SEC = 900;
 const NETWORK_QUIET_WINDOW_MS = 500;
 const MAX_SECRET_BYTES = 16 * 1024;
@@ -96,8 +96,8 @@ export function canonicalStagingRoute(value, rehearsalIsolationId = "") {
     throw new SafeSmokeError("invalid_route", "route URL is malformed");
   }
   const expectedPath = rehearsalIsolationId
-    ? `/dev/rehearsal/${rehearsalIsolationId}`
-    : "/dev";
+    ? `/staging/rehearsal/${rehearsalIsolationId}`
+    : "/staging";
   if (
     parsed.origin !== "https://yylx.world" ||
     parsed.username ||
@@ -1377,7 +1377,7 @@ async function writeReport(reportPath, report) {
 
 const USAGE =
   "Usage: node web/scripts/staging-admin-browser-smoke.mjs " +
-  "--route https://yylx.world/dev --expected-deployed-sha <40-hex-sha> " +
+  "--route https://yylx.world/staging --expected-deployed-sha <40-hex-sha> " +
   "--admin-token-source <file:/absolute/path|-> " +
   "--username <platform-admin> --report <sanitized.json> " +
   "--rollout-request-id <req-16hex> --rollout-attempt-number <n> " +

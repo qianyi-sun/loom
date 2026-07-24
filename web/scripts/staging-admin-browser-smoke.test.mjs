@@ -34,7 +34,7 @@ const originalGithubActions = process.env.GITHUB_ACTIONS;
 function validArgs(tokenSource = "file:/run/secrets/admin-token") {
   return [
     "--route",
-    "https://yylx.world/dev",
+    "https://yylx.world/staging",
     "--expected-deployed-sha",
     DEPLOYED_SHA,
     "--admin-token-source",
@@ -56,7 +56,7 @@ function rehearsalArgs() {
   const args = validArgs();
   args.splice(args.indexOf("--rollout-request-id"), 6);
   args[args.indexOf("--route") + 1] =
-    `https://yylx.world/dev/rehearsal/${REHEARSAL_ID}`;
+    `https://yylx.world/staging/rehearsal/${REHEARSAL_ID}`;
   args.push(
     "--rehearsal-plan-sha256",
     REHEARSAL_PLAN_SHA256,
@@ -81,7 +81,7 @@ describe("staging admin browser smoke arguments", () => {
     const options = parseArgs([...validArgs(), "--insecure-for-kind"]);
 
     expect(options).toMatchObject({
-      route: "https://yylx.world/dev",
+      route: "https://yylx.world/staging",
       expectedDeployedSha: DEPLOYED_SHA,
       adminTokenSource: "file:/run/secrets/admin-token",
       username: "qianyi",
@@ -99,7 +99,7 @@ describe("staging admin browser smoke arguments", () => {
       bindingMode: "rehearsal",
       rehearsalPlanSha256: REHEARSAL_PLAN_SHA256,
       rehearsalIsolationId: REHEARSAL_ID,
-      route: `https://yylx.world/dev/rehearsal/${REHEARSAL_ID}`,
+      route: `https://yylx.world/staging/rehearsal/${REHEARSAL_ID}`,
       emitSanitizedReport: true,
     });
   });
@@ -115,7 +115,7 @@ describe("staging admin browser smoke arguments", () => {
     );
     const wrongRoute = rehearsalArgs();
     wrongRoute[wrongRoute.indexOf("--route") + 1] =
-      `https://yylx.world/dev/rehearsal/${"e".repeat(24)}`;
+      `https://yylx.world/staging/rehearsal/${"e".repeat(24)}`;
     expect(() => parseArgs(wrongRoute)).toThrowError(
       "route must match the exact canonical staging binding",
     );
@@ -148,10 +148,10 @@ describe("staging admin browser smoke arguments", () => {
   it("rejects production, credentials, query strings, and ports", () => {
     for (const route of [
       "https://yylx.world/prod",
-      "https://user@yylx.world/dev",
-      "https://yylx.world/dev?debug=1",
-      "https://yylx.world:444/dev",
-      "https://attacker.example/dev",
+      "https://user@yylx.world/staging",
+      "https://yylx.world/staging?debug=1",
+      "https://yylx.world:444/staging",
+      "https://attacker.example/staging",
     ]) {
       expect(() => canonicalStagingRoute(route)).toThrowError(SafeSmokeError);
     }
@@ -228,7 +228,7 @@ describe("admin token source isolation", () => {
 describe("kind TLS boundary", () => {
   it("requires GitHub Actions and loopback-only DNS before bypassing TLS", async () => {
     const options = {
-      route: "https://yylx.world/dev",
+      route: "https://yylx.world/staging",
       insecureForKind: true,
     };
     await expect(
@@ -257,7 +257,7 @@ describe("kind TLS boundary", () => {
   it("does not resolve DNS when strict TLS remains enabled", async () => {
     let called = false;
     await assertInsecureKindBoundary(
-      { route: "https://yylx.world/dev", insecureForKind: false },
+      { route: "https://yylx.world/staging", insecureForKind: false },
       {
         env: {},
         dnsLookup: async () => {
@@ -368,7 +368,7 @@ describe("sanitized evidence contract", () => {
     };
     const monitor = createAuthenticatedPageMonitor(
       page,
-      "https://yylx.world/dev",
+      "https://yylx.world/staging",
       { nowFn: () => now },
     );
 
@@ -392,14 +392,14 @@ describe("sanitized evidence contract", () => {
     };
     const monitor = createAuthenticatedPageMonitor(
       page,
-      "https://yylx.world/dev",
+      "https://yylx.world/staging",
     );
     const checks = {};
 
     handlers.get("pageerror")(new Error("render failed"));
     handlers.get("response")({
       status: () => 503,
-      url: () => "https://yylx.world/dev/api/v1/admin/audit-events",
+      url: () => "https://yylx.world/staging/api/v1/admin/audit-events",
       request: () => ({ resourceType: () => "fetch" }),
     });
 
@@ -562,7 +562,7 @@ describe("sanitized evidence contract", () => {
     });
     expect(calls).toContainEqual([
       "POST",
-      "https://yylx.world/dev/api/v1/auth/logout",
+      "https://yylx.world/staging/api/v1/auth/logout",
     ]);
     expect(closed).toEqual({ browser: true, context: true, cookies: true });
     expect(launchOptions).toEqual({
