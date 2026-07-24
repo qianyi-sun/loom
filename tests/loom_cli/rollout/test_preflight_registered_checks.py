@@ -43,6 +43,7 @@ from loom_cli.rollout.operator.backup_rotation import (
     BackupRetirementRecord,
     BackupRotationState,
     begin_candidate,
+    record_manifest_verified,
 )
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -1202,11 +1203,10 @@ def _run_rotation_capacity_check(
     )
 
 
-def test_registered_backup_rotation_capacity_permits_own_reserved_candidate() -> None:
-    # The checkpoint coordinator reserves this backup's own CREATING candidate
-    # before the restore rehearsal. The gating admission check (permit=False)
-    # must still block on it, but the restore rehearsal (permit=True) must
-    # tolerate the backup's own reservation so it can attest.
+def _reserved_manifest_verified_state() -> BackupRotationState:
+    # Mirror the coordinator: reserve the candidate (CREATING) then record the
+    # manifest (MANIFEST_VERIFIED) -- the exact phase the restore rehearsal
+    # observes, since it runs after record_manifest_verified.
     reserved = begin_candidate(
         BackupRotationState(),
         payload_id="payload-own000001",
@@ -1214,26 +1214,40 @@ def test_registered_backup_rotation_capacity_permits_own_reserved_candidate() ->
         bundle_name="20260724T210000Z-req-own0000000001",
         created_at=datetime(2026, 7, 24, 21, tzinfo=UTC),
     ).state
-    assert reserved.candidate is not None
-    assert reserved.candidate.phase is BackupPayloadPhase.CREATING
+    return record_manifest_verified(
+        reserved,
+        payload_id="payload-own000001",
+        manifest_sha256="d" * 64,
+    ).state
+
+
+def test_registered_backup_rotation_capacity_permits_own_reserved_candidate() -> None:
+    # The checkpoint coordinator reserves this backup's own candidate and records
+    # its manifest (phase MANIFEST_VERIFIED) before the restore rehearsal. The
+    # gating admission check (permit=False) must still block on it, but the
+    # restore rehearsal (permit=True) must tolerate the backup's own reservation
+    # so it can attest.
+    state = _reserved_manifest_verified_state()
+    assert state.candidate is not None
+    assert state.candidate.phase is BackupPayloadPhase.MANIFEST_VERIFIED
 
     gating = _run_rotation_capacity_check(
         build_backup_rotation_capacity_check(
-            lambda: reserved,
-            expected_rotation_digest=reserved.evidence_digest,
+            lambda: state,
+            expected_rotation_digest=state.evidence_digest,
         ),
-        reserved.evidence_digest,
+        state.evidence_digest,
     )
     assert not gating.passed
     assert gating.evidence["blockers"] == {"candidate": "present"}
 
     rehearsal = _run_rotation_capacity_check(
         build_backup_rotation_capacity_check(
-            lambda: reserved,
-            expected_rotation_digest=reserved.evidence_digest,
+            lambda: state,
+            expected_rotation_digest=state.evidence_digest,
             permit_reserved_candidate=True,
         ),
-        reserved.evidence_digest,
+        state.evidence_digest,
     )
     assert rehearsal.passed
     assert rehearsal.evidence["candidate-present"] is True

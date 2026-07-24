@@ -1240,11 +1240,16 @@ def build_backup_rotation_capacity_check(
             permit_reserved_candidate
             and blockers.get("candidate") == "present"
             and state.candidate is not None
-            and state.candidate.phase is BackupPayloadPhase.CREATING
+            and state.candidate.phase
+            in (BackupPayloadPhase.CREATING, BackupPayloadPhase.MANIFEST_VERIFIED)
             and state.evidence_digest == expected_rotation_digest
         ):
             # The restore rehearsal's own reserved candidate, pinned exactly into
-            # expected_rotation_digest, is not an admission blocker here.
+            # expected_rotation_digest, is not an admission blocker here. The
+            # coordinator records the manifest (CREATING -> MANIFEST_VERIFIED)
+            # before verifying restore, so the rehearsal observes it in either of
+            # those pre-restore-verified phases; a RESTORE_VERIFIED/ACTIVE/FAILED
+            # candidate is never permitted.
             del blockers["candidate"]
         if state.evidence_digest != expected_rotation_digest:
             blockers["rotation-digest"] = "drifted"
