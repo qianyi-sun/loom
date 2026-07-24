@@ -311,16 +311,22 @@ class ExternalSupervisorPoolIdentity:
 
         if type(kind) is not str:
             raise ValueError("external supervisor predecessor kind is invalid")
-        # An absent predecessor (first introduction of the supervisor, with no
-        # units live and no canonical record) has no supervisor to place in the
-        # pool, so it is valid at any schema revision; the pool-row invariants
-        # below still gate the actual gb10-arm64->gb10 rename state independently.
+        # An absent predecessor (first introduction of the supervisor: no units
+        # live, no canonical record) has no supervisor to place in the worker
+        # pool, so there is no predecessor pool identity to enforce. The
+        # gb10-arm64->gb10 rename state is validated by the rollout migration and
+        # the *target* pool identity, not by an absent predecessor -- gating it
+        # here would wedge the first rollout on a live database whose lineage
+        # predates the rename (the migration that reconciles it runs, atomically
+        # with the deploy, only after this admission gate).
+        if kind == "absent":
+            return
         revision = int(self.schema_revision)
         if revision <= 66:
-            if kind not in {"legacy-manifest", "absent"} or any(self.target_rows.values()):
+            if kind != "legacy-manifest" or any(self.target_rows.values()):
                 raise ValueError("external supervisor pre-0067 pool identity drifted")
             return
-        if kind not in {"canonical", "absent"} or any(self.legacy_rows.values()):
+        if kind != "canonical" or any(self.legacy_rows.values()):
             raise ValueError("external supervisor post-0067 pool identity drifted")
 
 
