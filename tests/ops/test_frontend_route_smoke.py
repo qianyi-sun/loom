@@ -102,7 +102,7 @@ def _run_runtime_config(
 
 def test_runtime_config_accepts_only_exact_staging_rehearsal_route(tmp_path: Path) -> None:
     isolation = "a" * 24
-    route = f"/dev/rehearsal/{isolation}"
+    route = f"/staging/rehearsal/{isolation}"
     config, html = _run_runtime_config(
         tmp_path,
         environment="staging",
@@ -116,12 +116,42 @@ def test_runtime_config_accepts_only_exact_staging_rehearsal_route(tmp_path: Pat
     assert f'src="{route}/assets/' in html
 
 
+def test_runtime_config_rejects_stale_dev_staging_rehearsal_route(tmp_path: Path) -> None:
+    # Staging serves /staging; the pre-migration /dev rehearsal route is rejected.
+    isolation = "a" * 24
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_runtime_config(
+            tmp_path,
+            environment="staging",
+            route_path=f"/dev/rehearsal/{isolation}",
+            rehearsal_id=isolation,
+        )
+
+
+def test_runtime_config_accepts_staging_deploy_route(tmp_path: Path) -> None:
+    config, _html = _run_runtime_config(
+        tmp_path,
+        environment="staging",
+        route_path="/staging",
+    )
+    assert config["routePath"] == "/staging"
+
+
+def test_runtime_config_rejects_dev_route_for_staging_deploy(tmp_path: Path) -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_runtime_config(
+            tmp_path,
+            environment="staging",
+            route_path="/dev",
+        )
+
+
 def test_runtime_config_rejects_unbound_rehearsal_route(tmp_path: Path) -> None:
     with pytest.raises(subprocess.CalledProcessError):
         _run_runtime_config(
             tmp_path,
             environment="staging",
-            route_path="/dev/rehearsal/" + "a" * 24,
+            route_path="/staging/rehearsal/" + "a" * 24,
         )
 
 
@@ -1776,7 +1806,7 @@ def test_parse_route_bounds_malformed_route_and_api_urls(
         _parse_route(f"staging={route_url}={expected_api_base}")
 
 
-def test_web_runtime_config_script_writes_public_metadata(tmp_path) -> None:
+def test_web_runtime_config_script_writes_public_metadata(tmp_path: Path) -> None:
     document, _ = _run_runtime_config(
         tmp_path,
         environment="production",
@@ -1791,10 +1821,10 @@ def test_web_runtime_config_script_writes_public_metadata(tmp_path) -> None:
     }
 
 
-def test_web_runtime_config_prefixes_dev_assets(tmp_path: Path) -> None:
-    _, html = _run_runtime_config(tmp_path, environment="staging", route_path="/dev")
-    assert 'href="/dev/assets/index.css"' in html
-    assert 'src="/dev/assets/index.js"' in html
+def test_web_runtime_config_prefixes_staging_assets(tmp_path: Path) -> None:
+    _, html = _run_runtime_config(tmp_path, environment="staging", route_path="/staging")
+    assert 'href="/staging/assets/index.css"' in html
+    assert 'src="/staging/assets/index.js"' in html
     assert '="./assets/' not in html
 
 
@@ -1807,17 +1837,17 @@ def test_web_runtime_config_preserves_root_asset_contract(tmp_path: Path) -> Non
 def test_web_runtime_config_restart_never_retains_or_doubles_prefix(
     tmp_path: Path,
 ) -> None:
-    _run_runtime_config(tmp_path, environment="staging", route_path="/dev")
+    _run_runtime_config(tmp_path, environment="staging", route_path="/staging")
     _, prod_html = _run_runtime_config(
         tmp_path,
         environment="production",
         route_path="/prod",
     )
     assert prod_html.count("/prod/assets/") == 2
-    assert "/dev/assets/" not in prod_html
+    assert "/staging/assets/" not in prod_html
     assert "/prod/prod/assets/" not in prod_html
 
-    _, html = _run_runtime_config(tmp_path, environment="staging", route_path="/dev")
-    assert html.count("/dev/assets/") == 2
-    assert "/dev/dev/assets/" not in html
+    _, html = _run_runtime_config(tmp_path, environment="staging", route_path="/staging")
+    assert html.count("/staging/assets/") == 2
+    assert "/staging/staging/assets/" not in html
     assert "/prod/assets/" not in html

@@ -20,28 +20,37 @@ case "${environment}" in
     ;;
 esac
 
+# The public route prefix is derived from the environment (path-prefix scheme):
+# staging serves /staging, production /prod, development /dev, local none.
+case "${environment}" in
+  local) env_route="" ;;
+  development) env_route="/dev" ;;
+  staging) env_route="/staging" ;;
+  production) env_route="/prod" ;;
+esac
+
 if [ -n "${rehearsal_id}" ]; then
   if [ "${environment}" != "staging" ] || ! printf '%s' "${rehearsal_id}" | grep -Eq '^[0-9a-f]{24}$'; then
     echo "LOOM_FRONTEND_REHEARSAL_ID requires staging and 24 lowercase hex characters" >&2
     exit 1
   fi
-  if [ "${route_path}" != "/dev/rehearsal/${rehearsal_id}" ] || [ "${api_base}" != "${route_path}" ]; then
+  if [ "${route_path}" != "${env_route}/rehearsal/${rehearsal_id}" ] || [ "${api_base}" != "${route_path}" ]; then
     echo "rehearsal frontend route must match its exact isolated identity" >&2
     exit 1
   fi
 else
   case "${route_path}" in
-    ""|"/"|"/prod"|"/dev") ;;
+    ""|"/"|"${env_route}") ;;
     *)
-      echo "LOOM_FRONTEND_ROUTE_PATH must be empty, /, /prod, or /dev" >&2
+      echo "LOOM_FRONTEND_ROUTE_PATH must be empty, /, or ${env_route}" >&2
       exit 1
       ;;
   esac
 
   case "${api_base}" in
-    ""|"/"|"/prod"|"/dev") ;;
+    ""|"/"|"${env_route}") ;;
     *)
-      echo "LOOM_FRONTEND_API_BASE must be empty, /, /prod, or /dev" >&2
+      echo "LOOM_FRONTEND_API_BASE must be empty, /, or ${env_route}" >&2
       exit 1
       ;;
   esac
@@ -90,7 +99,7 @@ if [ -n "${route_path}" ]; then
     rm -f "${tmp_index_path}"
     exit 1
   fi
-  if grep -Eq '/(dev|prod)/(dev|prod)/assets/' "${tmp_index_path}"; then
+  if grep -Eq '/(dev|prod|staging)/(dev|prod|staging)/assets/' "${tmp_index_path}"; then
     echo "frontend shell contains a double or stale route prefix" >&2
     rm -f "${tmp_index_path}"
     exit 1
