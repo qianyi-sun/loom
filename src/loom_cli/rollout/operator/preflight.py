@@ -345,8 +345,16 @@ def _checkout_is_trusted(
         return False
 
     statement = installed.attestation
-    expected_tree = binding.resolved_tree or "none"
-    expected_base = binding.approved_base_sha or "none"
+    if binding.source_mode == "sealed-cumulative":
+        expected_tree = binding.resolved_tree or "none"
+        expected_base = binding.approved_base_sha or "none"
+    else:
+        # A merged-dev candidate's install attestation pins only the commit sha
+        # (staging_rollout_host records "none" for tree and base). Its git tree is
+        # a derived identity (HEAD^{tree}) proven by the candidate.identity check,
+        # not recorded in the install attestation, so it is not re-compared here.
+        expected_tree = "none"
+        expected_base = "none"
     return bool(
         statement.source_mode == config.source_mode == binding.source_mode
         and statement.source_sha == binding.resolved_sha

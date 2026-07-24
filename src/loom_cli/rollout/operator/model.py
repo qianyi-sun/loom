@@ -268,8 +268,14 @@ class CandidateBinding:
                 raise ValueError("sealed candidate source binding is incomplete")
             _require_sha(self.resolved_tree, "resolved_tree")
             _require_sha(self.approved_base_sha, "approved_base_sha")
-        elif self.resolved_tree is not None or self.approved_base_sha is not None:
-            raise ValueError("merged candidate must not carry sealed source binding")
+        else:
+            # A merged-dev candidate carries the resolved git tree (a derivable
+            # identity the Tier-1 artifact builders require) but never an
+            # approved base sha (the sealed-cumulative approval anchor).
+            if self.approved_base_sha is not None:
+                raise ValueError("merged candidate must not carry an approved base sha")
+            if self.resolved_tree is not None:
+                _require_sha(self.resolved_tree, "resolved_tree")
         _require_schema(self.schema_version)
 
     def to_dict(self) -> dict[str, object]:
@@ -289,6 +295,13 @@ class CandidateBinding:
                     "approved_base_sha": self.approved_base_sha,
                 }
             )
+        elif self.resolved_tree is not None:
+            value.update(
+                {
+                    "source_mode": self.source_mode,
+                    "resolved_tree": self.resolved_tree,
+                }
+            )
         return value
 
     @classmethod
@@ -302,8 +315,11 @@ class CandidateBinding:
             "schema_version",
         }
         sealed = data.get("source_mode") == "sealed-cumulative"
+        merged_with_tree = not sealed and "resolved_tree" in data
         if sealed:
             expected.update({"source_mode", "resolved_tree", "approved_base_sha"})
+        elif merged_with_tree:
+            expected.update({"source_mode", "resolved_tree"})
         _require_exact_keys(data, expected, "candidate binding")
         return cls(
             remote_url=_require_string(data["remote_url"], "remote_url"),
@@ -314,7 +330,9 @@ class CandidateBinding:
             schema_version=_require_schema(data["schema_version"]),
             source_mode="sealed-cumulative" if sealed else "merged-dev",
             resolved_tree=(
-                _require_sha(data["resolved_tree"], "resolved_tree") if sealed else None
+                _require_sha(data["resolved_tree"], "resolved_tree")
+                if sealed or merged_with_tree
+                else None
             ),
             approved_base_sha=(
                 _require_sha(data["approved_base_sha"], "approved_base_sha") if sealed else None
