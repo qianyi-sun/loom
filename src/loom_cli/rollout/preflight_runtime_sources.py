@@ -258,6 +258,10 @@ class PreflightRuntimeSources:
     lifecycle_self_test: Callable[[], LifecycleSelfTestEvidence] = run_lifecycle_self_test
     lifecycle_runtime_test: Callable[[], SystemdLaunchCancelEvidence] | None = None
     monotonic: Callable[[], float] | None = None
+    # Set only for the isolated restore rehearsal, which runs after the backup's
+    # own rotation candidate is reserved; lets backup.rotation-capacity tolerate
+    # that expected in-progress candidate (never set for gating/final admission).
+    permit_reserved_rotation_candidate: bool = False
     loaded_artifacts: LoadedPreflightArtifacts | None = None
 
     def __post_init__(self) -> None:
@@ -447,6 +451,7 @@ class PreflightRuntimeSources:
             build_backup_rotation_capacity_check(
                 authority.rotation_source,
                 expected_rotation_digest=authority.expected_rotation_digest,
+                permit_reserved_candidate=self.permit_reserved_rotation_candidate,
             ),
             systemd_check,
             build_external_supervisor_predecessor_check(

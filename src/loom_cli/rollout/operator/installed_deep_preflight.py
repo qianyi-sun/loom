@@ -168,6 +168,9 @@ class InstalledDeepPreflightComposition:
             now=self.now,
             importer=self.importer,
             loaded_artifacts=loaded,
+            permit_reserved_rotation_candidate=(
+                purpose is RuntimePurpose.DETACHED_REHEARSAL
+            ),
         )
 
     def authority(self) -> DeepPreflightAuthority:
