@@ -1137,6 +1137,14 @@ def test_release_rejects_external_supervisor_artifact_drift_after_secret_readbac
             return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
         if payload == secrets.payload:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        if (
+            command[0] == "kubectl"
+            and "apply" in command
+            and payload is not None
+            and b'"kind":"Service"' in payload
+            and b"loom-postgres" in payload
+        ):
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if "secret" in command and "get" in command:
             name = command[command.index("secret") + 1]
             return subprocess.CompletedProcess(argv, 0, f"{name}\t{plan.plan_digest}\n", "")
@@ -1179,6 +1187,14 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
             return subprocess.CompletedProcess(argv, 1, "", "token=must-not-leak")
         if payload == secrets.payload:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        if (
+            command[0] == "kubectl"
+            and "apply" in command
+            and payload is not None
+            and b'"kind":"Service"' in payload
+            and b"loom-postgres" in payload
+        ):
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if "secret" in command and "get" in command:
             name = command[command.index("secret") + 1]
             return subprocess.CompletedProcess(argv, 0, f"{name}\t{plan.plan_digest}\n", "")
@@ -1207,6 +1223,18 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
         )
         < validation_index
     )
+    # The db-clone pod is bridged to service/loom-postgres before the supervisor
+    # (which port-forwards to that service) is launched.
+    service_apply_index = next(
+        index
+        for index, (command, payload) in enumerate(calls)
+        if command[0] == "kubectl"
+        and "apply" in command
+        and payload is not None
+        and b'"kind":"Service"' in payload
+        and b"loom-postgres" in payload
+    )
+    assert service_apply_index < validation_index
 
 
 def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
