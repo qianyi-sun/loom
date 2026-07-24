@@ -9,7 +9,7 @@ import pwd
 import re
 import stat
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -289,8 +289,13 @@ def bind_fresh_origin_dev(
         image_tag=f"staging-{resolved_sha[:7]}",
         fetched_at=_utc_timestamp(now()),
     )
-    verify_bound_candidate(config, binding, run=run)
-    return binding
+    # The git tree of the resolved commit is a real, derivable identity that the
+    # Tier-1 artifact builders (migration manifest, production defaults, systemd
+    # render) require. It is not part of the sealed *approval* (that is the base
+    # sha), so a merged-dev candidate carries its resolved tree without carrying
+    # any approved base. verify_bound_candidate derives it from HEAD^{tree}.
+    evidence = verify_bound_candidate(config, binding, run=run)
+    return replace(binding, resolved_tree=evidence.resolved_tree)
 
 
 def bind_configured_candidate(
@@ -439,6 +444,8 @@ def verify_bound_candidate(
     else:
         if config.source_mode != "merged-dev":
             raise CandidateBindingError("merged candidate config binding drifted")
+        if binding.resolved_tree is not None and binding.resolved_tree != resolved_tree:
+            raise CandidateBindingError("merged candidate tree identity drifted")
 
     digest_payload = {
         "approved_base_sha": approved_base,

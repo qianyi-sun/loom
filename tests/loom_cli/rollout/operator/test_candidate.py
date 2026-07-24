@@ -304,8 +304,61 @@ def test_binding_uses_exact_installed_sha_without_mutating_git(trusted_repo: Pat
     assert binding.resolved_sha == FRESH_SHA
     assert binding.image_tag == "staging-abcdef1"
     assert binding.fetched_at == "2026-07-13T20:00:00Z"
+    # A merged-dev candidate carries the derived git tree (HEAD^{tree}) so the
+    # Tier-1 artifact builders can bind it, but never an approved base sha.
+    assert binding.source_mode == "merged-dev"
+    assert binding.resolved_tree == "2" * 40
+    assert binding.approved_base_sha is None
     mutating_operations = {"fetch", "checkout", "switch", "reset", "clean", "update-ref"}
     assert all(mutating_operations.isdisjoint(argv) for argv in runner.argvs)
+
+
+def test_merged_candidate_binding_decouples_tree_from_approved_base() -> None:
+    from loom_cli.rollout.operator.model import CandidateBinding
+
+    tree = "2" * 40
+    binding = CandidateBinding(
+        remote_url=FETCH_URL,
+        target_ref="origin/dev",
+        resolved_sha=FRESH_SHA,
+        image_tag="staging-abcdef1",
+        fetched_at="2026-07-13T20:00:00Z",
+        source_mode="merged-dev",
+        resolved_tree=tree,
+    )
+    assert binding.source_mode == "merged-dev"
+    assert binding.resolved_tree == tree
+    assert binding.approved_base_sha is None
+
+    # the derived tree survives to_dict/from_dict without an approved base
+    payload = binding.to_dict()
+    assert payload["resolved_tree"] == tree
+    assert "approved_base_sha" not in payload
+    assert CandidateBinding.from_dict(payload) == binding
+
+    # a merged-dev candidate may still omit the tree (backward compatible)
+    treeless = CandidateBinding(
+        remote_url=FETCH_URL,
+        target_ref="origin/dev",
+        resolved_sha=FRESH_SHA,
+        image_tag="staging-abcdef1",
+        fetched_at="2026-07-13T20:00:00Z",
+    )
+    assert treeless.resolved_tree is None
+    assert CandidateBinding.from_dict(treeless.to_dict()) == treeless
+
+    # but never an approved base sha (the sealed-cumulative approval anchor)
+    with pytest.raises(ValueError, match="must not carry an approved base sha"):
+        CandidateBinding(
+            remote_url=FETCH_URL,
+            target_ref="origin/dev",
+            resolved_sha=FRESH_SHA,
+            image_tag="staging-abcdef1",
+            fetched_at="2026-07-13T20:00:00Z",
+            source_mode="merged-dev",
+            resolved_tree=tree,
+            approved_base_sha="1" * 40,
+        )
 
 
 def test_candidate_identity_digest_binds_runtime_and_config_fingerprints(
