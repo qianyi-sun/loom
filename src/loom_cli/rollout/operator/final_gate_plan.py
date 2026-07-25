@@ -878,6 +878,15 @@ def _parse_external_supervisor_predecessor_evidence(
         "pending-transition-digest",
         "transition-clear",
         "runtime-ready",
+        # ``pool-identity-digest`` is part of the external-supervisor.predecessor
+        # evidence schema. It is a live count of external-supervisor worker rows
+        # per pool (legacy ``gb10-arm64`` vs target ``gb10``) that ordinary worker
+        # registration shifts, so it is deliberately NOT an authority/transition
+        # field and is NOT folded into the supervisor transition digest below --
+        # exactly as the final-admission drift check excludes it (see
+        # final_attestation_admission.py). We still require it to be present and a
+        # well-formed sha256 so the evidence stays schema-conformant.
+        "pool-identity-digest",
     }
     units = value.get("unit-digests")
     strings = {
@@ -887,6 +896,7 @@ def _parse_external_supervisor_predecessor_evidence(
         "unit_set_digest": value.get("unit-set-digest"),
         "live_evidence_digest": value.get("live-evidence-digest"),
         "pending_transition_digest": value.get("pending-transition-digest"),
+        "pool_identity_digest": value.get("pool-identity-digest"),
     }
     # An absent predecessor (first introduction of the supervisor) carries no
     # units and the absent authority/pointer digests; a present predecessor
