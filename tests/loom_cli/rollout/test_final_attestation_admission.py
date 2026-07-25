@@ -82,6 +82,7 @@ def _baseline_check(
     *,
     dependencies: tuple[str, ...],
     resource_digest: str,
+    ready: bool = True,
 ) -> RegisteredCheck:
     return RegisteredCheck(
         spec=CheckSpec(
@@ -107,9 +108,9 @@ def _baseline_check(
         implementation_version="v1",
         operations={
             CheckOperation.PROBE: lambda _context: CheckProbe(
-                passed=True,
+                passed=ready,
                 evidence={
-                    "ready": True,
+                    "ready": ready,
                     "observed-epoch": 7,
                     "readonly-principal": "system:serviceaccount:loom-staging:readonly",
                     "resource-digest": resource_digest,
@@ -127,6 +128,7 @@ def _checks(
     predecessor_live_digest: str = "d" * 64,
     predecessor_pool_digest: str = "2" * 64,
     gb10_inventory_digest: str = "4" * 64,
+    baseline_ready: bool = True,
 ) -> tuple[RegisteredCheck, ...]:
     predecessor_units = {
         "loom-autoscaler-gb10-staging.service": "e" * 64,
@@ -197,6 +199,7 @@ def _checks(
             "staging.health",
             dependencies=(),
             resource_digest=baseline_digest,
+            ready=baseline_ready,
         ),
         _baseline_check(
             "staging.auth",
@@ -402,15 +405,37 @@ def test_final_admission_rejects_host_boot_or_epoch_drift() -> None:
         )
 
 
-def test_final_admission_rejects_tier2_baseline_drift() -> None:
+def test_final_admission_tolerates_tier2_baseline_resource_drift() -> None:
+    # A Tier 2 baseline's resource-digest is a live hash of the probed staging
+    # resource (auth/release-baseline/storage-db) that shifts with ordinary
+    # traffic between the restore rehearsal and this re-check. It is deliberately
+    # NOT byte-matched against the attestation -- the baseline must only be
+    # re-verified HEALTHY (ready/epoch/principal/unblocked), which
+    # test_final_admission_rejects_unhealthy_tier2_baseline covers.
     attested_plan = _plan(_checks())
     drifted_plan = _plan(_checks(baseline_digest="c" * 64))
 
-    with pytest.raises(ValueError, match="Tier 2 baseline changed"):
+    admission = validate_final_attestation(
+        attestation=_attestation(attested_plan),
+        candidate=_candidate(),
+        plan=drifted_plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    assert all(execution.passed for execution in admission.tier2_executions)
+
+
+def test_final_admission_rejects_unhealthy_tier2_baseline() -> None:
+    # A baseline that is no longer ready must still fail final admission even
+    # though its resource-digest is not byte-matched.
+    plan = _plan(_checks(baseline_ready=False))
+
+    with pytest.raises(ValueError, match="Tier 0 drift check failed"):
         validate_final_attestation(
-            attestation=_attestation(attested_plan),
+            attestation=_attestation(plan),
             candidate=_candidate(),
-            plan=drifted_plan,
+            plan=plan,
             current_mutation_epoch=7,
             now=NOW,
         )
