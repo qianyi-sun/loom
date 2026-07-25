@@ -1251,6 +1251,18 @@ def build_backup_rotation_capacity_check(
             # those pre-restore-verified phases; a RESTORE_VERIFIED/ACTIVE/FAILED
             # candidate is never permitted.
             del blockers["candidate"]
+            # The own candidate also inflates payload_count by one, so a rolling
+            # backup (prior active + own candidate) legitimately reaches the
+            # transient limit of two in the rehearsal. Re-evaluate that limit
+            # excluding the own candidate: the coordinator promotes it and
+            # retires the prior active, restoring capacity. A genuine backlog
+            # (stuck retirements) still leaves >= 2 payloads once the own
+            # candidate is excluded and stays blocked.
+            if (
+                blockers.get("transient-limit") == "reached"
+                and state.payload_count - 1 < 2
+            ):
+                del blockers["transient-limit"]
         if state.evidence_digest != expected_rotation_digest:
             blockers["rotation-digest"] = "drifted"
         return CheckProbe(

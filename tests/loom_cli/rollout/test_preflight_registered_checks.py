@@ -43,7 +43,9 @@ from loom_cli.rollout.operator.backup_rotation import (
     BackupRetirementRecord,
     BackupRotationState,
     begin_candidate,
+    promote_candidate,
     record_manifest_verified,
+    record_restore_verified,
 )
 from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig
@@ -1252,6 +1254,84 @@ def test_registered_backup_rotation_capacity_permits_own_reserved_candidate() ->
     assert rehearsal.passed
     assert rehearsal.evidence["candidate-present"] is True
     assert rehearsal.evidence["blockers"] == {}
+
+
+def _rolling_backup_state() -> BackupRotationState:
+    # A first backup promoted to active, then this backup's own candidate
+    # reserved and manifest-recorded: the rolling state the restore rehearsal
+    # observes (prior active + own candidate => payload_count 2).
+    now = datetime(2026, 7, 24, 21, tzinfo=UTC)
+    state = begin_candidate(
+        BackupRotationState(),
+        payload_id="payload-active0001",
+        request_id="req-active00000001",
+        bundle_name="20260724T200000Z-req-active00000001",
+        created_at=now,
+    ).state
+    state = record_manifest_verified(
+        state, payload_id="payload-active0001", manifest_sha256="e" * 64
+    ).state
+    lease = BackupLease(
+        lease_id="lease-active000000",
+        source_request_id="req-active00000001",
+        manifest_sha256="e" * 64,
+        component_sha256={"postgres": "b" * 64, "authority": "c" * 64},
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=7,
+        db_snapshot_identity="lsn:0/16B6C50",
+        schema_revision="0066",
+        object_inventory_root="d" * 64,
+        created_at=now - timedelta(minutes=20),
+        restore_verified_at=now - timedelta(minutes=10),
+        expires_at=now + timedelta(hours=2),
+    )
+    state = record_restore_verified(
+        state, payload_id="payload-active0001", lease=lease
+    ).state
+    state = promote_candidate(state, payload_id="payload-active0001").state
+    state = begin_candidate(
+        state,
+        payload_id="payload-own000001",
+        request_id="req-own0000000001",
+        bundle_name="20260724T210000Z-req-own0000000001",
+        created_at=now,
+    ).state
+    return record_manifest_verified(
+        state, payload_id="payload-own000001", manifest_sha256="f" * 64
+    ).state
+
+
+def test_registered_backup_rotation_capacity_permits_rolling_own_candidate() -> None:
+    # On a rolling backup the prior active plus this backup's own candidate reach
+    # the transient limit of two in the rehearsal. Gating (permit=False) still
+    # blocks; the rehearsal (permit=True) tolerates it because promote retires
+    # the prior active and restores capacity.
+    state = _rolling_backup_state()
+    assert state.active is not None and state.candidate is not None
+    assert state.payload_count == 2
+
+    gating = _run_rotation_capacity_check(
+        build_backup_rotation_capacity_check(
+            lambda: state, expected_rotation_digest=state.evidence_digest
+        ),
+        state.evidence_digest,
+    )
+    assert not gating.passed
+    assert gating.evidence["blockers"].get("transient-limit") == "reached"
+
+    rehearsal = _run_rotation_capacity_check(
+        build_backup_rotation_capacity_check(
+            lambda: state,
+            expected_rotation_digest=state.evidence_digest,
+            permit_reserved_candidate=True,
+        ),
+        state.evidence_digest,
+    )
+    assert rehearsal.passed
+    assert rehearsal.evidence["blockers"] == {}
+    assert rehearsal.evidence["active-present"] is True
+    assert rehearsal.evidence["payload-count"] == 2
 
 
 def test_registered_backup_rotation_capacity_permit_still_blocks_digest_drift() -> None:
