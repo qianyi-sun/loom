@@ -99,11 +99,12 @@ def _verify_driver_envelope(plan: FinalGatePlan) -> None:
         or envelope.rollout_id != plan.rollout_id
         or envelope.attempt_number != plan.attempt_number
         or envelope.resolved_sha != plan.candidate_sha
-        or (
-            plan.source_mode == "sealed-cumulative"
-            and envelope.resolved_tree != plan.candidate_tree
-        )
-        or (plan.source_mode == "merged-dev" and envelope.resolved_tree is not None)
+        # A resolved tree, when present, must pin the exact candidate tree. A
+        # merged-dev candidate now carries that derivable tree (see the
+        # DriverEnvelope/CandidateBinding model), so it must NOT be rejected for
+        # being populated; only sealed-cumulative additionally *requires* it.
+        or (envelope.resolved_tree is not None and envelope.resolved_tree != plan.candidate_tree)
+        or (plan.source_mode == "sealed-cumulative" and envelope.resolved_tree is None)
         or envelope.runner_config_sha256 != plan.runner_config_hash
         or envelope.preflight_attestation_sha256 != plan.attestation_digest
         or envelope.service_token_source != plan.service_token_source
