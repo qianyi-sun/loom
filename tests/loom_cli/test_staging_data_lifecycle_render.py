@@ -108,7 +108,13 @@ def test_staging_lifecycle_network_policy_is_staging_only() -> None:
         "loom-staging-data-lifecycle",
     )
     assert policy is not None
-    assert policy["spec"]["ingress"] == []  # type: ignore[index]
+    # Deny-all ingress is expressed by opting Ingress into policyTypes with no
+    # ingress rules -- NOT an explicit `ingress: []`, which the API server
+    # normalizes to an absent field and makes server-side apply churn
+    # .metadata.generation forever (breaking exact-convergence). Assert the
+    # field is omitted while Ingress stays in policyTypes.
+    assert "ingress" not in policy["spec"]  # type: ignore[operator]
+    assert "Ingress" in policy["spec"]["policyTypes"]  # type: ignore[index]
     ports = {
         (port["port"], port["protocol"])
         for rule in policy["spec"]["egress"]  # type: ignore[index]
