@@ -126,6 +126,7 @@ def _checks(
     baseline_digest: str = "6" * 64,
     predecessor_live_digest: str = "d" * 64,
     predecessor_pool_digest: str = "2" * 64,
+    gb10_inventory_digest: str = "4" * 64,
 ) -> tuple[RegisteredCheck, ...]:
     predecessor_units = {
         "loom-autoscaler-gb10-staging.service": "e" * 64,
@@ -160,7 +161,7 @@ def _checks(
         ),
         _check(
             "gb10.host-readiness",
-            {"inventory-digest": "4" * 64, "boot-ids": {"gb10-1": boot_id}},
+            {"inventory-digest": gb10_inventory_digest, "boot-ids": {"gb10-1": boot_id}},
             (EvidenceField("inventory-digest", "sha256"), EvidenceField("boot-ids", "string-map")),
         ),
         _check(
@@ -347,6 +348,26 @@ def test_final_admission_tolerates_pool_identity_drift() -> None:
     # individually, so a pool-identity-only change must still admit.
     attested_plan = _plan(_checks(predecessor_pool_digest="2" * 64))
     drifted_plan = _plan(_checks(predecessor_pool_digest="3" * 64))
+
+    admission = validate_final_attestation(
+        attestation=_attestation(attested_plan),
+        candidate=_candidate(),
+        plan=drifted_plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    assert all(execution.passed for execution in admission.tier0_executions)
+
+
+def test_final_admission_tolerates_gb10_inventory_drift() -> None:
+    # gb10.host-readiness inventory-digest folds in each host's node-agent
+    # service/timer runtime state, which cycles between the restore rehearsal and
+    # this re-check. It is deliberately NOT gated: fleet readiness (the check must
+    # pass) and boot-ids (rejected in test_final_admission_rejects_host_boot_or_epoch_drift)
+    # cover meaningful gb10 drift, so an inventory-digest-only change must admit.
+    attested_plan = _plan(_checks(gb10_inventory_digest="4" * 64))
+    drifted_plan = _plan(_checks(gb10_inventory_digest="5" * 64))
 
     admission = validate_final_attestation(
         attestation=_attestation(attested_plan),
