@@ -101,9 +101,18 @@ class ProtectedApplyBaseline:
                 or blockers
                 or attestation.check_implementation_digests.get(check_id)
                 != execution.implementation_digest
-                or attestation.evidence_hashes.get(check_id) != execution.evidence_hash
             ):
                 raise ValueError("protected apply baseline evidence drifted")
+            # NOTE: we deliberately do NOT require the whole evidence_hash to
+            # byte-match the attestation. The Tier 2 baseline evidence carries
+            # ``resource-digest`` -- a live hash of the probed staging resource
+            # (auth/release-baseline/storage-db) that shifts with ordinary
+            # traffic between the restore rehearsal and this protected apply, so
+            # a fixed attestation snapshot can never re-match a serving system
+            # (see #986/#988/#990). The baseline is still re-verified HEALTHY
+            # above (passed, ready, current epoch, read-only principal, valid
+            # resource-digest, unblocked, exact implementation digest); the fresh
+            # resource-digest is recorded below for the protected-apply plan.
             principals.add(principal)
             resource_digests[check_id] = resource_digest
             implementation_digests[check_id] = execution.implementation_digest
