@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from loom_cli.rollout import final_gate_helper as helper
@@ -12,9 +13,12 @@ from tests.loom_cli.rollout.operator.test_final_gate_plan import _envelope
 from tests.loom_cli.rollout.operator.test_final_gate_runner import _admission
 
 
-def _prepared(tmp_path: Path, monkeypatch):
+def _prepared(tmp_path: Path, monkeypatch, *, with_resolved_tree: bool = False):
     source, attestation, _calls = _authority(tmp_path)
     envelope = _envelope(attestation)
+    if with_resolved_tree:
+        # A merged-dev candidate legitimately carries its derivable resolved tree.
+        envelope = replace(envelope, resolved_tree=attestation.bindings.candidate_tree)
     source(envelope, attestation, 7, _admission(attestation))
     state = tmp_path / "state"
     path = state / "requests/req-alpha/attempts/1/final-gate-plan.json"
@@ -110,6 +114,47 @@ def test_final_gate_helper_rejects_plan_digest_drift(
         == 2
     )
     assert capsys.readouterr().out == ""
+
+
+def test_final_gate_helper_accepts_merged_dev_resolved_tree(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    # Regression: a merged-dev candidate carries its resolved git tree, so the
+    # helper must load the plan instead of rejecting the populated tree as
+    # "driver envelope drifted" (which stalled every merged-dev protected apply).
+    attestation, path, digest = _prepared(tmp_path, monkeypatch, with_resolved_tree=True)
+
+    def execute(check_id, operation, _plan):
+        return FinalGateResult(
+            check_id=check_id,
+            operation=operation,
+            candidate_sha="a" * 40,
+            attestation_digest=attestation.attestation_digest,
+            observed_epoch=7,
+            evidence_digest="e" * 64,
+            protected_mutation=False,
+            blockers={},
+        )
+
+    rc = helper.main(
+        [
+            "execute",
+            "--check-id",
+            "final.convergence",
+            "--operation",
+            "verify",
+            "--plan",
+            str(path),
+            "--plan-sha256",
+            digest,
+        ],
+        execute=execute,
+    )
+
+    assert rc == 0
+    assert '"check_id":"final.convergence"' in capsys.readouterr().out
 
 
 def test_final_gate_helper_rejects_driver_envelope_byte_drift(
