@@ -194,8 +194,13 @@ metadata:
 spec:
   podSelector:
     matchLabels: { app: loom-staging-data-lifecycle }
+  # Deny-all ingress is expressed by listing Ingress in policyTypes with no
+  # ingress rules. Do NOT emit an explicit `ingress: []`: the API server
+  # normalizes an empty ingress list to an absent field, so a server-side apply
+  # that keeps re-asserting `[]` bumps .metadata.generation on every attempt and
+  # the protected-apply exact-convergence check (kubectl diff) can never reach a
+  # no-op. Omitting the field matches the stored form and converges cleanly.
   policyTypes: [Ingress, Egress]
-  ingress: []
   egress:
     - to:
         - podSelector: { matchLabels: { app: loom-postgres } }
