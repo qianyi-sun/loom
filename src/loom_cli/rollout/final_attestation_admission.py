@@ -181,9 +181,19 @@ def validate_final_attestation(
         == bindings.supervisor_predecessor_pending_transition_digest,
         evidence("external-supervisor.predecessor", "transition-clear") is True,
         evidence("external-supervisor.predecessor", "runtime-ready") is True,
-        by_id["external-supervisor.predecessor"].evidence_hash
-        == attestation.evidence_hashes.get("external-supervisor.predecessor"),
     )
+    # The drift-sensitive external-supervisor.predecessor *authority* and
+    # transition fields are re-checked individually above. We deliberately do
+    # NOT additionally require the check's whole evidence_hash to byte-match the
+    # attestation, because that evidence also folds in ``pool-identity-digest`` --
+    # a live count of external-supervisor worker rows per pool (legacy `gb10-arm64`
+    # vs target `gb10`). Ordinary worker registration between the restore
+    # rehearsal (which mints the attestation) and this final admission shifts that
+    # count, so a fixed attestation snapshot of live operational data can never
+    # re-match in a running system; gating on it fails every deploy whose window
+    # sees any worker activity while adding no authority-drift safety the fields
+    # above miss. (Concurrent legacy->target migration remains coordinated by the
+    # rollout itself and by the transition-clear/pending-transition digests.)
     if not all(exact_evidence):
         raise ValueError("final admission drift-sensitive evidence changed")
     for execution in tier2:

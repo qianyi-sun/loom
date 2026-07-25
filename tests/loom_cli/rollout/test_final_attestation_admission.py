@@ -337,18 +337,26 @@ def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
     assert admission.preflight_plan is plan
 
 
-def test_final_admission_rejects_pool_identity_drift() -> None:
+def test_final_admission_tolerates_pool_identity_drift() -> None:
+    # pool-identity-digest is a live count of external-supervisor worker rows per
+    # pool; it shifts with ordinary worker registration between the restore
+    # rehearsal and this final admission and can never re-match a fixed
+    # attestation snapshot. It is deliberately NOT gated here: the drift-sensitive
+    # authority/transition fields (rejected in
+    # test_final_admission_rejects_predecessor_drift_before_apply) are re-checked
+    # individually, so a pool-identity-only change must still admit.
     attested_plan = _plan(_checks(predecessor_pool_digest="2" * 64))
     drifted_plan = _plan(_checks(predecessor_pool_digest="3" * 64))
 
-    with pytest.raises(ValueError, match="evidence changed"):
-        validate_final_attestation(
-            attestation=_attestation(attested_plan),
-            candidate=_candidate(),
-            plan=drifted_plan,
-            current_mutation_epoch=7,
-            now=NOW,
-        )
+    admission = validate_final_attestation(
+        attestation=_attestation(attested_plan),
+        candidate=_candidate(),
+        plan=drifted_plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    assert all(execution.passed for execution in admission.tier0_executions)
 
 
 def test_final_admission_rejects_host_boot_or_epoch_drift() -> None:
