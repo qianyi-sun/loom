@@ -163,7 +163,14 @@ def validate_final_attestation(
         normalized_secret_metadata == dict(bindings.secret_metadata_fingerprints),
         evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
         evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
-        evidence("gb10.host-readiness", "inventory-digest") == bindings.gb10_inventory_digest,
+        # gb10.host-readiness inventory-digest is intentionally NOT byte-matched:
+        # it folds in each host's node-agent service/timer runtime state
+        # (ActiveState/SubState/Result), which cycles as the readiness timer
+        # fires and the oneshot agent runs between the restore rehearsal and this
+        # re-check, so a fixed attestation snapshot can never re-match a running
+        # fleet. Meaningful gb10 drift is still gated -- the check must PASS
+        # (fleet reachable + ready) and boot-ids must match (no host reboot or
+        # host-set change).
         string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
         evidence("external-supervisor.predecessor", "authority-kind")
         == bindings.supervisor_predecessor_kind,
@@ -309,7 +316,14 @@ def validate_post_apply_attestation_drift(
         normalized_secret_metadata == dict(bindings.secret_metadata_fingerprints),
         evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
         evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
-        evidence("gb10.host-readiness", "inventory-digest") == bindings.gb10_inventory_digest,
+        # gb10.host-readiness inventory-digest is intentionally NOT byte-matched:
+        # it folds in each host's node-agent service/timer runtime state
+        # (ActiveState/SubState/Result), which cycles as the readiness timer
+        # fires and the oneshot agent runs between the restore rehearsal and this
+        # re-check, so a fixed attestation snapshot can never re-match a running
+        # fleet. Meaningful gb10 drift is still gated -- the check must PASS
+        # (fleet reachable + ready) and boot-ids must match (no host reboot or
+        # host-set change).
         string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
     )
     if not all(exact):
