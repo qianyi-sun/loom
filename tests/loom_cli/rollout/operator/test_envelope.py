@@ -190,6 +190,21 @@ def test_load_validated_envelope_accepts_exact_private_binding(tmp_path: Path) -
     assert loaded == envelope
 
 
+def test_merged_envelope_decouples_tree_from_approved_base(tmp_path: Path) -> None:
+    # A merged-dev envelope mirrors its CandidateBinding: it carries the
+    # resolved git tree (finalize_verified_backup copies it from the candidate),
+    # but never an approved base sha. This is the exact binding a merged-dev
+    # backup finalizes into the first driver attempt.
+    config = _config(tmp_path)
+
+    envelope = _envelope(config, resolved_tree="2" * 40)
+    assert envelope.resolved_tree == "2" * 40
+    assert envelope.approved_base_sha is None
+
+    with pytest.raises(ValueError, match="must not carry an approved base sha"):
+        _envelope(config, approved_base_sha="3" * 40)
+
+
 def test_operator_backup_limits_follow_reviewed_config(tmp_path: Path) -> None:
     config = _config(tmp_path)
 
