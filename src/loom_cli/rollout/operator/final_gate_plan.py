@@ -246,26 +246,33 @@ class FinalGatePlan:
             "GB10 boot": self.gb10_boot_ids,
             "supervisor script": self.supervisor_script_digests,
             "systemd unit": self.systemd_unit_digests,
-            "supervisor predecessor unit": self.supervisor_predecessor_unit_sha256,
             "check implementation": self.check_implementation_digests,
             "evidence": self.evidence_hashes,
             "protected baseline": self.protected_baseline_resource_digests,
         }
+
+        def _entries_well_formed(values: Mapping[str, str]) -> bool:
+            return len(values) <= 256 and all(
+                isinstance(key, str)
+                and key
+                and isinstance(value, str)
+                and value
+                and len(key) <= 128
+                and len(value) <= 256
+                for key, value in values.items()
+            )
+
         for label, values in maps.items():
-            if (
-                not values
-                or len(values) > 256
-                or not all(
-                    isinstance(key, str)
-                    and key
-                    and isinstance(value, str)
-                    and value
-                    and len(key) <= 128
-                    and len(value) <= 256
-                    for key, value in values.items()
-                )
-            ):
+            if not values or not _entries_well_formed(values):
                 raise ValueError(f"final gate {label} map is invalid")
+        # The external-supervisor predecessor unit map is validated separately
+        # from the non-empty maps above: it is empty EXACTLY when the predecessor
+        # is absent (first introduction of the supervisor, before any predecessor
+        # authority exists). The absent-vs-present emptiness invariant is enforced
+        # by the supervisor-predecessor authority check below; here we only assert
+        # each carried entry is well formed (empty is legitimate when absent).
+        if not _entries_well_formed(self.supervisor_predecessor_unit_sha256):
+            raise ValueError("final gate supervisor predecessor unit map is invalid")
         if any(
             not value.startswith("sha256:")
             or _SHA256_RE.fullmatch(value.removeprefix("sha256:")) is None

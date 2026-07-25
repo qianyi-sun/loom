@@ -34,6 +34,7 @@ from loom_cli.rollout.preflight_contract import (
     StageCapability,
     external_supervisor_transition_digest,
     external_supervisor_unit_set_digest,
+    external_supervisor_unit_set_digest_or_empty,
 )
 from loom_cli.rollout.systemd_unit_readiness import UNIT_PATHS
 
@@ -451,6 +452,57 @@ def test_final_gate_plan_tolerates_pool_identity_outside_transition_identity(
             _systemd_evidence(),
             _predecessor_evidence(pool_identity_digest="not-a-sha256"),
         )
+
+
+def test_final_gate_plan_accepts_absent_supervisor_predecessor(tmp_path: Path) -> None:
+    # First introduction of the external supervisor: the predecessor is "absent"
+    # and legitimately carries NO units. The plan's map validation must not reject
+    # the empty predecessor unit map (regression: it was lumped in with the
+    # non-empty maps and every such deploy crashed at plan construction).
+    payload = _plan(tmp_path).to_dict()
+    payload["supervisor_predecessor_kind"] = "absent"
+    payload["supervisor_predecessor_unit_sha256"] = {}
+    payload["supervisor_predecessor_digest"] = EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+    payload["supervisor_predecessor_pointer_digest"] = EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+    payload["supervisor_predecessor_unit_set_digest"] = external_supervisor_unit_set_digest_or_empty(
+        {}
+    )
+    target_unit_sha256 = {
+        name: digest
+        for name, digest in payload["systemd_unit_digests"].items()
+        if name not in UNIT_PATHS
+    }
+    payload["supervisor_transition_digest"] = external_supervisor_transition_digest(
+        candidate_sha=payload["candidate_sha"],
+        candidate_tree=payload["candidate_tree"],
+        environment=payload["environment"],
+        predecessor_kind="absent",
+        predecessor_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        predecessor_pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        predecessor_unit_sha256={},
+        predecessor_unit_set_digest=external_supervisor_unit_set_digest_or_empty({}),
+        predecessor_live_evidence_digest=payload["supervisor_predecessor_live_evidence_digest"],
+        predecessor_pending_transition_digest=payload[
+            "supervisor_predecessor_pending_transition_digest"
+        ],
+        target_artifact_digest=payload["supervisor_artifact_digest"],
+        target_profile_sha256=payload["supervisor_profile_sha256"],
+        target_script_sha256=payload["supervisor_script_digests"],
+        target_unit_sha256=target_unit_sha256,
+        target_unit_set_digest=external_supervisor_unit_set_digest(target_unit_sha256),
+    )
+    payload["plan_digest"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "plan_digest"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    plan = FinalGatePlan.from_dict(payload)
+
+    assert plan.supervisor_predecessor_kind == "absent"
+    assert dict(plan.supervisor_predecessor_unit_sha256) == {}
 
 
 def test_final_gate_plan_store_is_private_and_nonreplaceable(tmp_path: Path) -> None:
