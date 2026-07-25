@@ -691,8 +691,15 @@ class DriverEnvelope:
                 raise ValueError("sealed envelope source binding is incomplete")
             _require_sha(self.resolved_tree, "resolved_tree")
             _require_sha(self.approved_base_sha, "approved_base_sha")
-        elif self.resolved_tree is not None or self.approved_base_sha is not None:
-            raise ValueError("merged envelope must not carry sealed source binding")
+        else:
+            # A merged-dev envelope mirrors its CandidateBinding: it carries the
+            # resolved git tree (a derivable identity the Tier-1 artifact
+            # builders require) but never an approved base sha (the
+            # sealed-cumulative approval anchor).
+            if self.approved_base_sha is not None:
+                raise ValueError("merged envelope must not carry an approved base sha")
+            if self.resolved_tree is not None:
+                _require_sha(self.resolved_tree, "resolved_tree")
         _require_string(self.fetched_at, "fetched_at")
         _require_absolute_path(self.backup_manifest_path, "backup_manifest_path")
         _require_sha256(self.backup_manifest_sha256, "backup_manifest_sha256")
