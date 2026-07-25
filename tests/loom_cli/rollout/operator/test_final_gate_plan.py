@@ -280,7 +280,7 @@ def _systemd_evidence() -> dict[str, object]:
     }
 
 
-def _predecessor_evidence() -> dict[str, object]:
+def _predecessor_evidence(*, pool_identity_digest: str = "b" * 64) -> dict[str, object]:
     units = {
         "loom-autoscaler-gb10-staging.service": "7" * 64,
         "loom-autoscaler-gb10-staging.timer": "8" * 64,
@@ -295,6 +295,7 @@ def _predecessor_evidence() -> dict[str, object]:
         "pending-transition-digest": hashlib.sha256(b"{}").hexdigest(),
         "transition-clear": True,
         "runtime-ready": True,
+        "pool-identity-digest": pool_identity_digest,
     }
 
 
@@ -397,6 +398,59 @@ def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None
     ).hexdigest()
     with pytest.raises(ValueError, match="transition identity drifted"):
         FinalGatePlan.from_dict(payload)
+
+
+def test_final_gate_plan_tolerates_pool_identity_outside_transition_identity(
+    tmp_path: Path,
+) -> None:
+    # ``pool-identity-digest`` is a live worker-count field carried in the
+    # external-supervisor.predecessor evidence. The plan must accept it (it is
+    # part of the evidence schema) but must NOT fold it into the supervisor
+    # transition identity, so two rehearsals whose only difference is the live
+    # pool identity produce the same transition digest.
+    attestation = _attestation()
+    envelope = _envelope(attestation)
+
+    def build(pool_identity_digest: str) -> FinalGatePlan:
+        return FinalGatePlan.build(
+            envelope,
+            attestation,
+            _artifacts(tmp_path),
+            _lease(),
+            _baseline(),
+            _systemd_evidence(),
+            _predecessor_evidence(pool_identity_digest=pool_identity_digest),
+        )
+
+    first = build("b" * 64)
+    second = build("c" * 64)
+    assert first.supervisor_transition_digest == second.supervisor_transition_digest
+
+    # A missing or malformed pool-identity-digest is still rejected: the field is
+    # required and must be a well-formed sha256.
+    missing = _predecessor_evidence()
+    del missing["pool-identity-digest"]
+    with pytest.raises(ValueError, match="predecessor evidence is invalid"):
+        FinalGatePlan.build(
+            envelope,
+            attestation,
+            _artifacts(tmp_path),
+            _lease(),
+            _baseline(),
+            _systemd_evidence(),
+            missing,
+        )
+
+    with pytest.raises(ValueError, match="predecessor evidence is invalid"):
+        FinalGatePlan.build(
+            envelope,
+            attestation,
+            _artifacts(tmp_path),
+            _lease(),
+            _baseline(),
+            _systemd_evidence(),
+            _predecessor_evidence(pool_identity_digest="not-a-sha256"),
+        )
 
 
 def test_final_gate_plan_store_is_private_and_nonreplaceable(tmp_path: Path) -> None:

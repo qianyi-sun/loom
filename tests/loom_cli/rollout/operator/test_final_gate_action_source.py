@@ -175,6 +175,7 @@ def _predecessor_execution():
                 EvidenceField("pending-transition-digest", "sha256"),
                 EvidenceField("transition-clear", "boolean"),
                 EvidenceField("runtime-ready", "boolean"),
+                EvidenceField("pool-identity-digest", "sha256"),
             ),
             timeout_seconds=5,
             freshness_ttl_seconds=600,
