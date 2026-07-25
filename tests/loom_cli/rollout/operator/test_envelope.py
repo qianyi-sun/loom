@@ -190,6 +190,23 @@ def test_load_validated_envelope_accepts_exact_private_binding(tmp_path: Path) -
     assert loaded == envelope
 
 
+def test_driver_envelope_round_trips_merged_resolved_tree(tmp_path: Path) -> None:
+    # A merged-dev envelope carries resolved_tree; to_dict -> from_dict must
+    # preserve it exactly. Otherwise lifecycle.launch rejects the persisted
+    # attempt as "driver envelope does not match immutable persisted attempt".
+    config = _config(tmp_path)
+    envelope = _envelope(config, resolved_tree="2" * 40)
+
+    restored = DriverEnvelope.from_dict(envelope.to_dict())
+
+    assert restored == envelope
+    assert restored.resolved_tree == "2" * 40
+    # A treeless merged-dev envelope still round-trips.
+    treeless = _envelope(config)
+    assert treeless.resolved_tree is None
+    assert DriverEnvelope.from_dict(treeless.to_dict()) == treeless
+
+
 def test_merged_envelope_decouples_tree_from_approved_base(tmp_path: Path) -> None:
     # A merged-dev envelope mirrors its CandidateBinding: it carries the
     # resolved git tree (finalize_verified_backup copies it from the candidate),

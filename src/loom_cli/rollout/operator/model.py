@@ -764,8 +764,14 @@ class DriverEnvelope:
     def to_dict(self) -> dict[str, object]:
         value = {field.name: getattr(self, field.name) for field in fields(self)}
         if self.source_mode == "merged-dev":
-            for key in ("source_mode", "resolved_tree", "approved_base_sha"):
-                value.pop(key)
+            # merged-dev omits the sealed-only source_mode marker and
+            # approved_base_sha (always absent), but must round-trip its
+            # resolved_tree (a merged-dev candidate carries it); drop that key
+            # only when it is genuinely absent.
+            value.pop("source_mode")
+            value.pop("approved_base_sha")
+            if self.resolved_tree is None:
+                value.pop("resolved_tree")
         return value
 
     @classmethod
@@ -773,7 +779,10 @@ class DriverEnvelope:
         expected = {field.name for field in fields(cls)}
         sealed = data.get("source_mode") == "sealed-cumulative"
         if not sealed:
-            expected.difference_update({"source_mode", "resolved_tree", "approved_base_sha"})
+            expected.discard("source_mode")
+            expected.discard("approved_base_sha")
+            if "resolved_tree" not in data:
+                expected.discard("resolved_tree")
         _require_exact_keys(data, expected, "driver envelope")
         return cls(
             schema_version=_require_schema(data["schema_version"]),
@@ -843,7 +852,9 @@ class DriverEnvelope:
             resume=_require_bool(data["resume"], "resume"),
             source_mode="sealed-cumulative" if sealed else "merged-dev",
             resolved_tree=(
-                _require_sha(data["resolved_tree"], "resolved_tree") if sealed else None
+                _require_sha(data["resolved_tree"], "resolved_tree")
+                if "resolved_tree" in data
+                else None
             ),
             approved_base_sha=(
                 _require_sha(data["approved_base_sha"], "approved_base_sha") if sealed else None
