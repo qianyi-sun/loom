@@ -17,8 +17,12 @@ spec:
         - name: worker
           image: loom-worker:0.7
           env:
+            - name: LOOM_WORKER_CANDIDATE_SHA
+              value: ""
             - name: LOOM_WORKER_CLAIM_POLL_INTERVAL_SEC
               value: "1.0"
+            - name: LOOM_WORKER_COMPOSE_PROJECT
+              value: ""
             - name: LOOM_WORKER_CONTAINER_CPUS
               value: "0.0"
             - name: LOOM_WORKER_CONTAINER_MEMORY_MIB
@@ -71,6 +75,8 @@ spec:
                   key: minio-secret-key
             - name: LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC
               value: "60.0"
+            - name: LOOM_WORKER_SANDBOX_IDENTITY
+              value: ""
             - name: LOOM_WORKER_SANDBOX_ISOLATION
               value: "False"
             - name: LOOM_WORKER_SANDBOX_SINGLETON_IMAGE
@@ -95,6 +101,12 @@ spec:
               value: "5.0"
             - name: LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC
               value: "300.0"
+            - name: LOOM_WORKER_SLURM_ALLOCATED_GPUS
+              value: "-1"
+            - name: LOOM_WORKER_SLURM_GPU_DEVICE_IDS
+              value: ""
+            - name: LOOM_WORKER_SLURM_JOB_ID
+              value: ""
             - name: LOOM_WORKER_STORAGE_AUTH_KIND
               value: "static_keys"
             - name: LOOM_WORKER_STORAGE_BACKEND
