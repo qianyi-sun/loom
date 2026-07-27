@@ -20,6 +20,9 @@ cp_url = "http://127.0.0.1:18081"
 smoke_on_behalf_username = "devansh"
 smoke_on_behalf_team_id = "__SMOKE_ON_BEHALF_TEAM_ID__"
 scope = "current-gb10"
-gb10_prep_concurrency = 8
+# Small so the fleet observe does not overwhelm the single GB10 SSH bastion
+# (trt-gb10-1 via the public IP; internal hosts ProxyJump through it, and it
+# also runs a worker + node-agent). See #1011.
+gb10_prep_concurrency = 2
 backup_max_objects = 1000000
 backup_max_entries = 16000000
