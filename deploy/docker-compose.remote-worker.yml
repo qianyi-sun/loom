@@ -47,6 +47,15 @@ services:
       - LOOM_WORKER_CONTAINER_CPUS=${LOOM_WORKER_CONTAINER_CPUS:-0}
       - LOOM_WORKER_CONTAINER_MEMORY_MIB=${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}
       - LOOM_WORKER_CONTAINER_PIDS=${LOOM_WORKER_CONTAINER_PIDS:-0}
+      # #1023: Slurm jobs set these from the admission-bound sandbox/candidate
+      # plus runtime allocation identity. They are forwarded so every child
+      # trial/sidecar gets the same cleanup and GPU-allocation boundary.
+      - LOOM_WORKER_SANDBOX_IDENTITY=${LOOM_WORKER_SANDBOX_IDENTITY:-manual}
+      - LOOM_WORKER_CANDIDATE_SHA=${LOOM_WORKER_CANDIDATE_SHA:-legacy}
+      - LOOM_WORKER_SLURM_JOB_ID=${LOOM_WORKER_SLURM_JOB_ID:-none}
+      - LOOM_WORKER_COMPOSE_PROJECT=${LOOM_WORKER_COMPOSE_PROJECT:-manual}
+      - LOOM_WORKER_SLURM_ALLOCATED_GPUS=${LOOM_WORKER_SLURM_ALLOCATED_GPUS:--1}
+      - LOOM_WORKER_SLURM_GPU_DEVICE_IDS=${LOOM_WORKER_SLURM_GPU_DEVICE_IDS:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - remote_worker_trajectories:/var/lib/loom/trajectories
@@ -61,7 +70,15 @@ services:
     cpus: ${LOOM_WORKER_CONTAINER_CPUS:-0}
     mem_limit: ${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}m
     pids_limit: ${LOOM_WORKER_CONTAINER_PIDS:--1}
-    restart: on-failure
+    labels:
+      loom.sandbox: ${LOOM_WORKER_SANDBOX_IDENTITY:-manual}
+      loom.candidate_sha: ${LOOM_WORKER_CANDIDATE_SHA:-legacy}
+      loom.slurm_job_id: ${LOOM_WORKER_SLURM_JOB_ID:-none}
+      loom.compose_project: ${LOOM_WORKER_COMPOSE_PROJECT:-manual}
+    # Slurm jobs export "no" so dockerd cannot restart a worker outside the
+    # allocation after a host/daemon restart. Fixed remote workers retain the
+    # historical on-failure policy.
+    restart: ${LOOM_WORKER_RESTART_POLICY:-on-failure}
 
 volumes:
   remote_worker_trajectories:

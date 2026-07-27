@@ -836,6 +836,10 @@ def test_slurm_config_from_policy_can_disable_exclusive_node_allocation() -> Non
             "requested_cpus": 2,
             "requested_memory_mib": 8000,
             "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 8000,
+            "container_pids": 512,
+            "candidate_sha": "a" * 40,
         },
     )
 
@@ -1011,8 +1015,7 @@ async def test_load_observation_excludes_release_drift_slurm_jobs() -> None:
                                 "staging-oldlab-worker-staging-a88e33a4.env"
                             ),
                             "LOOM_REMOTE_WORKER_REPO_DIR": (
-                                "/shared_work/qianyi/"
-                                "loom-remote-worker-staging-a88e33a4"
+                                "/shared_work/qianyi/loom-remote-worker-staging-a88e33a4"
                             ),
                         },
                     ),
@@ -1032,10 +1035,7 @@ async def test_load_observation_excludes_release_drift_slurm_jobs() -> None:
                     "/shared_work/qianyi/loom-worker-capacity/"
                     "staging-oldlab-worker-staging-a232312f.env"
                 ),
-                "repo_dir": (
-                    "/shared_work/qianyi/"
-                    "loom-remote-worker-staging-a232312f"
-                ),
+                "repo_dir": ("/shared_work/qianyi/loom-remote-worker-staging-a232312f"),
                 "requested_concurrency": 1,
                 "requested_cpus": 2,
                 "requested_memory_mib": 8192,
@@ -1896,9 +1896,7 @@ async def test_apply_slurm_scale_up_blocks_missing_allowed_nodes() -> None:
     )
 
     assert runner.submitted_nodes == []
-    assert result.error == (
-        "allowed nodes are required when Slurm worker controller is enabled"
-    )
+    assert result.error == ("allowed nodes are required when Slurm worker controller is enabled")
     assert result.blocked_reason == "missing_slurm_allowed_nodes"
     assert result.blocked_details == {
         "reason": "missing_slurm_allowed_nodes",

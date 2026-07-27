@@ -176,10 +176,13 @@ def test_mutable_dev_image_detection_is_literal_and_local(tmp_path: Path) -> Non
     image: postgres:16
   parameterized:
     image: loom-gateway:${LOOM_IMAGE_TAG:-dev}
+  sandboxed:
+    image: loom-control-plane:${LOOM_DEV_IMAGE_TAG:-dev}
 """,
     )
 
     assert _mutable_dev_images(compose) == (
+        "loom-control-plane:${LOOM_DEV_IMAGE_TAG:-dev}",
         "loom-service:dev",
         "loom-worker:dev",
     )

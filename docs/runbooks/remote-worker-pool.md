@@ -1252,8 +1252,14 @@ the underlying Slurm job. Release prefers the registry `worker_id`; if Slurm
 observations never linked the job to a worker, it falls back to the drained
 worker hostname matching the Slurm job `nodelist`.
 The Slurm submission script wraps Docker Compose in an `EXIT`/`INT`/`TERM` trap
-and runs `docker compose down --remove-orphans`, so autoscaler cancellation and
-worker idle exit remove the compose worker container as well as the Slurm job.
+and derives a per-job Compose project name from
+`environment + candidate_sha[0:12] + SLURM_JOB_ID`. It runs `docker compose
+down --remove-orphans` against that exact project, so autoscaler cancellation
+and worker idle exit remove only that job's worker container. The same sandbox,
+candidate, job, and Compose-project identity is stamped onto the worker, trial,
+verifier, and task-sidecar containers. Startup orphan cleanup filters by the
+current sandbox identity and preserves containers owned by another sandbox,
+including trials unknown to the current Control Plane.
 Forced termination is a break-glass operator action, not the default path.
 
 For OLDLAB Slurm, autoscaler `actuator_config` must include allowed nodes,
@@ -1264,6 +1270,19 @@ Autoscaler Slurm submissions request exclusive node allocation by default.
 Set `actuator_config.exclusive=false` only for deliberately shared Slurm nodes
 after lowering `requested_cpus`, `requested_memory_mib`, and
 `requested_concurrency` to a load-tested slice that coexists with other jobs.
+Non-exclusive admission fails closed unless all of
+`container_cpus`, `container_memory_mib`, and `container_pids` are positive,
+`environment` is a lowercase sandbox identity, and `candidate_sha` is the
+exact 40-character lowercase Git commit. These per-container caps apply to the
+worker, trial, verifier, and sidecars. They are not a substitute for proving
+aggregate cgroup containment on the target Slurm/Docker host.
+
+GPU pools may set `gpu_tres` using exactly `gpu:COUNT` or
+`gpu:TYPE:COUNT`; the controller emits that value as `sbatch --gres`. The batch
+script fails before Compose startup when a positive GPU request has no
+`SLURM_JOB_GPUS`, and the Docker driver rejects any trial or verifier GPU
+request above the recorded Slurm allocation. Containers receive only the
+allocated device IDs, rather than an unconstrained Docker GPU count.
 
 ### Slurm scheduler fields (account / QoS / reservation)
 

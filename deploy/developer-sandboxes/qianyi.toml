@@ -1,0 +1,32 @@
+schema_version = 1
+sandbox = "qianyi"
+ssh_target = "oldlab-2"
+canonical_hostname = "trt-eai-oldlab-2"
+compose_project = "loom-sandbox-qianyi"
+bind_address = "127.0.0.1"
+provider_connection_namespace = "sandbox-qianyi"
+candidate_root = "/shared_work/loom/candidates/sandboxes/qianyi"
+state_root = "/srv/loom/developer-sandboxes/qianyi"
+cache_root = "/srv/loom/developer-sandboxes/qianyi/cache"
+evidence_root = "/srv/loom/developer-sandboxes/qianyi/evidence"
+runtime_root = "/srv/loom/developer-sandboxes/qianyi/runtime"
+
+[ports]
+postgres = 20532
+minio = 20900
+minio_console = 20901
+control_plane = 20080
+loom_service = 20090
+llm_gateway = 20100
+egress_xds = 20800
+egress_proxy = 20443
+egress_admin = 20991
+web = 20173
+
+[database]
+name = "loom_sandbox_qianyi"
+
+[object_store]
+task_bucket = "loom-sandbox-qianyi-tasks"
+trajectories_bucket = "loom-sandbox-qianyi-trajectories"
+artifacts_bucket = "loom-sandbox-qianyi-artifacts"

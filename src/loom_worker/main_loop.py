@@ -149,6 +149,28 @@ def _worker_hostname(configured_hostname: str | None) -> str:
     return socket.gethostname()
 
 
+def _runtime_identity_labels(
+    settings: WorkerSettings,
+) -> tuple[tuple[str, str], ...]:
+    """Return immutable Slurm provenance labels for spawned containers."""
+    values = (
+        ("loom.sandbox", settings.sandbox_identity),
+        ("loom.candidate_sha", settings.candidate_sha),
+        ("loom.slurm_job_id", settings.slurm_job_id),
+        ("loom.compose_project", settings.compose_project),
+    )
+    return tuple((key, value) for key, value in values if value)
+
+
+def _slurm_gpu_device_ids(settings: WorkerSettings) -> tuple[str, ...]:
+    """Normalize Slurm's comma-separated GPU device allocation."""
+    return tuple(
+        device_id.strip()
+        for device_id in settings.slurm_gpu_device_ids.split(",")
+        if device_id.strip()
+    )
+
+
 _DEFAULT_CAPS = [
     {
         "os": "linux",
@@ -506,11 +528,16 @@ def _run_orphan_cleanup(
         config=retry_config,
         sleep=sleep,
     )
-    _run_orphan_sandbox_cleanup(_lookup)
+    _run_orphan_sandbox_cleanup(
+        _lookup,
+        sandbox_identity=getattr(settings, "sandbox_identity", ""),
+    )
 
 
 def _run_orphan_sandbox_cleanup(
     lookup: Callable[[UUID], tuple[str, UUID | None]],
+    *,
+    sandbox_identity: str,
 ) -> None:
     """Best-effort sweep of Docker containers left by dead workers (#605).
 
@@ -529,6 +556,7 @@ def _run_orphan_sandbox_cleanup(
         cleanup_orphan_sandbox_containers(
             docker_client=client,
             state_lookup=lambda tid: lookup(tid)[0],
+            sandbox_identity=sandbox_identity,
         )
     except Exception:
         logger.exception("orphan_sandbox_cleanup_failed")
@@ -971,6 +999,9 @@ async def _spawn_trial(
             container_cpus=settings.container_cpus,
             container_memory_mib=settings.container_memory_mib,
             container_pids=settings.container_pids,
+            runtime_identity_labels=_runtime_identity_labels(settings),
+            slurm_allocated_gpus=settings.slurm_allocated_gpus,
+            slurm_gpu_device_ids=_slurm_gpu_device_ids(settings),
             sidecar_runtime_factory=lambda: DockerTaskSidecarRuntime(
                 task_config=task_config,
                 task_dir=task_dir,
@@ -980,6 +1011,7 @@ async def _spawn_trial(
                 container_cpus=settings.container_cpus,
                 container_memory_mib=settings.container_memory_mib,
                 container_pids=settings.container_pids,
+                runtime_identity_labels=_runtime_identity_labels(settings),
                 setup_slot_provider=lambda: _daemon_build_slot(
                     cp_client,
                     settings,

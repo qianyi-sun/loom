@@ -44,6 +44,10 @@ environments. `docs/index.md` at the repo docs root is the task-router.
    not a formal environment; it is not in the identity contract or on
    `yylx.world`.
 
+9. **[shared-sandbox-capacity-broker.md](shared-sandbox-capacity-broker.md)** —
+   submit-host request/lease, fair-share, drain, observation, and evidence
+   contract for the three disposable developer sandboxes sharing GB10/OLDLAB.
+
 ## When to open a new runbook
 
 For a repeated procedure that spans more than a few commands, has hazards

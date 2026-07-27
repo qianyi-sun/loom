@@ -81,10 +81,7 @@ class SlurmWorkerCapacitySummary:
     )
 
     def as_list(self) -> list[dict[str, object]]:
-        return [
-            capacity.as_dict()
-            for _, capacity in sorted(self.by_pool.items())
-        ]
+        return [capacity.as_dict() for _, capacity in sorted(self.by_pool.items())]
 
 
 @dataclass(frozen=True)
@@ -187,6 +184,9 @@ def _active_capacity_query(
     nodelist: str,
     requested_cpus: int | None,
     requested_memory_mib: int | None,
+    requested_pids: int | None,
+    requested_gpu_tres: str | None,
+    requested_gpus: int,
     requested_concurrency: int,
 ) -> Select[tuple[SlurmWorkerJob]]:
     stmt = select(SlurmWorkerJob).where(
@@ -204,6 +204,15 @@ def _active_capacity_query(
         stmt = stmt.where(SlurmWorkerJob.requested_memory_mib.is_(None))
     else:
         stmt = stmt.where(SlurmWorkerJob.requested_memory_mib == requested_memory_mib)
+    if requested_pids is None:
+        stmt = stmt.where(SlurmWorkerJob.requested_pids.is_(None))
+    else:
+        stmt = stmt.where(SlurmWorkerJob.requested_pids == requested_pids)
+    if requested_gpu_tres is None:
+        stmt = stmt.where(SlurmWorkerJob.requested_gpu_tres.is_(None))
+    else:
+        stmt = stmt.where(SlurmWorkerJob.requested_gpu_tres == requested_gpu_tres)
+    stmt = stmt.where(SlurmWorkerJob.requested_gpus == requested_gpus)
     return stmt
 
 
@@ -220,13 +229,21 @@ async def record_slurm_worker_job(
     slurm_state: str | None,
     pending_reason: str | None,
     env: dict[str, str] | None,
+    requested_pids: int | None = None,
+    requested_gpu_tres: str | None = None,
+    requested_gpus: int = 0,
+    sandbox_identity: str | None = None,
+    candidate_sha: str | None = None,
+    compose_project: str | None = None,
     submitted_at: datetime | None = None,
     submission_error: str | None = None,
 ) -> tuple[SlurmWorkerJob, bool]:
     if job_id is not None:
-        existing_by_job_id = (await session.execute(
-            select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == job_id),
-        )).scalar_one_or_none()
+        existing_by_job_id = (
+            await session.execute(
+                select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == job_id),
+            )
+        ).scalar_one_or_none()
         if existing_by_job_id is not None:
             logger.info(
                 "slurm_worker_duplicate_job_id",
@@ -239,14 +256,21 @@ async def record_slurm_worker_job(
             )
             return existing_by_job_id, True
 
-    existing = (await session.execute(_active_capacity_query(
-        environment=environment,
-        pool_name=pool_name,
-        nodelist=nodelist,
-        requested_cpus=requested_cpus,
-        requested_memory_mib=requested_memory_mib,
-        requested_concurrency=requested_concurrency,
-    ))).scalar_one_or_none()
+    existing = (
+        await session.execute(
+            _active_capacity_query(
+                environment=environment,
+                pool_name=pool_name,
+                nodelist=nodelist,
+                requested_cpus=requested_cpus,
+                requested_memory_mib=requested_memory_mib,
+                requested_pids=requested_pids,
+                requested_gpu_tres=requested_gpu_tres,
+                requested_gpus=requested_gpus,
+                requested_concurrency=requested_concurrency,
+            )
+        )
+    ).scalar_one_or_none()
     if existing is not None:
         logger.info(
             "slurm_worker_duplicate_active_job",
@@ -268,7 +292,13 @@ async def record_slurm_worker_job(
         nodelist=nodelist,
         requested_cpus=requested_cpus,
         requested_memory_mib=requested_memory_mib,
+        requested_pids=requested_pids,
+        requested_gpu_tres=requested_gpu_tres,
+        requested_gpus=requested_gpus,
         requested_concurrency=requested_concurrency,
+        sandbox_identity=sandbox_identity,
+        candidate_sha=candidate_sha,
+        compose_project=compose_project,
         job_id=job_id,
         slurm_state=slurm_state,
         state=state,
@@ -311,9 +341,11 @@ async def reconcile_slurm_worker_jobs(
     stale = 0
     missing = 0
     for obs in observations:
-        job = (await session.execute(
-            select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == obs.job_id),
-        )).scalar_one_or_none()
+        job = (
+            await session.execute(
+                select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == obs.job_id),
+            )
+        ).scalar_one_or_none()
         if job is None:
             missing += 1
             logger.info(
@@ -337,14 +369,12 @@ async def reconcile_slurm_worker_jobs(
         job.updated_at = now
         updated += 1
         if state == "running" and job.worker_id is not None:
-            worker = (await session.execute(
-                select(Worker).where(Worker.id == job.worker_id),
-            )).scalar_one_or_none()
-            if (
-                worker is None
-                or worker.status != "active"
-                or worker.last_seen_at <= cutoff
-            ):
+            worker = (
+                await session.execute(
+                    select(Worker).where(Worker.id == job.worker_id),
+                )
+            ).scalar_one_or_none()
+            if worker is None or worker.status != "active" or worker.last_seen_at <= cutoff:
                 job.state = "stale"
                 job.pending_reason = "worker heartbeat stale"
                 job.stale_at = now
@@ -381,10 +411,12 @@ async def reconcile_slurm_worker_jobs(
 
     active_stmt = select(SlurmWorkerJob).where(SlurmWorkerJob.state.in_(ACTIVE_STATES))
     if observed_job_ids:
-        active_stmt = active_stmt.where(or_(
-            SlurmWorkerJob.job_id.is_(None),
-            SlurmWorkerJob.job_id.not_in(observed_job_ids),
-        ))
+        active_stmt = active_stmt.where(
+            or_(
+                SlurmWorkerJob.job_id.is_(None),
+                SlurmWorkerJob.job_id.not_in(observed_job_ids),
+            )
+        )
     stale_candidates = (await session.execute(active_stmt)).scalars().all()
     for job in stale_candidates:
         last_seen = job.last_reconciled_at or job.submitted_at or job.created_at
@@ -421,7 +453,13 @@ def slurm_worker_job_to_dict(job: SlurmWorkerJob) -> dict[str, object]:
         "nodelist": job.nodelist,
         "requested_cpus": job.requested_cpus,
         "requested_memory_mib": job.requested_memory_mib,
+        "requested_pids": job.requested_pids,
+        "requested_gpu_tres": job.requested_gpu_tres,
+        "requested_gpus": job.requested_gpus,
         "requested_concurrency": job.requested_concurrency,
+        "sandbox_identity": job.sandbox_identity,
+        "candidate_sha": job.candidate_sha,
+        "compose_project": job.compose_project,
         "job_id": job.job_id,
         "slurm_state": job.slurm_state,
         "state": job.state,
@@ -442,47 +480,54 @@ def slurm_worker_job_to_dict(job: SlurmWorkerJob) -> dict[str, object]:
 async def fetch_slurm_worker_job_status(
     session: AsyncSession,
 ) -> tuple[SlurmWorkerCapacitySummary, list[dict[str, object]]]:
-    rows = (await session.execute(
-        select(
-            SlurmWorkerJob,
-            Worker.status.label("worker_status"),
-        ).outerjoin(Worker, SlurmWorkerJob.worker_id == Worker.id)
-        .order_by(
-            SlurmWorkerJob.environment,
-            SlurmWorkerJob.pool_name,
-            SlurmWorkerJob.created_at,
-        ),
-    )).all()
+    rows = (
+        await session.execute(
+            select(
+                SlurmWorkerJob,
+                Worker.status.label("worker_status"),
+            )
+            .outerjoin(Worker, SlurmWorkerJob.worker_id == Worker.id)
+            .order_by(
+                SlurmWorkerJob.environment,
+                SlurmWorkerJob.pool_name,
+                SlurmWorkerJob.created_at,
+            ),
+        )
+    ).all()
     summary_rows: list[dict[str, Any]] = []
     jobs: list[dict[str, object]] = []
     for job, worker_status in rows:
-        summary_rows.append({
-            "environment": job.environment,
-            "pool_name": job.pool_name,
-            "state": job.state,
-            "requested_concurrency": job.requested_concurrency,
-            "job_id": job.job_id,
-            "started_at": job.started_at,
-            "submission_error": job.submission_error,
-            "worker_status": worker_status,
-        })
+        summary_rows.append(
+            {
+                "environment": job.environment,
+                "pool_name": job.pool_name,
+                "state": job.state,
+                "requested_concurrency": job.requested_concurrency,
+                "job_id": job.job_id,
+                "started_at": job.started_at,
+                "submission_error": job.submission_error,
+                "worker_status": worker_status,
+            }
+        )
         jobs.append(slurm_worker_job_to_dict(job))
     return summarize_jobs(summary_rows), jobs
 
 
 async def fetch_slurm_worker_metric_rows(session: AsyncSession) -> list[dict[str, Any]]:
-    rows = (await session.execute(
-        select(
-            SlurmWorkerJob.environment,
-            SlurmWorkerJob.pool_name,
-            SlurmWorkerJob.state,
-            SlurmWorkerJob.requested_concurrency,
-            SlurmWorkerJob.job_id,
-            SlurmWorkerJob.started_at,
-            SlurmWorkerJob.submission_error,
-            Worker.status.label("worker_status"),
-        ).outerjoin(Worker, SlurmWorkerJob.worker_id == Worker.id),
-    )).all()
+    rows = (
+        await session.execute(
+            select(
+                SlurmWorkerJob.environment,
+                SlurmWorkerJob.pool_name,
+                SlurmWorkerJob.state,
+                SlurmWorkerJob.requested_concurrency,
+                SlurmWorkerJob.job_id,
+                SlurmWorkerJob.started_at,
+                SlurmWorkerJob.submission_error,
+                Worker.status.label("worker_status"),
+            ).outerjoin(Worker, SlurmWorkerJob.worker_id == Worker.id),
+        )
+    ).all()
     return [
         {
             "environment": environment,
@@ -508,6 +553,10 @@ async def fetch_slurm_worker_metric_rows(session: AsyncSession) -> list[dict[str
 
 
 async def count_slurm_worker_jobs(session: AsyncSession) -> int:
-    return int((await session.execute(
-        select(func.count()).select_from(SlurmWorkerJob),
-    )).scalar_one())
+    return int(
+        (
+            await session.execute(
+                select(func.count()).select_from(SlurmWorkerJob),
+            )
+        ).scalar_one()
+    )

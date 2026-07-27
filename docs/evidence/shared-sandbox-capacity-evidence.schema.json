@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.example/schemas/shared-sandbox-capacity-evidence-v1.json",
+  "title": "Shared Sandbox Capacity Broker Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "authority",
+    "budgets",
+    "aggregate",
+    "requests",
+    "handoffs",
+    "audit"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "authority": {
+      "const": "shared-capacity-broker"
+    },
+    "budgets": {
+      "$ref": "#/$defs/budgets"
+    },
+    "aggregate": {
+      "$ref": "#/$defs/slotSummary"
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/requestRecord"
+      }
+    },
+    "handoffs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/handoff"
+      }
+    },
+    "audit": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/auditEvent"
+      }
+    }
+  },
+  "$defs": {
+    "nonnegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fullSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sandbox": {
+      "enum": [
+        "qianyi",
+        "hongjian",
+        "devansh"
+      ]
+    },
+    "state": {
+      "enum": [
+        "pending",
+        "active",
+        "draining",
+        "terminal"
+      ]
+    },
+    "slotSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_slots",
+        "granted_slots",
+        "active_slots",
+        "pending_slots",
+        "draining_slots",
+        "terminal_slots",
+        "committed_slots"
+      ],
+      "properties": {
+        "requested_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "granted_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "active_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "pending_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "draining_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "terminal_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "committed_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "global_slots",
+        "global_pending_slots",
+        "pool_slots",
+        "pool_pending_slots"
+      ],
+      "properties": {
+        "global_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "global_pending_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "pool_slots": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/nonnegativeInteger"
+          }
+        },
+        "pool_pending_slots": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/nonnegativeInteger"
+          }
+        }
+      }
+    },
+    "requestRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request",
+        "lease"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/request"
+        },
+        "lease": {
+          "$ref": "#/$defs/lease"
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sandbox",
+        "candidate_sha",
+        "pool",
+        "min_slots",
+        "target_slots",
+        "ttl_seconds",
+        "purpose",
+        "preemptible",
+        "idempotency_key",
+        "state",
+        "created_at",
+        "expires_at",
+        "cancel_requested",
+        "terminal_reason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "min_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "target_slots": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "preemptible": {
+          "type": "boolean"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "terminal_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "lease_epoch",
+        "granted_slots",
+        "pending_slots",
+        "active_slots",
+        "draining_slots",
+        "terminal_slots",
+        "state",
+        "last_observed_at",
+        "updated_at",
+        "committed_slots"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "lease_epoch": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "granted_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "pending_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "active_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "draining_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "terminal_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "last_observed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "committed_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "request_id",
+        "lease_epoch",
+        "sandbox",
+        "environment",
+        "candidate_sha",
+        "pool_name",
+        "enabled",
+        "min_slots",
+        "max_slots",
+        "expires_at",
+        "preemptible"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "lease_epoch": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "environment": {
+          "enum": [
+            "sandbox-qianyi",
+            "sandbox-hongjian",
+            "sandbox-devansh"
+          ]
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "pool_name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "min_slots": {
+          "const": 0
+        },
+        "max_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "preemptible": {
+          "type": "boolean"
+        }
+      }
+    },
+    "auditEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "request_id",
+        "event_type",
+        "occurred_at",
+        "details"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "event_type": {
+          "enum": [
+            "request_created",
+            "grant_increased",
+            "grant_reduced",
+            "lease_observed",
+            "cancel_requested",
+            "ttl_expired"
+          ]
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

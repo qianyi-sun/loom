@@ -32,6 +32,8 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     SubprocessSlurmCommandRunner,
     build_controller_config,
     compute_controller_decision,
+    slurm_compose_project_identity,
+    slurm_sandbox_identity,
     slurm_submission_config_for_node,
 )
 from loom_control_plane.slurm_worker_jobs import (
@@ -1044,6 +1046,8 @@ def _slurm_config_from_policy(
         container_cpus=float(actor_config.get("container_cpus") or 0.0),
         container_memory_mib=int(actor_config.get("container_memory_mib") or 0),
         container_pids=int(actor_config.get("container_pids") or 0),
+        candidate_sha=str(actor_config.get("candidate_sha") or ""),
+        gpu_tres=str(actor_config.get("gpu_tres") or ""),
     )
     if config is None:
         raise ValueError("Slurm autoscaler policy unexpectedly disabled")
@@ -1053,11 +1057,15 @@ def _slurm_config_from_policy(
 def _worker_env_from_slurm_config(
     config: ElasticSlurmWorkerControllerConfig,
 ) -> dict[str, str]:
+    sandbox_identity = slurm_sandbox_identity(config)
     env = {
         "LOOM_WORKER_MAX_CONCURRENT": str(config.requested_concurrency),
         "LOOM_WORKER_POOL_NAME": config.pool_name,
         "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
         "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
+        "LOOM_WORKER_SANDBOX_IDENTITY": sandbox_identity,
+        "LOOM_WORKER_CANDIDATE_SHA": config.candidate_sha,
+        "LOOM_WORKER_SLURM_ALLOCATED_GPUS": str(config.requested_gpus),
     }
     # #896: propagate per-container caps when configured (0/unset = unbounded).
     if config.container_cpus > 0:
@@ -1328,7 +1336,13 @@ async def _apply_slurm_scale_up(
                 nodelist=node,
                 requested_cpus=node_config.requested_cpus,
                 requested_memory_mib=node_config.requested_memory_mib,
+                requested_pids=node_config.container_pids or None,
+                requested_gpu_tres=node_config.gpu_tres or None,
+                requested_gpus=node_config.requested_gpus,
                 requested_concurrency=node_config.requested_concurrency,
+                sandbox_identity=slurm_sandbox_identity(node_config),
+                candidate_sha=node_config.candidate_sha or None,
+                compose_project=slurm_compose_project_identity(node_config, job_id),
                 job_id=job_id,
                 slurm_state="PENDING",
                 pending_reason=None,
@@ -1344,7 +1358,12 @@ async def _apply_slurm_scale_up(
                 nodelist=node,
                 requested_cpus=node_config.requested_cpus,
                 requested_memory_mib=node_config.requested_memory_mib,
+                requested_pids=node_config.container_pids or None,
+                requested_gpu_tres=node_config.gpu_tres or None,
+                requested_gpus=node_config.requested_gpus,
                 requested_concurrency=node_config.requested_concurrency,
+                sandbox_identity=slurm_sandbox_identity(node_config),
+                candidate_sha=node_config.candidate_sha or None,
                 job_id=None,
                 slurm_state="FAILED",
                 pending_reason=None,

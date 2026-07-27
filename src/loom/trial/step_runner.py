@@ -384,6 +384,7 @@ def _isolated_verifier_start_options(ctx: TrialContext) -> StartOptions:
         labels=tuple(
             sorted(
                 {
+                    **dict(ctx.runtime_identity_labels),
                     "loom.trial-container": "true",
                     "loom.driver-role": "verifier",
                     "loom.trial_id": str(ctx.trial_id),
@@ -392,6 +393,11 @@ def _isolated_verifier_start_options(ctx: TrialContext) -> StartOptions:
                 }.items(),
             ),
         ),
+        container_cpus=ctx.container_cpus,
+        container_memory_mib=ctx.container_memory_mib,
+        container_pids=ctx.container_pids,
+        slurm_allocated_gpus=ctx.slurm_allocated_gpus,
+        slurm_gpu_device_ids=ctx.slurm_gpu_device_ids,
     )
 
 
@@ -453,11 +459,7 @@ def _artifact_patterns(ctx: TrialContext, step: StepConfig) -> list[str]:
     # ``.loom/verifier`` is platform-owned. Ignore task-authored patterns in
     # that namespace, including broad globs and normalized traversal aliases;
     # only the exact names selected below may reach ArtifactCollector.
-    patterns = [
-        pattern
-        for pattern in step.artifacts
-        if not _is_reserved_verifier_pattern(pattern)
-    ]
+    patterns = [pattern for pattern in step.artifacts if not _is_reserved_verifier_pattern(pattern)]
     if ctx.agent.name == "terminus-2":
         loom_agent = ".loom/agent/**"
         if loom_agent not in patterns:
@@ -513,9 +515,7 @@ def _verifier_artifact_patterns(
 
 def _is_reserved_verifier_pattern(pattern: str) -> bool:
     normalized = posixpath.normpath(pattern).lstrip("/")
-    return normalized == ".loom/verifier" or normalized.startswith(
-        ".loom/verifier/"
-    )
+    return normalized == ".loom/verifier" or normalized.startswith(".loom/verifier/")
 
 
 def _resolve_instruction(ctx: TrialContext, step: StepConfig) -> str:

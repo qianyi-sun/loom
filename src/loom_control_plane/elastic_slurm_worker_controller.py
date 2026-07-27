@@ -52,6 +52,9 @@ _QUEUE_RUNNING_STMT = (
     )
 )
 _SAFE_JOB_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
+_SAFE_SANDBOX_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_CANDIDATE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_GPU_TRES_RE = re.compile(r"^gpu(?::[A-Za-z0-9_.-]+)?:(?P<count>[1-9][0-9]*)$")
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,9 @@ class ElasticSlurmWorkerControllerConfig:
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
+    candidate_sha: str = ""
+    gpu_tres: str = ""
+    requested_gpus: int = 0
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,16 @@ def _require_positive(value: int | float, name: str) -> None:
         raise ValueError(f"{name} must be positive")
 
 
+def _parse_gpu_tres(value: str) -> tuple[str, int]:
+    cleaned = value.strip()
+    if not cleaned:
+        return "", 0
+    match = _GPU_TRES_RE.fullmatch(cleaned)
+    if match is None:
+        raise ValueError("gpu_tres must use gpu[:type]:COUNT with a positive COUNT")
+    return cleaned, int(match.group("count"))
+
+
 def build_controller_config(
     *,
     enabled: bool,
@@ -222,6 +238,8 @@ def build_controller_config(
     container_cpus: float = 0.0,
     container_memory_mib: int = 0,
     container_pids: int = 0,
+    candidate_sha: str = "",
+    gpu_tres: str = "",
 ) -> ElasticSlurmWorkerControllerConfig | None:
     if not enabled:
         return None
@@ -267,6 +285,26 @@ def build_controller_config(
         raise ValueError("container_memory_mib must be non-negative")
     if container_pids < 0:
         raise ValueError("container_pids must be non-negative")
+    candidate_sha = candidate_sha.strip()
+    if candidate_sha and _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
+        raise ValueError("candidate_sha must be a 40-character lowercase Git SHA")
+    gpu_tres, requested_gpus = _parse_gpu_tres(gpu_tres)
+    if not exclusive:
+        _require_positive(container_cpus, "container_cpus for non-exclusive workers")
+        _require_positive(
+            container_memory_mib,
+            "container_memory_mib for non-exclusive workers",
+        )
+        _require_positive(container_pids, "container_pids for non-exclusive workers")
+        if _SAFE_SANDBOX_ID_RE.fullmatch(environment) is None:
+            raise ValueError(
+                "environment must be a lowercase sandbox identity for non-exclusive workers",
+            )
+        if _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
+            raise ValueError(
+                "candidate_sha is required for non-exclusive workers and must be a "
+                "40-character lowercase Git SHA",
+            )
 
     if max_jobs > len(allowed_nodes):
         raise ValueError("max_jobs cannot exceed the number of allowed nodes")
@@ -308,6 +346,9 @@ def build_controller_config(
         container_cpus=container_cpus,
         container_memory_mib=container_memory_mib,
         container_pids=container_pids,
+        candidate_sha=candidate_sha,
+        gpu_tres=gpu_tres,
+        requested_gpus=requested_gpus,
     )
 
 
@@ -519,18 +560,38 @@ def slurm_submission_config_for_node(
     )
 
 
+def slurm_sandbox_identity(config: ElasticSlurmWorkerControllerConfig) -> str:
+    normalized = _SAFE_JOB_NAME_RE.sub("-", config.environment.lower()).strip("-")
+    return (normalized or "sandbox")[:63]
+
+
+def slurm_compose_project_identity(
+    config: ElasticSlurmWorkerControllerConfig,
+    job_id: str,
+) -> str:
+    candidate_label = (config.candidate_sha or "legacy")[:12]
+    return f"loom-{slurm_sandbox_identity(config)}-{candidate_label}-{job_id}"
+
+
 def build_sbatch_request(
     config: ElasticSlurmWorkerControllerConfig,
     *,
     node: str,
 ) -> SbatchRequest:
     job_node = _SAFE_JOB_NAME_RE.sub("-", node).strip("-") or "worker"
+    sandbox_identity = slurm_sandbox_identity(config)
+    candidate_sha = config.candidate_sha or "legacy"
+    candidate_label = candidate_sha[:12]
     export_vars = [
         "ALL",
         f"LOOM_WORKER_MAX_CONCURRENT={config.requested_concurrency}",
         f"LOOM_WORKER_POOL_NAME={config.pool_name}",
         f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
         f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
+        f"LOOM_WORKER_SANDBOX_IDENTITY={sandbox_identity}",
+        f"LOOM_WORKER_CANDIDATE_SHA={candidate_sha}",
+        f"LOOM_WORKER_SLURM_ALLOCATED_GPUS={config.requested_gpus}",
+        "LOOM_WORKER_RESTART_POLICY=no",
     ]
     # #896: only export the per-container caps when configured (>0). Unset leaves
     # the compose/driver defaults unbounded, so exclusive pools are unaffected.
@@ -546,7 +607,7 @@ def build_sbatch_request(
     args = [
         config.sbatch_path,
         "--parsable",
-        f"--job-name=loom-worker-{job_node}",
+        f"--job-name={f'loom-{sandbox_identity}-{candidate_label}-{job_node}'[:128]}",
         f"--nodelist={node}",
     ]
     if config.exclusive:
@@ -560,6 +621,8 @@ def build_sbatch_request(
         args.append(f"--qos={config.slurm_qos}")
     if config.slurm_reservation:
         args.append(f"--reservation={config.slurm_reservation}")
+    if config.gpu_tres:
+        args.append(f"--gres={config.gpu_tres}")
     args.extend(
         (
             f"--cpus-per-task={config.requested_cpus}",
@@ -571,8 +634,21 @@ def build_sbatch_request(
     stdin = """#!/usr/bin/env bash
 set -euo pipefail
 
+: "${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
+: "${LOOM_WORKER_SANDBOX_IDENTITY:?LOOM_WORKER_SANDBOX_IDENTITY is required}"
+: "${LOOM_WORKER_CANDIDATE_SHA:?LOOM_WORKER_CANDIDATE_SHA is required}"
+export LOOM_WORKER_SLURM_JOB_ID="$SLURM_JOB_ID"
+export LOOM_WORKER_SLURM_GPU_DEVICE_IDS="${SLURM_JOB_GPUS:-}"
+if [[ "${LOOM_WORKER_SLURM_ALLOCATED_GPUS:?}" -gt 0 && -z "$LOOM_WORKER_SLURM_GPU_DEVICE_IDS" ]]; then
+  echo "error: GPU TRES was requested but SLURM_JOB_GPUS is empty" >&2
+  exit 2
+fi
+project_candidate="${LOOM_WORKER_CANDIDATE_SHA:0:12}"
+project_job="${SLURM_JOB_ID//[^A-Za-z0-9_-]/-}"
+export LOOM_WORKER_COMPOSE_PROJECT="loom-${LOOM_WORKER_SANDBOX_IDENTITY}-${project_candidate}-${project_job}"
+
 cd "$LOOM_REMOTE_WORKER_REPO_DIR"
-compose_args=(--env-file "$LOOM_REMOTE_WORKER_ENV_FILE" -f deploy/docker-compose.remote-worker.yml)
+compose_args=(--project-name "$LOOM_WORKER_COMPOSE_PROJECT" --env-file "$LOOM_REMOTE_WORKER_ENV_FILE" -f deploy/docker-compose.remote-worker.yml)
 
 cleanup() {
   status=${1:-$?}
@@ -581,7 +657,11 @@ cleanup() {
     kill "$compose_pid" 2>/dev/null || true
     wait "$compose_pid" 2>/dev/null || true
   fi
-  docker compose "${compose_args[@]}" down --remove-orphans || true
+  cleanup_status=0
+  docker compose "${compose_args[@]}" down --remove-orphans || cleanup_status=$?
+  if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+    status=$cleanup_status
+  fi
   exit "$status"
 }
 
@@ -984,7 +1064,13 @@ async def run_elastic_slurm_worker_controller_once(
                 nodelist=node,
                 requested_cpus=node_config.requested_cpus,
                 requested_memory_mib=node_config.requested_memory_mib,
+                requested_pids=node_config.container_pids or None,
+                requested_gpu_tres=node_config.gpu_tres or None,
+                requested_gpus=node_config.requested_gpus,
                 requested_concurrency=node_config.requested_concurrency,
+                sandbox_identity=slurm_sandbox_identity(node_config),
+                candidate_sha=node_config.candidate_sha or None,
+                compose_project=slurm_compose_project_identity(node_config, job_id),
                 job_id=job_id,
                 slurm_state="PENDING",
                 pending_reason=None,
@@ -1000,7 +1086,12 @@ async def run_elastic_slurm_worker_controller_once(
                 nodelist=node,
                 requested_cpus=node_config.requested_cpus,
                 requested_memory_mib=node_config.requested_memory_mib,
+                requested_pids=node_config.container_pids or None,
+                requested_gpu_tres=node_config.gpu_tres or None,
+                requested_gpus=node_config.requested_gpus,
                 requested_concurrency=node_config.requested_concurrency,
+                sandbox_identity=slurm_sandbox_identity(node_config),
+                candidate_sha=node_config.candidate_sha or None,
                 job_id=None,
                 slurm_state="FAILED",
                 pending_reason=None,
@@ -1062,6 +1153,9 @@ def _worker_env(config: ElasticSlurmWorkerControllerConfig) -> dict[str, str]:
         "LOOM_WORKER_POOL_NAME": config.pool_name,
         "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
         "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
+        "LOOM_WORKER_SANDBOX_IDENTITY": slurm_sandbox_identity(config),
+        "LOOM_WORKER_CANDIDATE_SHA": config.candidate_sha,
+        "LOOM_WORKER_SLURM_ALLOCATED_GPUS": str(config.requested_gpus),
     }
     try:
         fingerprint = worker_token_fingerprint_from_env_file(Path(config.env_file))

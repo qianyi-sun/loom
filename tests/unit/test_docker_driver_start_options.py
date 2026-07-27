@@ -10,6 +10,7 @@ import pytest
 import loom.driver.docker as docker_module
 from loom.driver.base import StartOptions
 from loom.driver.docker import DockerDriver
+from loom.errors import DriverError
 
 
 class _FakeContainer:
@@ -310,3 +311,81 @@ async def test_docker_driver_omits_container_caps_when_unset(
     assert "mem_limit" not in create_kwargs
     assert "pids_limit" not in create_kwargs
     assert container.started is True
+
+
+async def test_docker_driver_rejects_gpu_request_above_slurm_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+    driver = DockerDriver(
+        image="loom-agent-sandbox:dev",
+        workspace=PurePosixPath("/workspace"),
+    )
+
+    with pytest.raises(DriverError, match="exceeds the Slurm allocation"):
+        await driver.start(
+            options=StartOptions(
+                gpus=2,
+                slurm_allocated_gpus=1,
+                slurm_gpu_device_ids=("0",),
+            ),
+        )
+
+
+async def test_docker_driver_binds_only_slurm_allocated_gpu_devices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_kwargs: dict[str, Any] = {}
+    container = _FakeContainer()
+
+    class _Containers:
+        def create(self, image: str, **kwargs: Any) -> object:
+            create_kwargs.update(kwargs)
+            return container
+
+    class _Client:
+        containers = _Containers()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+    monkeypatch.setattr(
+        docker_module.docker.types,
+        "DeviceRequest",
+        lambda **kwargs: kwargs,
+    )
+
+    async def _noop_wait(self: DockerDriver) -> None:
+        return None
+
+    async def _noop_policy(self: DockerDriver, policy: object) -> None:
+        return None
+
+    monkeypatch.setattr(DockerDriver, "_wait_until_running", _noop_wait)
+    monkeypatch.setattr(DockerDriver, "set_network_policy", _noop_policy)
+
+    driver = DockerDriver(
+        image="loom-agent-sandbox:dev",
+        workspace=PurePosixPath("/workspace"),
+    )
+    await driver.start(
+        options=StartOptions(
+            gpus=1,
+            slurm_allocated_gpus=2,
+            slurm_gpu_device_ids=("3", "7"),
+        ),
+    )
+
+    assert create_kwargs["device_requests"] == [
+        {
+            "device_ids": ["3"],
+            "capabilities": [["gpu"]],
+        },
+    ]

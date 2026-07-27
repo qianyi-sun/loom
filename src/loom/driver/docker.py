@@ -166,12 +166,31 @@ class DockerDriver:
             if opts.container_pids > 0:
                 run_kwargs["pids_limit"] = opts.container_pids
             if opts.gpus:
-                run_kwargs["device_requests"] = [
-                    docker.types.DeviceRequest(
-                        count=opts.gpus,
-                        capabilities=[["gpu"]],
-                    )
-                ]
+                if opts.slurm_allocated_gpus >= 0:
+                    if opts.gpus > opts.slurm_allocated_gpus:
+                        raise DriverError(
+                            "trial GPU request exceeds the Slurm allocation: "
+                            f"requested={opts.gpus} allocated={opts.slurm_allocated_gpus}",
+                        )
+                    if len(opts.slurm_gpu_device_ids) < opts.gpus:
+                        raise DriverError(
+                            "Slurm GPU allocation is missing host device IDs: "
+                            f"requested={opts.gpus} "
+                            f"device_ids={len(opts.slurm_gpu_device_ids)}",
+                        )
+                    run_kwargs["device_requests"] = [
+                        docker.types.DeviceRequest(
+                            device_ids=list(opts.slurm_gpu_device_ids[: opts.gpus]),
+                            capabilities=[["gpu"]],
+                        )
+                    ]
+                else:
+                    run_kwargs["device_requests"] = [
+                        docker.types.DeviceRequest(
+                            count=opts.gpus,
+                            capabilities=[["gpu"]],
+                        )
+                    ]
             # docker-py's high-level containers.run() creates before it starts,
             # but it does not return the Container if start() raises. Split the
             # steps so the failure cleanup path can remove Created containers.
@@ -310,7 +329,8 @@ class DockerDriver:
 
         if timeout_sec is not None:
             exit_code, stdout, stderr = await asyncio.wait_for(
-                asyncio.to_thread(_sync), timeout=timeout_sec,
+                asyncio.to_thread(_sync),
+                timeout=timeout_sec,
             )
         else:
             exit_code, stdout, stderr = await asyncio.to_thread(_sync)
@@ -368,7 +388,10 @@ class DockerDriver:
         # (stdout_chunk, stderr_chunk) tuples (either side may be None for
         # a chunk that only carries the other stream).
         raw_stream = await asyncio.to_thread(
-            api.exec_start, exec_id, stream=True, demux=True,
+            api.exec_start,
+            exec_id,
+            stream=True,
+            demux=True,
         )
 
         stdout_q: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -420,7 +443,8 @@ class DockerDriver:
             # SIGKILL when the iterator blocks indefinitely.
             poll_task = asyncio.create_task(_poll_exit())
             done, pending = await asyncio.wait(
-                {reader_task, poll_task}, return_when=asyncio.FIRST_COMPLETED,
+                {reader_task, poll_task},
+                return_when=asyncio.FIRST_COMPLETED,
             )
             for t in pending:
                 t.cancel()
@@ -536,8 +560,7 @@ class DockerDriver:
         r = await self.exec(script, user="root", timeout_sec=30)
         if r.return_code != 0:
             raise DriverError(
-                f"network policy apply failed: rc={r.return_code} "
-                f"stderr={r.stderr[:512]!r}",
+                f"network policy apply failed: rc={r.return_code} stderr={r.stderr[:512]!r}",
             )
         self.network_policy_baseline = policy
 

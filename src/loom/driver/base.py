@@ -76,6 +76,11 @@ class StartOptions:
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
+    # #1023: -1 preserves unmanaged/local Docker behavior. Slurm workers set
+    # this to their exact allocation (including 0) and pass the host-visible
+    # SLURM_JOB_GPUS IDs so Docker cannot select a device outside the job.
+    slurm_allocated_gpus: int = -1
+    slurm_gpu_device_ids: tuple[str, ...] = ()
 
 
 @dataclass

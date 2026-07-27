@@ -42,16 +42,16 @@ def task_sidecar_image_tag(
     dockerfile = sidecar.dockerfile
     dockerfile_text = dockerfile.as_posix() if dockerfile is not None else ""
     build_context = sidecar.docker_build_context
-    build_context_text = (
-        build_context.as_posix() if build_context is not None else ""
+    build_context_text = build_context.as_posix() if build_context is not None else ""
+    material = "\n".join(
+        [
+            task_config.task.id,
+            task_checksum,
+            sidecar.name,
+            dockerfile_text,
+            build_context_text,
+        ]
     )
-    material = "\n".join([
-        task_config.task.id,
-        task_checksum,
-        sidecar.name,
-        dockerfile_text,
-        build_context_text,
-    ])
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return f"loom-sidecar:{digest}"
 
@@ -70,6 +70,7 @@ class DockerTaskSidecarRuntime:
         container_cpus: float = 0.0,
         container_memory_mib: int = 0,
         container_pids: int = 0,
+        runtime_identity_labels: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.task_config = task_config
         self.task_dir = task_dir
@@ -83,6 +84,7 @@ class DockerTaskSidecarRuntime:
         self.container_cpus = container_cpus
         self.container_memory_mib = container_memory_mib
         self.container_pids = container_pids
+        self.runtime_identity_labels = runtime_identity_labels
         self._client: Any | None = None
         self._containers: list[Any] = []
         self._network: Any | None = None
@@ -169,8 +171,7 @@ class DockerTaskSidecarRuntime:
             return sidecar.docker_image
         if sidecar.dockerfile is None:
             raise TaskImageBuildError(
-                f"sidecar {sidecar.name!r} declares neither docker_image nor "
-                "dockerfile",
+                f"sidecar {sidecar.name!r} declares neither docker_image nor dockerfile",
             )
         dockerfile = _resolve_dockerfile_path(
             task_dir=self.task_dir,
@@ -270,6 +271,7 @@ class DockerTaskSidecarRuntime:
                 ),
             },
             "labels": {
+                **dict(self.runtime_identity_labels),
                 "loom.setup-container": "true",
                 "loom.task-sidecar": "true",
                 "loom.task_id": self.task_config.task.id,
@@ -324,17 +326,13 @@ class DockerTaskSidecarRuntime:
         while loop.time() <= deadline:
             await asyncio.to_thread(container.reload)
             status = (
-                getattr(container, "attrs", {})
-                .get("State", {})
-                .get("Health", {})
-                .get("Status")
+                getattr(container, "attrs", {}).get("State", {}).get("Health", {}).get("Status")
             )
             if status == "healthy":
                 return
             if status == "unhealthy":
                 raise TaskImageBuildError(
-                    f"sidecar {getattr(container, 'name', '<unknown>')} "
-                    "became unhealthy",
+                    f"sidecar {getattr(container, 'name', '<unknown>')} became unhealthy",
                 )
             await asyncio.sleep(self.health_poll_interval_sec)
         raise TaskImageBuildError(

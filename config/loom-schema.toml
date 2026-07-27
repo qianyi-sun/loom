@@ -856,6 +856,42 @@ python_type = "int"
 default     = 0
 description = "#896 per-container hard PID cap for the trial and setup-sidecar containers this worker creates. Maps to Docker pids_limit. 0 = unbounded (default); non-exclusive (packed) nodes set a positive ceiling to bound fork-bomb blast radius on a shared double-duty node."
 
+[service_config.sandbox_identity]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Developer sandbox/environment identity for Slurm worker, trial, sidecar, Compose-project, and cleanup scoping. Empty is allowed only for legacy non-Slurm workers."
+
+[service_config.candidate_sha]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Exact lowercase 40-character candidate SHA bound to this Slurm worker job and propagated to every worker-created container label."
+
+[service_config.slurm_job_id]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Slurm allocation job ID injected by the batch script. Used with sandbox_identity and candidate_sha to scope Compose and Docker cleanup."
+
+[service_config.compose_project]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Per-job Docker Compose project name derived from sandbox identity, candidate SHA, and Slurm job ID."
+
+[service_config.slurm_allocated_gpus]
+used_by     = ["worker"]
+python_type = "int"
+default     = -1
+description = "GPU count granted to the Slurm job. -1 means non-Slurm/unmanaged; 0 denies GPU containers; positive values require device IDs from SLURM_JOB_GPUS."
+
+[service_config.slurm_gpu_device_ids]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Comma-separated host GPU device IDs from SLURM_JOB_GPUS. Docker trial requests are restricted to this exact allocation."
+
 [service_config.fixtures_root]
 used_by     = ["worker"]
 python_type = "Path"

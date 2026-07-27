@@ -122,6 +122,9 @@ class TrialContext:
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
+    runtime_identity_labels: tuple[tuple[str, str], ...] = ()
+    slurm_allocated_gpus: int = -1
+    slurm_gpu_device_ids: tuple[str, ...] = ()
 
     @property
     def task_id(self) -> str:
@@ -222,6 +225,7 @@ class Trial:
                             labels=tuple(
                                 sorted(
                                     {
+                                        **dict(self.ctx.runtime_identity_labels),
                                         "loom.trial-container": "true",
                                         "loom.trial_id": str(self.ctx.trial_id),
                                         "loom.team_id": str(self.ctx.team_id),
@@ -237,6 +241,8 @@ class Trial:
                             container_cpus=self.ctx.container_cpus,
                             container_memory_mib=self.ctx.container_memory_mib,
                             container_pids=self.ctx.container_pids,
+                            slurm_allocated_gpus=self.ctx.slurm_allocated_gpus,
+                            slurm_gpu_device_ids=self.ctx.slurm_gpu_device_ids,
                         )
                     )
                     driver_started = True

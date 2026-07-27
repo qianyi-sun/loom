@@ -891,7 +891,10 @@ class Task(Base):
     # Immutable upstream identity for benchmark-imported tasks. Legacy tasks
     # default to an empty object; profile-specific importers populate it.
     source_provenance: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     registered_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -1320,6 +1323,18 @@ class SlurmWorkerJob(Base):
             name="slurm_worker_jobs_requested_memory_positive_check",
         ),
         CheckConstraint(
+            "requested_pids IS NULL OR requested_pids > 0",
+            name="slurm_worker_jobs_requested_pids_positive_check",
+        ),
+        CheckConstraint(
+            "requested_gpus >= 0",
+            name="slurm_worker_jobs_requested_gpus_nonnegative_check",
+        ),
+        CheckConstraint(
+            "candidate_sha IS NULL OR candidate_sha ~ '^[0-9a-f]{40}$'",
+            name="slurm_worker_jobs_candidate_sha_check",
+        ),
+        CheckConstraint(
             "requested_concurrency > 0",
             name="slurm_worker_jobs_requested_concurrency_positive_check",
         ),
@@ -1336,9 +1351,18 @@ class SlurmWorkerJob(Base):
             "nodelist",
             text("coalesce(requested_cpus, -1)"),
             text("coalesce(requested_memory_mib, -1)"),
+            text("coalesce(requested_pids, -1)"),
+            text("coalesce(requested_gpu_tres, '')"),
+            "requested_gpus",
             "requested_concurrency",
             unique=True,
             postgresql_where=text("state IN ('pending', 'running')"),
+        ),
+        Index(
+            "slurm_worker_jobs_sandbox_candidate_state_idx",
+            "sandbox_identity",
+            "candidate_sha",
+            "state",
         ),
     )
 
@@ -1348,7 +1372,18 @@ class SlurmWorkerJob(Base):
     nodelist: Mapped[str] = mapped_column(Text, nullable=False)
     requested_cpus: Mapped[int | None] = mapped_column(Integer, nullable=True)
     requested_memory_mib: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requested_pids: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requested_gpu_tres: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_gpus: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
+    )
     requested_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
+    sandbox_identity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    compose_project: Mapped[str | None] = mapped_column(Text, nullable=True)
     job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     slurm_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[str] = mapped_column(

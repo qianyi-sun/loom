@@ -71,7 +71,7 @@ def _compose_args(compose_file: Path, env_file: Path | None) -> list[str]:
 
 
 def _mutable_dev_images(compose_file: Path) -> tuple[str, ...]:
-    """Return repo-built mutable ``loom-*:dev`` images in a compose file.
+    """Return repo-built mutable local images in a compose file.
 
     Local ``:dev`` tags are intentionally mutable.  They therefore cannot be
     trusted as source-fresh merely because Docker has an image with that tag.
@@ -79,9 +79,10 @@ def _mutable_dev_images(compose_file: Path) -> tuple[str, ...]:
     ``docker compose up --build`` before any container starts.  Compose/
     BuildKit then reuses fresh layers and rebuilds stale build inputs.
 
-    This parser deliberately reads only literal ``image:`` scalars.  Custom
-    compose files with immutable or parameterised image references keep their
-    existing no-build behaviour instead of being guessed at.
+    In addition to literal ``:dev`` tags, the checked-in developer Compose file
+    uses the exact ``${LOOM_DEV_IMAGE_TAG:-dev}`` suffix so independently named
+    sandbox projects do not overwrite each other's image tags. Other
+    parameterised references remain excluded rather than being guessed at.
     """
     images: set[str] = set()
     image_line = re.compile(r"^\s+image:\s*['\"]?([^'\"\s#]+)")
@@ -90,7 +91,10 @@ def _mutable_dev_images(compose_file: Path) -> tuple[str, ...]:
         if match is None:
             continue
         image = match.group(1)
-        if _MUTABLE_DEV_IMAGE_RE.fullmatch(image):
+        if _MUTABLE_DEV_IMAGE_RE.fullmatch(image) or (
+            image.startswith("loom-")
+            and image.endswith(":${LOOM_DEV_IMAGE_TAG:-dev}")
+        ):
             images.add(image)
     return tuple(sorted(images))
 

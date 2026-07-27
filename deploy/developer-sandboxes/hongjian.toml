@@ -1,0 +1,32 @@
+schema_version = 1
+sandbox = "hongjian"
+ssh_target = "oldlab-2"
+canonical_hostname = "trt-eai-oldlab-2"
+compose_project = "loom-sandbox-hongjian"
+bind_address = "127.0.0.1"
+provider_connection_namespace = "sandbox-hongjian"
+candidate_root = "/shared_work/loom/candidates/sandboxes/hongjian"
+state_root = "/srv/loom/developer-sandboxes/hongjian"
+cache_root = "/srv/loom/developer-sandboxes/hongjian/cache"
+evidence_root = "/srv/loom/developer-sandboxes/hongjian/evidence"
+runtime_root = "/srv/loom/developer-sandboxes/hongjian/runtime"
+
+[ports]
+postgres = 21532
+minio = 21900
+minio_console = 21901
+control_plane = 21080
+loom_service = 21090
+llm_gateway = 21100
+egress_xds = 21800
+egress_proxy = 21443
+egress_admin = 21991
+web = 21173
+
+[database]
+name = "loom_sandbox_hongjian"
+
+[object_store]
+task_bucket = "loom-sandbox-hongjian-tasks"
+trajectories_bucket = "loom-sandbox-hongjian-trajectories"
+artifacts_bucket = "loom-sandbox-hongjian-artifacts"

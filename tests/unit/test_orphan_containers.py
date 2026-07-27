@@ -5,7 +5,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from loom_worker.orphan_containers import cleanup_orphan_sandbox_containers
+from loom_worker.orphan_containers import (
+    cleanup_orphan_sandbox_containers as _cleanup_orphan_sandbox_containers,
+)
+
+_SANDBOX = "dev-a"
+
+
+def cleanup_orphan_sandbox_containers(**kwargs: Any) -> list[UUID]:
+    return _cleanup_orphan_sandbox_containers(
+        sandbox_identity=_SANDBOX,
+        **kwargs,
+    )
 
 
 @dataclass
@@ -15,6 +26,10 @@ class FakeContainer:
     attrs: dict[str, Any] = field(default_factory=dict)
     removed: bool = False
     remove_raises: Exception | None = None
+
+    def __post_init__(self) -> None:
+        if "loom.trial_id" in self.labels:
+            self.labels.setdefault("loom.sandbox", _SANDBOX)
 
     def remove(self, *, force: bool = False) -> None:
         if self.remove_raises is not None:
@@ -31,7 +46,7 @@ class FakeContainers:
         self,
         *,
         all: bool = False,
-        filters: dict[str, str] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[FakeContainer]:
         self.calls.append({"all": all, "filters": filters})
         return list(self._containers)
@@ -73,14 +88,24 @@ def test_removes_terminal_trials() -> None:
     assert set(removed) == {trial_a, trial_b, trial_c}
     assert all(c.removed for c in containers)
     assert client.containers.calls == [
-        {"all": True, "filters": {"label": "loom.trial_id"}},
+        {
+            "all": True,
+            "filters": {
+                "label": [
+                    "loom.trial_id",
+                    f"loom.sandbox={_SANDBOX}",
+                ],
+            },
+        },
     ]
 
 
 def test_removes_unknown_trials() -> None:
     trial_a = uuid4()
     container = FakeContainer(
-        id="c1", labels={"loom.trial_id": str(trial_a)}, attrs=_fresh(),
+        id="c1",
+        labels={"loom.trial_id": str(trial_a)},
+        attrs=_fresh(),
     )
     client = FakeDockerClient([container])
 
@@ -88,7 +113,8 @@ def test_removes_unknown_trials() -> None:
         raise LookupError
 
     removed = cleanup_orphan_sandbox_containers(
-        docker_client=client, state_lookup=lookup,
+        docker_client=client,
+        state_lookup=lookup,
     )
     assert removed == [trial_a]
     assert container.removed
@@ -97,12 +123,15 @@ def test_removes_unknown_trials() -> None:
 def test_preserves_non_terminal_when_fresh() -> None:
     trial_a = uuid4()
     container = FakeContainer(
-        id="c1", labels={"loom.trial_id": str(trial_a)}, attrs=_fresh(),
+        id="c1",
+        labels={"loom.trial_id": str(trial_a)},
+        attrs=_fresh(),
     )
     client = FakeDockerClient([container])
 
     removed = cleanup_orphan_sandbox_containers(
-        docker_client=client, state_lookup=lambda _t: "running",
+        docker_client=client,
+        state_lookup=lambda _t: "running",
     )
     assert removed == []
     assert not container.removed
@@ -111,12 +140,15 @@ def test_preserves_non_terminal_when_fresh() -> None:
 def test_removes_non_terminal_when_older_than_fallback() -> None:
     trial_a = uuid4()
     container = FakeContainer(
-        id="c1", labels={"loom.trial_id": str(trial_a)}, attrs=_stale(),
+        id="c1",
+        labels={"loom.trial_id": str(trial_a)},
+        attrs=_stale(),
     )
     client = FakeDockerClient([container])
 
     removed = cleanup_orphan_sandbox_containers(
-        docker_client=client, state_lookup=lambda _t: "claimed",
+        docker_client=client,
+        state_lookup=lambda _t: "claimed",
     )
     assert removed == [trial_a]
     assert container.removed
@@ -129,12 +161,15 @@ def test_preserves_non_terminal_when_startedat_missing() -> None:
     shape ever regresses."""
     trial_a = uuid4()
     container = FakeContainer(
-        id="c1", labels={"loom.trial_id": str(trial_a)}, attrs={"State": {}},
+        id="c1",
+        labels={"loom.trial_id": str(trial_a)},
+        attrs={"State": {}},
     )
     client = FakeDockerClient([container])
 
     removed = cleanup_orphan_sandbox_containers(
-        docker_client=client, state_lookup=lambda _t: "running",
+        docker_client=client,
+        state_lookup=lambda _t: "running",
     )
     assert removed == []
     assert not container.removed
@@ -145,7 +180,9 @@ def test_preserves_on_cp_unreachable() -> None:
     do NOT delete containers (fail-safe). Next startup retries."""
     trial_a = uuid4()
     container = FakeContainer(
-        id="c1", labels={"loom.trial_id": str(trial_a)}, attrs=_stale(),
+        id="c1",
+        labels={"loom.trial_id": str(trial_a)},
+        attrs=_stale(),
     )
     client = FakeDockerClient([container])
 
@@ -153,7 +190,8 @@ def test_preserves_on_cp_unreachable() -> None:
         raise ConnectionError("cp down")
 
     removed = cleanup_orphan_sandbox_containers(
-        docker_client=client, state_lookup=lookup,
+        docker_client=client,
+        state_lookup=lookup,
     )
     assert removed == []
     assert not container.removed
@@ -177,7 +215,8 @@ def test_skips_containers_with_missing_or_malformed_label() -> None:
     client = FakeDockerClient(containers)
 
     removed = cleanup_orphan_sandbox_containers(
-        docker_client=client, state_lookup=lambda _t: "succeeded",
+        docker_client=client,
+        state_lookup=lambda _t: "succeeded",
     )
     assert removed == [good_trial]
     assert containers[0].removed is False
@@ -211,12 +250,15 @@ def test_remove_failure_does_not_break_sweep() -> None:
         remove_raises=RuntimeError("docker api hiccup"),
     )
     cb = FakeContainer(
-        id="cb", labels={"loom.trial_id": str(trial_b)}, attrs=_fresh(),
+        id="cb",
+        labels={"loom.trial_id": str(trial_b)},
+        attrs=_fresh(),
     )
     client = FakeDockerClient([ca, cb])
 
     removed = cleanup_orphan_sandbox_containers(
-        docker_client=client, state_lookup=lambda _t: "succeeded",
+        docker_client=client,
+        state_lookup=lambda _t: "succeeded",
     )
     assert removed == [trial_b]
     assert cb.removed is True
@@ -225,11 +267,7 @@ def test_remove_failure_does_not_break_sweep() -> None:
 def test_uses_explicit_now_and_fallback_window() -> None:
     trial_a = uuid4()
     started_at_epoch = 1_700_000_000.0
-    started_at = (
-        datetime.fromtimestamp(started_at_epoch, tz=UTC)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
+    started_at = datetime.fromtimestamp(started_at_epoch, tz=UTC).isoformat().replace("+00:00", "Z")
     container = FakeContainer(
         id="c1",
         labels={"loom.trial_id": str(trial_a)},
@@ -254,3 +292,72 @@ def test_uses_explicit_now_and_fallback_window() -> None:
     )
     assert removed == [trial_a]
     assert container.removed
+
+
+def test_preserves_unknown_trial_from_another_sandbox() -> None:
+    trial_id = uuid4()
+    container = FakeContainer(
+        id="cross-sandbox",
+        labels={
+            "loom.trial_id": str(trial_id),
+            "loom.sandbox": "dev-b",
+        },
+        attrs=_stale(),
+    )
+    client = FakeDockerClient([container])
+    looked_up: list[UUID] = []
+
+    def lookup(value: UUID) -> str:
+        looked_up.append(value)
+        raise LookupError
+
+    removed = cleanup_orphan_sandbox_containers(
+        docker_client=client,
+        state_lookup=lookup,
+    )
+
+    assert removed == []
+    assert looked_up == []
+    assert not container.removed
+
+
+def test_legacy_cleanup_removes_only_unlabelled_legacy_container() -> None:
+    legacy_trial = uuid4()
+    sandbox_trial = uuid4()
+    legacy = FakeContainer(
+        id="legacy",
+        labels={"loom.trial_id": str(legacy_trial)},
+        attrs=_fresh(),
+    )
+    legacy.labels.pop("loom.sandbox")
+    sandbox = FakeContainer(
+        id="sandbox",
+        labels={
+            "loom.trial_id": str(sandbox_trial),
+            "loom.sandbox": "dev-b",
+        },
+        attrs=_fresh(),
+    )
+    client = FakeDockerClient([legacy, sandbox])
+    looked_up: list[UUID] = []
+
+    def lookup(value: UUID) -> str:
+        looked_up.append(value)
+        return "succeeded"
+
+    removed = _cleanup_orphan_sandbox_containers(
+        docker_client=client,
+        state_lookup=lookup,
+        sandbox_identity="",
+    )
+
+    assert removed == [legacy_trial]
+    assert looked_up == [legacy_trial]
+    assert legacy.removed
+    assert not sandbox.removed
+    assert client.containers.calls == [
+        {
+            "all": True,
+            "filters": {"label": ["loom.trial_id"]},
+        },
+    ]

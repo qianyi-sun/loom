@@ -73,14 +73,36 @@ def test_remote_worker_compose_container_caps_passthrough() -> None:
     # Numeric 0 default (== schema default). NOT empty — the WorkerSettings
     # float/int fields cannot parse "" and would crash worker startup.
     assert env["LOOM_WORKER_CONTAINER_CPUS"] == "${LOOM_WORKER_CONTAINER_CPUS:-0}"
-    assert env["LOOM_WORKER_CONTAINER_MEMORY_MIB"] == (
-        "${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}"
-    )
+    assert env["LOOM_WORKER_CONTAINER_MEMORY_MIB"] == ("${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}")
     assert env["LOOM_WORKER_CONTAINER_PIDS"] == "${LOOM_WORKER_CONTAINER_PIDS:-0}"
     # The compose-level caps bound THIS container (unbounded by default).
     assert worker["cpus"] == "${LOOM_WORKER_CONTAINER_CPUS:-0}"
     assert worker["mem_limit"] == "${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}m"
     assert worker["pids_limit"] == "${LOOM_WORKER_CONTAINER_PIDS:--1}"
+
+
+def test_remote_worker_compose_stamps_slurm_identity_and_disables_restart() -> None:
+    worker = _worker_service(_COMPOSE)
+    env = _env_map(worker["environment"])
+
+    assert env["LOOM_WORKER_SANDBOX_IDENTITY"] == (
+        "${LOOM_WORKER_SANDBOX_IDENTITY:-manual}"
+    )
+    assert env["LOOM_WORKER_CANDIDATE_SHA"] == (
+        "${LOOM_WORKER_CANDIDATE_SHA:-legacy}"
+    )
+    assert env["LOOM_WORKER_SLURM_JOB_ID"] == "${LOOM_WORKER_SLURM_JOB_ID:-none}"
+    assert env["LOOM_WORKER_COMPOSE_PROJECT"] == (
+        "${LOOM_WORKER_COMPOSE_PROJECT:-manual}"
+    )
+    assert env["LOOM_WORKER_SLURM_ALLOCATED_GPUS"] == ("${LOOM_WORKER_SLURM_ALLOCATED_GPUS:--1}")
+    assert worker["labels"] == {
+        "loom.sandbox": "${LOOM_WORKER_SANDBOX_IDENTITY:-manual}",
+        "loom.candidate_sha": "${LOOM_WORKER_CANDIDATE_SHA:-legacy}",
+        "loom.slurm_job_id": "${LOOM_WORKER_SLURM_JOB_ID:-none}",
+        "loom.compose_project": "${LOOM_WORKER_COMPOSE_PROJECT:-manual}",
+    }
+    assert worker["restart"] == "${LOOM_WORKER_RESTART_POLICY:-on-failure}"
 
 
 def test_compose_workers_raise_nofile_limit_for_concurrent_sandboxes() -> None:
@@ -102,8 +124,7 @@ def test_dev_compose_published_ports_default_to_loopback() -> None:
 
     assert published, "expected dev compose to publish local development ports"
     assert all(
-        isinstance(port, str)
-        and port.startswith("${LOOM_DEV_BIND_ADDR:-127.0.0.1}:")
+        isinstance(port, str) and port.startswith("${LOOM_DEV_BIND_ADDR:-127.0.0.1}:")
         for port in published
     )
 
