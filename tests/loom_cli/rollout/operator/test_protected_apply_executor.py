@@ -482,3 +482,41 @@ def test_subprocess_runner_has_fixed_environment_and_redacted_failure(
             input_payload=b"manifest\n",
             timeout_seconds=5,
         )
+
+
+def test_subprocess_runner_accepts_multiline_argv_but_rejects_empty_and_nul(
+    monkeypatch,
+) -> None:
+    runner = SubprocessProtectedApplyCommandRunner()
+    seen: list[tuple[str, ...]] = []
+
+    def run(argv, **_kwargs):
+        seen.append(tuple(argv))
+        return SimpleNamespace(returncode=0, stdout=b"{}\n", stderr=b"")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.run",
+        run,
+    )
+
+    # The rate-card inventory read passes a multi-line SQL literal as one argv
+    # element via `kubectl exec ... -- sh -ceu '... psql -c "$1"' sh <SQL>`.
+    # A newline is literal argument text (no shell), so it must be accepted.
+    multiline_sql = "\nSELECT jsonb_build_object(\n  'rate_cards', '[]'::jsonb\n);\n"
+    assert (
+        runner.capture_stdout(
+            ("kubectl", "exec", "statefulset/loom-postgres", "--", "sh", "-ceu", "x", "sh", multiline_sql),
+            env=runner.environment,
+            timeout_seconds=5,
+        )
+        == b"{}\n"
+    )
+    assert seen[0][-1] == multiline_sql
+
+    for bad in ("", "with\x00nul"):
+        with pytest.raises(ValueError, match="invocation is invalid"):
+            runner.capture_stdout(
+                ("kubectl", "exec", bad),
+                env=runner.environment,
+                timeout_seconds=5,
+            )
