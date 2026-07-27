@@ -328,7 +328,8 @@ unit_paths = {unit_paths!r}
 def run(argv, *, cwd=None):
     return subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True,
                           timeout=10, env={{"HOME": str(pathlib.Path.home()), "LANG": "C.UTF-8",
-                          "LC_ALL": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin"}})
+                          "LC_ALL": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin",
+                          "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
 
 def git(root, *args):
     result = run(["git", "-c", f"safe.directory={{root}}", "-C", str(root), *args])
@@ -500,7 +501,8 @@ def run(argv, *, cwd=None):
     result = subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True,
                             timeout=120, env={{"HOME": str(pathlib.Path.home()),
                             "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
-                            "PATH": "/usr/local/bin:/usr/bin:/bin"}})
+                            "PATH": "/usr/local/bin:/usr/bin:/bin",
+                            "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
     if result.returncode != 0:
         raise SystemExit(1)
 
@@ -508,7 +510,8 @@ def output(argv):
     result = subprocess.run(argv, check=False, capture_output=True, text=True,
                             timeout=20, env={{"HOME": str(pathlib.Path.home()),
                             "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
-                            "PATH": "/usr/local/bin:/usr/bin:/bin"}})
+                            "PATH": "/usr/local/bin:/usr/bin:/bin",
+                            "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
     if result.returncode != 0 or result.stderr:
         raise SystemExit(1)
     return result.stdout.strip()

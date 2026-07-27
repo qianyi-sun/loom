@@ -255,7 +255,13 @@ def _run_command(
     command = tuple(argv)
     if (
         not command
-        or any(not item or "\x00" in item or "\n" in item for item in command)
+        # A newline is NOT rejected: the GB10 fleet observation and other remote
+        # probes are dispatched as a single `python3 -c <multi-line source>` argv
+        # element (identical to the read-only gb10_readiness probe), and every
+        # command here runs via subprocess argv with no shell, so an embedded
+        # newline is literal argument text, not an injection vector. A NUL byte
+        # is still rejected (it cannot appear in an execve argument).
+        or any(not item or "\x00" in item for item in command)
         or not 1 <= timeout <= 900
     ):
         raise ValueError("installed final command is invalid")
