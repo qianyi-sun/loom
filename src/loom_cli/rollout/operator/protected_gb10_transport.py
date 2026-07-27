@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import shlex
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -36,6 +37,11 @@ _UNIT_ROOT = PurePosixPath("deploy/worker-pools/gb10")
 _FIXED_REPO = PurePosixPath("/home/qianyi/loom-worker-build-staging")
 _FIXED_ENV_FILE = _FIXED_REPO / ".env"
 _FIXED_NODE_AGENT_SERVICE = "loom-gb10-node-agent.service"
+# Installed transports retry transient single-bastion SSH failures. Six attempts
+# with a 2s pause tolerate the connection storms the fleet observe competes with
+# (the 30s autoscaler cadence) while keeping the total per-host budget bounded.
+_INSTALLED_OBSERVE_ATTEMPTS = 6
+_INSTALLED_OBSERVE_INTERVAL_SECONDS = 2.0
 _FIXED_IDENTITY = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
 _MAX_OUTPUT_BYTES = 64 * 1024
 _MUTATION_ORDER = (
@@ -100,6 +106,17 @@ class FixedGB10SSHTransport:
     run: CommandRunner
     certificate: Path | None = None
     max_concurrency: int = 8
+    # A transient failure against the single SSH bastion (all fleet hosts
+    # ProxyJump through trt-gb10-1) is retried within this budget rather than
+    # instantly reporting the host as drifted. Only unreachable/error results
+    # are retried; a well-formed observation -- exact or drifted -- is
+    # authoritative and returned immediately, so genuine drift still fails
+    # closed. Defaults to a single attempt so directly-constructed transports
+    # (unit tests) keep their exact-once semantics; the installed builder opts
+    # into retries.
+    settle_attempts: int = 1
+    settle_interval_seconds: float = 0.0
+    sleep: Callable[[float], None] = time.sleep
 
     def __post_init__(self) -> None:
         paths = (self.ssh_config, self.identity)
@@ -107,6 +124,9 @@ class FixedGB10SSHTransport:
             not self.targets
             or len({target.ssh_target for target in self.targets}) != len(self.targets)
             or not 1 <= self.max_concurrency <= 16
+            or not 1 <= self.settle_attempts <= 32
+            or not 0 <= self.settle_interval_seconds <= 10
+            or not callable(self.sleep)
             or any(not path.is_absolute() or ".." in path.parts for path in paths)
             or (
                 self.certificate is not None
@@ -182,18 +202,37 @@ class FixedGB10SSHTransport:
         target: GB10TransportTarget,
         plan: FinalGatePlan,
     ) -> GB10HostCandidateObservation:
+        # Retry transient transport failures (unreachable bastion, non-zero exit,
+        # stderr noise, oversize/unparseable output) within the settle budget; a
+        # host that never yields a well-formed observation still fails closed.
+        for attempt in range(self.settle_attempts):
+            observation = self._observe_once(target, plan)
+            if observation is not None:
+                return observation
+            if attempt + 1 < self.settle_attempts:
+                self.sleep(self.settle_interval_seconds)
+        return self._failed_observation(target)
+
+    def _observe_once(
+        self,
+        target: GB10TransportTarget,
+        plan: FinalGatePlan,
+    ) -> GB10HostCandidateObservation | None:
         command = _remote_observation_command(target, plan)
-        result = self.run(self._ssh_argv(target, command))
+        try:
+            result = self.run(self._ssh_argv(target, command))
+        except Exception:
+            return None
         if (
             result.returncode != 0
             or result.stderr
             or len(result.stdout.encode()) > _MAX_OUTPUT_BYTES
         ):
-            return self._failed_observation(target)
+            return None
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
-            return self._failed_observation(target)
+            return None
         expected = {
             "baseline_ready",
             "boot_id",
@@ -210,7 +249,7 @@ class FixedGB10SSHTransport:
             or not isinstance(payload["boot_id"], str)
             or any(type(payload[key]) is not bool for key in expected - {"boot_id"})
         ):
-            return self._failed_observation(target)
+            return None
         evidence_digest = _hash_json(payload)
         return GB10HostCandidateObservation(
             host=target.ssh_target,
@@ -241,8 +280,24 @@ class FixedGB10SSHTransport:
         ):
             raise ValueError("GB10 mutation operations are invalid")
         command = _remote_apply_command(target, plan, operations)
-        result = self.run(self._ssh_argv(target, command))
-        return result.returncode == 0 and result.stdout == "" and result.stderr == ""
+        # The typed convergence operations are idempotent, so a transient bastion
+        # failure is retried within the settle budget before the host is reported
+        # as failed.
+        for attempt in range(self.settle_attempts):
+            try:
+                result = self.run(self._ssh_argv(target, command))
+            except Exception:
+                result = None
+            if (
+                result is not None
+                and result.returncode == 0
+                and result.stdout == ""
+                and result.stderr == ""
+            ):
+                return True
+            if attempt + 1 < self.settle_attempts:
+                self.sleep(self.settle_interval_seconds)
+        return False
 
     def _ssh_argv(
         self,
@@ -726,6 +781,8 @@ def build_fixed_gb10_ssh_transport(
         certificate=certificate,
         run=run,
         max_concurrency=max_concurrency,
+        settle_attempts=_INSTALLED_OBSERVE_ATTEMPTS,
+        settle_interval_seconds=_INSTALLED_OBSERVE_INTERVAL_SECONDS,
     )
 
 

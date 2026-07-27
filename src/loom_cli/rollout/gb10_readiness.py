@@ -566,24 +566,32 @@ def _probe_target(
     sleep: Callable[[float], None],
 ) -> tuple[GB10HostReadiness | None, bool]:
     observed_transient = False
+    evidence: GB10HostReadiness | None = None
     for attempt in range(settle_attempts):
+        # A transient SSH/transport failure (an overloaded single bastion dropping
+        # the connection, a non-zero exit, or unparseable output) is retried within
+        # the settle budget rather than instantly failing the host -- mirroring the
+        # candidate-source probe. Only a fully parsed observation short-circuits:
+        # ready -> success; a non-transient not-ready state -> genuine drift returned
+        # immediately. After the budget is exhausted the host still fails closed.
+        evidence = None
         try:
-            result: CommandResult = run(_ssh_argv(target, ssh_config=ssh_config, identity=identity))
+            result: CommandResult | None = run(
+                _ssh_argv(target, ssh_config=ssh_config, identity=identity)
+            )
         except Exception:
-            return None, observed_transient
-        if result.returncode != 0 or not isinstance(result.stdout, str):
-            return None, observed_transient
-        evidence = parse_gb10_host_readiness(
-            result.stdout,
-            service=target.node_agent_service,
-        )
-        if evidence is None:
-            return None, observed_transient
-        if evidence.ready:
-            return evidence, observed_transient
-        if not evidence.transient_timer:
-            return evidence, observed_transient
-        observed_transient = True
+            result = None
+        if result is not None and result.returncode == 0 and isinstance(result.stdout, str):
+            evidence = parse_gb10_host_readiness(
+                result.stdout,
+                service=target.node_agent_service,
+            )
+            if evidence is not None:
+                if evidence.ready:
+                    return evidence, observed_transient
+                if not evidence.transient_timer:
+                    return evidence, observed_transient
+                observed_transient = True
         if attempt + 1 < settle_attempts:
             sleep(settle_interval_seconds)
     return evidence, observed_transient
