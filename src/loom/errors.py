@@ -117,6 +117,11 @@ _TEXTUAL_PROVIDER_TRANSPORT_RE = re.compile(
 _PROVIDER_TRANSPORT_DISCONNECT_MESSAGE = (
     "Provider transport disconnected before returning a response."
 )
+_TEXTUAL_STEP_JWT_AUTH_RE = re.compile(
+    r"""["']detail["']\s*:\s*["']not authorized["']""",
+    re.IGNORECASE,
+)
+_STEP_JWT_AUTH_MESSAGE = "Loom gateway rejected or expired the step token (HTTP 401)."
 
 
 def _redact_body(raw: str) -> str:
@@ -145,6 +150,9 @@ def classify_failure_message(message: str) -> tuple[FailureReason, str | None] |
     still a provider/gateway transport boundary failure and should not be
     grouped with model/agent logic errors.
     """
+
+    if "401" in message and _TEXTUAL_STEP_JWT_AUTH_RE.search(message):
+        return FailureReason.GATEWAY_ERROR, _STEP_JWT_AUTH_MESSAGE
 
     if not _TEXTUAL_PROVIDER_TRANSPORT_RE.search(message):
         return None

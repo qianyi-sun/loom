@@ -14,6 +14,7 @@ import logging
 import posixpath
 import time
 from datetime import UTC, datetime
+from math import ceil
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -37,6 +38,21 @@ if TYPE_CHECKING:
     from loom.trial.trial import TrialContext
 
 logger = logging.getLogger(__name__)
+
+
+_STEP_JWT_TTL_BUFFER_SEC = 300
+
+
+def _apply_step_token_ttl(agent: object, effective_agent_timeout_sec: float) -> None:
+    """Keep a subprocess agent's static step JWT valid for the resolved step.
+
+    ``effective_agent_timeout_sec`` is the value produced by
+    ``_resolve_agent_timeout`` and therefore already includes task defaults,
+    step overrides, trial overrides, and the trial multiplier.
+    """
+    if not hasattr(agent, "step_token_ttl_sec"):
+        return
+    agent.step_token_ttl_sec = ceil(effective_agent_timeout_sec) + _STEP_JWT_TTL_BUFFER_SEC
 
 
 class _VerifierDriverLease:
@@ -110,6 +126,7 @@ async def _run_step_impl(
 
     # Agent phase ──────────────────────────────────────────────────────────
     agent_timeout = _resolve_agent_timeout(ctx, step)
+    _apply_step_token_ttl(ctx.agent, agent_timeout)
     agent_phase: NetworkPolicy = (
         step.network.agent_phase if step.network and step.network.agent_phase else baseline_policy
     )

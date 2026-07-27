@@ -44,6 +44,15 @@ class _AlwaysPassVerifier:
         return VerifierResult(rewards={"passed": 1.0})
 
 
+class _TTLCapturingAgent:
+    name = "ttl-capturing"
+    step_token_ttl_sec = 1800
+    observed_step_token_ttl_sec: int | None = None
+
+    async def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+        self.observed_step_token_ttl_sec = self.step_token_ttl_sec
+
+
 @pytest.fixture
 async def context(tmp_path: Path) -> TrialContext:
     sol = tmp_path / "solution"
@@ -113,6 +122,34 @@ async def test_run_step_happy_path(context: TrialContext, tmp_path: Path):
     kinds = [e.kind for e in reader.iter_all()]
     assert EventKind.STEP_START in kinds
     assert EventKind.STEP_END in kinds
+
+
+async def test_run_step_applies_effective_timeout_before_agent_run(
+    context: TrialContext,
+) -> None:
+    agent = _TTLCapturingAgent()
+    context.agent = agent  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(
+        override_agent_timeout_sec=9000.0,
+    )
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket,
+        key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        result = await run_step(
+            ctx=context,
+            step=context.task_config.steps[0],
+            trajectory=writer,
+            baseline_policy=Public(),
+        )
+
+    assert result.error is None
+    assert agent.observed_step_token_ttl_sec == 9300
 
 
 async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Path):

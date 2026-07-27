@@ -24,13 +24,14 @@ from loom.db.schema import (
 )
 
 router = APIRouter(prefix="/admin")
+_MAX_STEP_TOKEN_TTL_SEC = 30_000
 
 
 class _IssueStepTokenRequest(BaseModel):
     team_id: UUID
     trial_id: UUID
     step_id: str = Field(min_length=1, max_length=64)
-    ttl_sec: int = Field(gt=0, le=7200)
+    ttl_sec: int = Field(gt=0, le=_MAX_STEP_TOKEN_TTL_SEC)
     # Only the dedicated family-orchestrator credential may set this field.
     # Presence is significant: explicit null means the evolver must use the
     # platform route even when the completed trial used a BYO connection.

@@ -148,6 +148,12 @@ import time. `loom_cli/__init__.py` eager-imports
    exits, best-effort kills the streaming exec handle so a timed-out
    adapter does not keep running in the sandbox
 
+Because the subprocess snapshots this JWT into its environment, the step
+runner derives its TTL from the same effective agent timeout used by
+execution—task or step defaults, trial override, and multiplier—then rounds up
+and adds a 300-second buffer. The Control Plane accepts these static
+step-token requests up to 30,000 seconds.
+
 For stdout-JSONL adapters, non-zero `AgentError` messages include a
 redacted diagnostic summary from terminal result/error events and
 permission-denial records when those signals are present. This keeps

@@ -58,6 +58,20 @@ Harbor artifacts copied into the trial sandbox:
 Step runner always includes `.loom/agent/**` in artifact patterns for
 `terminus-2` trials.
 
+## Step JWT lifetime
+
+Terminus-2 snapshots one step-scoped JWT when the agent phase starts and does
+not rotate it during that phase. Before invoking the runtime, the step runner
+therefore sets the JWT TTL to the same effective timeout used by agent
+execution, rounded up, plus a 300-second cleanup and clock-skew buffer. The
+effective timeout includes task defaults, per-step overrides, the trial
+`override_agent_timeout_sec`, and `agent_timeout_multiplier`.
+
+The Control Plane accepts requested step-token TTLs up to 30,000 seconds. A
+configuration whose effective timeout plus buffer exceeds that limit fails
+token issuance rather than silently minting a token that expires before the
+agent deadline.
+
 ## Typed trajectory events
 
 The subprocess-era events (`terminus2_session_ready`, `terminus2_exec_run`,
