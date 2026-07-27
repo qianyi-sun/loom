@@ -2288,6 +2288,7 @@ async def test_clone_config_surfaces_retry_default_mismatch(
     assert mismatch["current"]["max_attempts"] == 3
     assert mismatch["current"]["retry_on"] == [
         "gateway_error",
+        "node_setup_health",
         "provider_transport_disconnect",
     ]
 
