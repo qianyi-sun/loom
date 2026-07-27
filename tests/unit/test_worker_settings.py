@@ -75,6 +75,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_HOSTNAME", "trt-gb10-7")
     monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED", "true")
     monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX", "45.5")
+    monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_MIN_MEM_AVAILABLE_MB", "4096")
     monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB", "2048")
     monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_DSTATE_MAX", "12")
     monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC", "60")
@@ -103,6 +104,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert s.hostname == "trt-gb10-7"
     assert s.setup_health_guard_enabled is True
     assert s.setup_health_io_full_avg10_max == 45.5
+    assert s.setup_health_min_mem_available_mb == 4096
     assert s.setup_health_min_swap_free_mb == 2048
     assert s.setup_health_dstate_max == 12
     assert s.setup_health_wait_timeout_sec == 60
@@ -125,6 +127,7 @@ def test_idle_exit_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert s.trial_cache_build_max_concurrent == 1
     assert s.setup_health_guard_enabled is True
     assert s.setup_health_io_full_avg10_max == 50.0
+    assert s.setup_health_min_mem_available_mb == 2048
     assert s.setup_health_min_swap_free_mb == 1024
     assert s.setup_health_dstate_max == 32
     assert s.setup_health_wait_timeout_sec == 300.0

@@ -573,9 +573,26 @@ async def _claim_available_trials(
     vllm_registry: WorkerVLLMRegistry,
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
+    read_setup_health: Callable[[], Any] | None = None,
 ) -> int:
+    from loom_worker.setup_admission import (
+        policy_from_settings,
+        read_node_health_snapshot,
+    )
+
     claimed = 0
+    setup_health_policy = policy_from_settings(settings)
+    read_health_snapshot = read_setup_health or read_node_health_snapshot
     while pool.in_flight < settings.max_concurrent:
+        health = setup_health_policy.evaluate(read_health_snapshot())
+        if not health.ok:
+            logger.warning(
+                "trial_claim_paused_node_setup_health worker_id=%s reason=%s detail=%s",
+                worker_id,
+                health.reason,
+                health.detail,
+            )
+            break
         try:
             trial_payload = await cp_client.claim(
                 worker_id=worker_id,
@@ -1265,6 +1282,8 @@ def _classify_setup_failure(detail: str) -> FailureReason:
 
 
 def _setup_retry_reason_for_failure(reason: FailureReason) -> RetryReason | None:
+    if reason == FailureReason.NODE_SETUP_HEALTH:
+        return RetryReason.NODE_SETUP_HEALTH
     if reason == FailureReason.PROVIDER_TRANSPORT_DISCONNECT:
         return RetryReason.PROVIDER_TRANSPORT_DISCONNECT
     if reason == FailureReason.GATEWAY_ERROR:
@@ -1283,9 +1302,10 @@ def _setup_retry_after_seconds(
     retry_reason = _setup_retry_reason_for_failure(failure_reason)
     if retry_reason is None:
         return None
-    if retry_reason not in retry_policy.retry_on:
+    platform_owned_retry = retry_reason == RetryReason.NODE_SETUP_HEALTH
+    if not platform_owned_retry and retry_reason not in retry_policy.retry_on:
         return None
-    if attempt_count >= retry_policy.max_attempts:
+    if not platform_owned_retry and attempt_count >= retry_policy.max_attempts:
         return None
     now = datetime.now(UTC)
     retry_at = next_attempt_at(

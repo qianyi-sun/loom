@@ -140,7 +140,7 @@ spec:
             - name: LOOM_CP_TRIAL_RETRY_DEFAULT_MAX_ATTEMPTS
               value: "3"
             - name: LOOM_CP_TRIAL_RETRY_DEFAULT_RETRY_ON
-              value: "[\"gateway_error\", \"provider_transport_disconnect\"]"
+              value: "[\"gateway_error\", \"provider_transport_disconnect\", \"node_setup_health\"]"
             - name: LOOM_CP_WORKER_HEARTBEAT_EXPIRY_SEC
               value: "120"
             - name: LOOM_CP_WORKER_RECLAIM_SWEEP_INTERVAL_SEC

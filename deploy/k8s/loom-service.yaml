@@ -165,7 +165,7 @@ spec:
         - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_MAX_ATTEMPTS
           value: '3'
         - name: LOOM_SVC_TRIAL_RETRY_DEFAULT_RETRY_ON
-          value: '["gateway_error", "provider_transport_disconnect"]'
+          value: '["gateway_error", "provider_transport_disconnect", "node_setup_health"]'
         - name: LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION
           value: 'False'
         - name: LOOM_SVC_WORKER_HEARTBEAT_EXPIRY_SEC

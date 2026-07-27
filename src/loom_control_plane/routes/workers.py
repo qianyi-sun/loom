@@ -28,6 +28,11 @@ UPDATE trials t
        worker_id = NULL,
        failure_reason = (:failure_reason)::text,
        failure_message = (:failure_message)::text,
+       attempt_count = CASE
+           WHEN (:failure_reason)::text = 'node_setup_health'
+           THEN GREATEST(t.attempt_count - 1, 0)
+           ELSE t.attempt_count
+       END,
        next_attempt_at = NOW() + (:retry_after_sec)::double precision
                          * INTERVAL '1 second'
   FROM team_quotas q
@@ -36,7 +41,10 @@ UPDATE trials t
    AND t.state = 'claimed'
    AND t.started_at IS NULL
    AND q.team_id = t.team_id
-   AND t.attempt_count < q.max_attempts_ceiling
+   AND (
+       (:failure_reason)::text = 'node_setup_health'
+       OR t.attempt_count < q.max_attempts_ceiling
+   )
  RETURNING t.id;
 """)
 

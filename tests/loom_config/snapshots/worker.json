@@ -194,6 +194,11 @@
     "default": "50.0",
     "required": false
   },
+  "setup_health_min_mem_available_mb": {
+    "annotation": "<class 'int'>",
+    "default": "2048",
+    "required": false
+  },
   "setup_health_min_swap_free_mb": {
     "annotation": "<class 'int'>",
     "default": "1024",

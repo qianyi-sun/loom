@@ -59,6 +59,7 @@ class WorkerSettings(BaseSettings):
     setup_health_dstate_max: int = 32
     setup_health_guard_enabled: bool = True
     setup_health_io_full_avg10_max: float = 50.0
+    setup_health_min_mem_available_mb: int = 2048
     setup_health_min_swap_free_mb: int = 1024
     setup_health_poll_interval_sec: float = 5.0
     setup_health_wait_timeout_sec: float = 300.0

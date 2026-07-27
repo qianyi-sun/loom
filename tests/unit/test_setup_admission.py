@@ -51,6 +51,23 @@ def test_node_health_policy_allows_hosts_without_swap() -> None:
     assert decision.reason == "healthy"
 
 
+def test_node_health_policy_blocks_low_available_memory_without_swap() -> None:
+    policy = NodeHealthPolicy(min_mem_available_mb=2048)
+    snapshot = NodeHealthSnapshot(
+        io_full_avg10=0.0,
+        swap_total_mb=0,
+        swap_free_mb=0,
+        d_state_processes=0,
+        mem_available_mb=27,
+    )
+
+    decision = policy.evaluate(snapshot)
+
+    assert decision.ok is False
+    assert decision.reason == "node_memory_pressure"
+    assert "mem.available_mb=27" in decision.detail
+
+
 @pytest.mark.asyncio
 async def test_wait_for_setup_health_rejects_after_timeout() -> None:
     policy = NodeHealthPolicy(

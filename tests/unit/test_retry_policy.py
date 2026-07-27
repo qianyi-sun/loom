@@ -28,6 +28,7 @@ def test_retry_policy_default_retries_transient_gateway_errors():
     assert p.retry_on == frozenset({
         RetryReason.GATEWAY_ERROR,
         RetryReason.PROVIDER_TRANSPORT_DISCONNECT,
+        RetryReason.NODE_SETUP_HEALTH,
     })
 
 
@@ -40,5 +41,6 @@ def test_retry_reason_values():
         "trajectory_flush_failed",
         "gateway_error",
         "provider_transport_disconnect",
+        "node_setup_health",
     ):
         assert RetryReason(v).value == v

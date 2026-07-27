@@ -8,6 +8,7 @@ import httpx
 
 from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
+from loom_worker.setup_admission import NodeHealthSnapshot
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 
@@ -433,3 +434,91 @@ async def test_claim_cycle_treats_control_plane_transport_error_as_no_claim() ->
 
     assert claimed == 0
     assert cp.claim_calls == 1
+
+
+async def test_claim_cycle_does_not_claim_when_node_is_unhealthy() -> None:
+    cp = _ClaimingCP([])
+
+    claimed = await ml._claim_available_trials(  # type: ignore[attr-defined]
+        pool=RunnerPool(max_concurrent=3),
+        settings=_Settings(max_concurrent=3),
+        cp_client=cp,
+        gateway_client=None,
+        object_store=None,
+        worker_id=uuid4(),
+        vllm_registry=WorkerVLLMRegistry(enabled=False),
+        sandbox_allocator=None,
+        sandbox_singleton=None,
+        read_setup_health=lambda: NodeHealthSnapshot(
+            io_full_avg10=70.0,
+            swap_total_mb=0,
+            swap_free_mb=0,
+            d_state_processes=0,
+        ),
+    )
+
+    assert claimed == 0
+    assert cp.claim_calls == 0
+
+
+async def test_claim_cycle_rechecks_node_health_before_each_claim(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    pool = RunnerPool(max_concurrent=3)
+    release = asyncio.Event()
+    cp = _ClaimingCP(
+        [
+            {
+                "trial_id": str(uuid4()),
+                "team_id": str(uuid4()),
+                "task_id": "task-0",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            {
+                "trial_id": str(uuid4()),
+                "team_id": str(uuid4()),
+                "task_id": "task-1",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+        ]
+    )
+    snapshots = iter(
+        [
+            NodeHealthSnapshot(
+                io_full_avg10=1.0,
+                swap_total_mb=0,
+                swap_free_mb=0,
+                d_state_processes=0,
+            ),
+            NodeHealthSnapshot(
+                io_full_avg10=70.0,
+                swap_total_mb=0,
+                swap_free_mb=0,
+                d_state_processes=0,
+            ),
+        ]
+    )
+
+    async def _fake_spawn_trial(**kwargs) -> None:  # type: ignore[no-untyped-def]
+        async def _held() -> None:
+            await release.wait()
+
+        await kwargs["pool"].spawn(_held())
+
+    monkeypatch.setattr(ml, "_spawn_trial", _fake_spawn_trial)
+
+    claimed = await ml._claim_available_trials(  # type: ignore[attr-defined]
+        pool=pool,
+        settings=_Settings(max_concurrent=3),
+        cp_client=cp,
+        gateway_client=None,
+        object_store=None,
+        worker_id=uuid4(),
+        vllm_registry=WorkerVLLMRegistry(enabled=False),
+        sandbox_allocator=None,
+        sandbox_singleton=None,
+        read_setup_health=lambda: next(snapshots),
+    )
+
+    assert claimed == 1
+    assert cp.claim_calls == 1
+    release.set()
+    await pool.wait_all(timeout=2.0)

@@ -424,8 +424,8 @@ description = "Default TrialConfig.retry.max_attempts snapshotted into the trial
 [service_config.trial_retry_default_retry_on]
 used_by     = ["control-plane", "loom-service"]
 python_type = "str_list"
-default     = ["gateway_error", "provider_transport_disconnect"]
-description = "Default TrialConfig.retry.retry_on snapshotted at submit time when unset. Members of the RetryReason enum (see src/loom/models/trial.py). Deployment-policy knob: CI dev might set [] (fail-fast, no wasted tokens); prod release-gate might add 'agent_timeout' to survive transient LLM slowdowns; sensitive prod might keep only ['provider_transport_disconnect']."
+default     = ["gateway_error", "provider_transport_disconnect", "node_setup_health"]
+description = "Default TrialConfig.retry.retry_on snapshotted at submit time when unset. Members of the RetryReason enum (see src/loom/models/trial.py). node_setup_health is platform-owned and is requeued even for older or explicit policies that omit it, without consuming user or team attempt budget. Other members remain deployment-policy knobs."
 
 [service_config.trial_retry_default_backoff_base_sec]
 used_by     = ["control-plane", "loom-service"]
@@ -958,13 +958,19 @@ description = "Maximum concurrent layered trial-cache image builds allowed for t
 used_by     = ["worker"]
 python_type = "bool"
 default     = true
-description = "Enable worker-side node-health admission before Docker setup/build work. When enabled, task-image builds, layered trial-cache builds, and sidecar image pulls/builds wait or fail before launching setup containers if host I/O pressure, swap, or D-state process counts exceed configured thresholds."
+description = "Enable worker-side node-health admission before claiming work and before Docker setup/build work. When enabled, the worker pauses claims and setup containers when host I/O pressure, available memory, swap, or D-state process counts exceed configured thresholds."
 
 [service_config.setup_health_io_full_avg10_max]
 used_by     = ["worker"]
 python_type = "float"
 default     = 50.0
 description = "Maximum Linux /proc/pressure/io full avg10 value allowed before a worker admits new Docker setup/build work. Values above this indicate sustained host I/O stalls; shared OLDLAB incident evidence saw avg10 around 76 during SSH/login symptoms."
+
+[service_config.setup_health_min_mem_available_mb]
+used_by     = ["worker"]
+python_type = "int"
+default     = 2048
+description = "Minimum Linux MemAvailable in MiB required before a worker claims new trials or admits Docker setup/build work. This protects no-swap GB10 hosts where swap-only admission cannot detect near-total unified-memory exhaustion."
 
 [service_config.setup_health_min_swap_free_mb]
 used_by     = ["worker"]
@@ -982,7 +988,7 @@ description = "Maximum number of Linux D-state processes allowed before a worker
 used_by     = ["worker"]
 python_type = "float"
 default     = 300.0
-description = "Maximum seconds a claimed trial waits for setup-health recovery before failing setup with failure_reason=node_setup_health. The worker keeps pre-start heartbeats running while it waits."
+description = "Maximum seconds a claimed trial waits for setup-health recovery before requeueing with failure_reason=node_setup_health. The worker keeps pre-start heartbeats running while it waits; the Control Plane refunds the pre-start placement attempt."
 
 [service_config.setup_health_poll_interval_sec]
 used_by     = ["worker"]
