@@ -108,13 +108,24 @@ class ProtectedExternalSupervisorComponent:
         try:
             live = self.transport.observe(artifact)
         except (RuntimeError, ValueError):
-            return self._observation(
-                plan,
-                artifact,
-                epoch,
-                ComponentState.DRIFTED,
-                "0" * 64,
-            )
+            # A bare observe intentionally refuses to self-authorize an absent
+            # predecessor (absent is not self-authoritative -- it must be declared
+            # by the attested plan). When the plan itself declares absent, re-observe
+            # with the plan's absent authority so a genuinely-absent live state
+            # classifies READY (ready to bootstrap the first canonical supervisor)
+            # instead of DRIFTED, which would fail the protected-apply journal
+            # before it ever reaches apply. The post-apply re-classify still uses the
+            # bare observe above, which resolves the now-established canonical.
+            if plan.supervisor_predecessor_kind != "absent":
+                return self._observation(
+                    plan, artifact, epoch, ComponentState.DRIFTED, "0" * 64
+                )
+            try:
+                live = self.transport.observe(artifact, self._plan_authority(plan))
+            except (RuntimeError, ValueError):
+                return self._observation(
+                    plan, artifact, epoch, ComponentState.DRIFTED, "0" * 64
+                )
         state = ComponentState(classify_external_supervisor_live_state(artifact, live))
         if state is ComponentState.EXACT:
             canonical = live.canonical_identity

@@ -361,6 +361,94 @@ def test_component_classifies_bound_predecessor_partial_and_exact_states(tmp_pat
     assert component.classify(plan).state is ComponentState.EXACT
 
 
+def _bound_absent(tmp_path: Path):
+    plan, candidate_root, artifact = _bound_artifact(tmp_path)
+    predecessor_live = _observation(artifact, files="absent", runtime="absent")
+    absent_unit_set = external_supervisor_unit_set_digest_or_empty({})
+    transition_digest = external_supervisor_transition_digest(
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        environment=plan.environment,
+        predecessor_kind="absent",
+        predecessor_digest=ABSENT_PREDECESSOR_DIGEST,
+        predecessor_pointer_digest=ABSENT_PREDECESSOR_DIGEST,
+        predecessor_unit_sha256={},
+        predecessor_unit_set_digest=absent_unit_set,
+        predecessor_live_evidence_digest=predecessor_live.evidence_digest,
+        predecessor_pending_transition_digest=predecessor_live.pending_transition_digest,
+        target_artifact_digest=artifact.artifact_digest,
+        target_profile_sha256=artifact.profile_sha256,
+        target_script_sha256=artifact.script_sha256,
+        target_unit_sha256=artifact.unit_sha256,
+        target_unit_set_digest=external_supervisor_unit_set_digest(artifact.unit_sha256),
+    )
+    payload = plan.to_dict()
+    payload.pop("plan_digest")
+    payload.update(
+        {
+            "supervisor_predecessor_kind": "absent",
+            "supervisor_predecessor_digest": ABSENT_PREDECESSOR_DIGEST,
+            "supervisor_predecessor_pointer_digest": ABSENT_PREDECESSOR_DIGEST,
+            "supervisor_predecessor_unit_sha256": {},
+            "supervisor_predecessor_unit_set_digest": absent_unit_set,
+            "supervisor_predecessor_live_evidence_digest": predecessor_live.evidence_digest,
+            "supervisor_predecessor_pending_transition_digest": (
+                predecessor_live.pending_transition_digest
+            ),
+            "supervisor_transition_digest": transition_digest,
+        }
+    )
+    bound = type(plan).from_dict({**payload, "plan_digest": _hash_json(payload)})
+    return bound, candidate_root, artifact
+
+
+class _BareRefusingTransport:
+    """A bare observe() refuses to self-authorize absent; observe(authority) returns."""
+
+    def __init__(self, artifact, observation) -> None:
+        self.artifact = artifact
+        self.observation = observation
+
+    def observe(self, artifact, predecessor_authority=None):
+        assert artifact == self.artifact
+        if predecessor_authority is None:
+            raise RuntimeError("protected external supervisor predecessor is not authoritative")
+        return self.observation
+
+    def apply(self, *args, **kwargs):  # pragma: no cover - not exercised
+        raise AssertionError("apply is not expected in classify")
+
+    def reconcile_compensations(self):  # pragma: no cover - not exercised
+        raise AssertionError("reconcile is not expected in classify")
+
+
+def test_component_classifies_absent_bootstrap_ready_via_plan_authority(tmp_path: Path) -> None:
+    # The bare observe refuses absent (not self-authoritative); the component must
+    # re-observe with the plan's absent authority so the bootstrap classifies READY,
+    # letting the protected-apply journal reach apply instead of failing as drifted.
+    plan, candidate_root, artifact = _bound_absent(tmp_path)
+    transport = _BareRefusingTransport(artifact, _observation(artifact, files="absent", runtime="absent"))
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=transport,
+        epoch_guard=lambda value: _epoch(value),
+    )
+    assert component.classify(plan).state is ComponentState.READY
+
+
+def test_component_stays_drifted_when_bare_observe_refuses_non_absent(tmp_path: Path) -> None:
+    # A non-absent plan does not retry with an authority: a refusing bare observe
+    # stays DRIFTED (the fail-closed default is preserved for canonical/legacy).
+    plan, candidate_root, artifact = _bound_artifact(tmp_path)
+    transport = _BareRefusingTransport(artifact, _observation(artifact, files="absent", runtime="absent"))
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=transport,
+        epoch_guard=lambda value: _epoch(value),
+    )
+    assert component.classify(plan).state is ComponentState.DRIFTED
+
+
 def test_component_applies_and_reaches_exact(tmp_path: Path) -> None:
     plan, candidate_root, artifact = _bound_artifact(tmp_path)
     transport = _Transport(artifact, _observation(artifact, files="legacy", runtime="exact"))
