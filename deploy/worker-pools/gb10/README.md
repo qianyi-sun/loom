@@ -236,6 +236,10 @@ so no two supervisors on one host collide. The `--db-local-port` scheme is:
 | oldlab | 15447       | 15448   | 15449      |
 | gb10   | 15450       | 15451   | 15452      |
 
+Protected release rehearsals use the corresponding isolated range
+`25447`–`25452` (live port plus `10000`). This prevents the validate-only
+database tunnel from colliding with a live 30-second supervisor run.
+
 Supporting layout, shared across environments:
 
 - Runner checkout and virtualenv: `/opt/loom-<environment>-runner/repo` and

@@ -225,7 +225,7 @@ def test_builder_rejects_split_enablement_state(
         _build(root)
 
 
-def test_validation_argv_rewrites_only_isolated_authority_and_appends_mode(
+def test_validation_argv_rewrites_isolated_authority_and_port_and_appends_mode(
     tmp_path: Path,
 ) -> None:
     artifact = _build(_candidate(tmp_path))
@@ -243,11 +243,11 @@ def test_validation_argv_rewrites_only_isolated_authority_and_appends_mode(
     expected = list(live.args)
     expected[expected.index("--namespace") + 1] = "loom-rehearsal-abc123"
     expected[expected.index("--kubeconfig") + 1] = REHEARSAL_KUBECONFIG
+    expected[expected.index("--db-local-port") + 1] = "25451"
     assert list(command[2:-1]) == expected
     for flag in (
         "--pool-name",
         "--db-local-host",
-        "--db-local-port",
         "--db-service",
         "--db-remote-port",
         "--db-port-forward-ready-timeout-sec",
@@ -261,6 +261,43 @@ def test_validation_argv_rewrites_only_isolated_authority_and_appends_mode(
         artifact.validation_argv("loom-staging", REHEARSAL_KUBECONFIG)
     with pytest.raises(ValueError, match="not canonical"):
         artifact.validation_argv("loom-rehearsal-abc123", STAGING_KUBECONFIG)
+
+
+def test_validation_ports_are_unique_and_disjoint_from_live_ports(tmp_path: Path) -> None:
+    artifact = _build(
+        _candidate(
+            tmp_path,
+            supervisors=[
+                _supervisor(),
+                _supervisor(
+                    name="oldlab-staging",
+                    service_name="loom-autoscaler-oldlab-staging.service",
+                    timer_name="loom-autoscaler-oldlab-staging.timer",
+                    port=15448,
+                ),
+            ],
+        )
+    )
+
+    commands = artifact.validation_argv(
+        "loom-rehearsal-abc123",
+        REHEARSAL_KUBECONFIG,
+    )
+    live_ports = {supervisor.db_local_port for supervisor in artifact.supervisors}
+    validation_ports = {
+        int(command[command.index("--db-local-port") + 1]) for command in commands.values()
+    }
+
+    assert live_ports == {15448, 15451}
+    assert validation_ports == {25448, 25451}
+    assert live_ports.isdisjoint(validation_ports)
+
+
+def test_artifact_rejects_live_port_without_rehearsal_offset_capacity(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="rehearsal DB local port is out of bounds"):
+        _build(_candidate(tmp_path, supervisors=[_supervisor(port=60000)]))
 
 
 def test_verify_uses_only_temporary_exact_units_and_fails_closed(tmp_path: Path) -> None:

@@ -34,8 +34,10 @@ def test_agent_sandbox_image_files_exist_and_are_used_by_dockerfile() -> None:
     assert NPM_PACKAGES.is_file()
     assert PYTHON_REQUIREMENTS.is_file()
     assert PYTHON_CLI_REQUIREMENTS.is_file()
+    assert "FROM node:22-bookworm-slim AS node-runtime" in dockerfile
     assert "python:3.12-bookworm" in dockerfile
-    assert "NODE_MAJOR=22" in dockerfile
+    assert "COPY --from=node-runtime /usr/local/ /usr/local/" in dockerfile
+    assert "deb.nodesource.com" not in dockerfile
     assert "deploy/agent-sandbox/npm-packages.txt" in dockerfile
     assert "deploy/agent-sandbox/python-requirements.txt" in dockerfile
     assert "deploy/agent-sandbox/python-cli-requirements.txt" in dockerfile
