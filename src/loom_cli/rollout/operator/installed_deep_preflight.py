@@ -84,6 +84,7 @@ class InstalledDeepPreflightComposition:
     now: Callable[[], datetime]
     importer: ModuleImporter = importlib.import_module
     max_concurrency: int = 8
+    gb10_candidate_source_run: SystemdCommandRunner | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -171,6 +172,7 @@ class InstalledDeepPreflightComposition:
             permit_reserved_rotation_candidate=(
                 purpose is RuntimePurpose.DETACHED_REHEARSAL
             ),
+            gb10_candidate_source_run=self.gb10_candidate_source_run,
         )
 
     def authority(self) -> DeepPreflightAuthority:

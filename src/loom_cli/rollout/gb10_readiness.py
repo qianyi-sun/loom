@@ -380,7 +380,31 @@ def probe_gb10_candidate_source_readonly(
                 sleep(min(settle_interval_seconds * (2**attempt), 30.0))
         return None
 
-    outcomes: dict[str, str | None] = {}
+    outcomes: dict[str, str | None] = {
+        target.ssh_target: None for target in targets
+    }
+    if max_concurrency == 1:
+        # This mode intentionally protects one shared NFS checkout from
+        # fleet-wide read amplification. Once one host cannot prove the exact
+        # candidate, the all-host invariant is already false; do not spend the
+        # remaining DAG budget on queued hosts.
+        for target in targets:
+            digest = probe(target)
+            outcomes[target.ssh_target] = digest
+            if digest is None:
+                break
+        return GB10CandidateSourceReadiness(
+            host_digests={
+                host: digest for host, digest in outcomes.items() if digest is not None
+            },
+            failed_hosts=tuple(
+                sorted(host for host, digest in outcomes.items() if digest is None)
+            ),
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            unit_set_digest=unit_set_digest,
+        )
+
     with ThreadPoolExecutor(
         max_workers=min(max_concurrency, len(targets)),
         thread_name_prefix="loom-gb10-candidate-source",

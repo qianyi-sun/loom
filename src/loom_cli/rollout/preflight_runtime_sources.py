@@ -263,6 +263,7 @@ class PreflightRuntimeSources:
     # that expected in-progress candidate (never set for gating/final admission).
     permit_reserved_rotation_candidate: bool = False
     loaded_artifacts: LoadedPreflightArtifacts | None = None
+    gb10_candidate_source_run: SystemdCommandRunner | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -473,7 +474,7 @@ class PreflightRuntimeSources:
                 expected_binding_digest=self.gb10_mount_binding_digest,
             ),
             build_gb10_candidate_source_check(
-                self.gb10_run,
+                self.gb10_candidate_source_run or self.gb10_run,
                 targets=self.gb10_targets,
                 ssh_config=self.gb10_ssh_config,
                 identity=self.gb10_identity,
@@ -482,6 +483,8 @@ class PreflightRuntimeSources:
                 expected_candidate_tree=self.candidate.resolved_tree or "",
                 image_tag=self.candidate.image_tag,
                 max_concurrency=GB10_CANDIDATE_SOURCE_CONCURRENCY,
+                settle_attempts=2,
+                settle_interval_seconds=1.0,
             ),
             build_gb10_host_readiness_check(
                 self.gb10_run,

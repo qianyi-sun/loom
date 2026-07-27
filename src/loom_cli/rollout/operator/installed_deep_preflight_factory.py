@@ -532,6 +532,7 @@ def build_installed_deep_preflight_composition(
         ),
         systemd_run=commands.systemd_preflight,
         gb10_run=commands.simple,
+        gb10_candidate_source_run=commands.candidate_source,
         gb10_mount_source=shared_mount,
         systemd_analyze_run=commands.simple,
         image_run=commands.image,
