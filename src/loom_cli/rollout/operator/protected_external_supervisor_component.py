@@ -13,6 +13,7 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     ExternalSupervisorCanonicalPointer,
     ExternalSupervisorPredecessorAuthority,
     external_supervisor_unit_set_digest,
+    external_supervisor_unit_set_digest_or_empty,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
@@ -161,9 +162,30 @@ class ProtectedExternalSupervisorComponent:
             authority_digest=plan.supervisor_predecessor_digest,
             unit_sha256=plan.supervisor_predecessor_unit_sha256,
         )
+        if authority.kind == "absent":
+            # An absent predecessor is the first-introduction bootstrap: a
+            # post-0067 rollout that establishes the canonical supervisor when no
+            # predecessor units are live and no canonical record exists yet.
+            # Admission (`require_predecessor_kind`) and the transport authority
+            # resolver both accept it, so the apply must too -- but only when it
+            # is well formed: the absent sentinel digest, no predecessor units,
+            # the tolerant empty unit-set digest, and an absent pointer. The
+            # gb10-arm64->gb10 rename safety is enforced by the migration
+            # component and the target pool identity, not by the predecessor, so
+            # a fresh supervisor loses no guarantee. The strict
+            # ``unit_set_digest`` property rejects an empty set, so the absent
+            # unit-set is validated with the tolerant helper instead.
+            if (
+                authority.authority_digest != ABSENT_PREDECESSOR_DIGEST
+                or authority.unit_sha256
+                or plan.supervisor_predecessor_pointer_digest != ABSENT_PREDECESSOR_DIGEST
+                or plan.supervisor_predecessor_unit_set_digest
+                != external_supervisor_unit_set_digest_or_empty(authority.unit_sha256)
+            ):
+                raise ValueError("protected external supervisor predecessor binding is invalid")
+            return authority
         if (
-            authority.kind == "absent"
-            or authority.authority_digest == ABSENT_PREDECESSOR_DIGEST
+            authority.authority_digest == ABSENT_PREDECESSOR_DIGEST
             or authority.unit_set_digest != plan.supervisor_predecessor_unit_set_digest
             or (
                 authority.kind == "legacy-manifest"
