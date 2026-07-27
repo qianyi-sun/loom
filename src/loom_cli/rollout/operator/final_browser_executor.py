@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 from collections.abc import Callable, Sequence
@@ -30,6 +31,7 @@ _MAX_REPORT_BYTES = 1024 * 1024
 _MAX_TOKEN_BYTES = 64 * 1024
 _OUTPUT_DIRECTORY = "final-browser"
 _REPORT_NAME = "staging-admin-browser-acceptance.json"
+_STAGED_TOKEN_NAME = "admin-token"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -122,7 +124,11 @@ class FinalBrowserExecutor:
                 )
             return self._result(plan, report_sha256=report[1], mutated=True)
 
-        result = self.run(self._command(plan, directory))
+        try:
+            staged_token = self._stage_admin_token(directory, token.payload)
+        except OSError:
+            return self._result(plan, blocker="browser-evidence-authority-failed", mutated=False)
+        result = self.run(self._command(plan, directory, staged_token))
         report = self._read_report(report_path)
         if (
             result.returncode != 0
@@ -183,7 +189,37 @@ class FinalBrowserExecutor:
             route=plan.route,
         )
 
-    def _command(self, plan: FinalGatePlan, directory: Path) -> tuple[str, ...]:
+    def _stage_admin_token(self, directory: Path, payload: bytes) -> Path:
+        # The configured admin-token source is an ACL-readable shared file (owned
+        # by the provisioning account, readable by the rollout via a POSIX ACL).
+        # The hardened browser container re-validates the mounted token as
+        # ``st_uid == geteuid() and mode == 0o600`` -- which an ACL/group-shared
+        # file cannot satisfy inside the container. Stage a private 0600 copy
+        # owned by the service uid in the service-owned (0700) attempt directory
+        # (a sibling of the read-only /evidence mount) and bind-mount that copy.
+        path = directory.parent / _STAGED_TOKEN_NAME
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        try:
+            written = os.write(descriptor, payload)
+            metadata = os.fstat(descriptor)
+            if (
+                written != len(payload)
+                or metadata.st_uid != self.service_uid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
+            ):
+                raise OSError("staged browser admin token authority is unsafe")
+        finally:
+            os.close(descriptor)
+        return path
+
+    def _command(
+        self, plan: FinalGatePlan, directory: Path, token_file: Path
+    ) -> tuple[str, ...]:
         return (
             "docker",
             "run",
@@ -206,7 +242,7 @@ class FinalBrowserExecutor:
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,size=512m,mode=0700",
             "--mount",
-            f"type=bind,src={self.token_path},dst=/run/secrets/admin-token,readonly,bind-propagation=rprivate",
+            f"type=bind,src={token_file},dst=/run/secrets/admin-token,readonly,bind-propagation=rprivate",
             "--mount",
             f"type=bind,src={directory},dst=/evidence,bind-propagation=rprivate",
             plan.browser_image_digest,
