@@ -24,6 +24,12 @@ from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
 
 
+def test_runtime_identity_labels_allow_legacy_settings() -> None:
+    """Pre-containment workers remain valid and intentionally unlabelled."""
+    assert ml._runtime_identity_labels(_FakeSettings()) == ()  # type: ignore[arg-type]
+    assert ml._slurm_gpu_device_ids(_FakeSettings()) == ()  # type: ignore[arg-type]
+
+
 def test_setup_failure_classifier_recognizes_task_image_build_timeout() -> None:
     detail = (
         "building Docker image 'loom-task:405adf85aa0c5227b5fdf74f916f6b9c' "

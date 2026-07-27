@@ -65,7 +65,7 @@ values into the child-process environment or prints them in its JSON output.
 From the candidate checkout, render a mutation-free plan:
 
 ```bash
-uv run python scripts/ops/developer_sandbox.py plan \
+uv run --no-sync python scripts/ops/developer_sandbox.py plan \
   --operation create \
   --profile deploy/developer-sandboxes/qianyi.toml \
   --source-repo /shared_work/loom/candidates/sandboxes/qianyi/<SHA> \
@@ -89,7 +89,7 @@ and not unhealthy.
 Destroy is project-scoped and preserves named volumes by default:
 
 ```bash
-uv run python scripts/ops/developer_sandbox.py destroy ... --execute
+uv run --no-sync python scripts/ops/developer_sandbox.py destroy ... --execute
 ```
 
 Use `--delete-volumes` only when the developer explicitly intends to delete

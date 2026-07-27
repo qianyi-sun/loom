@@ -152,21 +152,28 @@ def _worker_hostname(configured_hostname: str | None) -> str:
 def _runtime_identity_labels(
     settings: WorkerSettings,
 ) -> tuple[tuple[str, str], ...]:
-    """Return immutable Slurm provenance labels for spawned containers."""
+    """Return immutable Slurm provenance labels for spawned containers.
+
+    Older in-process integrations and test doubles may still expose the
+    pre-containment WorkerSettings surface.  Treat missing identity fields as
+    the documented legacy, unlabelled worker rather than failing after a trial
+    has already been claimed.
+    """
     values = (
-        ("loom.sandbox", settings.sandbox_identity),
-        ("loom.candidate_sha", settings.candidate_sha),
-        ("loom.slurm_job_id", settings.slurm_job_id),
-        ("loom.compose_project", settings.compose_project),
+        ("loom.sandbox", getattr(settings, "sandbox_identity", "")),
+        ("loom.candidate_sha", getattr(settings, "candidate_sha", "")),
+        ("loom.slurm_job_id", getattr(settings, "slurm_job_id", "")),
+        ("loom.compose_project", getattr(settings, "compose_project", "")),
     )
     return tuple((key, value) for key, value in values if value)
 
 
 def _slurm_gpu_device_ids(settings: WorkerSettings) -> tuple[str, ...]:
     """Normalize Slurm's comma-separated GPU device allocation."""
+    raw_device_ids = getattr(settings, "slurm_gpu_device_ids", "")
     return tuple(
         device_id.strip()
-        for device_id in settings.slurm_gpu_device_ids.split(",")
+        for device_id in raw_device_ids.split(",")
         if device_id.strip()
     )
 
@@ -1000,7 +1007,7 @@ async def _spawn_trial(
             container_memory_mib=settings.container_memory_mib,
             container_pids=settings.container_pids,
             runtime_identity_labels=_runtime_identity_labels(settings),
-            slurm_allocated_gpus=settings.slurm_allocated_gpus,
+            slurm_allocated_gpus=getattr(settings, "slurm_allocated_gpus", -1),
             slurm_gpu_device_ids=_slurm_gpu_device_ids(settings),
             sidecar_runtime_factory=lambda: DockerTaskSidecarRuntime(
                 task_config=task_config,
