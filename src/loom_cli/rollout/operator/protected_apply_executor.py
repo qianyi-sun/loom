@@ -228,7 +228,13 @@ class SubprocessProtectedApplyCommandRunner:
         if (
             not command
             or command[0] != "kubectl"
-            or any(not item or "\x00" in item or "\n" in item for item in command)
+            # A newline is NOT rejected: protected components dispatch bounded
+            # read/mutation commands as subprocess argv with no shell (e.g.
+            # `kubectl exec ... -- sh -ceu '... psql -c "$1"' sh <SQL>`, where the
+            # trailing rate-card inventory SQL is a multi-line literal). An
+            # embedded newline is literal argument text, not an injection vector.
+            # Empty elements and NUL bytes are still rejected.
+            or any(not item or "\x00" in item for item in command)
             or dict(env) != dict(self.environment)
             or not 0 < timeout_seconds <= 1800
             or (input_payload is not None and len(input_payload) > self.max_output_bytes)
