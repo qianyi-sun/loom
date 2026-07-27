@@ -96,7 +96,7 @@ def browser_runtime_command(
         "--env",
         "HOME=/tmp",
         "--tmpfs",
-        "/tmp:rw,nosuid,nodev,size=32m,mode=0700",
+        "/tmp:rw,nosuid,nodev,size=32m,mode=1777",
         "--mount",
         f"type=bind,src={token_path},dst=/run/secrets/admin-token,readonly,bind-propagation=rprivate",
         "--entrypoint",
