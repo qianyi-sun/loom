@@ -339,6 +339,7 @@ def test_fleet_probe_returns_every_independent_blocker() -> None:
         ssh_config=Path("/fixed/ssh-config"),
         identity=Path("/fixed/identity"),
         max_concurrency=2,
+        settle_attempts=1,
     )
 
     assert not result.ready
@@ -373,6 +374,64 @@ def test_fleet_probe_fails_closed_when_transient_never_settles() -> None:
     assert result.failed_hosts == ("trt-gb10-1",)
     assert result.transient_hosts == ("trt-gb10-1",)
     assert calls == 3
+
+
+def test_fleet_probe_retries_transient_transport_failure() -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    calls = 0
+    sleeps: list[float] = []
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        # The single bastion drops the first two connections (ssh exit 255) before
+        # the host answers with a fully ready observation.
+        if calls < 3:
+            return subprocess.CompletedProcess(argv, 255, "", "kex_exchange_identification")
+        return subprocess.CompletedProcess(argv, 0, _payload("trt-gb10-1"), "")
+
+    result = probe_gb10_fleet_readonly(
+        run,
+        (target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        settle_attempts=5,
+        settle_interval_seconds=0.25,
+        sleep=sleeps.append,
+    )
+
+    assert result.ready
+    assert result.failed_hosts == ()
+    # A transport failure is retried but never reported as a transient-timer host.
+    assert result.transient_hosts == ()
+    assert result.host_boot_ids == {"trt-gb10-1": BOOT_IDS["trt-gb10-1"]}
+    assert calls == 3
+    assert sleeps == [0.25, 0.25]
+
+
+def test_fleet_probe_fails_closed_when_transport_never_recovers() -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    calls = 0
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(argv, 255, "", "connection reset by peer")
+
+    result = probe_gb10_fleet_readonly(
+        run,
+        (target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        settle_attempts=4,
+        settle_interval_seconds=0,
+    )
+
+    assert not result.ready
+    assert result.failed_hosts == ("trt-gb10-1",)
+    assert result.transient_hosts == ()
+    assert result.host_boot_ids == {}
+    assert calls == 4
 
 
 def test_ssh_topology_reports_every_host_without_remote_diagnostics() -> None:

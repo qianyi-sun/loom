@@ -113,6 +113,128 @@ def test_fixed_transport_applies_only_typed_operations_to_planned_host(tmp_path)
     assert "curl" not in calls[0][-1]
 
 
+def _retrying_transport(
+    run, *targets: GB10TransportTarget, sleeps: list[float], attempts: int = 5
+) -> FixedGB10SSHTransport:
+    return FixedGB10SSHTransport(
+        targets=targets,
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        run=run,
+        max_concurrency=2,
+        settle_attempts=attempts,
+        settle_interval_seconds=0.5,
+        sleep=sleeps.append,
+    )
+
+
+def test_fixed_transport_retries_transient_observe_failure(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1")
+    calls = 0
+    sleeps: list[float] = []
+    payload = {
+        "baseline_ready": True,
+        "boot_id": "boot-1",
+        "candidate_source_exact": True,
+        "checkout_exact": True,
+        "environment_exact": True,
+        "legacy_absent": True,
+        "service_timer_exact": True,
+        "units_exact": True,
+    }
+
+    def run(argv):
+        nonlocal calls
+        calls += 1
+        # The single bastion drops the first two connections (ssh exit 255).
+        if calls < 3:
+            return subprocess.CompletedProcess(argv, 255, "", "kex_exchange_identification")
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    observed = _retrying_transport(run, _target(), sleeps=sleeps).observe(plan)
+
+    host = observed.hosts["trt-gb10-1"]
+    assert host.exact
+    assert host.boot_id == "boot-1"
+    assert calls == 3
+    assert sleeps == [0.5, 0.5]
+
+
+def test_fixed_transport_observe_fails_closed_after_exhausting_retries(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1")
+    calls = 0
+    sleeps: list[float] = []
+
+    def run(argv):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(argv, 255, "", "connection reset by peer")
+
+    observed = _retrying_transport(run, _target(), sleeps=sleeps, attempts=4).observe(plan)
+
+    host = observed.hosts["trt-gb10-1"]
+    assert host.boot_id == "unavailable"
+    assert not host.applicable
+    assert calls == 4
+    assert sleeps == [0.5, 0.5, 0.5]
+
+
+def test_fixed_transport_does_not_retry_a_valid_drifted_observation(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1")
+    calls = 0
+    sleeps: list[float] = []
+    payload = {
+        "baseline_ready": False,
+        "boot_id": "boot-1",
+        "candidate_source_exact": False,
+        "checkout_exact": False,
+        "environment_exact": False,
+        "legacy_absent": True,
+        "service_timer_exact": False,
+        "units_exact": False,
+    }
+
+    def run(argv):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    observed = _retrying_transport(run, _target(), sleeps=sleeps).observe(plan)
+
+    # A well-formed observation is authoritative -- genuine drift is never retried.
+    assert not observed.hosts["trt-gb10-1"].applicable
+    assert observed.hosts["trt-gb10-1"].boot_id == "boot-1"
+    assert calls == 1
+    assert sleeps == []
+
+
+def test_fixed_transport_apply_retries_transient_failure(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1", "trt-gb10-2")
+    calls = 0
+    sleeps: list[float] = []
+
+    def run(argv):
+        nonlocal calls
+        calls += 1
+        if calls < 2:
+            return subprocess.CompletedProcess(argv, 255, "", "reset")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    convergence = GB10ConvergencePlan(
+        state=GB10ConvergenceState.READY,
+        mutations=(GB10HostMutation("trt-gb10-2", (GB10MutationKind.ENVIRONMENT,)),),
+        blockers={},
+        evidence_digest="1" * 64,
+    )
+    # A retried transient apply failure must converge without raising.
+    _retrying_transport(run, _target(), _target("trt-gb10-2"), sleeps=sleeps, attempts=3).apply(
+        plan, convergence
+    )
+
+    assert calls == 2
+    assert sleeps == [0.5]
+
+
 def test_fixed_remote_programs_compile_and_apply_rejects_noncanonical_order(tmp_path) -> None:
     plan = _plan(tmp_path, "trt-gb10-1")
     target = _target()
