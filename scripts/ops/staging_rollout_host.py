@@ -4177,7 +4177,14 @@ class HostInstaller:
             "smoke_on_behalf_username": "devansh",
             "smoke_on_behalf_team_id": team_id,
             "scope": "current-gb10",
-            "gb10_prep_concurrency": 8,
+            # The GB10 SSH inventory fans every host through a single bastion
+            # (trt-gb10-1 via the public IP; the internal hosts ProxyJump through
+            # it), and that host also runs a worker + the node-agent. An 8-way
+            # concurrent fleet observe overwhelms the bastion and drops probes,
+            # surfacing transient host-boot drift that fails the gb10 candidate
+            # gate. A small concurrency keeps the bastion responsive; the observe
+            # is a few seconds slower but reliable.
+            "gb10_prep_concurrency": 2,
             "backup_max_objects": 1_000_000,
             "backup_max_entries": 16_000_000,
         }
