@@ -240,7 +240,7 @@ class FinalBrowserExecutor:
             "--env",
             "HOME=/tmp",
             "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=512m,mode=0700",
+            "/tmp:rw,nosuid,nodev,size=512m,mode=1777",
             "--mount",
             f"type=bind,src={token_file},dst=/run/secrets/admin-token,readonly,bind-propagation=rprivate",
             "--mount",
