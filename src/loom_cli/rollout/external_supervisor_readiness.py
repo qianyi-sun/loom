@@ -31,6 +31,8 @@ STAGING_CANDIDATE_RUNTIME_ROOT = f"{STAGING_RUNNER_ROOT}/candidates"
 STAGING_NAMESPACE = "loom-staging"
 STAGING_KUBECONFIG = "/var/lib/loom-staging-rollout/kubeconfig"
 REHEARSAL_KUBECONFIG = "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig"
+_REHEARSAL_DB_LOCAL_PORT_OFFSET = 10_000
+_MAX_REHEARSAL_SOURCE_PORT = 65_535 - _REHEARSAL_DB_LOCAL_PORT_OFFSET
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -84,6 +86,12 @@ class CommandResult(Protocol):
 
 
 SystemdAnalyzeRunner = Callable[[Sequence[str]], CommandResult]
+
+
+def _rehearsal_db_local_port(live_port: int) -> int:
+    if not 1024 <= live_port <= _MAX_REHEARSAL_SOURCE_PORT:
+        raise ValueError("external supervisor rehearsal DB local port is out of bounds")
+    return live_port + _REHEARSAL_DB_LOCAL_PORT_OFFSET
 
 
 def staging_runtime_root(candidate_sha: str) -> str:
@@ -483,7 +491,11 @@ class ExternalSupervisorIdentity:
 
         rewritten: list[str] = []
         index = 0
-        replacements = {"--namespace": namespace, "--kubeconfig": kubeconfig}
+        replacements = {
+            "--namespace": namespace,
+            "--kubeconfig": kubeconfig,
+            "--db-local-port": str(_rehearsal_db_local_port(self.db_local_port)),
+        }
         while index < len(self.args):
             token = self.args[index]
             if "=" in token:
@@ -599,6 +611,7 @@ class ExternalSupervisorArtifact:
             for unit_name in (supervisor.service_name, supervisor.timer_name)
         ]
         ports = [supervisor.db_local_port for supervisor in self.supervisors]
+        rehearsal_ports = [_rehearsal_db_local_port(port) for port in ports]
         if (
             self.schema_version != 2
             or _SHA_RE.fullmatch(self.candidate_sha) is None
@@ -615,6 +628,8 @@ class ExternalSupervisorArtifact:
             or len({item.name for item in self.supervisors}) != len(self.supervisors)
             or len(units) != len(set(units))
             or len(ports) != len(set(ports))
+            or len(rehearsal_ports) != len(set(rehearsal_ports))
+            or not set(ports).isdisjoint(rehearsal_ports)
             or any(item.environment != self.environment for item in self.supervisors)
             or any(item.runtime_root != self.runtime_root for item in self.supervisors)
             or _SHA256_RE.fullmatch(self.artifact_digest) is None
