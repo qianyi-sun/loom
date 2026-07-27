@@ -212,6 +212,25 @@ def test_family_orchestrator_token_is_rejected_outside_step_exchange(
     assert response.status_code == 401
 
 
+def test_issue_step_token_accepts_effective_trial_timeout_ttl(
+    app,
+    seed,  # type: ignore[no-untyped-def]
+) -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/step-tokens",
+            headers={"Authorization": f"Bearer {seed['token']}"},
+            json={
+                "team_id": str(seed["team_id"]),
+                "trial_id": str(seed["trial_id"]),
+                "step_id": "main",
+                "ttl_sec": 9300,
+            },
+        )
+
+    assert response.status_code == 201, response.text
+
+
 def test_issue_step_token_validates_ttl(app, worker_token):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(
@@ -221,7 +240,7 @@ def test_issue_step_token_validates_ttl(app, worker_token):  # type: ignore[no-u
                 "team_id": str(uuid4()),
                 "trial_id": str(uuid4()),
                 "step_id": "main",
-                "ttl_sec": 99999,  # > 7200 cap
+                "ttl_sec": 30_001,
             },
         )
         assert r.status_code == 422

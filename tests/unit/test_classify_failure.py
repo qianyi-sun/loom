@@ -10,6 +10,7 @@ from loom.errors import (
     TrajectoryFlushFailedError,
     VerifierError,
     classify_failure,
+    classify_failure_message,
 )
 from loom.models.result import FailureReason
 
@@ -88,6 +89,19 @@ def test_provider_transport_disconnect_message_classification_is_idempotent():
     assert reason == FailureReason.PROVIDER_TRANSPORT_DISCONNECT
     assert msg is not None
     assert msg.count(prefix) == 1
+
+
+def test_textual_loom_step_jwt_401_is_actionable_and_redacted() -> None:
+    result = classify_failure_message(
+        "litellm.AuthenticationError: Error code: 401 - "
+        "{'detail': 'not authorized'} Authorization: Bearer secret-token"
+    )
+
+    assert result is not None
+    reason, msg = result
+    assert reason == FailureReason.GATEWAY_ERROR
+    assert msg == "Loom gateway rejected or expired the step token (HTTP 401)."
+    assert "secret-token" not in msg
 
 
 def test_timeout_error_classification_is_phase_dependent():
