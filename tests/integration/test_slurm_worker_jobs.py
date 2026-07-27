@@ -80,7 +80,13 @@ def _record_payload(job_id: str = "13441") -> dict[str, object]:
         "nodelist": "oldlab-[1-3]",
         "requested_cpus": 12,
         "requested_memory_mib": 58000,
+        "requested_pids": 512,
+        "requested_gpu_tres": "gpu:a100:2",
+        "requested_gpus": 2,
         "requested_concurrency": 6,
+        "sandbox_identity": "production",
+        "candidate_sha": "a" * 40,
+        "compose_project": f"loom-production-aaaaaaaaaaaa-{job_id}",
         "job_id": job_id,
         "slurm_state": "PENDING",
         "pending_reason": "Resources",
@@ -105,6 +111,12 @@ def test_record_submission_redacts_env_and_blocks_duplicate_active_capacity(
         assert r.status_code == 201, r.text
         created = r.json()
         assert created["state"] == "pending"
+        assert created["requested_pids"] == 512
+        assert created["requested_gpu_tres"] == "gpu:a100:2"
+        assert created["requested_gpus"] == 2
+        assert created["sandbox_identity"] == "production"
+        assert created["candidate_sha"] == "a" * 40
+        assert created["compose_project"] == "loom-production-aaaaaaaaaaaa-13441"
         assert created["redacted_env"]["LOOM_WORKER_TOKEN"] == "<redacted>"
 
         dup = client.post(
@@ -136,6 +148,12 @@ def test_record_submission_redacts_env_and_blocks_duplicate_active_capacity(
     assert row.environment == "production"
     assert row.pool_name == "oldlab"
     assert row.requested_concurrency == 6
+    assert row.requested_pids == 512
+    assert row.requested_gpu_tres == "gpu:a100:2"
+    assert row.requested_gpus == 2
+    assert row.sandbox_identity == "production"
+    assert row.candidate_sha == "a" * 40
+    assert row.compose_project == "loom-production-aaaaaaaaaaaa-13441"
     assert row.slurm_state == "PENDING"
     assert row.state == "pending"
     assert row.pending_reason == "Resources"

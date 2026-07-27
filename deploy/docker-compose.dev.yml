@@ -46,15 +46,15 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: loom
-      POSTGRES_PASSWORD: loom
-      POSTGRES_DB: loom
+      POSTGRES_USER: "${LOOM_DEV_POSTGRES_USER:-loom}"
+      POSTGRES_PASSWORD: "${LOOM_DEV_POSTGRES_PASSWORD:-loom}"
+      POSTGRES_DB: "${LOOM_DEV_POSTGRES_DB:-loom}"
     ports:
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:5432:5432"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "loom"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 2s
       timeout: 2s
       retries: 20
@@ -63,11 +63,11 @@ services:
     image: minio/minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: loomdev
-      MINIO_ROOT_PASSWORD: loomdev123
+      MINIO_ROOT_USER: "${LOOM_DEV_MINIO_ROOT_USER:-loomdev}"
+      MINIO_ROOT_PASSWORD: "${LOOM_DEV_MINIO_ROOT_PASSWORD:-loomdev123}"
     ports:
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:9000:9000"
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:9001:9001"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_MINIO_PORT:-9000}:9000"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -77,12 +77,12 @@ services:
       retries: 20
 
   llm-gateway:
-    image: loom-llm-gateway:dev
+    image: loom-llm-gateway:${LOOM_DEV_IMAGE_TAG:-dev}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
     environment:
-      LOOM_GW_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
+      LOOM_GW_DB_URL: "postgresql+psycopg://${LOOM_DEV_POSTGRES_USER:-loom}:${LOOM_DEV_POSTGRES_PASSWORD:-loom}@postgres/${LOOM_DEV_POSTGRES_DB:-loom}"
       LOOM_GW_ANTHROPIC_API_KEY: ${LOOM_GW_ANTHROPIC_API_KEY:-stub-key}
       LOOM_GW_OPENAI_API_KEY: ${LOOM_GW_OPENAI_API_KEY:-stub-key}
       LOOM_GW_DEV_RELOAD: "1"
@@ -106,12 +106,12 @@ services:
     volumes:
       - ../src:/app/src
       - ../packages:/app/packages
-      - ../.loom/admin/secrets.toml:/var/run/loom/admin/secrets.toml:ro
+      - ${LOOM_DEV_ADMIN_SECRET_FILE:-../.loom/admin/secrets.toml}:/var/run/loom/admin/secrets.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:9100:9100"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_LLM_GATEWAY_PORT:-9100}:9100"
     restart: on-failure
     # python -c probe rather than curl because Dockerfile.gateway is
     # python:3.11-slim and slim images don't ship curl. Reusing the
@@ -123,15 +123,15 @@ services:
       retries: 30
 
   control-plane:
-    image: loom-control-plane:dev
+    image: loom-control-plane:${LOOM_DEV_IMAGE_TAG:-dev}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.control-plane
     environment:
-      LOOM_CP_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
+      LOOM_CP_DB_URL: "postgresql+psycopg://${LOOM_DEV_POSTGRES_USER:-loom}:${LOOM_DEV_POSTGRES_PASSWORD:-loom}@postgres/${LOOM_DEV_POSTGRES_DB:-loom}"
       LOOM_CP_MINIO_ENDPOINT: http://minio:9000
-      LOOM_CP_MINIO_ACCESS_KEY: loomdev
-      LOOM_CP_MINIO_SECRET_KEY: loomdev123
+      LOOM_CP_MINIO_ACCESS_KEY: "${LOOM_DEV_MINIO_ROOT_USER:-loomdev}"
+      LOOM_CP_MINIO_SECRET_KEY: "${LOOM_DEV_MINIO_ROOT_PASSWORD:-loomdev123}"
       LOOM_CP_LLM_GATEWAY_URL: http://llm-gateway:9100
       LOOM_CP_LOG_LEVEL: debug
       LOOM_CP_DEV_RELOAD: "1"
@@ -143,14 +143,14 @@ services:
     volumes:
       - ../src:/app/src
       - ../packages:/app/packages
-      - ../.loom/admin/secrets.toml:/var/run/loom/admin/secrets.toml:ro
+      - ${LOOM_DEV_ADMIN_SECRET_FILE:-../.loom/admin/secrets.toml}:/var/run/loom/admin/secrets.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
     ports:
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:8080:8080"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_CONTROL_PLANE_PORT:-8080}:8080"
     restart: on-failure
     # python -c probe (see llm-gateway above for rationale).
     healthcheck:
@@ -160,15 +160,17 @@ services:
       retries: 30
 
   loom-service:
-    image: loom-service:dev
+    image: loom-service:${LOOM_DEV_IMAGE_TAG:-dev}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.service
     environment:
-      LOOM_SVC_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
+      LOOM_SVC_DB_URL: "postgresql+psycopg://${LOOM_DEV_POSTGRES_USER:-loom}:${LOOM_DEV_POSTGRES_PASSWORD:-loom}@postgres/${LOOM_DEV_POSTGRES_DB:-loom}"
       LOOM_SVC_MINIO_ENDPOINT: http://minio:9000
-      LOOM_SVC_MINIO_ACCESS_KEY: loomdev
-      LOOM_SVC_MINIO_SECRET_KEY: loomdev123
+      LOOM_SVC_MINIO_ACCESS_KEY: "${LOOM_DEV_MINIO_ROOT_USER:-loomdev}"
+      LOOM_SVC_MINIO_SECRET_KEY: "${LOOM_DEV_MINIO_ROOT_PASSWORD:-loomdev123}"
+      LOOM_SVC_TRAJECTORIES_BUCKET: "${LOOM_DEV_TRAJECTORIES_BUCKET:-trajectories}"
+      LOOM_SVC_ARTIFACTS_BUCKET: "${LOOM_DEV_ARTIFACTS_BUCKET:-artifacts}"
       LOOM_SVC_CONTROL_PLANE_URL: http://control-plane:8080/
       LOOM_SVC_GATEWAY_URL: http://llm-gateway:9100/
       LOOM_SVC_LOG_LEVEL: debug
@@ -190,18 +192,18 @@ services:
     volumes:
       - ../src:/app/src
       - ../packages:/app/packages
-      - ../.loom/admin/secrets.toml:/var/run/loom/admin/secrets.toml:ro
+      - ${LOOM_DEV_ADMIN_SECRET_FILE:-../.loom/admin/secrets.toml}:/var/run/loom/admin/secrets.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
       control-plane:
         condition: service_healthy
     ports:
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:8090:8090"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_LOOM_SERVICE_PORT:-8090}:8090"
     restart: on-failure
 
   worker:
-    image: loom-worker:dev
+    image: loom-worker:${LOOM_DEV_IMAGE_TAG:-dev}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
@@ -217,11 +219,11 @@ services:
       # `host.docker.internal`. Without this, real-model trials get
       # `FailedToOpenSocket` retries until they exhaust the agent's retry
       # budget (10× by default for claude-code).
-      LOOM_WORKER_SUBPROCESS_GATEWAY_URL: http://host.docker.internal:9100
+      LOOM_WORKER_SUBPROCESS_GATEWAY_URL: "http://host.docker.internal:${LOOM_DEV_LLM_GATEWAY_PORT:-9100}"
       LOOM_WORKER_TOKEN: "${LOOM_WORKER_TOKEN:-placeholder}"
       LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000
-      LOOM_WORKER_MINIO_ACCESS_KEY: loomdev
-      LOOM_WORKER_MINIO_SECRET_KEY: loomdev123
+      LOOM_WORKER_MINIO_ACCESS_KEY: "${LOOM_DEV_MINIO_ROOT_USER:-loomdev}"
+      LOOM_WORKER_MINIO_SECRET_KEY: "${LOOM_DEV_MINIO_ROOT_PASSWORD:-loomdev123}"
       LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS: "${LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS:-256}"
       LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC: "${LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC:-5}"
       LOOM_WORKER_MINIO_READ_TIMEOUT_SEC: "${LOOM_WORKER_MINIO_READ_TIMEOUT_SEC:-120}"
@@ -263,12 +265,12 @@ services:
   # Envoy fetches its CDS+RDS config from the xds-server on :18000
   # (which reads provider_connections from Postgres).
   egress-xds:
-    image: loom-egress-xds:dev
+    image: loom-egress-xds:${LOOM_DEV_IMAGE_TAG:-dev}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.egress-xds
     environment:
-      LOOM_EGRESS_XDS_DB_URL: postgresql://loom:loom@postgres:5432/loom
+      LOOM_EGRESS_XDS_DB_URL: "postgresql://${LOOM_DEV_POSTGRES_USER:-loom}:${LOOM_DEV_POSTGRES_PASSWORD:-loom}@postgres:5432/${LOOM_DEV_POSTGRES_DB:-loom}"
       LOOM_EGRESS_XDS_LISTEN_ADDR: 0.0.0.0:18000
       LOOM_EGRESS_XDS_LOG_LEVEL: info
     # The production Envoy bootstrap (deploy/envoy/egress-proxy.yaml)
@@ -280,7 +282,7 @@ services:
         aliases:
           - loom-egress-xds
     ports:
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:18000:18000"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_EGRESS_XDS_PORT:-18000}:18000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -295,8 +297,8 @@ services:
       - ./envoy/egress-proxy.yaml:/etc/envoy/envoy.yaml:ro
     command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
     ports:
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:30443:30443"
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:9901:9901"   # Envoy admin
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_EGRESS_PROXY_PORT:-30443}:30443"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_EGRESS_ADMIN_PORT:-9901}:9901"   # Envoy admin
     depends_on:
       egress-xds:
         condition: service_started
@@ -323,7 +325,7 @@ services:
       - ../web:/app
       - web_node_modules:/app/node_modules
     ports:
-      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:5173:5173"
+      - "${LOOM_DEV_BIND_ADDR:-127.0.0.1}:${LOOM_DEV_WEB_PORT:-5173}:5173"
     depends_on:
       loom-service:
         condition: service_started

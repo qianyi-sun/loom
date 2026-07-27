@@ -59,7 +59,13 @@ class _SlurmWorkerJobCreate(BaseModel):
     nodelist: str
     requested_cpus: int | None = Field(default=None, ge=1)
     requested_memory_mib: int | None = Field(default=None, ge=1)
+    requested_pids: int | None = Field(default=None, ge=1)
+    requested_gpu_tres: str | None = None
+    requested_gpus: int = Field(default=0, ge=0)
     requested_concurrency: int = Field(gt=0)
+    sandbox_identity: str | None = None
+    candidate_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    compose_project: str | None = None
     job_id: str | None = None
     slurm_state: str | None = None
     pending_reason: str | None = None
@@ -144,7 +150,9 @@ async def _require_admin_scope(
             session,
             authorization,
             admin_verifier=getattr(
-                request.app.state, "admin_secret_verifier", None,
+                request.app.state,
+                "admin_secret_verifier",
+                None,
             ),
         )
     if ctx is None or scope not in ctx.scopes:
@@ -168,14 +176,16 @@ async def issue_worker_token(
         expires_at = datetime.now(UTC) + timedelta(days=int(days))
 
     async with request.app.state.session_factory() as session:
-        await session.execute(insert(Token).values(
-            token_hash=token_hash,
-            type="worker",
-            scopes=["worker:claim", "worker:report", "worker:index"],
-            team_id=None,
-            issued_at=datetime.now(UTC),
-            expires_at=expires_at,
-        ))
+        await session.execute(
+            insert(Token).values(
+                token_hash=token_hash,
+                type="worker",
+                scopes=["worker:claim", "worker:report", "worker:index"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=expires_at,
+            )
+        )
         await session.commit()
 
     return {
@@ -200,14 +210,16 @@ async def issue_batch_runner_token(
         expires_at = datetime.now(UTC) + timedelta(days=int(days))
 
     async with request.app.state.session_factory() as session:
-        await session.execute(insert(Token).values(
-            token_hash=token_hash,
-            type="worker",
-            scopes=["submit:batch"],
-            team_id=None,
-            issued_at=datetime.now(UTC),
-            expires_at=expires_at,
-        ))
+        await session.execute(
+            insert(Token).values(
+                token_hash=token_hash,
+                type="worker",
+                scopes=["submit:batch"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=expires_at,
+            )
+        )
         await session.commit()
 
     return {
@@ -238,14 +250,16 @@ async def issue_family_orchestrator_token(
         expires_at = datetime.now(UTC) + timedelta(days=int(days))
 
     async with request.app.state.session_factory() as session:
-        await session.execute(insert(Token).values(
-            token_hash=token_hash,
-            type="family_orchestrator",
-            scopes=["family:evolve"],
-            team_id=None,
-            issued_at=datetime.now(UTC),
-            expires_at=expires_at,
-        ))
+        await session.execute(
+            insert(Token).values(
+                token_hash=token_hash,
+                type="family_orchestrator",
+                scopes=["family:evolve"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=expires_at,
+            )
+        )
         await session.commit()
 
     return {
@@ -293,7 +307,13 @@ async def create_slurm_worker_job(
             nodelist=payload.nodelist,
             requested_cpus=payload.requested_cpus,
             requested_memory_mib=payload.requested_memory_mib,
+            requested_pids=payload.requested_pids,
+            requested_gpu_tres=payload.requested_gpu_tres,
+            requested_gpus=payload.requested_gpus,
             requested_concurrency=payload.requested_concurrency,
+            sandbox_identity=payload.sandbox_identity,
+            candidate_sha=payload.candidate_sha,
+            compose_project=payload.compose_project,
             job_id=payload.job_id,
             slurm_state=payload.slurm_state,
             pending_reason=payload.pending_reason,

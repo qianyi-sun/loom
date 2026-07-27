@@ -126,9 +126,7 @@ class _FakeContainers:
         self.create_calls.append(call)
         container = _FakeContainer(
             str(kwargs["name"]),
-            health_statuses=(
-                ["starting", "healthy"] if "healthcheck" in kwargs else None
-            ),
+            health_statuses=(["starting", "healthy"] if "healthcheck" in kwargs else None),
             start_raises=self.fail_next_start,
         )
         self.fail_next_start = False
@@ -200,7 +198,8 @@ class _TrackingSlot:
 
 
 async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     task_dir = tmp_path / "task"
     api_context = task_dir / ".loom-build" / "sidecars" / "api"
@@ -219,6 +218,11 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
         task_checksum="abc123",
         trial_id=trial_id,
         health_poll_interval_sec=0,
+        runtime_identity_labels=(
+            ("loom.sandbox", "dev-a"),
+            ("loom.candidate_sha", "a" * 40),
+            ("loom.slurm_job_id", "12345"),
+        ),
     )
 
     network = await runtime.start(network_name="loom-task-net")
@@ -235,6 +239,9 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
     api_call = fake_client.containers.create_calls[1]
     assert api_call["network"] == "loom-task-net"
     assert api_call["labels"] == {
+        "loom.sandbox": "dev-a",
+        "loom.candidate_sha": "a" * 40,
+        "loom.slurm_job_id": "12345",
         "loom.setup-container": "true",
         "loom.task-sidecar": "true",
         "loom.task_id": "tb2/api-task",
@@ -268,7 +275,8 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
 
 
 async def test_sidecar_runtime_enters_setup_slot_for_pull_and_build(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """#275: sidecar image pull/build is trial setup work and must use
     the same daemon-wide admission boundary as task-image and layered
@@ -342,7 +350,8 @@ async def test_sidecar_runtime_removes_container_when_start_fails_after_create(
 
 
 async def test_sidecar_runtime_creates_and_removes_network_when_needed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     api_context = tmp_path / ".loom-build" / "sidecars" / "api"
     api_context.mkdir(parents=True)
@@ -403,7 +412,8 @@ async def test_sidecar_runtime_passes_docker_api_timeout(
 
 
 async def test_sidecar_runtime_applies_container_caps_when_set(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # #896: positive per-container caps map to nano_cpus / mem_limit /
     # pids_limit on every setup-sidecar container this runtime creates.
@@ -434,7 +444,8 @@ async def test_sidecar_runtime_applies_container_caps_when_set(
 
 
 async def test_sidecar_runtime_omits_container_caps_when_unset(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # #896: default (0) caps leave sidecar creation unbounded.
     api_context = tmp_path / ".loom-build" / "sidecars" / "api"

@@ -1,0 +1,32 @@
+schema_version = 1
+sandbox = "devansh"
+ssh_target = "oldlab-2"
+canonical_hostname = "trt-eai-oldlab-2"
+compose_project = "loom-sandbox-devansh"
+bind_address = "127.0.0.1"
+provider_connection_namespace = "sandbox-devansh"
+candidate_root = "/shared_work/loom/candidates/sandboxes/devansh"
+state_root = "/srv/loom/developer-sandboxes/devansh"
+cache_root = "/srv/loom/developer-sandboxes/devansh/cache"
+evidence_root = "/srv/loom/developer-sandboxes/devansh/evidence"
+runtime_root = "/srv/loom/developer-sandboxes/devansh/runtime"
+
+[ports]
+postgres = 22532
+minio = 22900
+minio_console = 22901
+control_plane = 22080
+loom_service = 22090
+llm_gateway = 22100
+egress_xds = 22800
+egress_proxy = 22443
+egress_admin = 22991
+web = 22173
+
+[database]
+name = "loom_sandbox_devansh"
+
+[object_store]
+task_bucket = "loom-sandbox-devansh-tasks"
+trajectories_bucket = "loom-sandbox-devansh-trajectories"
+artifacts_bucket = "loom-sandbox-devansh-artifacts"

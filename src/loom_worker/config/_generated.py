@@ -22,7 +22,9 @@ class WorkerSettings(BaseSettings):
 
     benchmark_cache: Path | None = None
     blocking_io_max_workers: int | None = None
+    candidate_sha: str = ""
     claim_poll_interval_sec: float = 1.0
+    compose_project: str = ""
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
@@ -51,6 +53,7 @@ class WorkerSettings(BaseSettings):
     minio_secret_key: SecretStr
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0
+    sandbox_identity: str = ""
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"
     sandbox_singleton_secrets_dir: str = "/var/lib/loom/sandbox-secrets"
@@ -63,6 +66,9 @@ class WorkerSettings(BaseSettings):
     setup_health_min_swap_free_mb: int = 1024
     setup_health_poll_interval_sec: float = 5.0
     setup_health_wait_timeout_sec: float = 300.0
+    slurm_allocated_gpus: int = -1
+    slurm_gpu_device_ids: str = ""
+    slurm_job_id: str = ""
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
     subprocess_gateway_url: HttpUrl | None = None

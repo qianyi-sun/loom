@@ -15,13 +15,12 @@ Predicate mirrors `cleanup_orphan_trajectories`:
 - Non-terminal, container fresh → preserve (a live worker somewhere may
   own it; wait for the terminal transition or the fallback window)
 
-We do not label containers with a `loom.worker_id` at spawn (see
-`task_sidecars.py:265`), so we can't distinguish "mine" from "someone
-else's" at the container level. That's fine at worker startup — a fresh
-worker owns no pre-existing trials, so every labeled container found is
-by definition orphan from some prior incarnation. The fallback window
-protects against deleting a container a live worker on the same host is
-still using for a long-running trial.
+Every Slurm-launched worker stamps containers with the immutable sandbox
+identity from its admission policy. Cleanup lists and removes containers
+only for that same identity. An unknown trial from another sandbox is
+therefore preserved even when multiple sandboxes share one Docker daemon.
+Legacy workers retain cleanup for unlabelled legacy containers while
+preserving every container that carries a sandbox identity.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 _TRIAL_ID_LABEL = "loom.trial_id"
+_SANDBOX_ID_LABEL = "loom.sandbox"
 
 # Mirror of `orphan_cleanup._NON_TERMINAL_FALLBACK_SEC`. See that module
 # for the reasoning — the fallback exists to bound resource growth when
@@ -74,6 +74,7 @@ def cleanup_orphan_sandbox_containers(
     *,
     docker_client: Any,
     state_lookup: Callable[[UUID], str],
+    sandbox_identity: str,
     now_sec: float | None = None,
     non_terminal_fallback_sec: float = _NON_TERMINAL_FALLBACK_SEC,
 ) -> list[UUID]:
@@ -90,9 +91,13 @@ def cleanup_orphan_sandbox_containers(
     if now_sec is None:
         now_sec = time.time()
 
+    label_filters = [_TRIAL_ID_LABEL]
+    if sandbox_identity:
+        label_filters.append(f"{_SANDBOX_ID_LABEL}={sandbox_identity}")
     try:
         containers = docker_client.containers.list(
-            all=True, filters={"label": _TRIAL_ID_LABEL},
+            all=True,
+            filters={"label": label_filters},
         )
     except Exception:
         logger.exception("orphan_sandbox_list_failed")
@@ -100,6 +105,18 @@ def cleanup_orphan_sandbox_containers(
 
     removed: list[UUID] = []
     for container in containers:
+        observed_sandbox = container.labels.get(_SANDBOX_ID_LABEL)
+        if observed_sandbox != sandbox_identity and (
+            sandbox_identity or observed_sandbox
+        ):
+            logger.info(
+                "orphan_sandbox_preserved container=%s reason=cross_sandbox "
+                "expected=%s observed=%s",
+                container.id,
+                sandbox_identity or "<legacy-unlabelled>",
+                observed_sandbox or "<missing>",
+            )
+            continue
         trial_id = _trial_id_from_labels(container.labels)
         if trial_id is None:
             logger.debug(
@@ -119,7 +136,9 @@ def cleanup_orphan_sandbox_containers(
             # move on; next startup will retry.
             logger.warning(
                 "orphan_sandbox_lookup_failed trial=%s container=%s — preserving",
-                trial_id, container.id, exc_info=True,
+                trial_id,
+                container.id,
+                exc_info=True,
             )
             continue
 
@@ -145,7 +164,9 @@ def cleanup_orphan_sandbox_containers(
 
         logger.info(
             "orphan_sandbox_preserved trial=%s container=%s state=%s age_sec=%s",
-            trial_id, container.id, state,
+            trial_id,
+            container.id,
+            state,
             f"{age_sec:.0f}" if age_sec is not None else "unknown",
         )
     return removed
@@ -163,12 +184,17 @@ def _remove(
     except Exception:
         logger.warning(
             "orphan_sandbox_remove_failed trial=%s container=%s reason=%s",
-            trial_id, container.id, reason, exc_info=True,
+            trial_id,
+            container.id,
+            reason,
+            exc_info=True,
         )
         return False
     log = logger.warning if warn else logger.info
     log(
         "orphan_sandbox_removed trial=%s container=%s reason=%s",
-        trial_id, container.id, reason,
+        trial_id,
+        container.id,
+        reason,
     )
     return True

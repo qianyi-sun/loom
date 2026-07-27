@@ -4,8 +4,8 @@ Simulates a pre-#857 staging database: it carries the full staging-lifecycle
 content but is MISSING the three inserted migrations' content (0062 benchmark
 profiles, 0066 autoscaler prod-pressure, 0067 gb10 pool rename) and is stamped
 at 0072. Proves that stamping such a DB to 0072 and running ``upgrade head``
-(which runs 0073) heals it into the exact fresh-head shape, and that a second
-run is a guarded no-op.
+(which includes 0073) heals it into the exact fresh-head shape, and that a
+second run is a guarded no-op.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _strip_inserted_migration_content(engine: object) -> None:
 def test_0073_reconciles_a_diverged_pre_renumber_database(
     isolated_migration_postgres_url: str,
 ) -> None:
-    url = isolated_migration_postgres_url  # fresh DB already at head (0073)
+    url = isolated_migration_postgres_url  # fresh DB already at current head
     cfg = _cfg(url)
     engine = create_engine(url)
 
@@ -68,6 +68,11 @@ def test_0073_reconciles_a_diverged_pre_renumber_database(
     fresh_batches = {c["name"] for c in fresh.get_columns("batches")}
     assert "resolved_task_ids" in fresh_batches
 
+    # Return the fresh database to the exact pre-0074 shape before simulating
+    # the diverged staging lineage. A stamp alone changes only Alembic metadata
+    # and would leave later physical columns behind.
+    command.downgrade(cfg, "0073")
+
     # Simulate the diverged staging DB, then stamp it back to 0072.
     _strip_inserted_migration_content(engine)
     stripped = inspect(engine)
@@ -75,7 +80,7 @@ def test_0073_reconciles_a_diverged_pre_renumber_database(
     assert "execution_state" not in {c["name"] for c in stripped.get_columns("benchmarks")}
     command.stamp(cfg, "0072")
 
-    # Reconcile: upgrade head runs 0073.
+    # Reconcile: upgrade head includes 0073 before later migrations.
     command.upgrade(cfg, "head")
 
     healed = inspect(engine)
@@ -90,7 +95,10 @@ def test_0073_reconciles_a_diverged_pre_renumber_database(
         ).scalar()
     assert probe_pool == "gb10", "0073 must apply the gb10-arm64 -> gb10 rename"
 
-    # Idempotency: a second reconcile pass is a guarded no-op (no error, stable).
+    # Idempotency: remove the later 0074 schema, then replay the 0073 reconcile
+    # from the exact historical shape. The 0073 pass is a guarded no-op and
+    # 0074 reapplies once from its real predecessor.
+    command.downgrade(cfg, "0073")
     command.stamp(cfg, "0072")
     command.upgrade(cfg, "head")
     again = inspect(engine)

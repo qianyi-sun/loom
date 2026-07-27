@@ -9,9 +9,19 @@
     "default": "None",
     "required": false
   },
+  "candidate_sha": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "claim_poll_interval_sec": {
     "annotation": "<class 'float'>",
     "default": "1.0",
+    "required": false
+  },
+  "compose_project": {
+    "annotation": "<class 'str'>",
+    "default": "''",
     "required": false
   },
   "container_cpus": {
@@ -154,6 +164,11 @@
     "default": "60.0",
     "required": false
   },
+  "sandbox_identity": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "sandbox_isolation": {
     "annotation": "<class 'bool'>",
     "default": "False",
@@ -212,6 +227,21 @@
   "setup_health_wait_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "300.0",
+    "required": false
+  },
+  "slurm_allocated_gpus": {
+    "annotation": "<class 'int'>",
+    "default": "-1",
+    "required": false
+  },
+  "slurm_gpu_device_ids": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "slurm_job_id": {
+    "annotation": "<class 'str'>",
+    "default": "''",
     "required": false
   },
   "storage_auth_kind": {

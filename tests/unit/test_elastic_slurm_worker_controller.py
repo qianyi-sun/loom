@@ -278,20 +278,27 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
     assert request.args == (
         "sbatch",
         "--parsable",
-        "--job-name=loom-worker-oldlab-4",
+        "--job-name=loom-production-legacy-oldlab-4",
         "--nodelist=oldlab-4",
         "--exclusive",
         "--time=7-00:00:00",
         "--partition=cpu",
         "--cpus-per-task=12",
         "--mem=58000M",
-        "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom",
+        "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom,LOOM_WORKER_SANDBOX_IDENTITY=production,LOOM_WORKER_CANDIDATE_SHA=legacy,LOOM_WORKER_SLURM_ALLOCATED_GPUS=0,LOOM_WORKER_RESTART_POLICY=no",
     )
     assert (
-        'compose_args=(--env-file "$LOOM_REMOTE_WORKER_ENV_FILE" '
+        'compose_args=(--project-name "$LOOM_WORKER_COMPOSE_PROJECT" '
+        '--env-file "$LOOM_REMOTE_WORKER_ENV_FILE" '
         "-f deploy/docker-compose.remote-worker.yml)"
     ) in request.stdin
-    assert 'docker compose "${compose_args[@]}" up --build' in request.stdin
+    assert 'export LOOM_WORKER_SLURM_JOB_ID="$SLURM_JOB_ID"' in request.stdin
+    assert (
+        'export LOOM_WORKER_COMPOSE_PROJECT="loom-${LOOM_WORKER_SANDBOX_IDENTITY}-'
+        '${project_candidate}-${project_job}"'
+    ) in request.stdin
+    assert 'docker compose "${compose_args[@]}" up --build &' in request.stdin
+    assert 'docker compose "${compose_args[@]}" down --remove-orphans' in request.stdin
     assert 'cd "$LOOM_REMOTE_WORKER_REPO_DIR"' in request.stdin
 
 
@@ -402,6 +409,58 @@ def test_build_controller_config_rejects_negative_container_caps(field: str) -> 
     with pytest.raises(ValueError):
         build_controller_config(
             **_controller_config_kwargs(**{field: -1}),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("container_cpus", 0.0),
+        ("container_memory_mib", 0),
+        ("container_pids", 0),
+        ("candidate_sha", ""),
+    ],
+)
+def test_nonexclusive_admission_requires_complete_containment(
+    field: str,
+    value: object,
+) -> None:
+    overrides: dict[str, object] = {
+        "exclusive": False,
+        "environment": "dev-a",
+        "container_cpus": 2.0,
+        "container_memory_mib": 4096,
+        "container_pids": 512,
+        "candidate_sha": "a" * 40,
+    }
+    overrides[field] = value
+
+    with pytest.raises(ValueError):
+        build_controller_config(
+            **_controller_config_kwargs(**overrides),  # type: ignore[arg-type]
+        )
+
+
+def test_gpu_tres_is_validated_and_emitted_in_sbatch_request() -> None:
+    config = build_controller_config(
+        **_controller_config_kwargs(  # type: ignore[arg-type]
+            gpu_tres="gpu:a100:2",
+        )
+    )
+
+    assert config is not None
+    assert config.requested_gpus == 2
+    request = build_sbatch_request(config, node="oldlab-1")
+    assert "--gres=gpu:a100:2" in request.args
+    assert "LOOM_WORKER_SLURM_ALLOCATED_GPUS=2" in request.args[-1]
+    assert "SLURM_JOB_GPUS is empty" in request.stdin
+
+
+@pytest.mark.parametrize("gpu_tres", ["gpu:0", "gpu:a100", "tesla:1", "gpu::2"])
+def test_gpu_tres_rejects_ambiguous_requests(gpu_tres: str) -> None:
+    with pytest.raises(ValueError, match="gpu_tres"):
+        build_controller_config(
+            **_controller_config_kwargs(gpu_tres=gpu_tres),  # type: ignore[arg-type]
         )
 
 
