@@ -1736,8 +1736,8 @@ def test_registered_migration_plan_binds_exact_candidate_graph_and_policy() -> N
     )
 
     assert result.passed
-    assert result.evidence["head"] == "0073"
-    assert result.evidence["revision-count"] == 74
+    assert result.evidence["head"] == "0074"
+    assert result.evidence["revision-count"] == 75
     assert result.evidence["linear"] is True
     assert result.evidence["policy-digest"] == policy_digest
 
