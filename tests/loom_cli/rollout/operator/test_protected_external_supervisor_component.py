@@ -16,6 +16,7 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPredecessorAuthority,
     external_supervisor_unit_set_digest,
+    external_supervisor_unit_set_digest_or_empty,
     load_predecessor_manifest,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
@@ -59,6 +60,43 @@ def _absent_authority() -> ExternalSupervisorPredecessorAuthority:
         authority_digest=ABSENT_PREDECESSOR_DIGEST,
         unit_sha256={},
     )
+
+
+def _absent_plan(**overrides: object) -> SimpleNamespace:
+    fields: dict[str, object] = {
+        "supervisor_predecessor_kind": "absent",
+        "supervisor_predecessor_digest": ABSENT_PREDECESSOR_DIGEST,
+        "supervisor_predecessor_unit_sha256": {},
+        "supervisor_predecessor_pointer_digest": ABSENT_PREDECESSOR_DIGEST,
+        "supervisor_predecessor_unit_set_digest": external_supervisor_unit_set_digest_or_empty({}),
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def test_plan_authority_bootstraps_well_formed_absent_predecessor() -> None:
+    # A post-0067 first-introduction rollout carries an absent predecessor
+    # (no live units, no canonical record). The apply must build the absent
+    # authority so the bootstrap can establish the first canonical supervisor.
+    authority = ProtectedExternalSupervisorComponent._plan_authority(_absent_plan())
+    assert authority.kind == "absent"
+    assert authority.authority_digest == ABSENT_PREDECESSOR_DIGEST
+    assert dict(authority.unit_sha256) == {}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"supervisor_predecessor_digest": "0" * 64},
+        {"supervisor_predecessor_pointer_digest": "0" * 64},
+        {"supervisor_predecessor_unit_set_digest": "0" * 64},
+    ],
+)
+def test_plan_authority_rejects_malformed_absent_predecessor(
+    override: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="predecessor binding is invalid"):
+        ProtectedExternalSupervisorComponent._plan_authority(_absent_plan(**override))
 
 
 def _bound_artifact(tmp_path: Path):
