@@ -87,6 +87,8 @@ spec:
               value: "True"
             - name: LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX
               value: "50.0"
+            - name: LOOM_WORKER_SETUP_HEALTH_MIN_MEM_AVAILABLE_MB
+              value: "2048"
             - name: LOOM_WORKER_SETUP_HEALTH_MIN_SWAP_FREE_MB
               value: "1024"
             - name: LOOM_WORKER_SETUP_HEALTH_POLL_INTERVAL_SEC
