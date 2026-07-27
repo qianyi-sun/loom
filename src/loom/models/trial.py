@@ -23,6 +23,7 @@ class RetryReason(StrEnum):
     TRAJECTORY_FLUSH_FAILED = "trajectory_flush_failed"
     GATEWAY_ERROR = "gateway_error"
     PROVIDER_TRANSPORT_DISCONNECT = "provider_transport_disconnect"
+    NODE_SETUP_HEALTH = "node_setup_health"
 
 
 class BackoffSpec(BaseModel):
@@ -39,6 +40,7 @@ class RetryPolicy(BaseModel):
     retry_on: frozenset[RetryReason] = frozenset({
         RetryReason.GATEWAY_ERROR,
         RetryReason.PROVIDER_TRANSPORT_DISCONNECT,
+        RetryReason.NODE_SETUP_HEALTH,
     })
     backoff: BackoffSpec = BackoffSpec()
 

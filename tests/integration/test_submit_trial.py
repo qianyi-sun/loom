@@ -314,6 +314,7 @@ def test_submit_snapshots_retry_defaults_when_absent(
     assert set(retry["retry_on"]) == {
         "gateway_error",
         "provider_transport_disconnect",
+        "node_setup_health",
     }
     assert retry["backoff"] == {
         "base_sec": 30.0,

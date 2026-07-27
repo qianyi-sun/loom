@@ -24,6 +24,7 @@ class NodeHealthSnapshot:
     swap_total_mb: int | None
     swap_free_mb: int | None
     d_state_processes: int | None
+    mem_available_mb: int | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class NodeHealthDecision:
 @dataclass(frozen=True)
 class NodeHealthPolicy:
     io_full_avg10_max: float = 50.0
+    min_mem_available_mb: int = 2048
     min_swap_free_mb: int = 1024
     d_state_process_max: int = 32
     wait_timeout_sec: float = 300.0
@@ -60,6 +62,18 @@ class NodeHealthPolicy:
                 detail=(
                     f"io.full.avg10={snapshot.io_full_avg10:g} "
                     f"max={self.io_full_avg10_max:g}"
+                ),
+            )
+
+        if (
+            snapshot.mem_available_mb is not None
+            and snapshot.mem_available_mb < self.min_mem_available_mb
+        ):
+            return NodeHealthDecision(
+                ok=False,
+                reason="node_memory_pressure",
+                detail=(
+                    f"mem.available_mb={snapshot.mem_available_mb} min={self.min_mem_available_mb}"
                 ),
             )
 
@@ -97,6 +111,7 @@ class NodeHealthPolicy:
             reason="healthy",
             detail=(
                 f"io.full.avg10={_fmt_unknown(snapshot.io_full_avg10)} "
+                f"mem.available_mb={_fmt_unknown(snapshot.mem_available_mb)} "
                 f"swap.free_mb={_fmt_unknown(snapshot.swap_free_mb)} "
                 f"d_state_processes={_fmt_unknown(snapshot.d_state_processes)}"
             ),
@@ -118,6 +133,9 @@ def policy_from_settings(settings: Any) -> NodeHealthPolicy:
     return NodeHealthPolicy(
         io_full_avg10_max=float(
             getattr(settings, "setup_health_io_full_avg10_max", 50.0),
+        ),
+        min_mem_available_mb=int(
+            getattr(settings, "setup_health_min_mem_available_mb", 2048),
         ),
         min_swap_free_mb=int(
             getattr(settings, "setup_health_min_swap_free_mb", 1024),
@@ -169,6 +187,10 @@ def read_node_health_snapshot(
 ) -> NodeHealthSnapshot:
     return NodeHealthSnapshot(
         io_full_avg10=_read_io_full_avg10(proc_root / "pressure" / "io"),
+        mem_available_mb=_read_meminfo_mb(
+            proc_root / "meminfo",
+            "MemAvailable",
+        ),
         swap_total_mb=_read_meminfo_mb(proc_root / "meminfo", "SwapTotal"),
         swap_free_mb=_read_meminfo_mb(proc_root / "meminfo", "SwapFree"),
         d_state_processes=_count_d_state_processes(proc_root),

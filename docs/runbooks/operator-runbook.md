@@ -2872,11 +2872,12 @@ increase queued connections without removing the token-row write hotspot.
 | `trial_cache_min_free_gb` | `20` | Capacity backstop — when free disk drops below this, oldest-by-creation entries are evicted first. |
 | `trial_cache_build_lock_timeout_sec` | `1800.0` | Cluster-wide builder-slot TTL. The slot's owner refreshes every 60 s while building. |
 | `trial_cache_build_max_concurrent` | `1` | Daemon-wide cap for concurrent layered trial-cache Docker builds across different cache keys. Keep `1` on shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts after load testing. |
-| `setup_health_guard_enabled` | `true` | Enables node-health admission before Docker setup/build work. |
-| `setup_health_io_full_avg10_max` | `50.0` | Blocks new setup/build work when Linux `/proc/pressure/io` full avg10 exceeds this value. |
+| `setup_health_guard_enabled` | `true` | Enables node-health admission before claiming work and before Docker setup/build work. |
+| `setup_health_io_full_avg10_max` | `50.0` | Pauses claims and setup/build work when Linux `/proc/pressure/io` full avg10 exceeds this value. |
+| `setup_health_min_mem_available_mb` | `2048` | Pauses claims and setup/build work when Linux `MemAvailable` falls below this MiB threshold, including no-swap hosts. |
 | `setup_health_min_swap_free_mb` | `1024` | Blocks new setup/build work when swap is configured and free swap falls below this MiB threshold. |
 | `setup_health_dstate_max` | `32` | Blocks new setup/build work when D-state process count exceeds this value. |
-| `setup_health_wait_timeout_sec` | `300.0` | Claimed-trial wait budget for setup-health recovery before failing setup as `node_setup_health`. |
+| `setup_health_wait_timeout_sec` | `300.0` | Claimed-trial wait budget for setup-health recovery before requeueing as `node_setup_health`; this pre-start placement attempt is refunded. |
 | `setup_health_poll_interval_sec` | `5.0` | Poll interval while waiting for setup-health recovery. |
 | `subprocess_gateway_url` | unset; k8s render injects `worker_subprocess_gateway_url` | Sandbox-facing gateway URL for subprocess agents. It may be the OpenAI facade default or a bare gateway-router URL; the worker normalizes it to the adapter's facade dialect before injecting SDK env vars. |
 | `docker_api_timeout_sec` | `1800` | Docker SDK API timeout for worker-created clients. Keep this near the largest expected pull/build budget so docker-py does not fail long pulls, Dockerfile builds, or sidecar startup at its shorter default. |

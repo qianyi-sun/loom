@@ -680,6 +680,47 @@ async def test_setup_transport_disconnect_requeues_when_trial_policy_allows() ->
     ]
 
 
+async def test_setup_node_health_requeues_without_user_retry_budget() -> None:
+    cp = _FakeCPClient()
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    await ml._mark_setup_failed(
+        cp_client=cp,  # type: ignore[arg-type]
+        trial_id=trial_id,
+        worker_id=worker_id,
+        detail=(
+            "SETUP_ADMISSION_BLOCKED reason=node_io_pressure "
+            "operation=setup-build io.full.avg10=70 max=50"
+        ),
+        retry_policy=RetryPolicy(
+            max_attempts=1,
+            retry_on=frozenset(),
+            backoff=BackoffSpec(
+                base_sec=30,
+                max_sec=600,
+                multiplier=2.0,
+                jitter=0.0,
+            ),
+        ),
+        attempt_count=1,
+    )
+
+    assert cp.patch_calls == []
+    assert cp.retry_calls == [
+        {
+            "trial_id": trial_id,
+            "worker_id": worker_id,
+            "failure_reason": FailureReason.NODE_SETUP_HEALTH.value,
+            "failure_message": (
+                "SETUP_ADMISSION_BLOCKED reason=node_io_pressure "
+                "operation=setup-build io.full.avg10=70 max=50"
+            ),
+            "retry_after_sec": 30.0,
+        }
+    ]
+
+
 async def test_setup_retry_report_exception_falls_back_to_terminal_patch() -> None:
     cp = _RetryRaisingCPClient()
     trial_id = uuid4()

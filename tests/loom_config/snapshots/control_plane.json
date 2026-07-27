@@ -276,7 +276,7 @@
   },
   "trial_retry_default_retry_on": {
     "annotation": "list[str]",
-    "default": "['gateway_error', 'provider_transport_disconnect']",
+    "default": "['gateway_error', 'provider_transport_disconnect', 'node_setup_health']",
     "required": false
   },
   "worker_heartbeat_expiry_sec": {

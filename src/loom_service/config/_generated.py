@@ -83,7 +83,7 @@ class LoomServiceSettings(BaseSettings):
     trial_retry_default_backoff_max_sec: float = 600.0
     trial_retry_default_backoff_multiplier: float = 2.0
     trial_retry_default_max_attempts: int = 3
-    trial_retry_default_retry_on: list[str] = ["gateway_error", "provider_transport_disconnect"]
+    trial_retry_default_retry_on: list[str] = ["gateway_error", "provider_transport_disconnect", "node_setup_health"]
     untrusted_workload_isolation: bool = False
     worker_heartbeat_expiry_sec: int = 120
     workload_trust_mode: str = "internal_trusted"
