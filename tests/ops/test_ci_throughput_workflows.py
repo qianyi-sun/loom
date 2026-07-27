@@ -1430,21 +1430,26 @@ def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:
         "    default 0;\n"
         "    ~*^[^?]*(?:%2f|%5c|\\x5c|//) 1;\n"
         '    "~*^/[^/?]*%[0-9a-f]{2}[^/?]*(?:/|[?]|$)" 1;\n'
-        "    ~^/(?:dev|prod)(?:/|\\?|$) 0;\n"
-        "    ~*^/(?:dev|prod)(?:/|\\?|$) 1;\n"
+        "    ~^/(?:dev|prod|staging)(?:/|\\?|$) 0;\n"
+        "    ~*^/(?:dev|prod|staging)(?:/|\\?|$) 1;\n"
         "}\n"
     )
 
     assert expected_map in config
     assert "merge_slashes off;" in config
     assert "if ($loom_ambiguous_path) {\n        return 404;\n    }" in config
-    assert "location ~ ^/(?:prod|dev)/assets/(.+)$" in config
+    assert "location = /staging {\n        return 308 /staging/$is_args$args;\n    }" in config
+    assert "location ~ ^/(?:prod|dev|staging)/assets/(.+)$" in config
     assert (
         "location ~* ^/(?:.+/)+assets(?:/|$) {\n"
         "        return 404;\n"
         "    }"
     ) in config
-    assert "location ~* ^/(?:prod|dev)(?:/|$) {\n        return 404;\n    }" in config
+    assert (
+        "location ~* ^/(?:prod|dev|staging)(?:/|$) {\n"
+        "        return 404;\n"
+        "    }"
+    ) in config
 
 
 def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:

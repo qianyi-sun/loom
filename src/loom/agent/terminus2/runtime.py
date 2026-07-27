@@ -53,6 +53,20 @@ def _harbor_model_name(model: ModelSpec) -> str:
 
 
 _HARBOR_ARTIFACT_NAMES = ("trajectory.json", "recording.cast")
+_HARBOR_TMUX_SESSION = "terminus-2"
+
+
+async def _reset_harbor_tmux_session(env: Driver) -> None:
+    """Remove Harbor's fixed-name session before a sequential agent retry.
+
+    Harbor pins every Terminus2 run in a sandbox to ``terminus-2`` and does not
+    stop that session after ``run``. Loom retries reuse the same sandbox, so a
+    prior attempt otherwise makes ``tmux new-session`` fail with a duplicate
+    session error. Each trial owns its sandbox; target only Harbor's fixed name.
+    """
+    await env.exec(
+        f"tmux kill-session -t {_HARBOR_TMUX_SESSION} 2>/dev/null || true",
+    )
 
 
 async def _publish_harbor_artifacts_to_sandbox(
@@ -175,6 +189,7 @@ class LoomTerminus2Runtime:
         poll_task = asyncio.create_task(_poll_checkpoints())
 
         try:
+            await _reset_harbor_tmux_session(env)
             await agent.setup(harbor_env)
             await agent.run(instruction, harbor_env, context)
         except asyncio.CancelledError:

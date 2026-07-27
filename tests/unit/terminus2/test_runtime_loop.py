@@ -47,7 +47,12 @@ class _TokenCP:
         return []
 
 
-def _patch_harbor(monkeypatch, *, tokens_seen: list[str]) -> None:
+def _patch_harbor(
+    monkeypatch,
+    *,
+    tokens_seen: list[str],
+    lifecycle: list[str] | None = None,
+) -> None:
     class _FakeTerminus2:
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
@@ -56,6 +61,8 @@ def _patch_harbor(monkeypatch, *, tokens_seen: list[str]) -> None:
                 tokens_seen.append(str(llm_kwargs["api_key"]))
 
         async def setup(self, env: object) -> None:
+            if lifecycle is not None:
+                lifecycle.append("setup")
             await asyncio.sleep(0.05)
 
         async def run(
@@ -151,6 +158,75 @@ async def test_concurrent_runtimes_do_not_mutate_process_env(
     assert os.environ.get("OPENAI_API_KEY") == prior_api_key
     assert os.environ.get("OPENAI_BASE_URL") == prior_base
     assert set(tokens_seen) == {"token-1", "token-2"}
+
+
+@pytest.mark.asyncio
+async def test_retry_clears_harbor_fixed_tmux_session_before_each_setup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lifecycle: list[str] = []
+    tokens_seen: list[str] = []
+    _patch_harbor(
+        monkeypatch,
+        tokens_seen=tokens_seen,
+        lifecycle=lifecycle,
+    )
+
+    def _record_exec(
+        cmd: str,
+        user: str | int | None,
+        cwd: PurePosixPath | None,
+        env: object,
+    ):
+        del user, cwd, env
+        lifecycle.append(cmd)
+        from loom.models.exec import ExecResult
+
+        return ExecResult(
+            return_code=0,
+            stdout=b"",
+            stderr=b"",
+            truncated=False,
+            duration_sec=0.0,
+        )
+
+    trial_id = uuid4()
+    runtime = LoomTerminus2Runtime(
+        model=ModelSpec(provider="openai", name="gpt-4"),
+        team_id=str(uuid4()),
+        trial_id=trial_id,
+        cp_client=_TokenCP(),
+        gateway_url="http://127.0.0.1:19100",
+    )
+    driver = FakeDriver(exec_handler=_record_exec)
+    await driver.start()
+
+    for attempt in range(2):
+        writer = TrajectoryWriter(
+            local_path=tmp_path / f"retry-{attempt}.jsonl",
+            store=FakeObjectStore(),
+            bucket="trajectories",
+            key=f"{trial_id}/{attempt}/events.jsonl",
+            flush_event_count=1000,
+            flush_bytes=10_000_000,
+            flush_sec=3600,
+            min_part_bytes=0,
+        )
+        async with writer:
+            await runtime.run(
+                instruction="x",
+                env=driver,
+                trajectory=writer,
+                mcp=[],
+                skills_dir=PurePosixPath("/workspace"),
+                step_id="main",
+            )
+
+    cleanup = "tmux kill-session -t terminus-2 2>/dev/null || true"
+    assert lifecycle == [cleanup, "setup", cleanup, "setup"]
+    assert tokens_seen == ["token-1", "token-2"]
+    await driver.stop()
 
 
 @pytest.mark.asyncio
