@@ -169,6 +169,47 @@ def test_candidate_source_probe_reports_complete_host_failures() -> None:
     assert result.host_digests == {}
 
 
+def test_serial_candidate_source_probe_stops_after_first_failed_host() -> None:
+    targets = tuple(
+        GB10ProbeTarget(host, "loom-gb10-node-agent.service")
+        for host in ("trt-gb10-1", "trt-gb10-2", "trt-gb10-3")
+    )
+    calls: list[str] = []
+    payload = json.dumps(
+        {
+            "candidate_sha": CANDIDATE_SHA,
+            "candidate_tree": CANDIDATE_TREE,
+            "unit_sha256": UNIT_DIGESTS,
+        }
+    )
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        host = argv[-2]
+        calls.append(host)
+        if host == "trt-gb10-1":
+            return subprocess.CompletedProcess(argv, 0, payload, "")
+        return subprocess.CompletedProcess(argv, 255, "", "unavailable")
+
+    result = probe_gb10_candidate_source_readonly(
+        run,
+        targets,
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        candidate_sha=CANDIDATE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        image_tag="staging-aaaaaaa",
+        unit_sha256=UNIT_DIGESTS,
+        unit_set_digest=UNIT_SET_DIGEST,
+        max_concurrency=1,
+        settle_attempts=2,
+        settle_interval_seconds=0,
+    )
+
+    assert calls == ["trt-gb10-1", "trt-gb10-2", "trt-gb10-2"]
+    assert result.host_digests.keys() == {"trt-gb10-1"}
+    assert result.failed_hosts == ("trt-gb10-2", "trt-gb10-3")
+
+
 def test_candidate_source_probe_settles_one_transient_shared_source_read() -> None:
     target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
     calls = 0

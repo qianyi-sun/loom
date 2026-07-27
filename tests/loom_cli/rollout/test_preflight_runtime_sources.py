@@ -96,6 +96,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(
         return _result()
 
     gb10_concurrency: dict[str, int] = {}
+    candidate_source_options: dict[str, object] = {}
     for builder_name in (
         "build_gb10_ssh_topology_check",
         "build_gb10_candidate_source_check",
@@ -110,9 +111,18 @@ def test_sources_build_complete_exact_registry_without_running_probes(
             **kwargs,
         ):
             gb10_concurrency[_builder_name] = kwargs["max_concurrency"]
+            if _builder_name == "build_gb10_candidate_source_check":
+                candidate_source_options.update(
+                    run=args[0],
+                    settle_attempts=kwargs["settle_attempts"],
+                    settle_interval_seconds=kwargs["settle_interval_seconds"],
+                )
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(runtime_sources_module, builder_name, record_concurrency)
+
+    def candidate_source_command(*_args, **_kwargs):
+        return _result()
 
     sources = PreflightRuntimeSources(
         config=config,
@@ -204,6 +214,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(
             "7" * 64,
         ),
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        gb10_candidate_source_run=candidate_source_command,
     )
 
     runtime = sources.build(mutation_epoch=9)
@@ -229,4 +240,9 @@ def test_sources_build_complete_exact_registry_without_running_probes(
         "build_gb10_candidate_source_check": GB10_CANDIDATE_SOURCE_CONCURRENCY,
         "build_gb10_host_readiness_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,
         "build_gb10_ssh_topology_check": GB10_PREFLIGHT_FLEET_CONCURRENCY,
+    }
+    assert candidate_source_options == {
+        "run": candidate_source_command,
+        "settle_attempts": 2,
+        "settle_interval_seconds": 1.0,
     }

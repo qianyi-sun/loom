@@ -88,6 +88,17 @@ class InstalledPreflightCommands:
     def simple(self, argv: Sequence[str]) -> CommandResult:
         return self._execute(argv, timeout=120)
 
+    def candidate_source(self, argv: Sequence[str]) -> CommandResult:
+        """Bound each remote shared-checkout read below DAG cancellation grace.
+
+        The candidate-source check serializes the GB10 fleet to avoid amplifying
+        NFS reads. A generic 120-second subprocess timeout can therefore outlive
+        the check's 180-second DAG budget and force the entire runner to exit
+        during cancellation. Keep each individual SSH attempt short enough for
+        the check to return a normal failed-host result instead.
+        """
+        return self._execute(argv, timeout=4)
+
     def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
         """Run only the fixed Tier 0 systemd probes with a short RPC bound."""
         command = tuple(argv)

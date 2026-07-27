@@ -1849,6 +1849,8 @@ def build_gb10_candidate_source_check(
     expected_candidate_tree: str,
     image_tag: str,
     max_concurrency: int = 8,
+    settle_attempts: int = 6,
+    settle_interval_seconds: float = 2.0,
 ) -> RegisteredCheck:
     """Build the Tier 0 exact shared candidate source and unit-byte invariant."""
     expected_inventory_digest = gb10_target_inventory_digest(targets)
@@ -1875,6 +1877,8 @@ def build_gb10_candidate_source_check(
                 unit_sha256=units.unit_sha256,
                 unit_set_digest=units.unit_set_digest,
                 max_concurrency=max_concurrency,
+                settle_attempts=settle_attempts,
+                settle_interval_seconds=settle_interval_seconds,
             )
         except (OSError, RuntimeError, ValueError):
             return _empty_gb10_candidate_source_probe(targets)
