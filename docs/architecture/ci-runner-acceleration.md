@@ -155,9 +155,12 @@ verifies the credential is absent before sealing the candidate-bound qcow2
 manifest. The registry has no upstream proxy and therefore cannot expose
 private Docker Hub repositories or use the account for arbitrary PR-controlled
 pulls. Docker and oldlab-only BuildKit builders read the local mirror; the
-credential ISO and build directory are deleted after sealing. Every one-job
-runner starts the Actions process itself with `umask 022`, matching the
-permission assumptions of the GitHub-hosted test environment.
+guest Docker daemon receives explicit amd64-only imports so `kind load` never
+tries to import missing architectures, while BuildKit retains the mirror's
+amd64 and arm64 manifests. The credential ISO and build directory are deleted
+after sealing. Every one-job runner starts the Actions process itself with
+`umask 022`, matching the permission assumptions of the GitHub-hosted test
+environment.
 
 ## Reconcile, health, and drain
 

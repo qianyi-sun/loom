@@ -385,6 +385,9 @@ def test_golden_guest_seeds_images_without_retaining_registry_credentials(
     assert "readonly:" in script
     assert "registry-mirrors" in script
     assert "/etc/buildkit/loom-ci.toml" in script
+    assert "--override-arch amd64" in script
+    assert '"docker-daemon:${image}"' in script
+    assert 'docker pull --platform linux/amd64 "${image}"' not in script
     assert script.count("systemctl restart docker-registry\nwait_for_registry") == 2
     assert "journalctl --no-pager -u docker-registry -n 50" in script
     assert "proxy:" not in script

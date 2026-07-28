@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +161,18 @@ def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
         jobs = _workflow(workflow_path)["jobs"]
         for job_id in job_ids:
             assert jobs[job_id]["runs-on"] == "ubuntu-latest"
+
+
+def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    paths = config["tool"]["coverage"]["paths"]
+
+    for path_group, source_root in (("source", "src"), ("packages", "packages")):
+        assert paths[path_group] == [
+            source_root,
+            f"/home/runner/work/*/*/{source_root}",
+            f"/opt/actions-runner/_work/*/*/{source_root}",
+        ]
 
 
 def test_source_workflows_share_authoritative_generation_marker() -> None:

@@ -759,7 +759,19 @@ cat >/etc/buildkit/loom-ci.toml <<'EOF'
 EOF
 systemctl restart docker
 for image in {base_images}; do
-  docker pull --platform linux/amd64 "${{image}}" >/dev/null
+  repository="${{image%:*}}"
+  tag="${{image##*:}}"
+  if [[ "$repository" != */* ]]; then
+    repository="library/${{repository}}"
+  fi
+  skopeo copy \
+    --override-os linux \
+    --override-arch amd64 \
+    --src-tls-verify=false \
+    "docker://127.0.0.1:5000/${{repository}}:${{tag}}" \
+    "docker-daemon:${{image}}" \
+    >/dev/null
+  docker image inspect "${{image}}" >/dev/null
 done
 test "$(systemctl is-active docker-registry)" = active
 id runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash runner
