@@ -59,6 +59,13 @@ request, backup, lifecycle pointer, systemd unit, or rollout directory.
 `start --dry-run` remains the explicit operator preview and intentionally
 publishes a non-active preview request for auditability.
 
+When an attempt reaches the service-owned protected-apply journal, `status`
+also reports the journal's component identifier and whether its immutable
+terminal record exists. This reads file authority and filenames only, never
+component payloads, so an early worker exit remains diagnosable even where the
+per-user journal is unavailable. Unsafe or malformed journal metadata is
+omitted fail-closed.
+
 The broker derives the caller from the authenticated sudo context and records
 the initiating and attempt operators. It accepts no caller, repository, ref,
 SHA, tag, path, cluster, secret, concurrency, skip, force-lock, or arbitrary

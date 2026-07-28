@@ -1445,6 +1445,12 @@ loom-staging-rollout cancel REQUEST_ID --reason "bounded operational reason"
 loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
+For attempts that entered protected apply, `status` may include
+`protected_component` and `protected_component_status`. An `incomplete` value
+identifies the exact component whose intent exists without an immutable
+terminal record; it is safe diagnostic metadata, not permission to edit the
+request store or bypass the broker.
+
 `qianyi`, `hongjian`, and `devansh` are members of
 `loom-staging-operators`. Invoke these broker commands directly as the
 authenticated operator, without a leading `sudo`; the broker derives the OS
