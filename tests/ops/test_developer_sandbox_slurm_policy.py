@@ -344,6 +344,116 @@ def test_accounting_cas_refuses_to_delete_new_identity_with_external_reference(
         policy._restore_accounting(loaded, snapshot)
 
 
+def test_accounting_restore_rejects_owned_drift_before_first_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    desired = policy._accounting_desired_state(loaded)
+    before = json.loads(json.dumps(desired))
+    before["accounts"][loaded.parent_account]["Fairshare"] = "2"
+    current = json.loads(json.dumps(desired))
+    current["accounts"][loaded.parent_account]["Fairshare"] = "777"
+    snapshot = tmp_path / "accounting-cas.json"
+    policy._atomic_write(
+        snapshot,
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cluster": loaded.cluster,
+                "before": before,
+                "desired": desired,
+            },
+        )
+        + "\n",
+        mode=0o600,
+    )
+    monkeypatch.setattr(policy, "_accounting_state", lambda _profile: current)
+
+    def unexpected_run(
+        _argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del timeout
+        pytest.fail("accounting mutation ran before the CAS drift gate")
+
+    monkeypatch.setattr(policy, "_run", unexpected_run)
+    with pytest.raises(policy.PolicyError, match="changed concurrently"):
+        policy._restore_accounting(loaded, snapshot)
+
+
+def test_accounting_restore_deletes_only_exact_new_loom_identities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    desired = policy._accounting_desired_state(loaded)
+    empty = {"qos": {}, "accounts": {}, "associations": {}}
+    snapshot = tmp_path / "accounting-cas.json"
+    policy._atomic_write(
+        snapshot,
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cluster": loaded.cluster,
+                "before": empty,
+                "desired": desired,
+            },
+        )
+        + "\n",
+        mode=0o600,
+    )
+    states = iter((desired, empty))
+    monkeypatch.setattr(policy, "_accounting_state", lambda _profile: next(states))
+    monkeypatch.setattr(policy, "_accounting_external_references", lambda _profile: set())
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(
+        argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del timeout
+        commands.append(tuple(argv))
+        return ""
+
+    monkeypatch.setattr(policy, "_run", fake_run)
+    policy._restore_accounting(loaded, snapshot)
+
+    delete_commands = [command for command in commands if "delete" in command]
+    for user, account in zip(loaded.users, loaded.child_accounts, strict=True):
+        assert (
+            "sacctmgr",
+            "-i",
+            "delete",
+            "user",
+            "where",
+            f"name={user}",
+            f"account={account}",
+            f"cluster={loaded.cluster}",
+        ) in delete_commands
+    for account in (*loaded.child_accounts, loaded.parent_account):
+        assert (
+            "sacctmgr",
+            "-i",
+            "delete",
+            "account",
+            "where",
+            f"account={account}",
+            f"cluster={loaded.cluster}",
+        ) in delete_commands
+    assert (
+        "sacctmgr",
+        "-i",
+        "delete",
+        "qos",
+        "where",
+        f"name={loaded.qos}",
+    ) in delete_commands
+    assert len(delete_commands) == len(loaded.users) + len(loaded.child_accounts) + 2
+
+
 def test_service_reload_failure_restores_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -715,6 +825,44 @@ def _allocation_inflight_payload(
     }
 
 
+def test_allocation_cleanup_archives_completed_job_without_scancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "3" * 40
+    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    payload = _allocation_inflight_payload(loaded, candidate)
+    policy._write_allocation_state(path, payload, enforce_root_ownership=False)
+    monkeypatch.setattr(
+        policy,
+        "_probe_accounting_rows",
+        lambda job_id: [
+            [job_id, payload["job_name"], "COMPLETED", "node", "cpu=1", "account"],
+        ],
+    )
+
+    def unexpected_run(
+        _argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del timeout
+        pytest.fail("terminal allocation cleanup must not call scancel")
+
+    monkeypatch.setattr(policy, "_run", unexpected_run)
+    policy._cancel_allocation_job(
+        path,
+        payload,
+        loaded,
+        enforce_root_ownership=False,
+    )
+
+    assert not path.exists()
+    history = path.parent / f"{candidate}.123.terminal.json"
+    assert json.loads(history.read_text())["terminal_state"] == "COMPLETED"
+
+
 @pytest.mark.parametrize(
     ("message", "expected"),
     (
@@ -759,6 +907,7 @@ def test_allocation_probe_poll_failure_cancels_and_waits_for_terminal_state(
         return ""
 
     monkeypatch.setattr(policy, "_poll_probe_terminal", fake_poll)
+    monkeypatch.setattr(policy, "_probe_accounting_rows", lambda _job_id: [])
     monkeypatch.setattr(policy, "_run", fake_run)
     with pytest.raises(policy.PolicyError, match=expected):
         policy._poll_allocation_or_cancel(
@@ -797,6 +946,7 @@ def test_allocation_probe_recovers_crash_journal_before_new_submission(
         return ""
 
     monkeypatch.setattr(policy, "_run", fake_run)
+    monkeypatch.setattr(policy, "_probe_accounting_rows", lambda _job_id: [])
     monkeypatch.setattr(
         policy,
         "_poll_probe_terminal",
@@ -820,6 +970,91 @@ def test_allocation_probe_recovers_crash_journal_before_new_submission(
     assert list(path.parent.glob(f"{candidate}.123.cancelled.json"))
 
 
+def test_allocation_recovery_archives_terminal_job_without_scancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "4" * 40
+    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    payload = _allocation_inflight_payload(loaded, candidate)
+    policy._write_allocation_state(path, payload, enforce_root_ownership=False)
+    monkeypatch.setattr(
+        policy,
+        "_probe_accounting_rows",
+        lambda job_id: [
+            [job_id, payload["job_name"], "COMPLETED", "node", "cpu=1", "account"],
+        ],
+    )
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(
+        argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del timeout
+        commands.append(tuple(argv))
+        return ""
+
+    monkeypatch.setattr(policy, "_run", fake_run)
+    policy._recover_allocation_probe(
+        path,
+        loaded,
+        candidate_sha=candidate,
+        job_name=str(payload["job_name"]),
+        enforce_root_ownership=False,
+    )
+
+    assert commands == [
+        ("squeue", "-h", "-n", payload["job_name"], "-o", "%A|%j|%T"),
+    ]
+    assert not path.exists()
+    history = path.parent / f"{candidate}.123.terminal.json"
+    assert json.loads(history.read_text())["terminal_state"] == "COMPLETED"
+
+
+def test_allocation_cleanup_scancels_when_initial_sacct_is_temporarily_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "5" * 40
+    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    payload = _allocation_inflight_payload(loaded, candidate)
+    policy._write_allocation_state(path, payload, enforce_root_ownership=False)
+    monkeypatch.setattr(policy, "_probe_accounting_rows", lambda _job_id: [])
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(
+        argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del timeout
+        commands.append(tuple(argv))
+        return ""
+
+    monkeypatch.setattr(policy, "_run", fake_run)
+    monkeypatch.setattr(
+        policy,
+        "_poll_probe_terminal",
+        lambda job_id, **_kwargs: [
+            [job_id, payload["job_name"], "CANCELLED", "", "", ""],
+        ],
+    )
+    policy._cancel_allocation_job(
+        path,
+        payload,
+        loaded,
+        enforce_root_ownership=False,
+    )
+
+    assert commands == [("scancel", f"--clusters={loaded.cluster}", "123")]
+    assert not path.exists()
+    assert list(path.parent.glob(f"{candidate}.123.cancelled.json"))
+
+
 def test_allocation_probe_scancel_failure_remains_durably_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -838,6 +1073,7 @@ def test_allocation_probe_scancel_failure_remains_durably_fail_closed(
         del argv, timeout
         raise policy.PolicyError("scancel failed safely with exit code 1")
 
+    monkeypatch.setattr(policy, "_probe_accounting_rows", lambda _job_id: [])
     monkeypatch.setattr(policy, "_run", fail_scancel)
     with pytest.raises(policy.PolicyError, match="scancel failed"):
         policy._cancel_allocation_job(
@@ -860,6 +1096,7 @@ def test_allocation_probe_cancel_readback_failure_remains_durably_fail_closed(
     path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
     payload = _allocation_inflight_payload(loaded, candidate)
     policy._write_allocation_state(path, payload, enforce_root_ownership=False)
+    monkeypatch.setattr(policy, "_probe_accounting_rows", lambda _job_id: [])
     monkeypatch.setattr(policy, "_run", lambda _argv, **_kwargs: "")
 
     def fail_readback(_job_id: str, **_kwargs: float) -> list[list[str]]:

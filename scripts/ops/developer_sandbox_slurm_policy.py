@@ -1349,6 +1349,8 @@ def _accounting_external_references(profile: Profile) -> set[str]:
         ).splitlines()
         if line.strip()
     ]
+    if any(len(row) < 2 for row in account_rows):
+        raise PolicyError("Slurm account reference readback is malformed")
     exact_accounts = {profile.parent_account, *profile.child_accounts}
     references = {
         row[1]
@@ -1371,8 +1373,10 @@ def _accounting_external_references(profile: Profile) -> set[str]:
         ).splitlines()
         if line.strip()
     ]
+    if any(len(row) < 4 for row in association_rows):
+        raise PolicyError("Slurm association reference readback is malformed")
     for row in association_rows:
-        if len(row) < 4 or (row[0], row[1]) in exact_associations:
+        if (row[0], row[1]) in exact_associations:
             continue
         if row[1] in exact_accounts:
             references.add(row[1])
@@ -1398,7 +1402,7 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
     }
     if profile.qos not in before["qos"] and profile.qos in current["qos"]:
         created_identities.add(profile.qos)
-    if _accounting_external_references(profile) & created_identities:
+    if created_identities and (_accounting_external_references(profile) & created_identities):
         raise PolicyError("new Loom accounting identities have external references")
 
     before_associations = before["associations"]
@@ -1490,7 +1494,16 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
             ),
         )
     elif profile.qos in current["qos"]:
-        _run(("sacctmgr", "-i", "delete", "qos", profile.qos))
+        _run(
+            (
+                "sacctmgr",
+                "-i",
+                "delete",
+                "qos",
+                "where",
+                f"name={profile.qos}",
+            ),
+        )
     if _accounting_state(profile) != before:
         raise PolicyError("Loom accounting CAS restore readback drifted")
 
@@ -1942,6 +1955,20 @@ def _cancel_allocation_job(
     job_id = str(payload.get("job_id", ""))
     if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
         raise PolicyError("allocation inflight journal job ID is invalid")
+    try:
+        observed = _probe_accounting_rows(job_id)
+    except PolicyError:
+        observed = []
+    observed_state = _base_job_state(observed, job_id)
+    if observed_state in _TERMINAL_JOB_STATES:
+        payload["terminal_state"] = observed_state
+        _finish_allocation_inflight(
+            path,
+            payload,
+            "terminal",
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        return
     payload["phase"] = "cancel_requested"
     _write_allocation_state(
         path,

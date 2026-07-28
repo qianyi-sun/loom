@@ -143,10 +143,12 @@ The probe submits one bounded, non-exclusive `sbatch` job and executes one
 `srun` step inside that allocation. Submission uses immediate parsable output,
 not `sbatch --wait`; a root-only mode-`0600` inflight record is persisted below
 a non-symlink root-owned mode-`0700` directory before bounded polling begins.
-Every timeout or error sends `scancel` to that exact cluster/job ID and waits
-for terminal accounting readback. Cancellation or readback failure remains
-durably fail-closed, and the next invocation recovers an interrupted inflight
-or exact deterministic-name orphan before submitting anything new.
+Every timeout, error, or recovery first reads the exact base job from `sacct`.
+An already-terminal job is archived without `scancel`; a non-terminal or
+temporarily unknown job receives `scancel` for that exact cluster/job ID,
+followed by terminal accounting readback. Cancellation or readback failure
+remains durably fail-closed, and the next invocation recovers an interrupted
+inflight or exact deterministic-name orphan before submitting anything new.
 
 The final root-only artifact binds the full candidate SHA/tree,
 cluster/controller/submit-host route, account/QoS, job, allocation node, TRES,
