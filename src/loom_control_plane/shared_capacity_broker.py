@@ -387,7 +387,7 @@ class SharedCapacityBroker:
             if path.exists() or path.is_symlink()
         }
         for path in existing_sidecars:
-            self._validate_authority_file(path, mode=0o600)
+            self._validate_authority_file(path, mode=0o600, missing_ok=True)
         connection = sqlite3.connect(self.state_db, timeout=30.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -399,10 +399,12 @@ class SharedCapacityBroker:
             if path not in existing_sidecars:
                 try:
                     os.chmod(path, 0o600, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
                 except OSError as exc:
                     connection.close()
                     raise BrokerError("broker SQLite sidecar authority is unsafe") from exc
-            self._validate_authority_file(path, mode=0o600)
+            self._validate_authority_file(path, mode=0o600, missing_ok=True)
         return connection
 
     def _prepare_authority(self) -> None:
@@ -452,9 +454,18 @@ class SharedCapacityBroker:
             raise BrokerError("broker authority directory must be owner-only mode 0700")
 
     @staticmethod
-    def _validate_authority_file(path: Path, *, mode: int) -> None:
+    def _validate_authority_file(
+        path: Path,
+        *,
+        mode: int,
+        missing_ok: bool = False,
+    ) -> bool:
         try:
             metadata = os.lstat(path)
+        except FileNotFoundError:
+            if missing_ok:
+                return False
+            raise BrokerError("broker authority file is unavailable") from None
         except OSError as exc:
             raise BrokerError("broker authority file is unavailable") from exc
         if (
@@ -465,6 +476,7 @@ class SharedCapacityBroker:
             or stat.S_IMODE(metadata.st_mode) != mode
         ):
             raise BrokerError("broker authority file has unsafe owner, type, link count, or mode")
+        return True
 
     def _sqlite_sidecar_paths(self) -> tuple[Path, ...]:
         return tuple(
