@@ -1,0 +1,1085 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.example/schemas/developer-sandbox-live-acceptance-v1.json",
+  "title": "Candidate-bound developer sandbox live acceptance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate",
+    "session",
+    "topology",
+    "state_machine",
+    "capacity_samples",
+    "large_batch_bursts",
+    "fairness",
+    "runtime_envelopes",
+    "peer_workloads",
+    "storage_io",
+    "fault_recovery",
+    "invariants"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha",
+        "tree",
+        "runtime_receipts"
+      ],
+      "properties": {
+        "sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "runtime_receipts": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/runtimeReceipt"
+          }
+        }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "submit_host",
+        "execute_acknowledged",
+        "started_at",
+        "completed_at",
+        "collected_at",
+        "max_collection_lag_seconds"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "submit_host": {
+          "const": "trt-eai-oldlab-2"
+        },
+        "execute_acknowledged": {
+          "const": true
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "completed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "collected_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "max_collection_lag_seconds": {
+          "const": 300
+        }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandboxes",
+        "pools",
+        "eligible_nodes",
+        "excluded_nodes",
+        "slot_budgets",
+        "pending_slot_budgets"
+      ],
+      "properties": {
+        "sandboxes": {
+          "const": [
+            "qianyi",
+            "hongjian",
+            "devansh"
+          ]
+        },
+        "pools": {
+          "const": [
+            "oldlab",
+            "gb10"
+          ]
+        },
+        "eligible_nodes": {
+          "const": [
+            "trt-eai-oldlab-1",
+            "trt-eai-oldlab-2",
+            "trt-eai-oldlab-3",
+            "trt-eai-oldlab-4",
+            "trt-eai-oldlab-5",
+            "trt-gb10-1",
+            "trt-gb10-2",
+            "trt-gb10-3",
+            "trt-gb10-4",
+            "trt-gb10-5",
+            "trt-gb10-6",
+            "trt-gb10-8",
+            "trt-gb10-9",
+            "trt-gb10-10",
+            "trt-gb10-11",
+            "trt-gb10-12",
+            "trt-gb10-13",
+            "trt-gb10-14",
+            "trt-gb10-15"
+          ]
+        },
+        "excluded_nodes": {
+          "const": [
+            "trt-gb10-7"
+          ]
+        },
+        "slot_budgets": {
+          "const": {
+            "oldlab": 20,
+            "gb10": 140
+          }
+        },
+        "pending_slot_budgets": {
+          "const": {
+            "oldlab": 10,
+            "gb10": 30
+          }
+        }
+      }
+    },
+    "state_machine": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "$ref": "#/$defs/phase"
+      }
+    },
+    "capacity_samples": {
+      "type": "array",
+      "minItems": 48,
+      "maxItems": 48,
+      "items": {
+        "$ref": "#/$defs/capacitySample"
+      }
+    },
+    "large_batch_bursts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/burst"
+      }
+    },
+    "fairness": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/fairnessWindow"
+      }
+    },
+    "runtime_envelopes": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "$ref": "#/$defs/runtimeEnvelope"
+      }
+    },
+    "peer_workloads": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/peerWorkload"
+      }
+    },
+    "storage_io": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/storageIo"
+      }
+    },
+    "fault_recovery": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "$ref": "#/$defs/faultRecovery"
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capacity_overshoot_events",
+        "duplicate_observations",
+        "duplicate_trials",
+        "indefinite_starvation_events",
+        "exclusive_slurm_jobs",
+        "cgroup_escape_events",
+        "peer_disruption_events",
+        "storage_error_events",
+        "orphan_jobs",
+        "orphan_containers",
+        "orphan_leases",
+        "orphan_trials",
+        "duplicate_retries",
+        "unattributed_retries"
+      ],
+      "properties": {
+        "capacity_overshoot_events": {
+          "const": 0
+        },
+        "duplicate_observations": {
+          "const": 0
+        },
+        "duplicate_trials": {
+          "const": 0
+        },
+        "indefinite_starvation_events": {
+          "const": 0
+        },
+        "exclusive_slurm_jobs": {
+          "const": 0
+        },
+        "cgroup_escape_events": {
+          "const": 0
+        },
+        "peer_disruption_events": {
+          "const": 0
+        },
+        "storage_error_events": {
+          "const": 0
+        },
+        "orphan_jobs": {
+          "const": 0
+        },
+        "orphan_containers": {
+          "const": 0
+        },
+        "orphan_leases": {
+          "const": 0
+        },
+        "orphan_trials": {
+          "const": 0
+        },
+        "duplicate_retries": {
+          "const": 0
+        },
+        "unattributed_retries": {
+          "const": 0
+        }
+      }
+    }
+  },
+  "$defs": {
+    "fullSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonnegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "sandbox": {
+      "enum": [
+        "qianyi",
+        "hongjian",
+        "devansh"
+      ]
+    },
+    "pool": {
+      "enum": [
+        "oldlab",
+        "gb10"
+      ]
+    },
+    "phaseName": {
+      "enum": [
+        "preflight",
+        "baseline",
+        "large_batch_burst",
+        "fairness_contention",
+        "mixed_non_loom",
+        "cancel_cleanup",
+        "ttl_cleanup",
+        "submit_host_restart",
+        "worker_crash",
+        "final_drain"
+      ]
+    },
+    "node": {
+      "type": "string",
+      "pattern": "^trt-(?:eai-oldlab-[1-5]|gb10-(?:[1-6]|8|9|1[0-5]))$"
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "candidate_sha",
+        "candidate_tree",
+        "started_at",
+        "finished_at",
+        "deadline_seconds",
+        "status",
+        "checkpoint_sha256"
+      ],
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/phaseName"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7200
+        },
+        "status": {
+          "const": "pass"
+        },
+        "checkpoint_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "runtimeReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandbox",
+        "candidate_sha",
+        "candidate_tree",
+        "collected_at",
+        "expires_at",
+        "payload_sha256",
+        "domain_generations"
+      ],
+      "properties": {
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "collected_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "domain_generations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "oldlab",
+            "gb10"
+          ],
+          "properties": {
+            "oldlab": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "gb10": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          }
+        }
+      }
+    },
+    "capacitySample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "observed_at",
+        "sandbox",
+        "pool",
+        "candidate_sha",
+        "request_id",
+        "lease_epoch",
+        "observation_sequence",
+        "requested_slots",
+        "granted_slots",
+        "pending_slots",
+        "active_slots",
+        "draining_slots",
+        "terminal_slots"
+      ],
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/phaseName"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "pool": {
+          "$ref": "#/$defs/pool"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "lease_epoch": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "observation_sequence": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "requested_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "granted_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "pending_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "active_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "draining_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "terminal_slots": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "burst": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pool",
+        "candidate_sha",
+        "batch_id",
+        "trial_count",
+        "completed_trials",
+        "failed_trials",
+        "cancelled_trials",
+        "duplicate_trial_ids",
+        "requested_slots",
+        "granted_slots",
+        "peak_active_slots",
+        "nodes",
+        "node_trial_counts"
+      ],
+      "properties": {
+        "pool": {
+          "$ref": "#/$defs/pool"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "batch_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "trial_count": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 10000
+        },
+        "completed_trials": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "failed_trials": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "cancelled_trials": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "duplicate_trial_ids": {
+          "const": 0
+        },
+        "requested_slots": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "granted_slots": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "peak_active_slots": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 19,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/node"
+          }
+        },
+        "node_trial_counts": {
+          "type": "object",
+          "minProperties": 2,
+          "maxProperties": 19,
+          "propertyNames": {
+            "$ref": "#/$defs/node"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        }
+      }
+    },
+    "fairnessWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pool",
+        "window_seconds",
+        "max_grant_wait_seconds",
+        "max_grant_skew_ratio",
+        "participants"
+      ],
+      "properties": {
+        "pool": {
+          "$ref": "#/$defs/pool"
+        },
+        "window_seconds": {
+          "type": "integer",
+          "minimum": 1800,
+          "maximum": 7200
+        },
+        "max_grant_wait_seconds": {
+          "const": 600
+        },
+        "max_grant_skew_ratio": {
+          "const": 0.2
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sandbox",
+              "requested_slots",
+              "granted_slots_total",
+              "grant_cycles",
+              "first_grant_wait_seconds",
+              "longest_starvation_seconds",
+              "indefinite_starvation"
+            ],
+            "properties": {
+              "sandbox": {
+                "$ref": "#/$defs/sandbox"
+              },
+              "requested_slots": {
+                "$ref": "#/$defs/positiveInteger"
+              },
+              "granted_slots_total": {
+                "$ref": "#/$defs/positiveInteger"
+              },
+              "grant_cycles": {
+                "$ref": "#/$defs/positiveInteger"
+              },
+              "first_grant_wait_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 600
+              },
+              "longest_starvation_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 600
+              },
+              "indefinite_starvation": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "resourceLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_cores",
+        "memory_bytes",
+        "pids"
+      ],
+      "properties": {
+        "cpu_cores": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "memory_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "runtimeEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandbox",
+        "pool",
+        "candidate_sha",
+        "job_id",
+        "node",
+        "account",
+        "allocation",
+        "cgroup",
+        "containers"
+      ],
+      "properties": {
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "pool": {
+          "$ref": "#/$defs/pool"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "node": {
+          "$ref": "#/$defs/node"
+        },
+        "account": {
+          "type": "string",
+          "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+        },
+        "allocation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cpu_cores",
+            "memory_bytes",
+            "pids",
+            "gpu_count",
+            "tres",
+            "exclusive"
+          ],
+          "properties": {
+            "cpu_cores": {
+              "$ref": "#/$defs/positiveNumber"
+            },
+            "memory_bytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "pids": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "gpu_count": {
+              "$ref": "#/$defs/nonnegativeInteger"
+            },
+            "tres": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "exclusive": {
+              "const": false
+            }
+          }
+        },
+        "cgroup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "job_path",
+            "controllers",
+            "delegated",
+            "cpu_cores_max",
+            "memory_bytes_max",
+            "pids_max"
+          ],
+          "properties": {
+            "job_path": {
+              "$ref": "#/$defs/cgroupPath"
+            },
+            "controllers": {
+              "type": "array",
+              "minItems": 3,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "cpu",
+                  "memory",
+                  "pids"
+                ]
+              }
+            },
+            "delegated": {
+              "const": true
+            },
+            "cpu_cores_max": {
+              "$ref": "#/$defs/positiveNumber"
+            },
+            "memory_bytes_max": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "pids_max": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          }
+        },
+        "containers": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role",
+              "container_id",
+              "cgroup_parent",
+              "observed_cgroup_path",
+              "limits",
+              "observed_limits",
+              "gpu_ids"
+            ],
+            "properties": {
+              "role": {
+                "enum": [
+                  "worker",
+                  "trial",
+                  "verifier",
+                  "sidecar"
+                ]
+              },
+              "container_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{12,64}$"
+              },
+              "cgroup_parent": {
+                "$ref": "#/$defs/cgroupPath"
+              },
+              "observed_cgroup_path": {
+                "$ref": "#/$defs/cgroupPath"
+              },
+              "limits": {
+                "$ref": "#/$defs/resourceLimits"
+              },
+              "observed_limits": {
+                "$ref": "#/$defs/resourceLimits"
+              },
+              "gpu_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "peerCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_at",
+        "running_jobs",
+        "completed_jobs",
+        "failed_jobs",
+        "throughput_per_second",
+        "p95_latency_seconds"
+      ],
+      "properties": {
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "running_jobs": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "completed_jobs": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "failed_jobs": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "throughput_per_second": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "p95_latency_seconds": {
+          "$ref": "#/$defs/positiveNumber"
+        }
+      }
+    },
+    "peerWorkload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pool",
+        "job_id",
+        "account",
+        "baseline",
+        "during",
+        "after",
+        "max_throughput_regression_ratio",
+        "disrupted"
+      ],
+      "properties": {
+        "pool": {
+          "$ref": "#/$defs/pool"
+        },
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "account": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "not": {
+            "pattern": "^loom-dev(?:-|$)"
+          }
+        },
+        "baseline": {
+          "$ref": "#/$defs/peerCheckpoint"
+        },
+        "during": {
+          "$ref": "#/$defs/peerCheckpoint"
+        },
+        "after": {
+          "$ref": "#/$defs/peerCheckpoint"
+        },
+        "max_throughput_regression_ratio": {
+          "const": 0.2
+        },
+        "disrupted": {
+          "const": false
+        }
+      }
+    },
+    "storageIo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "domain",
+        "baseline_free_bytes",
+        "minimum_free_bytes",
+        "after_free_bytes",
+        "required_free_bytes",
+        "cache_peak_bytes",
+        "cache_limit_bytes",
+        "read_bytes",
+        "read_limit_bytes",
+        "write_bytes",
+        "write_limit_bytes",
+        "io_errors",
+        "enospc_events"
+      ],
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/pool"
+        },
+        "baseline_free_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "minimum_free_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "after_free_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "required_free_bytes": {
+          "type": "integer",
+          "minimum": 10737418240
+        },
+        "cache_peak_bytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "cache_limit_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 274877906944
+        },
+        "read_bytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "read_limit_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5497558138880
+        },
+        "write_bytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "write_limit_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5497558138880
+        },
+        "io_errors": {
+          "const": 0
+        },
+        "enospc_events": {
+          "const": 0
+        }
+      }
+    },
+    "retryAttribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interrupted_trials",
+        "retryable_trials",
+        "retried_trials",
+        "duplicate_retries",
+        "lost_trials",
+        "unknown_attribution"
+      ],
+      "properties": {
+        "interrupted_trials": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "retryable_trials": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "retried_trials": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "duplicate_retries": {
+          "const": 0
+        },
+        "lost_trials": {
+          "const": 0
+        },
+        "unknown_attribution": {
+          "const": 0
+        }
+      }
+    },
+    "faultRecovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "candidate_sha",
+        "sandbox",
+        "pool",
+        "request_id",
+        "injected_at",
+        "recovered_at",
+        "recovery_deadline_seconds",
+        "orphan_jobs",
+        "orphan_containers",
+        "orphan_leases",
+        "orphan_trials",
+        "retry_attribution"
+      ],
+      "properties": {
+        "event": {
+          "enum": [
+            "cancel",
+            "ttl_expiry",
+            "submit_host_restart",
+            "worker_crash"
+          ]
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "pool": {
+          "$ref": "#/$defs/pool"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "injected_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "recovered_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "recovery_deadline_seconds": {
+          "const": 600
+        },
+        "orphan_jobs": {
+          "const": 0
+        },
+        "orphan_containers": {
+          "const": 0
+        },
+        "orphan_leases": {
+          "const": 0
+        },
+        "orphan_trials": {
+          "const": 0
+        },
+        "retry_attribution": {
+          "$ref": "#/$defs/retryAttribution"
+        }
+      }
+    },
+    "cgroupPath": {
+      "type": "string",
+      "pattern": "^/(?:[A-Za-z0-9_.:@-]+/?)+$",
+      "minLength": 2,
+      "maxLength": 1024
+    }
+  }
+}
