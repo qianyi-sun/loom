@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import insert, text
 
 from loom.auth import verify_bearer_token
@@ -125,6 +125,16 @@ class _ProdPressurePayload(BaseModel):
     grace_period_seconds: int = Field(default=600, ge=0)
 
 
+class _SharedCapacityBindingPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1, le=1)
+    request_id: UUID
+    lease_epoch: int = Field(ge=0)
+    candidate_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    preemptible: bool
+
+
 class _AutoscalerPolicyPayload(BaseModel):
     actuator: str
     enabled: bool = False
@@ -138,6 +148,7 @@ class _AutoscalerPolicyPayload(BaseModel):
     force: bool = False
     disabled_reason: str | None = None
     actuator_config: dict[str, Any] = Field(default_factory=dict)
+    shared_capacity_binding: _SharedCapacityBindingPayload | None = None
 
 
 async def _require_admin_scope(
@@ -406,6 +417,11 @@ async def put_worker_pool_autoscaler_policy(
                 force=payload.force,
                 disabled_reason=payload.disabled_reason,
                 actuator_config=payload.actuator_config,
+                shared_capacity_binding=(
+                    payload.shared_capacity_binding.model_dump(mode="json")
+                    if payload.shared_capacity_binding is not None
+                    else None
+                ),
             )
             await session.commit()
             return autoscaler_policy_to_dict(row)

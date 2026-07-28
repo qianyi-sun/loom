@@ -1702,6 +1702,13 @@ class WorkerPoolAutoscalerPolicy(Base):
         JSONB,
         nullable=True,
     )
+    # Durable binding and retirement state for broker-controlled Slurm
+    # capacity. This is separate from ``updated_at`` because ordinary
+    # autoscaler decisions update that timestamp on every tick.
+    capacity_lease_state: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
     idle_since_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=True,

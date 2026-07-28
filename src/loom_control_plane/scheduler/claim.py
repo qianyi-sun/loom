@@ -77,7 +77,10 @@ WITH next AS (
               FROM worker_pool_autoscaler_policies p
              WHERE p.pool_name = w.pool_name
                AND p.actuator = 'slurm'
-               AND p.prod_pressure_state->>'state' = 'draining'
+               AND (
+                    p.prod_pressure_state->>'state' = 'draining'
+                    OR p.capacity_lease_state->>'state' = 'retiring'
+               )
           )
      )
    ORDER BY

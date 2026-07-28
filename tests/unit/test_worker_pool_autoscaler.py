@@ -891,7 +891,10 @@ async def test_policy_upsert_and_status_helpers_use_normalized_fields() -> None:
         drain_timeout_seconds=600,
         force=True,
         disabled_reason="manual pause",
-        actuator_config={"allowed_nodes": ["oldlab-1"]},
+        actuator_config={
+            "allowed_nodes": ["oldlab-1"],
+            "external_runner": True,
+        },
         now=now,
     )
 
@@ -900,7 +903,10 @@ async def test_policy_upsert_and_status_helpers_use_normalized_fields() -> None:
     assert created.environment == "production"
     assert created.pool_name == "oldlab"
     assert created.force is True
-    assert created.actuator_config == {"allowed_nodes": ["oldlab-1"]}
+    assert created.actuator_config == {
+        "allowed_nodes": ["oldlab-1"],
+        "external_runner": True,
+    }
 
     existing = _policy_row()
     update_session = _FakeSession([_FakeResult(scalar=existing)])
@@ -938,6 +944,29 @@ async def test_policy_upsert_and_status_helpers_use_normalized_fields() -> None:
         "oldlab",
         "oldlab",
     ]
+
+
+async def test_ordinary_external_runner_policy_does_not_require_capacity_binding() -> None:
+    session = _FakeSession([_FakeResult(scalar=None)])
+
+    created = await upsert_autoscaler_policy(
+        cast(Any, session),
+        environment="staging",
+        pool_name="ordinary-external",
+        actuator="slurm",
+        enabled=True,
+        min_slots=0,
+        max_slots=1,
+        scale_up_threshold_slots=1,
+        scale_down_idle_seconds=600,
+        scale_up_cooldown_seconds=60,
+        scale_down_cooldown_seconds=300,
+        drain_timeout_seconds=600,
+        actuator_config={"external_runner": True},
+    )
+
+    assert created.capacity_lease_state is None
+    assert created.actuator_config == {"external_runner": True}
 
 
 async def test_load_observation_counts_slots_and_matching_queue() -> None:
