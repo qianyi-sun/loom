@@ -95,3 +95,53 @@ uv run --no-sync python scripts/ops/developer_sandbox.py destroy ... --execute
 Use `--delete-volumes` only when the developer explicitly intends to delete
 that sandbox project's persistent data. No command in this workflow is rollout
 or staging evidence.
+
+## Cross-sandbox negative probes (A3)
+
+Automated negatives live in-repo and do not require `oldlab-2`:
+
+1. Static profile isolation:
+
+```bash
+uv run --no-sync python scripts/validate_developer_sandbox_isolation.py \
+  --profiles-dir deploy/developer-sandboxes --json
+```
+
+2. CI dual-stack crossover tests:
+   `tests/integration/test_developer_sandbox_crossover.py` (foreign worker/admin
+   tokens → 401; foreign MinIO creds / bucket names rejected).
+
+3. Secret-safe probe helper (default dry-run; pass secret **file paths** only):
+
+```bash
+uv run --no-sync python scripts/ops/developer_sandbox_crossover_probe.py \
+  --qianyi-cp-url http://127.0.0.1:20080 \
+  --qianyi-worker-token-file /secure/qianyi.env \
+  --qianyi-admin-secret-file /secure/qianyi-admin.toml \
+  --hongjian-cp-url http://127.0.0.1:21080 \
+  --hongjian-worker-token-file /secure/hongjian.env \
+  --hongjian-admin-secret-file /secure/hongjian-admin.toml \
+  --write-evidence /tmp/a3-crossover-dry-run.json
+```
+
+Add `--execute` only after three sandboxes are installed (see installer
+follow-up) for the live six-edge pairwise matrix. Evidence JSON records
+fingerprints and status codes only — never raw `loom_w_*` / admin / MinIO
+secrets.
+
+A3 crossover evidence is **not** `#896` soak evidence.
+
+### Profile identity notes
+
+- `provider_connection_namespace` (`sandbox-<owner>`) is profile identity today;
+  there is no `src/` runtime consumer that enforces it yet.
+- `object_store.task_bucket` / planner `LOOM_DEV_TASK_BUCKET` name MinIO task
+  buckets for ops; Compose wires trajectories/artifacts buckets into
+  `loom-service`. Do not treat unset compose task-bucket env as a security
+  boundary.
+
+## Shared capacity brokerage
+
+Capacity brokerage and the broker→WPAP handoff adapter are documented in
+[`shared-sandbox-capacity-broker.md`](shared-sandbox-capacity-broker.md). This
+sandbox runbook does not configure Slurm packing or enable shared-worker pools.

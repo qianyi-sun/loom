@@ -125,9 +125,32 @@ The sandbox adapter must:
    that capacity was released;
 5. return an observation for the same request and epoch.
 
-This interface intentionally does not call the existing Control Plane
-autoscaler API. A later environment-specific adapter owns authentication and
-delivery, while this broker remains transport- and token-agnostic.
+### Drain mapping onto WPAP (critical)
+
+Control-plane
+[`compute_autoscaler_decision`](../../src/loom_control_plane/worker_pool_autoscaler.py)
+returns `noop` when WPAP `enabled=false`, which does **not** force scale-down.
+Adapters that materialize handoffs into
+`PUT /admin/worker-pool-autoscaler-policies/{environment}/{pool_name}` must:
+
+| Handoff | WPAP apply |
+|---------|------------|
+| `enabled=true`, `max_slots=N>0` | `enabled=true`, `min_slots=0`, `max_slots=N` (never raise above handoff) |
+| `enabled=false` or `max_slots=0` | `max_slots=0`, `min_slots=0`, keep autoscaler **`enabled=true`** so drain can run; only set `enabled=false` after observed pending+active+draining == 0 if a hard stop is required |
+
+Admin auth uses secret **files** only. Handoffs, observations, and evidence must
+never contain tokens or object-store credentials.
+
+### Adapter / supervisor ownership
+
+The durable per-sandbox handoff adapter and observation/reconcile supervisor
+are tracked as #1023 slice 2 (draft
+[#1065](https://github.com/qianyi-sun/loom/pull/1065):
+`scripts/ops/shared_capacity_adapter.py`,
+`scripts/ops/shared_capacity_supervisor.py`). This broker remains
+transport- and token-agnostic; adapters own WPAP mutation against each
+sandbox's loopback Control Plane (`sandbox-qianyi|hongjian|devansh`, not
+`development`).
 
 ## Report observed capacity
 
