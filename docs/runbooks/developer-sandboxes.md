@@ -441,33 +441,43 @@ Dry-run / CI dual-stack negatives are **not** live A3 host evidence and are
 codes only — never raw `loom_w_*` / admin / MinIO secrets.
 
 Live `--execute` is fail-closed: it binds CP/MinIO URLs to the exact reviewed
-profile loopback endpoints, requires mode-`0600` non-symlink secret files owned
-by the invoking user, requires complete MinIO negatives plus same-sandbox
-positive controls for all three sandboxes, and requires one candidate SHA that
-matches every `sandbox-state.json` readback:
+profile loopback endpoints, requires mode-`0600` single-link non-symlink secret
+files owned by root for link bundles or by the exact sandbox account for its
+private admin/state files, requires complete MinIO negatives plus
+same-sandbox positive controls for all three sandboxes, and requires one
+candidate SHA and tree that match every `sandbox-state.json`, exact clean Git
+candidate readback, remote-link fleet binding, and fresh OLDLAB+GB10 combined
+activation receipt. Run the live probe as root on `oldlab-2`, immediately after
+the cross-domain collector has published
+`/var/lib/loom-shared-capacity/runtime-attestations/<sandbox>/<sha>/combined.json`:
 
 ```bash
 uv run --no-sync python scripts/ops/developer_sandbox_crossover_probe.py \
   --execute \
   --profiles-dir deploy/developer-sandboxes \
   --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
-  --qianyi-worker-token-file /secure/qianyi.env \
-  --qianyi-admin-secret-file /secure/qianyi-admin.toml \
-  --qianyi-minio-access-key-file /secure/qianyi-minio-access \
-  --qianyi-minio-secret-key-file /secure/qianyi-minio-secret \
-  --hongjian-worker-token-file /secure/hongjian.env \
-  --hongjian-admin-secret-file /secure/hongjian-admin.toml \
-  --hongjian-minio-access-key-file /secure/hongjian-minio-access \
-  --hongjian-minio-secret-key-file /secure/hongjian-minio-secret \
-  --devansh-worker-token-file /secure/devansh.env \
-  --devansh-admin-secret-file /secure/devansh-admin.toml \
-  --devansh-minio-access-key-file /secure/devansh-minio-access \
-  --devansh-minio-secret-key-file /secure/devansh-minio-secret \
+  --qianyi-worker-token-file /etc/loom/developer-sandbox-links/clients/qianyi/<SHA>/worker-token \
+  --qianyi-admin-secret-file /srv/loom/developer-sandboxes/qianyi/secrets/admin.toml \
+  --qianyi-minio-access-key-file /etc/loom/developer-sandbox-links/clients/qianyi/<SHA>/minio-access-key \
+  --qianyi-minio-secret-key-file /etc/loom/developer-sandbox-links/clients/qianyi/<SHA>/minio-secret-key \
+  --hongjian-worker-token-file /etc/loom/developer-sandbox-links/clients/hongjian/<SHA>/worker-token \
+  --hongjian-admin-secret-file /srv/loom/developer-sandboxes/hongjian/secrets/admin.toml \
+  --hongjian-minio-access-key-file /etc/loom/developer-sandbox-links/clients/hongjian/<SHA>/minio-access-key \
+  --hongjian-minio-secret-key-file /etc/loom/developer-sandbox-links/clients/hongjian/<SHA>/minio-secret-key \
+  --devansh-worker-token-file /etc/loom/developer-sandbox-links/clients/devansh/<SHA>/worker-token \
+  --devansh-admin-secret-file /srv/loom/developer-sandboxes/devansh/secrets/admin.toml \
+  --devansh-minio-access-key-file /etc/loom/developer-sandbox-links/clients/devansh/<SHA>/minio-access-key \
+  --devansh-minio-secret-key-file /etc/loom/developer-sandbox-links/clients/devansh/<SHA>/minio-secret-key \
   --write-evidence /tmp/a3-crossover-execute.json
 ```
 
 Optional `--<sandbox>-cp-url` / `--<sandbox>-minio-endpoint` overrides are
-accepted only when they exactly equal the reviewed profile endpoints.
+accepted only when they exactly equal the reviewed profile endpoints. The
+probe never accepts the worker-side `sandbox-link` URLs or oldlab2 relay
+listener URLs as overrides: credentials are sent only to each target
+sandbox's local loopback CP/MinIO services, while the required combined
+receipt proves that the same candidate is installed through the candidate-bound
+remote-link and dual-NFS runtime paths.
 
 ### Profile identity notes
 

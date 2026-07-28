@@ -420,8 +420,14 @@ preserve the exact request, epoch, candidate, and preemptibility binding:
 
 | Handoff | WPAP lease transition |
 |---------|-----------------------|
-| `enabled=true`, `max_slots=N>0` | `active` with `min_slots=0`, `max_slots=N` (never raise above handoff) |
-| `enabled=false` or `max_slots=0` | `active → retiring`; the external actuator drains pending/active/draining work and commits `retired` only after terminal Slurm readback |
+| `enabled=true`, `max_slots=N>0` | `enabled=true`, `min_slots=0`, `max_slots=N`, exact `shared_capacity_binding`; durable state `active` |
+| `enabled=false` or `max_slots=0` | `enabled=false`, `min_slots=0`, `max_slots=0` with the same binding; `active → retiring`, then the retirement actuator drains to terminal Slurm readback before `retired` |
+
+Never emulate retirement by keeping a disabled grant locally enabled. While
+`retiring`, every retry keeps the exact request, epoch, candidate SHA, and
+preemptible binding; it cannot switch requests. A missing row plus a valid
+positive first grant is created directly as bound `active`; a zero-capacity
+first handoff is bound `retiring` and cannot activate without a newer epoch.
 
 Admin auth uses secret **files** only. Handoffs, observations, and evidence must
 never contain tokens or object-store credentials.

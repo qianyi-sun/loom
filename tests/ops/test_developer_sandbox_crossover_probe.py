@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,121 @@ def _write_state(path: Path, *, sandbox: str, sha: str = SHA) -> None:
         encoding="utf-8",
     )
     path.chmod(0o600)
+
+
+def _canonical_without_digest(payload: dict[str, object]) -> bytes:
+    unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    return json.dumps(
+        unsigned,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+
+
+def _write_runtime_receipts(root: Path, *, sha: str = SHA, tree: str = TREE) -> None:
+    import hashlib
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    for sandbox in probe.ALLOWED_SANDBOXES:
+        fleet_expires = now + timedelta(minutes=15)
+        collector_expires = now + timedelta(minutes=10)
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-combined-activation",
+            "sandbox": sandbox,
+            "candidate_sha": sha,
+            "candidate_tree": tree,
+            "collector": {
+                "hostname": "trt-eai-oldlab-2",
+                "collected_at": now.isoformat(),
+                "expires_at": collector_expires.isoformat(),
+            },
+            "fleet_attestation": {
+                "path": (
+                    "/var/lib/loom-developer-sandbox-links/attestations/"
+                    f"{sandbox}/{sha}/fleet.json"
+                ),
+                "payload_sha256": "sha256:" + ("c" * 64),
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": fleet_expires.isoformat().replace("+00:00", "Z"),
+            },
+            "domains": {
+                name: {
+                    "manifest_path": f"/attestations/{sandbox}/{sha}/{name}.json",
+                    "signature_path": f"/attestations/{sandbox}/{sha}/{name}.sig",
+                    "payload_sha256": "d" * 64,
+                    "signature_sha256": "e" * 64,
+                    "key_id": f"{name}-key",
+                    "generation": 1,
+                    "published_at": now.isoformat(),
+                    "expires_at": fleet_expires.isoformat(),
+                }
+                for name in ("oldlab", "gb10")
+            },
+        }
+        payload["payload_sha256"] = hashlib.sha256(
+            _canonical_without_digest(payload),
+        ).hexdigest()
+        destination = root / sandbox / sha / "combined.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        destination.chmod(0o600)
+
+
+def _execute_argv(
+    tmp_path: Path,
+    profiles_dir: Path,
+    runtime_root: Path,
+) -> list[str]:
+    argv = [
+        "--execute",
+        "--profiles-dir",
+        str(profiles_dir),
+        "--candidate-sha",
+        SHA,
+        "--runtime-attestation-root",
+        str(runtime_root),
+    ]
+    for sandbox, worker, admin in (
+        ("qianyi", WORKER_A, ADMIN_A),
+        ("hongjian", WORKER_B, ADMIN_B),
+        ("devansh", WORKER_C, ADMIN_C),
+    ):
+        worker_path = tmp_path / f"{sandbox}-worker.env"
+        admin_path = tmp_path / f"{sandbox}-admin.toml"
+        access_path = tmp_path / f"{sandbox}-access"
+        secret_path = tmp_path / f"{sandbox}-secret"
+        _write_worker_env(worker_path, worker)
+        _write_admin(admin_path, admin)
+        _write_secret_line(access_path, f"{sandbox}-access")
+        _write_secret_line(secret_path, f"{sandbox}-secret")
+        argv.extend(
+            [
+                f"--{sandbox}-worker-token-file",
+                str(worker_path),
+                f"--{sandbox}-admin-secret-file",
+                str(admin_path),
+                f"--{sandbox}-minio-access-key-file",
+                str(access_path),
+                f"--{sandbox}-minio-secret-key-file",
+                str(secret_path),
+            ],
+        )
+    return argv
+
+
+def _stub_candidate_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        probe,
+        "_verify_candidate_repository",
+        lambda profile, **_: profile.candidate_root / SHA,
+    )
 
 
 def _write_profiles(tmp_path: Path) -> Path:
@@ -188,8 +304,143 @@ def test_secure_secret_file_rejects_world_readable(tmp_path: Path) -> None:
         probe.secure_secret_file(path, label="worker-token secret file")
 
 
-def test_execute_requires_minio_and_candidate_binding(tmp_path: Path) -> None:
+def test_secure_secret_file_rejects_hard_link(tmp_path: Path) -> None:
+    path = tmp_path / "worker.env"
+    path.write_text("LOOM_WORKER_TOKEN=x\n", encoding="utf-8")
+    path.chmod(0o600)
+    (tmp_path / "worker-copy.env").hardlink_to(path)
+    with pytest.raises(ValueError, match="exactly one hard link"):
+        probe.secure_secret_file(path, label="worker-token secret file")
+
+
+def test_secure_secret_file_rejects_symlink(tmp_path: Path) -> None:
+    path = tmp_path / "worker.env"
+    path.write_text("LOOM_WORKER_TOKEN=x\n", encoding="utf-8")
+    path.chmod(0o600)
+    link = tmp_path / "worker-link.env"
+    link.symlink_to(path)
+    with pytest.raises(ValueError, match="non-symlink"):
+        probe.secure_secret_file(link, label="worker-token secret file")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://127.0.0.1:20080",
+        "http://user:pass@127.0.0.1:20080",
+        "http://127.0.0.1:20080/path",
+        "http://127.0.0.1:20080/?query=yes",
+        "http://127.0.0.1:20080/#fragment",
+        "http://127.0.0.1",
+    ],
+)
+def test_endpoint_rejects_non_exact_url_shapes(url: str) -> None:
+    with pytest.raises(ValueError, match="http://host:port"):
+        probe._normalize_http_url(url)
+
+
+def test_evidence_write_is_atomic_private_and_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "evidence.json"
+    probe._write_evidence(target, {"schema_version": 1, "result": "pass"})
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert json.loads(target.read_text(encoding="utf-8"))["result"] == "pass"
+
+    target.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_text("preserve\n", encoding="utf-8")
+    target.symlink_to(outside)
+    with pytest.raises(ValueError, match="evidence target is unsafe"):
+        probe._write_evidence(target, {"result": "pass"})
+    assert outside.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_candidate_repository_readback_requires_exact_clean_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidates" / SHA
+    candidate.mkdir(parents=True)
+    profile = probe.SandboxProfileView(
+        sandbox="qianyi",
+        bind_address="127.0.0.1",
+        compose_project="loom-sandbox-qianyi",
+        candidate_root=tmp_path / "candidates",
+        state_root=tmp_path / "state",
+        control_plane_port=20080,
+        minio_port=20900,
+        artifacts_bucket="loom-sandbox-qianyi-artifacts",
+        trajectories_bucket="loom-sandbox-qianyi-trajectories",
+        task_bucket="loom-sandbox-qianyi-tasks",
+    )
+
+    def fake_git(_repository: Path, *args: str) -> str:
+        if args[:2] == ("status", "--porcelain=v1"):
+            return ""
+        if args[-1] == "HEAD^{tree}":
+            return TREE
+        return SHA
+
+    monkeypatch.setattr(probe, "_run_git_readback", fake_git)
+    resolved = probe._verify_candidate_repository(
+        profile,
+        expected_sha=SHA,
+        expected_tree=TREE,
+        state_source_repo=str(candidate),
+    )
+    assert resolved == candidate.resolve()
+
+    monkeypatch.setattr(
+        probe,
+        "_run_git_readback",
+        lambda _repository, *args: "dirty" if args[0] == "status" else SHA,
+    )
+    with pytest.raises(ValueError, match=r"tree readback drifted|not clean"):
+        probe._verify_candidate_repository(
+            profile,
+            expected_sha=SHA,
+            expected_tree=TREE,
+            state_source_repo=str(candidate),
+        )
+
+
+def test_runtime_activation_rejects_stale_or_tampered_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "runtime-attestations"
+    _write_runtime_receipts(root)
+    candidate = probe.CandidateIdentity(
+        sandbox="qianyi",
+        candidate_sha=SHA,
+        candidate_tree=TREE,
+        compose_project="loom-sandbox-qianyi",
+        source_repo="/candidate",
+        state_path="/state",
+        state_payload_sha256="f" * 64,
+        updated_at="2026-07-28T00:00:00Z",
+    )
+    receipt = root / "qianyi" / SHA / "combined.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["candidate_tree"] = "0" * 40
+    receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    receipt.chmod(0o600)
+    with pytest.raises(ValueError, match="binding is invalid"):
+        probe.load_runtime_activation(root, candidate)
+
+    _write_runtime_receipts(root)
+    with pytest.raises(ValueError, match="stale or untrusted"):
+        probe.load_runtime_activation(
+            root,
+            candidate,
+            now=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+
+def test_execute_requires_minio_and_candidate_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     profiles_dir = _write_profiles(tmp_path)
+    _stub_candidate_readback(monkeypatch)
+    runtime_root = tmp_path / "runtime-attestations"
+    _write_runtime_receipts(runtime_root)
     secrets: dict[str, Path] = {}
     for sandbox, worker, admin in (
         ("qianyi", WORKER_A, ADMIN_A),
@@ -209,6 +460,8 @@ def test_execute_requires_minio_and_candidate_binding(tmp_path: Path) -> None:
         str(profiles_dir),
         "--candidate-sha",
         SHA,
+        "--runtime-attestation-root",
+        str(runtime_root),
         "--qianyi-worker-token-file",
         str(secrets["qianyi_worker"]),
         "--qianyi-admin-secret-file",
@@ -226,41 +479,26 @@ def test_execute_requires_minio_and_candidate_binding(tmp_path: Path) -> None:
     assert code == 1
 
 
-def test_execute_rejects_mismatched_cp_url(tmp_path: Path) -> None:
+def test_execute_rejects_mismatched_cp_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     profiles_dir = _write_profiles(tmp_path)
-    argv = ["--execute", "--profiles-dir", str(profiles_dir), "--candidate-sha", SHA]
-    for sandbox, worker, admin in (
-        ("qianyi", WORKER_A, ADMIN_A),
-        ("hongjian", WORKER_B, ADMIN_B),
-        ("devansh", WORKER_C, ADMIN_C),
-    ):
-        worker_path = tmp_path / f"{sandbox}-worker.env"
-        admin_path = tmp_path / f"{sandbox}-admin.toml"
-        access_path = tmp_path / f"{sandbox}-access"
-        secret_path = tmp_path / f"{sandbox}-secret"
-        _write_worker_env(worker_path, worker)
-        _write_admin(admin_path, admin)
-        _write_secret_line(access_path, f"{sandbox}-access")
-        _write_secret_line(secret_path, f"{sandbox}-secret")
-        argv.extend(
-            [
-                f"--{sandbox}-worker-token-file",
-                str(worker_path),
-                f"--{sandbox}-admin-secret-file",
-                str(admin_path),
-                f"--{sandbox}-minio-access-key-file",
-                str(access_path),
-                f"--{sandbox}-minio-secret-key-file",
-                str(secret_path),
-            ],
-        )
+    _stub_candidate_readback(monkeypatch)
+    runtime_root = tmp_path / "runtime-attestations"
+    _write_runtime_receipts(runtime_root)
+    argv = _execute_argv(tmp_path, profiles_dir, runtime_root)
     argv.extend(["--qianyi-cp-url", "http://127.0.0.1:1"])
     code = probe.main(argv)
     assert code == 1
 
 
-def test_execute_rejects_stale_candidate_sha(tmp_path: Path) -> None:
+def test_execute_rejects_stale_candidate_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     profiles_dir = _write_profiles(tmp_path)
+    _stub_candidate_readback(monkeypatch)
     stale = tmp_path / "state" / "hongjian" / "sandbox-state.json"
     _write_state(stale, sandbox="hongjian", sha="c" * 40)
 
@@ -297,44 +535,20 @@ def test_execute_rejects_stale_candidate_sha(tmp_path: Path) -> None:
 def test_same_sandbox_status_classes_are_specific() -> None:
     assert probe.WORKER_CLAIM_SAME_STATUSES == frozenset({200, 204})
     assert 401 not in probe.WORKER_CLAIM_SAME_STATUSES
-    assert probe.ADMIN_MINT_SAME_STATUSES == frozenset({200, 201})
+    assert probe.ADMIN_MINT_SAME_STATUSES == frozenset({201})
     assert probe.WORKER_CLAIM_FOREIGN_STATUSES == frozenset({401})
+    assert probe.ADMIN_MINT_FOREIGN_STATUSES == frozenset({403})
 
 
-def test_build_targets_execute_binds_reviewed_endpoints(tmp_path: Path) -> None:
+def test_build_targets_execute_binds_reviewed_endpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     profiles_dir = _write_profiles(tmp_path)
-    ns_args = [
-        "--execute",
-        "--profiles-dir",
-        str(profiles_dir),
-        "--candidate-sha",
-        SHA,
-    ]
-    for sandbox, worker, admin in (
-        ("qianyi", WORKER_A, ADMIN_A),
-        ("hongjian", WORKER_B, ADMIN_B),
-        ("devansh", WORKER_C, ADMIN_C),
-    ):
-        worker_path = tmp_path / f"{sandbox}-worker.env"
-        admin_path = tmp_path / f"{sandbox}-admin.toml"
-        access_path = tmp_path / f"{sandbox}-access"
-        secret_path = tmp_path / f"{sandbox}-secret"
-        _write_worker_env(worker_path, worker)
-        _write_admin(admin_path, admin)
-        _write_secret_line(access_path, f"{sandbox}-access")
-        _write_secret_line(secret_path, f"{sandbox}-secret")
-        ns_args.extend(
-            [
-                f"--{sandbox}-worker-token-file",
-                str(worker_path),
-                f"--{sandbox}-admin-secret-file",
-                str(admin_path),
-                f"--{sandbox}-minio-access-key-file",
-                str(access_path),
-                f"--{sandbox}-minio-secret-key-file",
-                str(secret_path),
-            ],
-        )
+    _stub_candidate_readback(monkeypatch)
+    runtime_root = tmp_path / "runtime-attestations"
+    _write_runtime_receipts(runtime_root)
+    ns_args = _execute_argv(tmp_path, profiles_dir, runtime_root)
     args = probe.build_parser().parse_args(ns_args)
     targets, candidates, candidate_sha = probe.build_targets(args, execute=True)
     assert candidate_sha == SHA
@@ -344,3 +558,8 @@ def test_build_targets_execute_binds_reviewed_endpoints(tmp_path: Path) -> None:
     assert targets["qianyi"].own_bucket == "loom-sandbox-qianyi-artifacts"
     assert targets["qianyi"].foreign_bucket == "loom-sandbox-hongjian-artifacts"
     assert all(row.candidate_sha == SHA for row in candidates)
+    assert targets["qianyi"].runtime_activation is not None
+    assert (
+        targets["qianyi"].runtime_activation.fleet_payload_sha256
+        == "sha256:" + ("c" * 64)
+    )
