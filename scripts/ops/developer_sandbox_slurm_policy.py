@@ -1786,6 +1786,77 @@ def _allocation_inflight_path(root: Path, profile: Profile, candidate_sha: str) 
     return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.inflight.json"
 
 
+def _allocation_lock_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
+    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.lock"
+
+
+@contextmanager
+def _allocation_probe_lock(
+    root: Path,
+    profile: Profile,
+    candidate_sha: str,
+    *,
+    enforce_root_ownership: bool = True,
+) -> Iterator[None]:
+    if _CANDIDATE_RE.fullmatch(candidate_sha) is None:
+        raise PolicyError("allocation probe lock candidate SHA is invalid")
+    path = _allocation_lock_path(root, profile, candidate_sha)
+    if enforce_root_ownership:
+        _require_root_private_directory(path.parent)
+        expected_uid, expected_gid = 0, 0
+    else:
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path.parent.chmod(0o700)
+        expected_uid, expected_gid = os.geteuid(), os.getegid()
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    created = False
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise PolicyError("allocation probe lock could not be opened safely") from exc
+    except OSError as exc:
+        raise PolicyError("allocation probe lock could not be created safely") from exc
+    locked = False
+    try:
+        if created:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            _fsync_directory(path.parent)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+        ):
+            raise PolicyError("allocation probe lock inode is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        locked = True
+        try:
+            linked = path.lstat()
+        except OSError as exc:
+            raise PolicyError("allocation probe lock path is unavailable") from exc
+        if (
+            stat.S_ISLNK(linked.st_mode)
+            or not stat.S_ISREG(linked.st_mode)
+            or stat.S_IMODE(linked.st_mode) != 0o600
+            or linked.st_uid != expected_uid
+            or linked.st_gid != expected_gid
+            or linked.st_dev != opened.st_dev
+            or linked.st_ino != opened.st_ino
+        ):
+            raise PolicyError("allocation probe lock path changed during acquisition")
+        yield
+    finally:
+        if locked:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _invalidate_allocation_artifact(root: Path, profile: Profile, candidate_sha: str) -> None:
     path = _allocation_probe_path(root, profile, candidate_sha)
     _require_root_private_directory(path.parent)
@@ -2113,7 +2184,7 @@ def _positive_gpu_tres(value: str) -> bool:
     return False
 
 
-def run_allocation_probe(
+def _run_allocation_probe_transaction(
     root: Path,
     profile: Profile,
     *,
@@ -2333,6 +2404,32 @@ def run_allocation_probe(
             enforce_root_ownership=True,
         )
         raise
+
+
+def run_allocation_probe(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    candidate_root: Path,
+    worker_env: Path,
+    batch_uid: int,
+    batch_gid: int,
+    timeout_seconds: float = _ALLOCATION_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    if root != Path("/") or os.geteuid() != 0:
+        raise PolicyError("allocation-side Slurm probe requires the live root")
+    with _allocation_probe_lock(root, profile, candidate_sha):
+        return _run_allocation_probe_transaction(
+            root,
+            profile,
+            candidate_sha=candidate_sha,
+            candidate_root=candidate_root,
+            worker_env=worker_env,
+            batch_uid=batch_uid,
+            batch_gid=batch_gid,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def allocation_probe_readback(

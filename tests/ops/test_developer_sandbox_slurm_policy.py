@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -825,6 +827,68 @@ def _allocation_inflight_payload(
     }
 
 
+def test_allocation_probe_lock_serializes_candidate_transactions(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "6" * 40
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_attempting = threading.Event()
+    second_submitted = threading.Event()
+    errors: list[BaseException] = []
+
+    def first_transaction() -> None:
+        try:
+            with policy._allocation_probe_lock(
+                tmp_path,
+                loaded,
+                candidate,
+                enforce_root_ownership=False,
+            ):
+                first_entered.set()
+                if not release_first.wait(timeout=2):
+                    raise RuntimeError("first allocation transaction was not released")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def second_transaction() -> None:
+        try:
+            if not first_entered.wait(timeout=2):
+                raise RuntimeError("first allocation transaction did not acquire the lock")
+            second_attempting.set()
+            with policy._allocation_probe_lock(
+                tmp_path,
+                loaded,
+                candidate,
+                enforce_root_ownership=False,
+            ):
+                second_submitted.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=first_transaction)
+    second = threading.Thread(target=second_transaction)
+    first.start()
+    assert first_entered.wait(timeout=2)
+    second.start()
+    assert second_attempting.wait(timeout=2)
+    assert not second_submitted.wait(timeout=0.1)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert second_submitted.is_set()
+    lock = policy._allocation_lock_path(tmp_path, loaded, candidate)
+    metadata = lock.lstat()
+    assert stat.S_ISREG(metadata.st_mode)
+    assert stat.S_IMODE(metadata.st_mode) == 0o600
+    assert (metadata.st_uid, metadata.st_gid) == (os.geteuid(), os.getegid())
+
+
 def test_allocation_cleanup_archives_completed_job_without_scancel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -954,13 +1018,19 @@ def test_allocation_probe_recovers_crash_journal_before_new_submission(
             [job_id, payload["job_name"], "CANCELLED", "", "", ""],
         ],
     )
-    policy._recover_allocation_probe(
-        path,
+    with policy._allocation_probe_lock(
+        tmp_path,
         loaded,
-        candidate_sha=candidate,
-        job_name=str(payload["job_name"]),
+        candidate,
         enforce_root_ownership=False,
-    )
+    ):
+        policy._recover_allocation_probe(
+            path,
+            loaded,
+            candidate_sha=candidate,
+            job_name=str(payload["job_name"]),
+            enforce_root_ownership=False,
+        )
 
     assert commands == [
         ("scancel", f"--clusters={loaded.cluster}", "123"),

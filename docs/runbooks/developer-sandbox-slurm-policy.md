@@ -143,6 +143,11 @@ The probe submits one bounded, non-exclusive `sbatch` job and executes one
 `srun` step inside that allocation. Submission uses immediate parsable output,
 not `sbatch --wait`; a root-only mode-`0600` inflight record is persisted below
 a non-symlink root-owned mode-`0700` directory before bounded polling begins.
+The full invalidate, recovery, submission, polling, evidence, and finalize
+transaction holds a persistent root-owned mode-`0600` `flock` keyed by cluster
+and candidate, so concurrent invocations cannot submit or overwrite the same
+inflight identity. A crashed process releases the kernel lock while leaving
+the durable journal for exact recovery by the next lock holder.
 Every timeout, error, or recovery first reads the exact base job from `sacct`.
 An already-terminal job is archived without `scancel`; a non-terminal or
 temporarily unknown job receives `scancel` for that exact cluster/job ID,
