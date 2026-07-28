@@ -1,0 +1,21 @@
+schema_version = 1
+sandbox = "devansh"
+server_address = "192.168.50.14"
+
+[services.control-plane]
+server_port = 28080
+target_port = 22080
+health_path = "/healthz"
+allow_empty_health = false
+
+[services.gateway]
+server_port = 28100
+target_port = 22100
+health_path = "/healthz"
+allow_empty_health = false
+
+[services.minio]
+server_port = 28900
+target_port = 22900
+health_path = "/minio/health/live"
+allow_empty_health = true

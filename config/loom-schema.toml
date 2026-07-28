@@ -72,11 +72,21 @@ python_type = "SecretStr"
 required    = true
 secret      = { key = "minio-access-key" }
 
+[service_config.minio_access_key_file]
+used_by     = ["worker"]
+python_type = "Path"
+description = "Optional root-installed MinIO access-key file for a remote worker."
+
 [service_config.minio_secret_key]
 used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "SecretStr"
 required    = true
 secret      = { key = "minio-secret-key" }
+
+[service_config.minio_secret_key_file]
+used_by     = ["worker"]
+python_type = "Path"
+description = "Optional root-installed MinIO secret-key file for a remote worker."
 
 [service_config.minio_region]
 used_by     = ["control-plane", "loom-service", "worker"]
@@ -725,9 +735,13 @@ default     = "{}"
 [service_config.token]
 used_by     = ["worker"]
 python_type = "SecretStr"
-required    = true
 secret      = { key = "worker-token" }
-description = "Worker bearer token, minted by `loom admin tokens worker mint`."
+description = "Worker bearer token, minted by `loom admin tokens worker mint`. Exactly one of token or token_file is required at worker startup."
+
+[service_config.token_file]
+used_by     = ["worker"]
+python_type = "Path"
+description = "Optional root-installed worker bearer-token file. Exactly one of token or token_file is required at worker startup."
 
 [service_config.max_concurrent]
 used_by     = ["worker"]

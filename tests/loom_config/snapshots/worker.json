@@ -114,6 +114,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "minio_access_key_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "minio_connect_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "5.0",
@@ -153,6 +158,11 @@
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",
     "required": true
+  },
+  "minio_secret_key_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
   },
   "pool_name": {
     "annotation": "<class 'str'>",
@@ -275,9 +285,14 @@
     "required": false
   },
   "token": {
-    "annotation": "<class 'pydantic.types.SecretStr'>",
-    "default": "PydanticUndefined",
-    "required": true
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "token_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
   },
   "trajectory_cache_dir": {
     "annotation": "<class 'pathlib.Path'>",

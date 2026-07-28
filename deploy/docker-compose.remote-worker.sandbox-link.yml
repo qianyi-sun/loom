@@ -1,0 +1,76 @@
+# Candidate-bound, host-local data-plane link for developer sandbox Slurm jobs.
+# Compose with docker-compose.remote-worker.yml. The sidecar has no published
+# host ports: only the worker can reach its three plaintext listeners.
+services:
+  sandbox-link:
+    image: loom-worker:${LOOM_IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    command: ["python", "-m", "loom_worker.sandbox_link_proxy"]
+    environment:
+      LOOM_WORKER_SANDBOX_IDENTITY: ${LOOM_WORKER_SANDBOX_IDENTITY:?set LOOM_WORKER_SANDBOX_IDENTITY}
+      LOOM_WORKER_CANDIDATE_SHA: ${LOOM_WORKER_CANDIDATE_SHA:?set LOOM_WORKER_CANDIDATE_SHA}
+      LOOM_SANDBOX_LINK_CP_UPSTREAM: ${LOOM_SANDBOX_LINK_CP_UPSTREAM:?set LOOM_SANDBOX_LINK_CP_UPSTREAM}
+      LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM: ${LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM:?set LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM}
+      LOOM_SANDBOX_LINK_MINIO_UPSTREAM: ${LOOM_SANDBOX_LINK_MINIO_UPSTREAM:?set LOOM_SANDBOX_LINK_MINIO_UPSTREAM}
+    volumes:
+      - type: bind
+        source: ${LOOM_WORKER_CP_TLS_CA_FILE_HOST:?set LOOM_WORKER_CP_TLS_CA_FILE_HOST}
+        target: /run/loom-sandbox-link/ca.pem
+        read_only: true
+      - type: bind
+        source: ${LOOM_WORKER_CP_TLS_CERT_FILE_HOST:?set LOOM_WORKER_CP_TLS_CERT_FILE_HOST}
+        target: /run/loom-sandbox-link/client.pem
+        read_only: true
+      - type: bind
+        source: ${LOOM_WORKER_CP_TLS_KEY_FILE_HOST:?set LOOM_WORKER_CP_TLS_KEY_FILE_HOST}
+        target: /run/loom-sandbox-link/client-key.pem
+        read_only: true
+    healthcheck:
+      test: ["CMD", "python", "-m", "loom_worker.sandbox_link_proxy", "--check"]
+      interval: 10s
+      timeout: 8s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    cgroup_parent: ${LOOM_WORKER_CGROUP_PARENT:?set LOOM_WORKER_CGROUP_PARENT}
+    labels:
+      loom.sandbox: ${LOOM_WORKER_SANDBOX_IDENTITY:?set LOOM_WORKER_SANDBOX_IDENTITY}
+      loom.candidate_sha: ${LOOM_WORKER_CANDIDATE_SHA:?set LOOM_WORKER_CANDIDATE_SHA}
+      loom.slurm_job_id: ${LOOM_WORKER_SLURM_JOB_ID:?set LOOM_WORKER_SLURM_JOB_ID}
+      loom.compose_project: ${LOOM_WORKER_COMPOSE_PROJECT:?set LOOM_WORKER_COMPOSE_PROJECT}
+    restart: "no"
+
+  worker:
+    environment:
+      LOOM_WORKER_CONTROL_PLANE_URL: http://sandbox-link:8080
+      LOOM_WORKER_GATEWAY_URL: http://sandbox-link:9100
+      LOOM_WORKER_MINIO_ENDPOINT: http://sandbox-link:9000
+      LOOM_WORKER_TOKEN: ""
+      LOOM_WORKER_TOKEN_FILE: /run/loom-worker-secrets/worker-token
+      LOOM_WORKER_MINIO_ACCESS_KEY: ""
+      LOOM_WORKER_MINIO_ACCESS_KEY_FILE: /run/loom-worker-secrets/minio-access-key
+      LOOM_WORKER_MINIO_SECRET_KEY: ""
+      LOOM_WORKER_MINIO_SECRET_KEY_FILE: /run/loom-worker-secrets/minio-secret-key
+    volumes:
+      - type: bind
+        source: ${LOOM_WORKER_TOKEN_FILE_HOST:?set LOOM_WORKER_TOKEN_FILE_HOST}
+        target: /run/loom-worker-secrets/worker-token
+        read_only: true
+      - type: bind
+        source: ${LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST:?set LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST}
+        target: /run/loom-worker-secrets/minio-access-key
+        read_only: true
+      - type: bind
+        source: ${LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST:?set LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST}
+        target: /run/loom-worker-secrets/minio-secret-key
+        read_only: true
+    depends_on:
+      sandbox-link:
+        condition: service_healthy

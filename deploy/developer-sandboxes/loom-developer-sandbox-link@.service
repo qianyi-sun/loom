@@ -1,0 +1,42 @@
+[Unit]
+Description=Loom developer sandbox mTLS link (%i)
+After=network-online.target loom-developer-sandbox@%i.service
+Wants=network-online.target
+Requires=loom-developer-sandbox@%i.service
+ConditionPathExists=/etc/loom/developer-sandbox-links/server/%i/current/config.toml
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStartPre=/usr/local/libexec/loom-developer-sandbox-remote-link --config /etc/loom/developer-sandbox-links/server/%i/current/config.toml --check
+ExecStart=/usr/local/libexec/loom-developer-sandbox-remote-link --config /etc/loom/developer-sandbox-links/server/%i/current/config.toml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/loom/developer-sandbox-links/server/%i
+RestrictAddressFamilies=AF_INET
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow=192.168.50.0/24
+IPAddressAllow=192.168.20.0/24
+
+[Install]
+WantedBy=multi-user.target
