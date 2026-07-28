@@ -49,10 +49,36 @@ MAX_TOKEN_BYTES = 4096
 GOLDEN_IMAGE_NAME = "golden.qcow2"
 GOLDEN_MANIFEST_NAME = "golden-manifest.json"
 STATE_SCHEMA_VERSION = 1
+DOCKERHUB_CREDENTIALS_NAME = "dockerhub-credentials.json"
+GUEST_BASE_IMAGES = (
+    "alpine:3.19",
+    "alpine/socat:1.7.4.4",
+    "bitnamilegacy/pgbouncer:1.24.0",
+    "busybox:latest",
+    "edoburu/pgbouncer:latest",
+    "envoyproxy/envoy:v1.30-latest",
+    "golang:1.23-alpine",
+    "kindest/node:v1.31.0",
+    "minio/minio:latest",
+    "moby/buildkit:buildx-stable-1",
+    "nginxinc/nginx-unprivileged:1.27-alpine",
+    "node:20-slim",
+    "node:20.19.5-slim",
+    "node:22-bookworm-slim",
+    "postgres:16",
+    "postgres:16-alpine",
+    "prometheuscommunity/pgbouncer-exporter:v0.12.1",
+    "python:3.11-alpine",
+    "python:3.11-slim",
+    "python:3.12-bookworm",
+    "python:3.12-slim",
+    "tonistiigi/binfmt:latest",
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_IMAGE_RE = re.compile(r"^loom-ci-runner-qemu:[a-z0-9][a-z0-9._-]{0,63}$")
 _SAFE_PREFIX_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,30}$")
+_DOCKERHUB_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 class PoolConfigError(ValueError):
@@ -313,6 +339,12 @@ class SlotState:
     candidate_sha: str
 
 
+@dataclass(frozen=True, slots=True)
+class DockerHubCredentials:
+    username: str
+    token: str
+
+
 def load_profile(path: Path) -> PoolProfile:
     try:
         with path.open("rb") as handle:
@@ -396,6 +428,39 @@ def read_token(path: Path) -> str:
     if not token or any(char.isspace() for char in token):
         raise PoolOperationError("GitHub token file must contain one opaque token")
     return token
+
+
+def read_dockerhub_credentials(path: Path) -> DockerHubCredentials:
+    try:
+        metadata = path.stat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise PoolOperationError("could not read Docker Hub credentials") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PoolOperationError("Docker Hub credentials must be a regular file")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise PoolOperationError(
+            "Docker Hub credentials must not grant group/other access",
+        )
+    if not raw or len(raw) > MAX_TOKEN_BYTES or b"\x00" in raw:
+        raise PoolOperationError("Docker Hub credentials have an invalid size")
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PoolOperationError("Docker Hub credentials are not valid JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {"username", "token"}:
+        raise PoolOperationError("Docker Hub credential fields are invalid")
+    username = payload.get("username")
+    token = payload.get("token")
+    if (
+        not isinstance(username, str)
+        or _DOCKERHUB_USERNAME_RE.fullmatch(username) is None
+        or not isinstance(token, str)
+        or not token
+        or any(char.isspace() for char in token)
+    ):
+        raise PoolOperationError("Docker Hub credentials are invalid")
+    return DockerHubCredentials(username=username, token=token)
 
 
 def _sha256(path: Path) -> str:
@@ -581,6 +646,7 @@ def _qemu_container_command(
 
 def _base_install_script(profile: PoolProfile) -> str:
     runner_sha = profile.actions_runner_sha256
+    base_images = " ".join(GUEST_BASE_IMAGES)
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -591,19 +657,103 @@ apt-get install -y --no-install-recommends \
   curl \
   docker-buildx \
   docker-compose-v2 \
+  docker-registry \
   docker.io \
   git \
   jq \
   python-is-python3 \
+  skopeo \
   sudo \
   unzip
 systemctl enable --now docker
+install -d -o docker-registry -g docker-registry -m 0750 \
+  /var/lib/loom-ci-registry
+cat >/etc/docker/registry/config.yml <<'EOF'
+version: 0.1
+log:
+  fields:
+    service: loom-ci-registry
+storage:
+  filesystem:
+    rootdirectory: /var/lib/loom-ci-registry
+http:
+  addr: 0.0.0.0:5000
+EOF
+systemctl enable --now docker-registry
+curl --fail --silent --show-error http://127.0.0.1:5000/v2/ >/dev/null
+install -d -m 0700 /run/loom-ci-registry
+install -d -m 0755 /mnt/loom-ci-assets
+mount -o ro LABEL=LOOMCIASSETS /mnt/loom-ci-assets
+install -m 0600 \
+  /mnt/loom-ci-assets/{DOCKERHUB_CREDENTIALS_NAME} \
+  /run/loom-ci-registry/{DOCKERHUB_CREDENTIALS_NAME}
+dockerhub_username=$(
+  python3 -c 'import json; print(json.load(open("/run/loom-ci-registry/{DOCKERHUB_CREDENTIALS_NAME}"))["username"])'
+)
+cleanup_registry_auth() {{
+  docker logout >/dev/null 2>&1 || true
+  rm -rf /root/.docker /run/loom-ci-registry
+}}
+trap cleanup_registry_auth EXIT
+python3 -c \
+  'import json; print(json.load(open("/run/loom-ci-registry/{DOCKERHUB_CREDENTIALS_NAME}"))["token"])' \
+  | docker login --username "${{dockerhub_username}}" --password-stdin >/dev/null
+unset dockerhub_username
+for image in {base_images}; do
+  repository="${{image%:*}}"
+  tag="${{image##*:}}"
+  if [[ "$repository" != */* ]]; then
+    repository="library/${{repository}}"
+  fi
+  skopeo copy \
+    --all \
+    --src-authfile /root/.docker/config.json \
+    --dest-tls-verify=false \
+    "docker://docker.io/${{repository}}:${{tag}}" \
+    "docker://127.0.0.1:5000/${{repository}}:${{tag}}" \
+    >/dev/null
+done
+cleanup_registry_auth
+trap - EXIT
+test ! -e /root/.docker/config.json
+cat >/etc/docker/registry/config.yml <<'EOF'
+version: 0.1
+log:
+  fields:
+    service: loom-ci-registry
+storage:
+  filesystem:
+    rootdirectory: /var/lib/loom-ci-registry
+  maintenance:
+    readonly:
+      enabled: true
+http:
+  addr: 0.0.0.0:5000
+EOF
+systemctl restart docker-registry
+cat >/etc/docker/daemon.json <<'EOF'
+{{
+  "insecure-registries": ["127.0.0.1:5000"],
+  "registry-mirrors": ["http://127.0.0.1:5000"]
+}}
+EOF
+install -d -m 0755 /etc/buildkit
+cat >/etc/buildkit/loom-ci.toml <<'EOF'
+[registry."docker.io"]
+  mirrors = ["127.0.0.1:5000"]
+  http = true
+  insecure = true
+EOF
+systemctl restart docker
+for image in {base_images}; do
+  docker pull --platform linux/amd64 "${{image}}" >/dev/null
+done
+test "$(systemctl is-active docker-registry)" = active
 id runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash runner
 usermod -aG docker runner
 printf 'runner ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/runner
 chmod 0440 /etc/sudoers.d/runner
 mkdir -p /mnt/loom-ci-assets /opt/actions-runner
-mount -o ro LABEL=LOOMCIASSETS /mnt/loom-ci-assets
 printf '{runner_sha}  /mnt/loom-ci-assets/{profile.actions_runner_name}\\n' | sha256sum -c -
 tar -xzf /mnt/loom-ci-assets/{profile.actions_runner_name} -C /opt/actions-runner
 umount /mnt/loom-ci-assets
@@ -637,8 +787,11 @@ umount /mnt
 install -o runner -g runner -m 0600 /dev/null /var/log/loom-actions-runner.log
 systemctl is-active --quiet docker
 set +e
-sudo -u runner /opt/actions-runner/run.sh \
-  --jitconfig "$(cat /run/loom-ci-jit/jitconfig)" \
+sudo -u runner /bin/bash -c '
+  set -euo pipefail
+  umask 0022
+  exec /opt/actions-runner/run.sh --jitconfig "$1"
+' loom-ci-runner "$(cat /run/loom-ci-jit/jitconfig)" \
   >/var/log/loom-actions-runner.log 2>&1
 runner_rc=$?
 set -e
@@ -668,7 +821,19 @@ exec >/var/log/loom-ci-agent-sandbox-benchmark.log 2>&1
 git clone --filter=blob:none https://github.com/{EXPECTED_REPOSITORY}.git /opt/loom
 git -C /opt/loom checkout --detach {candidate_sha}
 docker run --privileged --rm tonistiigi/binfmt --install all
-docker buildx create --name loom-benchmark --use --bootstrap
+buildx_args=(
+  docker buildx create
+  --name loom-benchmark
+  --use
+  --bootstrap
+)
+if [[ -r /etc/buildkit/loom-ci.toml ]]; then
+  buildx_args+=(
+    --driver-opt network=host
+    --buildkitd-config /etc/buildkit/loom-ci.toml
+  )
+fi
+"${{buildx_args[@]}}"
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   --file /opt/loom/deploy/Dockerfile.agent-sandbox \
@@ -819,6 +984,7 @@ def prepare_base(
     *,
     candidate_sha: str,
     execute: bool,
+    dockerhub_credentials: DockerHubCredentials | None,
     runner: CommandRunner,
 ) -> dict[str, object]:
     _verify_candidate_sha(candidate_sha)
@@ -831,6 +997,10 @@ def prepare_base(
     }
     if not execute:
         return plan
+    if dockerhub_credentials is None:
+        raise PoolOperationError(
+            "Docker Hub credentials are required to prepare the golden guest",
+        )
 
     _verify_host(profile)
     _verify_qemu_image(profile, candidate_sha, runner)
@@ -884,6 +1054,17 @@ def prepare_base(
         meta_data.write_text(_meta_data("loom-ci-golden"), encoding="utf-8")
         for path in (user_data, meta_data):
             path.chmod(0o600)
+        dockerhub_credentials_path = build_root / DOCKERHUB_CREDENTIALS_NAME
+        _write_private(
+            dockerhub_credentials_path,
+            json.dumps(
+                {
+                    "username": dockerhub_credentials.username,
+                    "token": dockerhub_credentials.token,
+                },
+                separators=(",", ":"),
+            ),
+        )
 
         _require_success(
             runner,
@@ -917,6 +1098,10 @@ def prepare_base(
                     (
                         f"{profile.actions_runner_name}="
                         f"/cache/{profile.actions_runner_name}"
+                    ),
+                    (
+                        f"{DOCKERHUB_CREDENTIALS_NAME}="
+                        f"/state/{DOCKERHUB_CREDENTIALS_NAME}"
                     ),
                 ),
             ),
@@ -1014,6 +1199,7 @@ def prepare_base(
                 "candidate_sha": candidate_sha,
                 "cloud_image_sha256": profile.cloud_image_sha256,
                 "actions_runner_sha256": profile.actions_runner_sha256,
+                "base_images": list(GUEST_BASE_IMAGES),
                 "golden_sha256": golden_sha,
                 "created_at": datetime.now(UTC).isoformat(),
             },
@@ -1037,6 +1223,7 @@ def _verify_golden(profile: PoolProfile, candidate_sha: str) -> None:
         "candidate_sha": candidate_sha,
         "cloud_image_sha256": profile.cloud_image_sha256,
         "actions_runner_sha256": profile.actions_runner_sha256,
+        "base_images": list(GUEST_BASE_IMAGES),
     }
     if any(manifest.get(key) != value for key, value in expected.items()):
         raise PoolOperationError("golden image manifest does not match the candidate")
@@ -1559,6 +1746,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--candidate-sha", default="")
     parser.add_argument("--token-file", type=Path)
+    parser.add_argument("--dockerhub-credentials-file", type=Path)
     subparsers = parser.add_subparsers(dest="operation", required=True)
     for name in ("preflight", "prepare-base", "reconcile", "drain"):
         subparser = subparsers.add_parser(name)
@@ -1593,6 +1781,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 profile,
                 candidate_sha=args.candidate_sha,
                 execute=args.execute,
+                dockerhub_credentials=(
+                    read_dockerhub_credentials(args.dockerhub_credentials_file)
+                    if args.dockerhub_credentials_file is not None
+                    else None
+                ),
                 runner=runner,
             )
         elif args.operation == "reconcile":

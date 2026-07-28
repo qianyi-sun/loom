@@ -121,8 +121,12 @@ administration access and no workflow/package/deployment credentials.
 LOOM_CI_RUNNER_CANDIDATE_SHA=<full reviewed commit SHA>
 ```
 
-Run the secret-free checks and seal the pinned base guest before supplying the
-GitHub token:
+Run the secret-free checks before supplying either credential. Create a
+root-owned mode-0600 `/etc/loom-ci-runner-pool/dockerhub-credentials.json`
+containing `{"username":"...","token":"..."}`. Use a scoped Docker Hub access
+token, not an account password. It is used only while sealing the base guest to
+populate a candidate-bound allowlisted registry containing the public
+Docker/Kind/test images that otherwise cause an anonymous 11-runner pull burst:
 
 ```bash
 sudo /usr/local/libexec/loom-ci-runner-pool \
@@ -133,7 +137,11 @@ sudo /usr/local/libexec/loom-ci-runner-pool \
 sudo /usr/local/libexec/loom-ci-runner-pool \
   --profile /etc/loom-ci-runner-pool/profile.toml \
   --candidate-sha "$CANDIDATE_SHA" \
+  --dockerhub-credentials-file \
+    /etc/loom-ci-runner-pool/dockerhub-credentials.json \
   prepare-base --execute
+
+sudo rm /etc/loom-ci-runner-pool/dockerhub-credentials.json
 ```
 
 `preflight` requires oldlab-5, `/dev/kvm`, Docker with the systemd cgroup
@@ -141,9 +149,15 @@ driver, and a QEMU image whose OCI candidate label matches the requested SHA.
 `prepare-base` verifies the pinned Ubuntu cloud image and Actions runner
 checksums, installs Docker/Buildx/Compose, a `python` → Python 3 compatibility
 command, and the C compiler required by Go race tests in a KVM guest. It also
-checks those tools before sealing the candidate-bound qcow2 manifest. Every
-one-job runner starts with `umask 022`, matching the permission assumptions of
-the GitHub-hosted test environment.
+authenticates only for the base-image mirror population, logs out, removes
+root's Docker configuration, switches the guest registry to read-only, and
+verifies the credential is absent before sealing the candidate-bound qcow2
+manifest. The registry has no upstream proxy and therefore cannot expose
+private Docker Hub repositories or use the account for arbitrary PR-controlled
+pulls. Docker and oldlab-only BuildKit builders read the local mirror; the
+credential ISO and build directory are deleted after sealing. Every one-job
+runner starts the Actions process itself with `umask 022`, matching the
+permission assumptions of the GitHub-hosted test environment.
 
 ## Reconcile, health, and drain
 

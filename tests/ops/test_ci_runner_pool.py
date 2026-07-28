@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
+import tomllib
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -136,6 +138,7 @@ def _seal_golden(profile: pool.PoolProfile) -> None:
                 "candidate_sha": CANDIDATE_SHA,
                 "cloud_image_sha256": profile.cloud_image_sha256,
                 "actions_runner_sha256": profile.actions_runner_sha256,
+                "base_images": list(pool.GUEST_BASE_IMAGES),
                 "golden_sha256": digest,
             },
         ),
@@ -196,6 +199,37 @@ def test_token_source_requires_private_regular_file(tmp_path: Path) -> None:
 
     token.chmod(0o600)
     assert pool.read_token(token) == "secret-token"
+
+
+def test_dockerhub_credentials_require_private_exact_json(tmp_path: Path) -> None:
+    credentials = tmp_path / "dockerhub-credentials.json"
+    credentials.write_text(
+        json.dumps({"username": "loom-ci", "token": "secret-token"}),
+        encoding="utf-8",
+    )
+    credentials.chmod(0o640)
+
+    with pytest.raises(pool.PoolOperationError, match="group/other"):
+        pool.read_dockerhub_credentials(credentials)
+
+    credentials.chmod(0o600)
+    assert pool.read_dockerhub_credentials(credentials) == pool.DockerHubCredentials(
+        username="loom-ci",
+        token="secret-token",
+    )
+
+    credentials.write_text(
+        json.dumps(
+            {
+                "username": "loom-ci",
+                "token": "secret-token",
+                "unexpected": True,
+            },
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(pool.PoolOperationError, match="fields"):
+        pool.read_dockerhub_credentials(credentials)
 
 
 def test_dry_run_never_calls_github_or_docker(tmp_path: Path) -> None:
@@ -331,6 +365,87 @@ def test_golden_guest_installs_github_hosted_compatibility_tools(
     assert "sudo -u runner docker compose version" in script
     assert "sudo -u runner python --version" in script
     assert "test -x /usr/bin/cc" in script
+
+
+def test_golden_guest_seeds_images_without_retaining_registry_credentials(
+    tmp_path: Path,
+) -> None:
+    script = pool._base_install_script(_profile(tmp_path))
+
+    assert "docker login" in script
+    assert "--password-stdin" in script
+    assert "skopeo copy" in script
+    assert "--all" in script
+    assert "--src-authfile /root/.docker/config.json" in script
+    for image in pool.GUEST_BASE_IMAGES:
+        assert image in script
+    assert "docker logout" in script
+    assert "rm -rf /root/.docker /run/loom-ci-registry" in script
+    assert "test ! -e /root/.docker/config.json" in script
+    assert "readonly:" in script
+    assert "registry-mirrors" in script
+    assert "/etc/buildkit/loom-ci.toml" in script
+    assert "proxy:" not in script
+    assert "secret-token" not in script
+
+
+def test_golden_mirror_covers_ci_dockerhub_inputs() -> None:
+    def dockerhub_ref(raw_ref: str) -> str | None:
+        ref = raw_ref.split("@", 1)[0]
+        if not ref or ref.startswith(("$", "loom-")):
+            return None
+        if "/" in ref:
+            registry = ref.split("/", 1)[0]
+            if registry == "localhost" or "." in registry or ":" in registry:
+                return None
+        if ":" not in ref.rsplit("/", 1)[-1]:
+            ref += ":latest"
+        return ref
+
+    expected = {
+        "busybox:latest",
+        "edoburu/pgbouncer:latest",
+        "kindest/node:v1.31.0",
+        "moby/buildkit:buildx-stable-1",
+        "postgres:16-alpine",
+        "tonistiigi/binfmt:latest",
+    }
+    manifest = tomllib.loads(
+        Path("config/component-ownership.toml").read_text(encoding="utf-8"),
+    )
+    for component in manifest["components"]:
+        if component["kind"] != "release-image":
+            continue
+        dockerfile = Path(component["dockerfile"]).read_text(encoding="utf-8")
+        for line in dockerfile.splitlines():
+            if not line.lstrip().startswith("FROM "):
+                continue
+            tokens = line.split()
+            raw_ref = tokens[2] if tokens[1].startswith("--platform=") else tokens[1]
+            if (ref := dockerhub_ref(raw_ref)) is not None:
+                expected.add(ref)
+
+    for path in (
+        *Path("deploy").glob("*compose*.yml"),
+        *Path("deploy/k8s").glob("*.yaml"),
+    ):
+        for raw_ref in re.findall(
+            r"^\s*image:\s*[\"']?([^\"'\s]+)",
+            path.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        ):
+            if (ref := dockerhub_ref(raw_ref)) is not None:
+                expected.add(ref)
+
+    assert expected <= set(pool.GUEST_BASE_IMAGES)
+
+
+def test_runner_process_sets_github_hosted_umask() -> None:
+    script = pool._slot_run_script()
+
+    assert "sudo -u runner /bin/bash -c" in script
+    assert "umask 0022" in script
+    assert "exec /opt/actions-runner/run.sh" in script
 
 
 def test_iso_commands_preserve_long_filenames(

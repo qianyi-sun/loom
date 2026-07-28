@@ -389,6 +389,21 @@ jobs:
               --name loom-staging
           done < "$image_names"
           rm -f "$image_names"
+          # The oldlab golden guest seeds these public images with an
+          # operator-only Docker Hub login, then removes that credential before
+          # any PR job starts. Loading them here avoids an anonymous burst from
+          # the nested kind/containerd daemon sharing the oldlab egress IP.
+          for base_image in \
+            alpine/socat:1.7.4.4 \
+            bitnamilegacy/pgbouncer:1.24.0 \
+            envoyproxy/envoy:v1.30-latest \
+            minio/minio:latest \
+            postgres:16 \
+            prometheuscommunity/pgbouncer-exporter:v0.12.1
+          do
+            docker image inspect "$base_image" >/dev/null
+            kind load docker-image "$base_image" --name loom-staging
+          done
 
       - name: Bootstrap namespace + Secrets
         # Bootstrap loom-secrets from schema via `loom cluster bootstrap-secrets`.

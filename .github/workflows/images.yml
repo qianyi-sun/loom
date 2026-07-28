@@ -299,7 +299,19 @@ jobs:
         # wraps. No marketplace actions needed.
         run: |
           docker run --privileged --rm tonistiigi/binfmt --install all
-          docker buildx create --name loom-builder --use --bootstrap
+          buildx_args=(
+            docker buildx create
+            --name loom-builder
+            --use
+            --bootstrap
+          )
+          if [[ -r /etc/buildkit/loom-ci.toml ]]; then
+            buildx_args+=(
+              --driver-opt network=host
+              --buildkitd-config /etc/buildkit/loom-ci.toml
+            )
+          fi
+          "${buildx_args[@]}"
           docker buildx inspect
 
       - name: Build without registry or cache write authority
