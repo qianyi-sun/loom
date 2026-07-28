@@ -1,0 +1,21 @@
+schema_version = 1
+sandbox = "hongjian"
+server_address = "192.168.50.14"
+
+[services.control-plane]
+server_port = 27080
+target_port = 21080
+health_path = "/healthz"
+allow_empty_health = false
+
+[services.gateway]
+server_port = 27100
+target_port = 21100
+health_path = "/healthz"
+allow_empty_health = false
+
+[services.minio]
+server_port = 27900
+target_port = 21900
+health_path = "/minio/health/live"
+allow_empty_health = true

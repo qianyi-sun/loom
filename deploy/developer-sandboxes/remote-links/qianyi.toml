@@ -1,0 +1,21 @@
+schema_version = 1
+sandbox = "qianyi"
+server_address = "192.168.50.14"
+
+[services.control-plane]
+server_port = 26080
+target_port = 20080
+health_path = "/healthz"
+allow_empty_health = false
+
+[services.gateway]
+server_port = 26100
+target_port = 20100
+health_path = "/healthz"
+allow_empty_health = false
+
+[services.minio]
+server_port = 26900
+target_port = 20900
+health_path = "/minio/health/live"
+allow_empty_health = true

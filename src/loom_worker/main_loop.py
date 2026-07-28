@@ -72,6 +72,10 @@ from loom.verifier.pytest_verifier import PytestVerifier
 from loom.verifier.script_verifier import ScriptVerifier
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, StepTokenClient
+from loom_worker.control_plane_security import (
+    resolve_worker_minio_credentials,
+    resolve_worker_token,
+)
 from loom_worker.heartbeat import HeartbeatThread
 from loom_worker.materializers import (
     build_default_materializers,
@@ -244,10 +248,11 @@ def _configure_blocking_io_executor(settings: WorkerSettings) -> None:
 
 
 def _build_worker_object_store(settings: WorkerSettings) -> MinioObjectStore:
+    access_key, secret_key = resolve_worker_minio_credentials(settings)
     return MinioObjectStore(
         endpoint_url=settings.minio_endpoint,
-        access_key=settings.minio_access_key.get_secret_value(),
-        secret_key=settings.minio_secret_key.get_secret_value(),
+        access_key=access_key,
+        secret_key=secret_key,
         region=settings.minio_region,
         max_pool_connections=settings.minio_max_pool_connections,
         connect_timeout=settings.minio_connect_timeout_sec,
@@ -315,6 +320,7 @@ async def run_worker(settings: WorkerSettings) -> None:
     settings.trajectory_cache_dir.mkdir(parents=True, exist_ok=True)
     _configure_blocking_io_executor(settings)
     _log_docker_registry_auth_summary()
+    token_value = resolve_worker_token(settings)
 
     async with (
         httpx.AsyncClient(
@@ -328,12 +334,12 @@ async def run_worker(settings: WorkerSettings) -> None:
     ):
         cp_client = HttpControlPlaneClient(
             base_url=str(settings.control_plane_url),
-            token=settings.token.get_secret_value(),
+            token=token_value,
             _client=cp_http,
         )
         gateway_client = HttpLLMGatewayClient(
             base_url=str(settings.gateway_url),
-            token=settings.token.get_secret_value(),
+            token=token_value,
             _client=gw_http,
         )
 
@@ -344,14 +350,17 @@ async def run_worker(settings: WorkerSettings) -> None:
         worker_id = UUID(info["worker_id"])
         logger.info("worker_registered worker_id=%s", worker_id)
 
-        _run_orphan_cleanup(settings, worker_id)
+        _run_orphan_cleanup(
+            settings,
+            worker_id,
+            token_value=token_value,
+        )
         _run_trial_cache_eviction(settings)
 
         sync_http = httpx.Client(
             base_url=str(settings.control_plane_url),
             timeout=5.0,
         )
-        token_value = settings.token.get_secret_value()
 
         def _hb_tick() -> None:
             sync_http.post(
@@ -501,11 +510,13 @@ def _run_orphan_cleanup(
     settings: WorkerSettings,
     worker_id: UUID,
     *,
+    token_value: str | None = None,
     retry_config: StartupRetryConfig = DEFAULT_STARTUP_RETRY_CONFIG,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Sync HTTP lookup against /trials/{id} — invoked once at startup."""
-    token_value = settings.token.get_secret_value()
+    if token_value is None:
+        token_value = resolve_worker_token(settings)
 
     def _lookup(trial_id: UUID) -> tuple[str, UUID | None]:
         with httpx.Client(

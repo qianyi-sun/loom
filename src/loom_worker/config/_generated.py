@@ -43,6 +43,7 @@ class WorkerSettings(BaseSettings):
     max_concurrent: int = 5
     metrics_port: int = 9090
     minio_access_key: SecretStr
+    minio_access_key_file: Path | None = None
     minio_connect_timeout_sec: float = 5.0
     minio_endpoint: str = "http://loom-minio:9000"
     minio_max_pool_connections: int = 256
@@ -51,6 +52,7 @@ class WorkerSettings(BaseSettings):
     minio_read_timeout_sec: float = 120.0
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
+    minio_secret_key_file: Path | None = None
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0
     sandbox_identity: str = ""
@@ -75,7 +77,8 @@ class WorkerSettings(BaseSettings):
     task_image_build_max_bytes: int = Field(default=536870912, validation_alias="LOOM_TASK_IMAGE_BUILD_MAX_BYTES")
     task_image_build_max_files: int = Field(default=2000, validation_alias="LOOM_TASK_IMAGE_BUILD_MAX_FILES")
     task_materialize_timeout_sec: float = 300.0
-    token: SecretStr
+    token: SecretStr | None = None
+    token_file: Path | None = None
     trajectory_cache_dir: Path = Path("/var/lib/loom/trajectories")
     trial_cache_base_image_pull_timeout_sec: float = 1800.0
     trial_cache_build_lock_timeout_sec: float = 1800.0

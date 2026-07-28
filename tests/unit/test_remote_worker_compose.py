@@ -4,6 +4,7 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.remote-worker.yml"
+_SANDBOX_LINK_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.remote-worker.sandbox-link.yml"
 _DEV_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.dev.yml"
 _WORKER_NOFILE_LIMIT = 65_536
 
@@ -62,6 +63,49 @@ def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
     assert env["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == (
         "${LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS:-}"
     )
+    assert env["LOOM_WORKER_TOKEN"] == "${LOOM_WORKER_TOKEN:-}"
+    assert env["LOOM_WORKER_TOKEN_FILE"] is None
+
+
+def test_sandbox_link_overlay_mounts_only_host_local_secret_files() -> None:
+    data = yaml.safe_load(_SANDBOX_LINK_COMPOSE.read_text(encoding="utf-8"))
+    assert set(data["services"]) == {"sandbox-link", "worker"}
+    worker = data["services"]["worker"]
+    sidecar = data["services"]["sandbox-link"]
+    env = _env_map(worker["environment"])
+    volumes = worker["volumes"]
+
+    assert env["LOOM_WORKER_CONTROL_PLANE_URL"] == "http://sandbox-link:8080"
+    assert env["LOOM_WORKER_GATEWAY_URL"] == "http://sandbox-link:9100"
+    assert env["LOOM_WORKER_MINIO_ENDPOINT"] == "http://sandbox-link:9000"
+    assert env["LOOM_WORKER_TOKEN"] == ""
+    assert env["LOOM_WORKER_TOKEN_FILE"].endswith("/worker-token")
+    assert env["LOOM_WORKER_MINIO_ACCESS_KEY"] == ""
+    assert env["LOOM_WORKER_MINIO_ACCESS_KEY_FILE"].endswith("/minio-access-key")
+    assert env["LOOM_WORKER_MINIO_SECRET_KEY"] == ""
+    assert env["LOOM_WORKER_MINIO_SECRET_KEY_FILE"].endswith("/minio-secret-key")
+    assert {volume["source"] for volume in volumes} == {
+        "${LOOM_WORKER_TOKEN_FILE_HOST:?set LOOM_WORKER_TOKEN_FILE_HOST}",
+        "${LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST:?set LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST}",
+        "${LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST:?set LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST}",
+    }
+    assert {volume["source"] for volume in sidecar["volumes"]} == {
+        "${LOOM_WORKER_CP_TLS_CA_FILE_HOST:?set LOOM_WORKER_CP_TLS_CA_FILE_HOST}",
+        "${LOOM_WORKER_CP_TLS_CERT_FILE_HOST:?set LOOM_WORKER_CP_TLS_CERT_FILE_HOST}",
+        "${LOOM_WORKER_CP_TLS_KEY_FILE_HOST:?set LOOM_WORKER_CP_TLS_KEY_FILE_HOST}",
+    }
+    assert all(volume["read_only"] is True for volume in volumes)
+    assert all(volume["read_only"] is True for volume in sidecar["volumes"])
+    assert "ports" not in sidecar
+    assert sidecar["read_only"] is True
+    assert sidecar["restart"] == "no"
+    assert sidecar["cpus"] == 0.25
+    assert sidecar["mem_limit"] == "128m"
+    assert sidecar["pids_limit"] == 64
+    assert sidecar["cgroup_parent"].startswith("${LOOM_WORKER_CGROUP_PARENT:?")
+    assert worker["depends_on"] == {
+        "sandbox-link": {"condition": "service_healthy"},
+    }
 
 
 def test_remote_worker_compose_container_caps_passthrough() -> None:
@@ -85,16 +129,10 @@ def test_remote_worker_compose_stamps_slurm_identity_and_disables_restart() -> N
     worker = _worker_service(_COMPOSE)
     env = _env_map(worker["environment"])
 
-    assert env["LOOM_WORKER_SANDBOX_IDENTITY"] == (
-        "${LOOM_WORKER_SANDBOX_IDENTITY:-manual}"
-    )
-    assert env["LOOM_WORKER_CANDIDATE_SHA"] == (
-        "${LOOM_WORKER_CANDIDATE_SHA:-legacy}"
-    )
+    assert env["LOOM_WORKER_SANDBOX_IDENTITY"] == ("${LOOM_WORKER_SANDBOX_IDENTITY:-manual}")
+    assert env["LOOM_WORKER_CANDIDATE_SHA"] == ("${LOOM_WORKER_CANDIDATE_SHA:-legacy}")
     assert env["LOOM_WORKER_SLURM_JOB_ID"] == "${LOOM_WORKER_SLURM_JOB_ID:-none}"
-    assert env["LOOM_WORKER_COMPOSE_PROJECT"] == (
-        "${LOOM_WORKER_COMPOSE_PROJECT:-manual}"
-    )
+    assert env["LOOM_WORKER_COMPOSE_PROJECT"] == ("${LOOM_WORKER_COMPOSE_PROJECT:-manual}")
     assert env["LOOM_WORKER_SLURM_ALLOCATED_GPUS"] == ("${LOOM_WORKER_SLURM_ALLOCATED_GPUS:--1}")
     assert worker["labels"] == {
         "loom.sandbox": "${LOOM_WORKER_SANDBOX_IDENTITY:-manual}",
