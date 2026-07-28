@@ -139,8 +139,11 @@ sudo /usr/local/libexec/loom-ci-runner-pool \
 `preflight` requires oldlab-5, `/dev/kvm`, Docker with the systemd cgroup
 driver, and a QEMU image whose OCI candidate label matches the requested SHA.
 `prepare-base` verifies the pinned Ubuntu cloud image and Actions runner
-checksums, installs Docker/Buildx in a KVM guest, checks the resulting qcow2,
-and seals a candidate-bound manifest.
+checksums, installs Docker/Buildx/Compose, a `python` → Python 3 compatibility
+command, and the C compiler required by Go race tests in a KVM guest. It also
+checks those tools before sealing the candidate-bound qcow2 manifest. Every
+one-job runner starts with `umask 022`, matching the permission assumptions of
+the GitHub-hosted test environment.
 
 ## Reconcile, health, and drain
 

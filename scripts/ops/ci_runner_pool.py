@@ -585,7 +585,18 @@ def _base_install_script(profile: PoolProfile) -> str:
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl docker-buildx docker.io git jq sudo unzip
+apt-get install -y --no-install-recommends \
+  build-essential \
+  ca-certificates \
+  curl \
+  docker-buildx \
+  docker-compose-v2 \
+  docker.io \
+  git \
+  jq \
+  python-is-python3 \
+  sudo \
+  unzip
 systemctl enable --now docker
 id runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash runner
 usermod -aG docker runner
@@ -600,6 +611,9 @@ umount /mnt/loom-ci-assets
 chown -R runner:runner /opt/actions-runner
 sudo -u runner docker version
 sudo -u runner docker buildx version
+sudo -u runner docker compose version
+sudo -u runner python --version
+test -x /usr/bin/cc
 install -d -o runner -g runner -m 0700 /home/runner/_work
 apt-get clean
 rm -rf /var/lib/apt/lists/* /tmp/*
@@ -615,6 +629,7 @@ poweroff
 def _slot_run_script() -> str:
     return """#!/usr/bin/env bash
 set -euo pipefail
+umask 0022
 install -d -m 0700 /run/loom-ci-jit
 mount -o ro LABEL=LOOMCIJIT /mnt
 install -m 0600 /mnt/jitconfig /run/loom-ci-jit/jitconfig

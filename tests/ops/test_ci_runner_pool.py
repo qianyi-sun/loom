@@ -311,8 +311,26 @@ def test_slot_cloud_init_keeps_jit_material_out_of_user_data() -> None:
             "content"
         ],
     ).decode()
+    assert "umask 0022" in pool._slot_run_script()
     assert "truncate -s 0 /var/log/loom-actions-runner.log" in pool._slot_run_script()
     assert "poweroff" in pool._slot_run_script()
+
+
+def test_golden_guest_installs_github_hosted_compatibility_tools(
+    tmp_path: Path,
+) -> None:
+    script = pool._base_install_script(_profile(tmp_path))
+
+    for package in (
+        "build-essential",
+        "docker-buildx",
+        "docker-compose-v2",
+        "python-is-python3",
+    ):
+        assert package in script
+    assert "sudo -u runner docker compose version" in script
+    assert "sudo -u runner python --version" in script
+    assert "test -x /usr/bin/cc" in script
 
 
 def test_iso_commands_preserve_long_filenames(
