@@ -540,11 +540,33 @@ sudo /usr/local/libexec/loom-shared-capacity-runtime-host rollback \
   --execute
 ```
 
-Rollback stops the current timers, restores the prior candidate pointer,
-configs, exact units, and each prior enabled/active state, and removes the
-current candidate only when the journal proves it did not pre-exist. Never
-delete the installer state, journal, broker database, adapter state,
-observations, or audit files to force a rollback.
+Rollback of an installed-but-inactive candidate stops the current timers,
+restores the prior candidate pointer, configs, exact units, and each prior
+enabled/active state, and removes the current candidate only when the journal
+proves it did not pre-exist. An activated candidate uses an additional durable
+retirement sequence. The retained install transaction first becomes the active
+rollback journal and closes broker admission with that exact transaction ID.
+It cancels only the current candidate's request in each of the exact three
+sandboxes by two pools; a nonterminal request for another candidate fails
+closed and is never cancelled.
+
+While the fence remains closed, rollback repeatedly runs the supported
+supervisor and six adapter service cycles. It does not restore local files until
+all six broker requests and leases are terminal at zero, the current atomic
+handoffs are disabled at zero, all six Control Plane policies and counters read
+back disabled at zero, and the matching Control Plane worker/Slurm status has
+no pending or running jobs. The journal records closing, draining, drained,
+restoring, restored-with-fence, and admission-open phases. Recovery resumes the
+recorded phase; a timeout, adapter failure, readback failure, or host restart
+keeps the recoverable journal and admission fence in place.
+
+Only after external capacity is proven retired does rollback restore the local
+snapshot. It then reopens only its exact broker fence, records that durable
+phase, and removes a journal-owned candidate last. `install` refuses to replace
+an `activated` runtime, so this retirement cannot be bypassed by publishing a
+new candidate. Never delete the installer state, active pointer, journal,
+broker database, adapter state, observations, or audit files to force a
+rollback.
 
 ### Shared-capacity retirement mapping
 

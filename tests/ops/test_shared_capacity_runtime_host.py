@@ -306,6 +306,27 @@ def test_orphan_recovery_rolls_back_noncommitted_transaction(
     assert restored == [(path, True)]
 
 
+def test_orphan_recovery_resumes_persisted_activated_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path("/var/lib/loom-shared-capacity/rollback.json")
+    payload = {
+        "operation": "install",
+        "phase": "rollback-restoring",
+    }
+    resumed: list[tuple[Path, dict[str, object]]] = []
+    monkeypatch.setattr(host, "_active_journal", lambda: (path, payload))
+    monkeypatch.setattr(
+        host,
+        "_resume_activated_rollback",
+        lambda item, data: resumed.append((item, data)),
+    )
+
+    host._recover_orphan()
+
+    assert resumed == [(path, payload)]
+
+
 def test_committed_activation_recovery_reopens_exact_admission_before_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -440,6 +461,7 @@ def test_activation_preflight_checks_broker_and_all_six_receipts(
     (
         ("broker-preflight", host._BROKER_PREFLIGHT, 3),
         ("broker-open", host._BROKER_OPEN, 2),
+        ("broker-retire", host._BROKER_RETIRE, 4),
         ("adapter-preflight", host._ADAPTER_PREFLIGHT, 3),
         ("generation-readback", host._GENERATION_READBACK, 1),
         ("activated-adapter-readback", host._ACTIVATED_ADAPTER_READBACK, 3),
@@ -539,6 +561,113 @@ def test_activation_rejects_nonzero_broker_handoff() -> None:
 
     with pytest.raises(host.RuntimeHostError, match="zero-capacity"):
         host._validate_zero_broker_handoffs(report, selected, SHA)
+
+
+def _retirement_report(
+    *,
+    state: str,
+    candidate_sha: str = SHA,
+) -> dict[str, object]:
+    requests: list[dict[str, object]] = []
+    for index, instance in enumerate(host.INSTANCES):
+        sandbox, pool = instance.rsplit("-", 1)
+        live = state != "terminal"
+        requests.append(
+            {
+                "request": {
+                    "id": f"request-{index}",
+                    "sandbox": sandbox,
+                    "pool": pool,
+                    "candidate_sha": candidate_sha,
+                    "state": state,
+                },
+                "lease": {
+                    "granted_slots": 1 if live else 0,
+                    "pending_slots": 0,
+                    "active_slots": 1 if live else 0,
+                    "draining_slots": 0,
+                    "committed_slots": 1 if live else 0,
+                },
+            },
+        )
+    total = len(host.INSTANCES) if state != "terminal" else 0
+    return {
+        "requests": requests,
+        "aggregate": {
+            "granted_slots": total,
+            "pending_slots": 0,
+            "active_slots": total,
+            "draining_slots": 0,
+            "committed_slots": total,
+        },
+    }
+
+
+def test_retirement_targets_only_exact_candidate_and_ignores_foreign_terminal() -> None:
+    report = _retirement_report(state="active")
+    requests = report["requests"]
+    assert isinstance(requests, list)
+    requests.append(
+        {
+            "request": {
+                "id": "foreign-terminal",
+                "sandbox": "qianyi",
+                "pool": "gb10",
+                "candidate_sha": "c" * 40,
+                "state": "terminal",
+            },
+            "lease": {
+                "granted_slots": 0,
+                "pending_slots": 0,
+                "active_slots": 0,
+                "draining_slots": 0,
+                "committed_slots": 0,
+            },
+        },
+    )
+
+    assert host._retirement_request_ids(report, SHA) == tuple(
+        f"request-{index}" for index in range(len(host.INSTANCES))
+    )
+    assert "foreign-terminal" not in host._retirement_request_ids(report, SHA)
+
+
+def test_retirement_rejects_foreign_nonterminal_lane_without_cancelling_it() -> None:
+    report = _retirement_report(state="terminal")
+    requests = report["requests"]
+    assert isinstance(requests, list)
+    requests.append(
+        {
+            "request": {
+                "id": "foreign-active",
+                "sandbox": "qianyi",
+                "pool": "gb10",
+                "candidate_sha": "c" * 40,
+                "state": "active",
+            },
+            "lease": {
+                "granted_slots": 1,
+                "pending_slots": 0,
+                "active_slots": 1,
+                "draining_slots": 0,
+                "committed_slots": 1,
+            },
+        },
+    )
+
+    with pytest.raises(host.RuntimeHostError, match="another candidate"):
+        host._retirement_request_ids(report, SHA)
+
+
+def test_retirement_requires_six_terminal_zero_lanes() -> None:
+    report = _retirement_report(state="terminal")
+
+    assert host._retirement_is_drained(report, SHA) is True
+    requests = report["requests"]
+    assert isinstance(requests, list)
+    requests.pop()
+    with pytest.raises(host.RuntimeHostError, match="lane is missing"):
+        host._retirement_is_drained(report, SHA)
 
 
 def test_activation_rejects_zero_but_nonterminal_request() -> None:
@@ -735,6 +864,229 @@ def test_activation_failure_restores_installed_inactive_snapshot(
 
     assert restored == [journal_path]
     assert candidate_repo == host.CANDIDATE_PARENT / SHA / "repo"
+
+
+def test_activated_rollback_reopens_fence_only_after_external_and_local_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "journal.json"
+    active = tmp_path / "active.json"
+    active.write_text("{}\n", encoding="utf-8")
+    transaction_id = "1" * 32
+    payload = {
+        "phase": "rollback-closing-admission",
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "candidate_previously_existed": False,
+    }
+    events: list[str] = []
+    monkeypatch.setattr(host, "ACTIVE_JOURNAL_PATH", active)
+    monkeypatch.setattr(host, "INSTALLER_ROOT", tmp_path)
+    monkeypatch.setattr(
+        host,
+        "_validate_transaction",
+        lambda item, data: (transaction_id, "install", SHA, TREE, {}, {}),
+    )
+    monkeypatch.setattr(
+        host,
+        "_request_capacity_retirement",
+        lambda candidate, token: events.append("close-and-cancel") or "drained",
+    )
+    monkeypatch.setattr(
+        host,
+        "_drain_activated_capacity",
+        lambda candidate, token: events.append("external-drained"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_verify_activated_capacity_drained",
+        lambda candidate, token: events.append("external-readback"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_restore_local_transaction",
+        lambda item, data, **kwargs: events.append("local-restored")
+        or (transaction_id, "install", SHA, TREE),
+    )
+    monkeypatch.setattr(
+        host,
+        "_open_activation_admission",
+        lambda candidate, token: events.append("fence-open"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_remove_path",
+        lambda value: events.append("candidate-removed"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_update_journal",
+        lambda item, data, phase: data.update(phase=phase)
+        or events.append(f"phase:{phase}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_fsync_directory",
+        lambda value: events.append("journal-cleared"),
+    )
+
+    host._complete_activated_rollback(path, payload)
+
+    assert events.index("external-readback") < events.index("local-restored")
+    assert events.index("local-restored") < events.index("fence-open")
+    assert events.index("fence-open") < events.index("candidate-removed")
+    assert payload["phase"] == "rolled-back"
+    assert not active.exists()
+
+
+def test_activated_rollback_partial_drain_failure_keeps_fence_and_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path("/var/lib/loom-shared-capacity/rollback.json")
+    active = tmp_path / "active.json"
+    active.write_text("{}\n", encoding="utf-8")
+    transaction_id = "1" * 32
+    payload = {
+        "phase": "rollback-closing-admission",
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "candidate_previously_existed": False,
+    }
+    events: list[str] = []
+    monkeypatch.setattr(host, "ACTIVE_JOURNAL_PATH", active)
+    monkeypatch.setattr(
+        host,
+        "_validate_transaction",
+        lambda item, data: (transaction_id, "install", SHA, TREE, {}, {}),
+    )
+    monkeypatch.setattr(
+        host,
+        "_request_capacity_retirement",
+        lambda candidate, token: events.append("fence-closed") or "pending",
+    )
+    monkeypatch.setattr(
+        host,
+        "_drain_activated_capacity",
+        lambda candidate, token: (_ for _ in ()).throw(
+            host.RuntimeHostError("partial adapter failure"),
+        ),
+    )
+    monkeypatch.setattr(
+        host,
+        "_update_journal",
+        lambda item, data, phase: data.update(phase=phase)
+        or events.append(f"phase:{phase}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_restore_local_transaction",
+        lambda *args, **kwargs: events.append("local-restored"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_open_activation_admission",
+        lambda *args: events.append("fence-open"),
+    )
+
+    with pytest.raises(host.RuntimeHostError, match="partial adapter failure"):
+        host._complete_activated_rollback(path, payload)
+
+    assert payload["phase"] == "rollback-draining"
+    assert events == ["fence-closed", "phase:rollback-draining"]
+    assert active.exists()
+
+
+def test_activated_rollback_resumes_after_local_restore_before_opening_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "journal.json"
+    active = tmp_path / "active.json"
+    active.write_text("{}\n", encoding="utf-8")
+    transaction_id = "1" * 32
+    payload = {
+        "phase": "rollback-restored-fenced",
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "candidate_previously_existed": False,
+    }
+    events: list[str] = []
+    monkeypatch.setattr(host, "ACTIVE_JOURNAL_PATH", active)
+    monkeypatch.setattr(host, "INSTALLER_ROOT", tmp_path)
+    monkeypatch.setattr(
+        host,
+        "_validate_transaction",
+        lambda item, data: (transaction_id, "install", SHA, TREE, {}, {}),
+    )
+    monkeypatch.setattr(
+        host,
+        "_open_activation_admission",
+        lambda candidate, token: events.append("fence-open"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_remove_path",
+        lambda value: events.append("candidate-removed"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_update_journal",
+        lambda item, data, phase: data.update(phase=phase),
+    )
+    monkeypatch.setattr(host, "_fsync_directory", lambda value: None)
+    monkeypatch.setattr(
+        host,
+        "_restore_local_transaction",
+        lambda *args, **kwargs: events.append("unexpected-restore"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_drain_activated_capacity",
+        lambda *args: events.append("unexpected-drain"),
+    )
+
+    host._resume_activated_rollback(path, payload)
+
+    assert events == ["fence-open", "candidate-removed"]
+    assert payload["phase"] == "rolled-back"
+    assert not active.exists()
+
+
+def test_install_refuses_to_replace_an_activated_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+                "activation_status": "activated",
+            },
+        ),
+        encoding="utf-8",
+    )
+    candidate = host.Candidate(SHA, TREE, host.REPO_ROOT)
+    journal_written = False
+    monkeypatch.setattr(host, "STATE_PATH", state_path)
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "_load_candidate_profile", lambda value: {})
+    monkeypatch.setattr(host, "_lock", nullcontext)
+    monkeypatch.setattr(host, "_recover_orphan", lambda: None)
+
+    def write_journal(*args: object, **kwargs: object) -> None:
+        nonlocal journal_written
+        journal_written = True
+
+    monkeypatch.setattr(host, "_write_journal", write_journal)
+
+    with pytest.raises(host.RuntimeHostError, match="retired through rollback"):
+        host.install(candidate)
+
+    assert journal_written is False
 
 
 def test_rollback_requires_exact_active_candidate(

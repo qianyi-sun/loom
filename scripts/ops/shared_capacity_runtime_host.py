@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -91,6 +92,8 @@ ADAPTER_SERVICES = tuple(
 ALL_TIMERS = (SUPERVISOR_TIMER, *ADAPTER_TIMERS)
 ALL_SERVICES = (SUPERVISOR_SERVICE, *ADAPTER_SERVICES)
 ALL_UNITS = (*ALL_TIMERS, *ALL_SERVICES)
+RETIREMENT_MAX_CYCLES = 60
+RETIREMENT_POLL_SECONDS = 5.0
 UNIT_PATHS = (
     ADAPTER_SERVICE_PATH,
     ADAPTER_TIMER_PATH,
@@ -867,10 +870,10 @@ def _restore_units(states: Mapping[str, Any]) -> None:
             _run(("systemctl", "stop", unit), expected={0, 5})
 
 
-def _restore_transaction(
+def _validate_transaction(
     path: Path,
     payload: dict[str, Any],
-) -> None:
+) -> tuple[str, str, str, str, Mapping[str, Any], Mapping[str, Any]]:
     transaction_id = payload.get("transaction_id")
     operation = payload.get("operation")
     sha = payload.get("candidate_sha")
@@ -906,12 +909,37 @@ def _restore_transaction(
             or type(state.get("active")) is not bool
         ):
             raise RuntimeHostError("runtime-host transaction unit state is invalid")
+    return transaction_id, operation, sha, tree, files, units
+
+
+def _restore_local_transaction(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    remove_candidate: bool,
+) -> tuple[str, str, str, str]:
+    transaction_id, operation, sha, tree, files, units = _validate_transaction(
+        path,
+        payload,
+    )
     _stop_units()
-    _remove_path(Path(staging_path))
+    _remove_path(Path(str(payload["staging_path"])))
     _restore_files(files)
     _restore_units(units)
-    if payload.get("candidate_previously_existed") is False:
+    if remove_candidate and payload.get("candidate_previously_existed") is False:
         _remove_path(CANDIDATE_PARENT / sha)
+    return transaction_id, operation, sha, tree
+
+
+def _restore_transaction(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    transaction_id, operation, sha, tree = _restore_local_transaction(
+        path,
+        payload,
+        remove_candidate=True,
+    )
     _update_journal(path, payload, "rolled-back")
     if operation == "activate":
         _open_activation_admission(
@@ -931,6 +959,12 @@ def _recover_orphan() -> None:
     if active is None:
         return
     path, payload = active
+    if (
+        payload.get("operation") == "install"
+        and str(payload.get("phase", "")).startswith("rollback-")
+    ):
+        _resume_activated_rollback(path, payload)
+        return
     if payload.get("phase") == "committed":
         if payload.get("operation") == "activate":
             sha = payload.get("candidate_sha")
@@ -1116,7 +1150,11 @@ def _service_result(unit: str) -> tuple[str, str]:
     return result, status
 
 
-def _run_candidate_python(candidate: Candidate, code: str, *args: str) -> None:
+def _run_candidate_python(
+    candidate: Candidate,
+    code: str,
+    *args: str,
+) -> subprocess.CompletedProcess[str]:
     expected_arguments = _EMBEDDED_PROGRAM_ARGUMENT_COUNTS.get(code)
     if expected_arguments is None or len(args) != expected_arguments:
         raise RuntimeHostError("embedded candidate program argument contract is invalid")
@@ -1124,7 +1162,7 @@ def _run_candidate_python(candidate: Candidate, code: str, *args: str) -> None:
         compile(code, "<shared-capacity-runtime-host-embedded>", "exec")
     except SyntaxError as exc:
         raise RuntimeHostError("embedded candidate program is invalid") from exc
-    _run(
+    return _run(
         (
             str(candidate.venv / "bin/python"),
             "-I",
@@ -1141,6 +1179,124 @@ def _run_candidate_python(candidate: Candidate, code: str, *args: str) -> None:
             "HOME": "/nonexistent",
             "XDG_CONFIG_HOME": "/nonexistent",
         },
+    )
+
+
+def _candidate_broker_state_db(candidate: Candidate) -> Path:
+    try:
+        payload = tomllib.loads(
+            _read_candidate_file(
+                candidate,
+                SUPERVISOR_CONFIG_SOURCE.relative_to(REPO_ROOT),
+            ).decode("utf-8", errors="strict"),
+        )
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeHostError("candidate supervisor config is invalid") from exc
+    raw = payload.get("state_db")
+    if not isinstance(raw, str):
+        raise RuntimeHostError("candidate broker authority path is invalid")
+    path = Path(raw)
+    if not path.is_absolute() or ".." in path.parts:
+        raise RuntimeHostError("candidate broker authority path is invalid")
+    return path
+
+
+def _retirement_request_ids(
+    report: Mapping[str, Any],
+    candidate_sha: str,
+) -> tuple[str, ...]:
+    records = report.get("requests")
+    if not isinstance(records, list):
+        raise RuntimeHostError("broker retirement report is invalid")
+    by_instance: dict[str, list[tuple[Mapping[str, Any], Mapping[str, Any]]]] = {
+        instance: [] for instance in INSTANCES
+    }
+    request_ids: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeHostError("broker retirement request is invalid")
+        request = record.get("request")
+        lease = record.get("lease")
+        if not isinstance(request, dict) or not isinstance(lease, dict):
+            raise RuntimeHostError("broker retirement request is invalid")
+        request_id = request.get("id")
+        instance = f"{request.get('sandbox')}-{request.get('pool')}"
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or request_id in request_ids
+            or instance not in by_instance
+        ):
+            raise RuntimeHostError("broker retirement request binding is invalid")
+        request_ids.add(request_id)
+        by_instance[instance].append((request, lease))
+
+    retire: list[str] = []
+    for instance, lane_records in by_instance.items():
+        exact = [
+            (request, lease)
+            for request, lease in lane_records
+            if request.get("candidate_sha") == candidate_sha
+        ]
+        if not exact:
+            raise RuntimeHostError(f"broker retirement lane is missing: {instance}")
+        nonterminal = [
+            (request, lease)
+            for request, lease in lane_records
+            if request.get("state") != "terminal"
+        ]
+        if len(nonterminal) > 1:
+            raise RuntimeHostError(f"broker retirement lane is ambiguous: {instance}")
+        if nonterminal:
+            request, _lease = nonterminal[0]
+            if request.get("candidate_sha") != candidate_sha:
+                raise RuntimeHostError(
+                    f"broker retirement lane belongs to another candidate: {instance}",
+                )
+            retire.append(str(request["id"]))
+    return tuple(retire)
+
+
+def _retirement_is_drained(
+    report: Mapping[str, Any],
+    candidate_sha: str,
+) -> bool:
+    outstanding = _retirement_request_ids(report, candidate_sha)
+    records = report.get("requests")
+    aggregate = report.get("aggregate")
+    if not isinstance(records, list) or not isinstance(aggregate, dict):
+        raise RuntimeHostError("broker retirement aggregate is invalid")
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeHostError("broker retirement request is invalid")
+        request = record.get("request")
+        lease = record.get("lease")
+        if not isinstance(request, dict) or not isinstance(lease, dict):
+            raise RuntimeHostError("broker retirement request is invalid")
+        if request.get("candidate_sha") != candidate_sha:
+            continue
+        if request.get("state") != "terminal" or any(
+            lease.get(field) != 0
+            for field in (
+                "granted_slots",
+                "pending_slots",
+                "active_slots",
+                "draining_slots",
+                "committed_slots",
+            )
+        ):
+            return False
+    if outstanding:
+        return False
+    return not any(
+        aggregate.get(field) != 0
+        for field in (
+            "granted_slots",
+            "pending_slots",
+            "active_slots",
+            "draining_slots",
+            "committed_slots",
+        )
     )
 
 
@@ -1294,9 +1450,34 @@ import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
-from scripts.ops.shared_capacity_supervisor import load_config
+SharedCapacityBroker(Path(sys.argv[2])).open_admission(sys.argv[3])
+"""
+
+_BROKER_RETIRE = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+from scripts.ops.shared_capacity_runtime_host import (
+    _retirement_is_drained,
+    _retirement_request_ids,
+)
+from scripts.ops.shared_capacity_supervisor import (
+    _validate_report_budgets,
+    load_config,
+)
 config = load_config(Path(sys.argv[2]))
-SharedCapacityBroker(config.state_db).open_admission(sys.argv[3])
+if config.state_db != Path(sys.argv[5]):
+    raise RuntimeError("broker retirement authority binding mismatch")
+broker = SharedCapacityBroker(config.state_db)
+broker.close_admission(sys.argv[4])
+report = broker.status()
+_validate_report_budgets(report, config)
+for request_id in _retirement_request_ids(report, sys.argv[3]):
+    broker.cancel(request_id, reason="runtime_host_rollback")
+report = broker.status()
+_validate_report_budgets(report, config)
+print("drained" if _retirement_is_drained(report, sys.argv[3]) else "pending")
 """
 
 _ADAPTER_PREFLIGHT = """
@@ -1479,6 +1660,7 @@ if not handoff.enabled:
 _EMBEDDED_PROGRAM_ARGUMENT_COUNTS = {
     _BROKER_PREFLIGHT: 3,
     _BROKER_OPEN: 2,
+    _BROKER_RETIRE: 4,
     _ADAPTER_PREFLIGHT: 3,
     _GENERATION_READBACK: 1,
     _ACTIVATED_ADAPTER_READBACK: 3,
@@ -1514,9 +1696,137 @@ def _open_activation_admission(
     _run_candidate_python(
         candidate,
         _BROKER_OPEN,
-        str(SUPERVISOR_CONFIG_PATH),
+        str(_candidate_broker_state_db(candidate)),
         transaction_id,
     )
+
+
+def _request_capacity_retirement(
+    candidate: Candidate,
+    transaction_id: str,
+) -> str:
+    completed = _run_candidate_python(
+        candidate,
+        _BROKER_RETIRE,
+        str(SUPERVISOR_CONFIG_PATH),
+        candidate.sha,
+        transaction_id,
+        str(_candidate_broker_state_db(candidate)),
+    )
+    status = completed.stdout.strip()
+    if status not in {"pending", "drained"}:
+        raise RuntimeHostError("broker retirement status is invalid")
+    return status
+
+
+def _run_retirement_cycle() -> None:
+    for unit in (SUPERVISOR_SERVICE, *ADAPTER_SERVICES, SUPERVISOR_SERVICE):
+        _run(("systemctl", "start", unit))
+        if _service_result(unit) != ("success", "0"):
+            raise RuntimeHostError("shared-capacity retirement cycle failed")
+
+
+def _drain_activated_capacity(
+    candidate: Candidate,
+    transaction_id: str,
+) -> None:
+    for cycle in range(RETIREMENT_MAX_CYCLES):
+        _request_capacity_retirement(candidate, transaction_id)
+        _run_retirement_cycle()
+        if _request_capacity_retirement(candidate, transaction_id) == "drained":
+            _activated_adapter_readback(candidate)
+            return
+        if cycle + 1 < RETIREMENT_MAX_CYCLES:
+            time.sleep(RETIREMENT_POLL_SECONDS)
+    raise RuntimeHostError("shared-capacity retirement did not drain before timeout")
+
+
+def _verify_activated_capacity_drained(
+    candidate: Candidate,
+    transaction_id: str,
+) -> None:
+    if _request_capacity_retirement(candidate, transaction_id) != "drained":
+        raise RuntimeHostError("shared-capacity retirement regressed before local restore")
+    _activated_adapter_readback(candidate)
+
+
+def _rollback_candidate(payload: Mapping[str, Any]) -> Candidate:
+    sha = payload.get("candidate_sha")
+    tree = payload.get("candidate_tree")
+    if (
+        not isinstance(sha, str)
+        or SHA_RE.fullmatch(sha) is None
+        or not isinstance(tree, str)
+        or SHA_RE.fullmatch(tree) is None
+    ):
+        raise RuntimeHostError("activated rollback candidate binding is invalid")
+    return Candidate(
+        sha=sha,
+        tree=tree,
+        source=CANDIDATE_PARENT / sha / "repo",
+    )
+
+
+def _complete_activated_rollback(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    transaction_id, operation, _sha, _tree, _files, _units = _validate_transaction(
+        path,
+        payload,
+    )
+    if operation != "install":
+        raise RuntimeHostError("activated rollback transaction is invalid")
+    candidate = _rollback_candidate(payload)
+    phase = payload.get("phase")
+    if phase == "rollback-closing-admission":
+        _request_capacity_retirement(candidate, transaction_id)
+        _update_journal(path, payload, "rollback-draining")
+        phase = "rollback-draining"
+    if phase == "rollback-draining":
+        _drain_activated_capacity(candidate, transaction_id)
+        _update_journal(path, payload, "rollback-drained")
+        phase = "rollback-drained"
+    if phase == "rollback-drained":
+        _verify_activated_capacity_drained(candidate, transaction_id)
+        _update_journal(path, payload, "rollback-restoring")
+        phase = "rollback-restoring"
+    if phase == "rollback-restoring":
+        _restore_local_transaction(
+            path,
+            payload,
+            remove_candidate=False,
+        )
+        _update_journal(path, payload, "rollback-restored-fenced")
+        phase = "rollback-restored-fenced"
+    if phase == "rollback-restored-fenced":
+        _open_activation_admission(candidate, transaction_id)
+        _update_journal(path, payload, "rollback-admission-open")
+        phase = "rollback-admission-open"
+    if phase == "rollback-admission-open":
+        if payload.get("candidate_previously_existed") is False:
+            _remove_path(candidate.root)
+        _update_journal(path, payload, "rolled-back")
+        ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
+        _fsync_directory(INSTALLER_ROOT)
+        return
+    raise RuntimeHostError("activated rollback journal phase is invalid")
+
+
+def _resume_activated_rollback(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    if payload.get("phase") not in {
+        "rollback-closing-admission",
+        "rollback-draining",
+        "rollback-drained",
+        "rollback-restoring",
+        "rollback-restored-fenced",
+        "rollback-admission-open",
+    }:
+        raise RuntimeHostError("activated rollback journal phase is invalid")
+    _complete_activated_rollback(path, payload)
 
 
 def _activate_units(candidate: Candidate) -> None:
@@ -1642,6 +1952,12 @@ def install(candidate: Candidate) -> dict[str, Any]:
     _load_candidate_profile(candidate)
     with _lock():
         _recover_orphan()
+        if STATE_PATH.exists() or STATE_PATH.is_symlink():
+            current_state = _load_json(STATE_PATH, "runtime-host state")
+            if current_state.get("activation_status") == "activated":
+                raise RuntimeHostError(
+                    "activated runtime must be retired through rollback before install",
+                )
         _reject_orphan_stages()
         _reject_orphan_configs()
         _loaded_managed_units()
@@ -1770,10 +2086,15 @@ def rollback_plan(sha: str) -> dict[str, Any]:
         "mutation_authorized": False,
         "candidate_sha": sha,
         "steps": [
-            "stop-current-services-and-timers",
+            "journal-and-persistently-fence-new-broker-requests",
+            "cancel-only-the-six-exact-candidate-sandbox-pool-requests",
+            "reconcile-and-read-back-six-terminal-zero-handoffs",
+            "read-back-six-disabled-zero-control-plane-policies-and-worker-jobs",
+            "stop-current-services-and-timers-after-external-capacity-is-zero",
             "restore-previous-configs-and-exact-units",
             "restore-previous-enabled-and-active-state",
-            "remove-journal-owned-stage-and-candidate",
+            "reopen-the-exact-admission-fence-after-local-restore",
+            "remove-journal-owned-stage-and-candidate-last",
         ],
     }
 
@@ -1795,12 +2116,19 @@ def rollback(sha: str) -> dict[str, Any]:
         payload = _load_json(path, "runtime-host rollback transaction")
         if payload.get("phase") != "committed" or payload.get("candidate_sha") != sha:
             raise RuntimeHostError("runtime-host rollback transaction is invalid")
+        activation_status = state.get("activation_status")
+        if activation_status not in {"activated", "installed"}:
+            raise RuntimeHostError("runtime-host rollback activation state is invalid")
         _atomic_write(
             ACTIVE_JOURNAL_PATH,
             _canonical_json({"transaction_id": transaction_id}),
             mode=0o600,
         )
-        _restore_transaction(path, payload)
+        if activation_status == "activated":
+            _update_journal(path, payload, "rollback-closing-admission")
+            _complete_activated_rollback(path, payload)
+        else:
+            _restore_transaction(path, payload)
         return {
             "schema_version": 1,
             "status": "rolled-back",
