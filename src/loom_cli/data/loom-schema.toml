@@ -368,7 +368,7 @@ default     = 300
 [service_config.upstream_timeout_sec]
 used_by     = ["llm-gateway"]
 python_type = "float"
-default     = 120.0
+default     = 200.0
 
 # ─── Per-request retry on transient upstream failures (#298 Slice A) ───
 # Retry classification + budget live in `loom_llm_gateway/retry.py`.

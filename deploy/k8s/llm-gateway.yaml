@@ -95,7 +95,7 @@ spec:
                   key: together-api-key
                   optional: true
             - name: LOOM_GW_UPSTREAM_TIMEOUT_SEC
-              value: "120.0"
+              value: "200.0"
 
             - name: LOOM_GW_ADMIN_SECRET_FILE
               value: "/var/run/loom/admin/secrets.toml"
