@@ -28,6 +28,7 @@ _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _POOL_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _IDEMPOTENCY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _PURPOSE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._:/()#,+-]{0,199}")
+_ADMISSION_FENCE_RE = re.compile(r"[0-9a-f]{32}")
 _SECRET_HINT_RE = re.compile(
     r"(?:bearer\s+|password|private[_ -]?key|api[_ -]?key|secret|token|"
     r"\bsk-[A-Za-z0-9_-]{8,})",
@@ -610,6 +611,66 @@ class SharedCapacityBroker:
         connection.execute("BEGIN IMMEDIATE")
         return connection
 
+    @staticmethod
+    def _admission_fence(connection: sqlite3.Connection) -> str | None:
+        row = connection.execute(
+            "SELECT value FROM broker_meta WHERE key = 'capacity_admission_fence'",
+        ).fetchone()
+        if row is None:
+            return None
+        token = str(row["value"])
+        if _ADMISSION_FENCE_RE.fullmatch(token) is None:
+            raise BrokerError("capacity admission fence is invalid")
+        return token
+
+    def close_admission(self, token: str) -> None:
+        """Persistently fence new requests for an exact activation transaction."""
+
+        if _ADMISSION_FENCE_RE.fullmatch(token) is None:
+            raise BrokerError("capacity admission fence token is invalid")
+        self.initialize()
+        connection = self._transaction()
+        try:
+            existing = self._admission_fence(connection)
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO broker_meta(key, value)
+                    VALUES('capacity_admission_fence', ?)
+                    """,
+                    (token,),
+                )
+            elif existing != token:
+                raise BrokerError("capacity admission is fenced by another transaction")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def open_admission(self, token: str) -> None:
+        """Idempotently release only the caller's persisted activation fence."""
+
+        if _ADMISSION_FENCE_RE.fullmatch(token) is None:
+            raise BrokerError("capacity admission fence token is invalid")
+        self.initialize()
+        connection = self._transaction()
+        try:
+            existing = self._admission_fence(connection)
+            if existing is not None and existing != token:
+                raise BrokerError("capacity admission fence belongs to another transaction")
+            if existing == token:
+                connection.execute(
+                    "DELETE FROM broker_meta WHERE key = 'capacity_admission_fence'",
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def request_capacity(
         self,
         *,
@@ -682,6 +743,9 @@ class SharedCapacityBroker:
                     raise BrokerError("idempotency_key is already bound to another request")
                 connection.commit()
                 return request, lease
+
+            if self._admission_fence(connection) is not None:
+                raise BrokerError("new capacity requests are fenced during runtime activation")
 
             request_id = str(uuid4())
             connection.execute(

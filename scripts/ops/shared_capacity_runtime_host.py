@@ -760,7 +760,13 @@ def _snapshot_paths() -> tuple[Path, ...]:
     )
 
 
-def _write_journal(candidate: Candidate) -> tuple[Path, dict[str, Any]]:
+def _write_journal(
+    candidate: Candidate,
+    *,
+    operation: str,
+) -> tuple[Path, dict[str, Any]]:
+    if operation not in {"install", "activate"}:
+        raise RuntimeHostError("runtime-host transaction operation is invalid")
     transaction_id = uuid.uuid4().hex
     _ensure_directory(STATE_ROOT, mode=0o700)
     _ensure_directory(INSTALLER_ROOT, mode=0o700)
@@ -770,6 +776,7 @@ def _write_journal(candidate: Candidate) -> tuple[Path, dict[str, Any]]:
     payload: dict[str, Any] = {
         "schema_version": 1,
         "transaction_id": transaction_id,
+        "operation": operation,
         "phase": "prepared",
         "candidate_sha": candidate.sha,
         "candidate_tree": candidate.tree,
@@ -865,14 +872,19 @@ def _restore_transaction(
     payload: dict[str, Any],
 ) -> None:
     transaction_id = payload.get("transaction_id")
+    operation = payload.get("operation")
     sha = payload.get("candidate_sha")
+    tree = payload.get("candidate_tree")
     staging_path = payload.get("staging_path")
     if (
         not isinstance(transaction_id, str)
         or re.fullmatch(r"[0-9a-f]{32}", transaction_id) is None
         or path != JOURNAL_ROOT / f"{transaction_id}.json"
+        or operation not in {"install", "activate"}
         or not isinstance(sha, str)
         or SHA_RE.fullmatch(sha) is None
+        or not isinstance(tree, str)
+        or SHA_RE.fullmatch(tree) is None
         or type(payload.get("candidate_previously_existed")) is not bool
         or staging_path != str(CANDIDATE_PARENT / f".install-{sha}-{transaction_id}")
     ):
@@ -901,6 +913,15 @@ def _restore_transaction(
     if payload.get("candidate_previously_existed") is False:
         _remove_path(CANDIDATE_PARENT / sha)
     _update_journal(path, payload, "rolled-back")
+    if operation == "activate":
+        _open_activation_admission(
+            Candidate(
+                sha=sha,
+                tree=tree,
+                source=CANDIDATE_PARENT / sha / "repo",
+            ),
+            transaction_id,
+        )
     ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
     _fsync_directory(INSTALLER_ROOT)
 
@@ -911,6 +932,27 @@ def _recover_orphan() -> None:
         return
     path, payload = active
     if payload.get("phase") == "committed":
+        if payload.get("operation") == "activate":
+            sha = payload.get("candidate_sha")
+            tree = payload.get("candidate_tree")
+            transaction_id = payload.get("transaction_id")
+            if (
+                not isinstance(sha, str)
+                or SHA_RE.fullmatch(sha) is None
+                or not isinstance(tree, str)
+                or SHA_RE.fullmatch(tree) is None
+                or not isinstance(transaction_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}", transaction_id) is None
+            ):
+                raise RuntimeHostError("committed activation journal is invalid")
+            _open_activation_admission(
+                Candidate(
+                    sha=sha,
+                    tree=tree,
+                    source=CANDIDATE_PARENT / sha / "repo",
+                ),
+                transaction_id,
+            )
         ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
         _fsync_directory(INSTALLER_ROOT)
         return
@@ -1113,6 +1155,7 @@ def _validate_zero_broker_handoffs(
     aggregate = report.get("aggregate")
     if not isinstance(records, list) or not isinstance(aggregate, dict):
         raise RuntimeHostError("broker activation report is invalid")
+    requests: dict[str, Mapping[str, Any]] = {}
     leases: dict[str, Mapping[str, Any]] = {}
     for record in records:
         if not isinstance(record, dict):
@@ -1124,6 +1167,7 @@ def _validate_zero_broker_handoffs(
         request_id = request.get("id")
         if not isinstance(request_id, str) or request_id in leases:
             raise RuntimeHostError("broker activation request binding is invalid")
+        requests[request_id] = request
         leases[request_id] = lease
     for instance in INSTANCES:
         handoff = selected.get(instance)
@@ -1135,7 +1179,11 @@ def _validate_zero_broker_handoffs(
             or handoff.get("candidate_sha") != candidate_sha
         ):
             raise RuntimeHostError("activation requires six zero-capacity handoffs")
-        lease = leases.get(str(handoff.get("request_id")))
+        request_id = str(handoff.get("request_id"))
+        request = requests.get(request_id)
+        lease = leases.get(request_id)
+        if request is None or request.get("state") != "terminal":
+            raise RuntimeHostError("activation requires terminal zero-capacity requests")
         if lease is None or any(
             lease.get(field) != 0 for field in ("pending_slots", "active_slots", "draining_slots")
         ):
@@ -1233,10 +1281,22 @@ from scripts.ops.shared_capacity_supervisor import (
     load_config,
 )
 config = load_config(Path(sys.argv[2]))
-report = SharedCapacityBroker(config.state_db).status()
+broker = SharedCapacityBroker(config.state_db)
+broker.close_admission(sys.argv[4])
+report = broker.status()
 _validate_report_budgets(report, config)
 selected = _publication_handoffs(report, config)
 _validate_zero_broker_handoffs(report, selected, sys.argv[3])
+"""
+
+_BROKER_OPEN = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+from scripts.ops.shared_capacity_supervisor import load_config
+config = load_config(Path(sys.argv[2]))
+SharedCapacityBroker(config.state_db).open_admission(sys.argv[3])
 """
 
 _ADAPTER_PREFLIGHT = """
@@ -1417,19 +1477,25 @@ if not handoff.enabled:
 """
 
 _EMBEDDED_PROGRAM_ARGUMENT_COUNTS = {
-    _BROKER_PREFLIGHT: 2,
+    _BROKER_PREFLIGHT: 3,
+    _BROKER_OPEN: 2,
     _ADAPTER_PREFLIGHT: 3,
     _GENERATION_READBACK: 1,
     _ACTIVATED_ADAPTER_READBACK: 3,
 }
 
 
-def _activation_preflight(candidate: Candidate) -> None:
+def _activation_preflight(
+    candidate: Candidate,
+    *,
+    transaction_id: str,
+) -> None:
     _run_candidate_python(
         candidate,
         _BROKER_PREFLIGHT,
         str(SUPERVISOR_CONFIG_PATH),
         candidate.sha,
+        transaction_id,
     )
     for instance in INSTANCES:
         _run_candidate_python(
@@ -1439,6 +1505,18 @@ def _activation_preflight(candidate: Candidate) -> None:
             candidate.sha,
             candidate.tree,
         )
+
+
+def _open_activation_admission(
+    candidate: Candidate,
+    transaction_id: str,
+) -> None:
+    _run_candidate_python(
+        candidate,
+        _BROKER_OPEN,
+        str(SUPERVISOR_CONFIG_PATH),
+        transaction_id,
+    )
 
 
 def _activate_units(candidate: Candidate) -> None:
@@ -1568,7 +1646,7 @@ def install(candidate: Candidate) -> dict[str, Any]:
         _reject_orphan_configs()
         _loaded_managed_units()
         _installed_managed_unit_files()
-        journal_path, journal = _write_journal(candidate)
+        journal_path, journal = _write_journal(candidate, operation="install")
         try:
             _stop_units()
             _update_journal(journal_path, journal, "stopped")
@@ -1613,11 +1691,13 @@ def activation_plan(sha: str) -> dict[str, Any]:
         "candidate_sha": sha,
         "steps": [
             "verify-installed-inactive-exact-candidate",
-            "require-six-disabled-zero-handoffs-and-zero-broker-counters",
+            "journal-and-fence-new-broker-requests-by-transaction",
+            "require-six-terminal-disabled-zero-handoffs-and-zero-broker-counters",
             "validate-six-config-secret-combined-receipt-and-zero-cp-policies",
             "run-supervisor-once-and-read-back-complete-generation",
             "enable-supervisor-timer",
             "run-and-enable-six-adapter-timers",
+            "commit-activated-state-before-releasing-exact-admission-fence",
             "rollback-to-all-disabled-on-any-failure",
         ],
     }
@@ -1648,9 +1728,13 @@ def activate(sha: str) -> dict[str, Any]:
         if state.get("activation_status") != "installed":
             raise RuntimeHostError("runtime-host activation state is invalid")
         check(candidate, activation_mode="installed")
-        _activation_preflight(candidate)
-        journal_path, journal = _write_journal(candidate)
+        journal_path, journal = _write_journal(candidate, operation="activate")
         try:
+            _update_journal(journal_path, journal, "activation-closing-admission")
+            _activation_preflight(
+                candidate,
+                transaction_id=str(journal["transaction_id"]),
+            )
             _update_journal(journal_path, journal, "activation-preflight-passed")
             _activate_units(candidate)
             _update_journal(journal_path, journal, "units-activated")
@@ -1665,6 +1749,10 @@ def activate(sha: str) -> dict[str, Any]:
             )
             report = check(candidate, activation_mode="activated")
             _update_journal(journal_path, journal, "committed")
+            _open_activation_admission(
+                candidate,
+                str(journal["transaction_id"]),
+            )
             ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
             _fsync_directory(INSTALLER_ROOT)
             return report

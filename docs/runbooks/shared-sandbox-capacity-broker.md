@@ -500,6 +500,18 @@ adapter-start failure cannot strand positive capacity written by an earlier
 adapter. Tokens are read only inside the isolated candidate process and are
 never emitted.
 
+The same activation transaction first writes a token-bound admission fence into
+the broker's SQLite authority under `BEGIN IMMEDIATE`. New requests are rejected
+while that fence exists; an exact idempotent replay of an already recorded
+request remains read-only. The zero gate requires the six selected requests to
+be terminal, so a request racing the fence either commits first and makes
+activation fail closed, or is rejected before insertion. The converger keeps
+the fence through supervisor/adapter startup, activated-state readback, and the
+durable `committed` journal update. It releases only its exact transaction token
+after that commit. Crash recovery idempotently releases a committed fence or
+restores the inactive snapshot before releasing a rolled-back fence; another
+transaction's fence is never removed.
+
 Activation then runs the supervisor once, validates its complete atomic
 generation against fresh broker status, enables the supervisor timer, and
 starts/enables each adapter timer in the closed order. Any failure restores the

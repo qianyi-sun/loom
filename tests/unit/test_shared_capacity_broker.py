@@ -169,6 +169,28 @@ def test_state_authority_is_owner_only_and_sidecars_are_not_world_readable(
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_persisted_admission_fence_blocks_only_new_requests_until_exact_release(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    existing = _request(broker, SandboxId.QIANYI)
+    token = "1" * 32
+
+    broker.close_admission(token)
+    broker.close_admission(token)
+    restarted = _broker(tmp_path, clock)
+    assert _request(restarted, SandboxId.QIANYI) == existing
+    with pytest.raises(BrokerError, match="fenced during runtime activation"):
+        _request(restarted, SandboxId.HONGJIAN)
+    with pytest.raises(BrokerError, match="belongs to another transaction"):
+        restarted.open_admission("2" * 32)
+
+    restarted.open_admission(token)
+    restarted.open_admission(token)
+    assert _request(restarted, SandboxId.HONGJIAN)
+
+
 def test_v1_authority_upgrades_observation_replay_state_in_place(
     tmp_path: Path,
 ) -> None:

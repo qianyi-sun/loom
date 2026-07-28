@@ -233,6 +233,7 @@ def test_install_failure_restores_snapshot_and_candidate(
     events: list[str] = []
     journal = {
         "transaction_id": "1" * 32,
+        "operation": "install",
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "candidate_previously_existed": False,
@@ -258,7 +259,7 @@ def test_install_failure_restores_snapshot_and_candidate(
     monkeypatch.setattr(
         host,
         "_write_journal",
-        lambda value: events.append("journal") or (journal_path, journal),
+        lambda value, **kwargs: events.append("journal") or (journal_path, journal),
     )
     monkeypatch.setattr(
         host,
@@ -305,6 +306,39 @@ def test_orphan_recovery_rolls_back_noncommitted_transaction(
     assert restored == [(path, True)]
 
 
+def test_committed_activation_recovery_reopens_exact_admission_before_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path("/var/lib/loom-shared-capacity/committed.json")
+    transaction_id = "1" * 32
+    payload = {
+        "phase": "committed",
+        "operation": "activate",
+        "transaction_id": transaction_id,
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+    }
+    events: list[tuple[str, object]] = []
+    active_journal = tmp_path / "active.json"
+    active_journal.write_text("{}")
+    monkeypatch.setattr(host, "ACTIVE_JOURNAL_PATH", active_journal)
+    monkeypatch.setattr(host, "INSTALLER_ROOT", tmp_path)
+    monkeypatch.setattr(host, "_active_journal", lambda: (path, payload))
+    monkeypatch.setattr(
+        host,
+        "_open_activation_admission",
+        lambda candidate, token: events.append(("open", (candidate.sha, token))),
+    )
+    monkeypatch.setattr(host, "_fsync_directory", lambda value: events.append(("fsync", value)))
+
+    host._recover_orphan()
+
+    assert events[0] == ("open", (SHA, transaction_id))
+    assert not active_journal.exists()
+    assert events[1] == ("fsync", tmp_path)
+
+
 def test_unjournaled_staging_path_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -334,7 +368,9 @@ def test_crash_restore_removes_journal_owned_stage_and_candidate(
     stage = candidate_parent / f".install-{SHA}-{transaction_id}"
     payload = {
         "transaction_id": transaction_id,
+        "operation": "install",
         "candidate_sha": SHA,
+        "candidate_tree": TREE,
         "candidate_previously_existed": False,
         "staging_path": str(stage),
         "files": {str(path): {"present": False} for path in host._snapshot_paths()},
@@ -386,10 +422,11 @@ def test_activation_preflight_checks_broker_and_all_six_receipts(
         lambda value, code, *args: calls.append((code, args)),
     )
 
-    host._activation_preflight(candidate)
+    host._activation_preflight(candidate, transaction_id="1" * 32)
 
     assert len(calls) == 7
     assert calls[0][0] == host._BROKER_PREFLIGHT
+    assert calls[0][1] == (str(host.SUPERVISOR_CONFIG_PATH), SHA, "1" * 32)
     adapter_calls = calls[1:]
     assert all(code == host._ADAPTER_PREFLIGHT for code, _args in adapter_calls)
     assert {Path(args[0]).stem for _code, args in adapter_calls} == set(host.INSTANCES)
@@ -401,7 +438,8 @@ def test_activation_preflight_checks_broker_and_all_six_receipts(
 @pytest.mark.parametrize(
     ("name", "program", "argument_count"),
     (
-        ("broker-preflight", host._BROKER_PREFLIGHT, 2),
+        ("broker-preflight", host._BROKER_PREFLIGHT, 3),
+        ("broker-open", host._BROKER_OPEN, 2),
         ("adapter-preflight", host._ADAPTER_PREFLIGHT, 3),
         ("generation-readback", host._GENERATION_READBACK, 1),
         ("activated-adapter-readback", host._ACTIVATED_ADAPTER_READBACK, 3),
@@ -470,6 +508,7 @@ def _zero_broker_preflight() -> tuple[dict[str, object], dict[str, object]]:
                     "id": request_id,
                     "sandbox": sandbox,
                     "pool": pool,
+                    "state": "terminal",
                 },
                 "lease": {
                     "pending_slots": 0,
@@ -499,6 +538,18 @@ def test_activation_rejects_nonzero_broker_handoff() -> None:
     handoff.update({"enabled": True, "max_slots": 1})
 
     with pytest.raises(host.RuntimeHostError, match="zero-capacity"):
+        host._validate_zero_broker_handoffs(report, selected, SHA)
+
+
+def test_activation_rejects_zero_but_nonterminal_request() -> None:
+    report, selected = _zero_broker_preflight()
+    requests = report["requests"]
+    assert isinstance(requests, list)
+    request = requests[0]["request"]
+    assert isinstance(request, dict)
+    request["state"] = "pending"
+
+    with pytest.raises(host.RuntimeHostError, match="terminal zero-capacity"):
         host._validate_zero_broker_handoffs(report, selected, SHA)
 
 
@@ -637,6 +688,7 @@ def test_activation_failure_restores_installed_inactive_snapshot(
     journal_path = Path("/var/lib/loom-shared-capacity/activation.json")
     journal = {
         "transaction_id": transaction_id,
+        "operation": "activate",
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "candidate_previously_existed": True,
@@ -660,8 +712,12 @@ def test_activation_failure_restores_installed_inactive_snapshot(
         },
     )
     monkeypatch.setattr(host, "check", lambda *args, **kwargs: {"status": "pass"})
-    monkeypatch.setattr(host, "_activation_preflight", lambda value: None)
-    monkeypatch.setattr(host, "_write_journal", lambda value: (journal_path, journal))
+    monkeypatch.setattr(host, "_activation_preflight", lambda value, **kwargs: None)
+    monkeypatch.setattr(
+        host,
+        "_write_journal",
+        lambda value, **kwargs: (journal_path, journal),
+    )
     monkeypatch.setattr(host, "_update_journal", lambda *args: None)
     monkeypatch.setattr(
         host,
