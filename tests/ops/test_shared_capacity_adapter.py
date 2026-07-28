@@ -27,6 +27,28 @@ class FakeControlPlane:
         return dict(self.policy)
 
 
+class EmptyControlPlane:
+    def __init__(self) -> None:
+        self.policy: dict[str, Any] | None = None
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        if kwargs["method"] == "GET" and self.policy is None:
+            raise adapter.PolicyMissingError("not found")
+        if kwargs["method"] == "PUT":
+            self.policy = {
+                **kwargs["body"],
+                "environment": "sandbox-qianyi",
+                "pool_name": "gb10",
+                "last_pending_slots": None,
+                "last_actual_slots": None,
+                "last_draining_slots": None,
+            }
+        assert self.policy is not None
+        return dict(self.policy)
+
+
 def _write(path: Path, text: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -97,6 +119,7 @@ def _fixture(
                 f'observation_path = "{observation_path}"',
                 f'adapter_state_path = "{state_path}"',
                 f'sandbox_state_path = "{sandbox_state_path}"',
+                "max_slots_bound = 140",
                 "timeout_seconds = 10",
                 "",
             ),
@@ -177,6 +200,79 @@ def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> N
     assert [call["method"] for call in control_plane.calls] == ["GET", "PUT", "GET"]
 
 
+def test_bootstrap_creates_missing_candidate_bound_nonexclusive_policy_once(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    control_plane = EmptyControlPlane()
+
+    first = adapter.bootstrap_policy(config, http_json=control_plane)
+    second = adapter.bootstrap_policy(config, http_json=control_plane)
+
+    assert first["status"] == "created"
+    assert second["status"] == "unchanged"
+    assert [call["method"] for call in control_plane.calls] == ["GET", "PUT", "GET"]
+    assert control_plane.policy is not None
+    policy = control_plane.policy
+    assert policy["enabled"] is False
+    assert policy["max_slots"] == 0
+    actuator = policy["actuator_config"]
+    assert actuator["candidate_sha"] == SHA
+    assert actuator["exclusive"] is False
+    assert actuator["external_runner"] is True
+    assert actuator["container_cpus"] > 0
+    assert actuator["container_memory_mib"] > 0
+    assert actuator["container_pids"] == 4096
+    assert actuator["job_pids_max"] == 65536
+    assert (
+        actuator["job_pids_max"]
+        >= actuator["container_pids"] * actuator["requested_concurrency"]
+    )
+    assert actuator["slurm_account"] == "loom-dev-qianyi"
+    assert actuator["qos_normal"] == "loom-dev"
+    assert "loom_admin_test_secret" not in json.dumps(policy)
+
+
+def test_bootstrap_rejects_existing_policy_authority_drift(tmp_path: Path) -> None:
+    config, _ = _fixture(tmp_path)
+    expected = adapter._bootstrap_policy_body(config, candidate_sha=SHA)
+    policy = {
+        **expected,
+        "environment": "sandbox-qianyi",
+        "pool_name": "gb10",
+        "last_pending_slots": 0,
+        "last_actual_slots": 0,
+        "last_draining_slots": 0,
+    }
+    policy["actuator_config"] = {**policy["actuator_config"], "exclusive": True}
+    control_plane = FakeControlPlane(policy)
+
+    with pytest.raises(adapter.AdapterError, match="immutable bootstrap"):
+        adapter.bootstrap_policy(config, http_json=control_plane)
+
+    assert [call["method"] for call in control_plane.calls] == ["GET"]
+
+
+def test_bootstrap_rejects_job_pid_budget_below_concurrency_bound(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    templates = tmp_path / "policy-templates"
+    templates.mkdir()
+    source = (
+        ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml"
+    ).read_text()
+    _write(
+        templates / "gb10.toml",
+        source.replace("job_pids_max = 65536", "job_pids_max = 32768"),
+    )
+    monkeypatch.setattr(adapter, "_POLICY_TEMPLATE_DIR", templates)
+
+    with pytest.raises(adapter.AdapterError, match="below concurrency bound"):
+        adapter._bootstrap_policy_body(config, candidate_sha=SHA)
+
+
 def test_handoff_epoch_regression_and_same_epoch_rewrite_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -227,6 +323,23 @@ def test_policy_candidate_mismatch_never_mutates_policy(tmp_path: Path) -> None:
         )
 
     assert [call["method"] for call in control_plane.calls] == ["GET"]
+
+
+def test_handoff_above_reviewed_pool_bound_fails_before_api(
+    tmp_path: Path,
+) -> None:
+    config, handoff_path = _fixture(tmp_path, max_slots=141)
+    control_plane = FakeControlPlane(_policy())
+
+    with pytest.raises(adapter.AdapterError, match="reviewed pool bound"):
+        adapter.run_once(
+            config,
+            now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+            http_json=control_plane,
+        )
+
+    assert json.loads(handoff_path.read_text())["max_slots"] == 141
+    assert control_plane.calls == []
 
 
 def test_expired_handoff_only_drains_to_zero(tmp_path: Path) -> None:
@@ -360,6 +473,38 @@ def test_checked_in_configs_cover_three_sandboxes_and_two_pools() -> None:
     assert len({item.handoff_path for item in configs}) == 6
     assert len({item.observation_path for item in configs}) == 6
     assert len({item.adapter_state_path for item in configs}) == 6
+    assert {(item.pool_name, item.max_slots_bound) for item in configs} == {
+        ("gb10", 140),
+        ("oldlab", 20),
+    }
+    for config in configs:
+        policy = adapter._bootstrap_policy_body(config, candidate_sha=SHA)
+        actuator = policy["actuator_config"]
+        assert policy["enabled"] is False
+        assert policy["max_slots"] == 0
+        assert actuator["candidate_sha"] == SHA
+        assert actuator["exclusive"] is False
+        assert actuator["external_runner"] is True
+        assert actuator["slurm_account"] == f"loom-dev-{config.sandbox}"
+        assert actuator["qos_normal"] == "loom-dev"
+        assert actuator["env_file"] == (
+            f"/shared_work/loom/runtime/sandboxes/{config.sandbox}/"
+            f"{SHA}/worker-{config.pool_name}.env"
+        )
+        assert "/candidates/" not in actuator["env_file"]
+        assert actuator["container_cpus"] > 0
+        assert actuator["container_memory_mib"] > 0
+        assert actuator["container_pids"] > 0
+        assert isinstance(actuator["job_pids_max"], int)
+        assert actuator["job_pids_max"] > 0
+        assert (
+            actuator["job_pids_max"]
+            >= actuator["container_pids"] * actuator["requested_concurrency"]
+        )
+        assert actuator["allowed_nodes"]
+        assert config.admin_secret_file == Path(
+            f"/srv/loom/developer-sandboxes/{config.sandbox}/secrets/admin.toml",
+        )
 
 
 def test_service_renderer_binds_exact_candidate_and_rejects_drift() -> None:
@@ -370,7 +515,9 @@ def test_service_renderer_binds_exact_candidate_and_rejects_drift() -> None:
     rendered = renderer.render_service_unit(template, git_sha=SHA)
 
     assert "${GIT_SHA}" not in rendered
-    assert rendered.count(SHA) == 4
+    assert rendered.count(SHA) == 6
+    assert "ExecStartPre=" in rendered
+    assert " bootstrap" in rendered
     assert "ProtectSystem=strict" in rendered
     assert "ReadWritePaths=/var/lib/loom-shared-capacity" in rendered
     with pytest.raises(ValueError, match="40-character"):

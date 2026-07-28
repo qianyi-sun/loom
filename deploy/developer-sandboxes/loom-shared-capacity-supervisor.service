@@ -1,0 +1,21 @@
+[Unit]
+Description=Loom shared-capacity broker supervisor
+After=local-fs.target
+ConditionPathExists=/etc/loom/shared-capacity-supervisor.toml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/loom-shared-capacity/candidates/${GIT_SHA}/repo
+Environment=PATH=/opt/loom-shared-capacity/candidates/${GIT_SHA}/venv/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+NoNewPrivileges=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/loom/shared-capacity-supervisor.toml
+ReadWritePaths=/var/lib/loom-shared-capacity
+ExecStart=/opt/loom-shared-capacity/candidates/${GIT_SHA}/venv/bin/python -I -B /opt/loom-shared-capacity/candidates/${GIT_SHA}/repo/scripts/ops/shared_capacity_supervisor.py --config /etc/loom/shared-capacity-supervisor.toml run
+TimeoutStartSec=60

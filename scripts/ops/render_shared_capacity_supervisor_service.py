@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the shared-capacity adapter unit for one immutable candidate."""
+"""Render the shared-capacity supervisor unit for one immutable candidate."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 _TOKEN = "${GIT_SHA}"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_EXPECTED_TOKEN_COUNT = 6
+_EXPECTED_TOKEN_COUNT = 4
 _MAX_TEMPLATE_BYTES = 64 * 1024
 _FORBIDDEN_RUNTIME_PATHS = (
     "/opt/loom-shared-capacity/current",
@@ -36,9 +36,8 @@ def render_service_unit(template: str, *, git_sha: str) -> str:
     required = (
         f"WorkingDirectory={root}/repo\n",
         f"Environment=PATH={root}/venv/bin:/usr/local/bin:/usr/bin:/bin\n",
-        f"ExecStartPre={root}/venv/bin/python -I -B ",
         f"ExecStart={root}/venv/bin/python -I -B ",
-        f" {root}/repo/scripts/ops/shared_capacity_adapter.py --config ",
+        f" {root}/repo/scripts/ops/shared_capacity_supervisor.py ",
     )
     if any(fragment not in rendered for fragment in required):
         raise ValueError("rendered service is not fully bound to the exact candidate")
@@ -48,7 +47,7 @@ def render_service_unit(template: str, *, git_sha: str) -> str:
 def _template_path() -> Path:
     return (
         Path(__file__).resolve().parents[2]
-        / "deploy/developer-sandboxes/loom-shared-capacity-adapter@.service"
+        / "deploy/developer-sandboxes/loom-shared-capacity-supervisor.service"
     )
 
 

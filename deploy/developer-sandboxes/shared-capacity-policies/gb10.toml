@@ -1,0 +1,57 @@
+schema_version = 1
+pool_name = "gb10"
+slot_budget = 140
+pending_slot_budget = 30
+job_pids_max = 65536
+
+[policy]
+actuator = "slurm"
+enabled = false
+disabled_reason = "awaiting_shared_capacity_handoff"
+min_slots = 0
+max_slots = 0
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[policy.actuator_config]
+backend = "docker"
+cpu_arch = "arm64"
+partition = "gb10"
+allowed_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+env_file = "/shared_work/loom/runtime/sandboxes/${SANDBOX}/${CANDIDATE_SHA}/worker-gb10.env"
+repo_dir = "/shared_work/loom/candidates/sandboxes/${SANDBOX}/${CANDIDATE_SHA}"
+requested_cpus = 20
+requested_memory_mib = 115000
+requested_concurrency = 10
+max_jobs = 14
+pending_job_cap = 3
+time_limit = "02:00:00"
+exclusive = false
+external_runner = true
+slurm_account = "loom-dev-${SANDBOX}"
+qos_normal = "loom-dev"
+container_cpus = 2
+container_memory_mib = 11500
+container_pids = 4096
+job_pids_max = 65536
+candidate_sha = "${CANDIDATE_SHA}"
+gpu_tres = "gpu:1"

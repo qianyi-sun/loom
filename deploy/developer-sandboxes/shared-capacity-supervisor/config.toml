@@ -1,0 +1,25 @@
+schema_version = 1
+state_db = "/var/lib/loom-shared-capacity/broker.sqlite3"
+handoff_dir = "/var/lib/loom-shared-capacity/handoffs"
+observation_dir = "/var/lib/loom-shared-capacity/observations"
+supervisor_state_path = "/var/lib/loom-shared-capacity/supervisor-state.json"
+audit_path = "/var/lib/loom-shared-capacity/supervisor-audit.jsonl"
+evidence_path = "/var/lib/loom-shared-capacity/evidence/supervisor-latest.json"
+global_slot_budget = 160
+global_pending_slot_budget = 40
+instances = [
+  "qianyi-gb10",
+  "qianyi-oldlab",
+  "hongjian-gb10",
+  "hongjian-oldlab",
+  "devansh-gb10",
+  "devansh-oldlab",
+]
+
+[pool_slot_budgets]
+gb10 = 140
+oldlab = 20
+
+[pool_pending_slot_budgets]
+gb10 = 30
+oldlab = 10
