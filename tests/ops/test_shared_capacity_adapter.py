@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
+import os
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +22,7 @@ TREE = "c" * 40
 REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 CAPACITY_TIME = "2026-07-28T14:00:00Z"
 REAL_VALIDATE_RUNTIME_ATTESTATION = adapter._validate_runtime_attestation
+REAL_SHARED_COLLECTOR_LOCK = adapter._shared_collector_lock
 
 
 def _lease_state(
@@ -181,9 +187,7 @@ def _policy(
     capacity_lease_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     template = tomllib.loads(
-        (
-            ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml"
-        )
+        (ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml")
         .read_text()
         .replace("${SANDBOX}", "qianyi")
         .replace("${CANDIDATE_SHA}", candidate_sha),
@@ -226,8 +230,7 @@ def _receipt_payload(
         },
         "fleet_attestation": {
             "path": (
-                "/var/lib/loom-developer-sandbox-links/attestations/"
-                f"{sandbox}/{sha}/fleet.json"
+                f"/var/lib/loom-developer-sandbox-links/attestations/{sandbox}/{sha}/fleet.json"
             ),
             "payload_sha256": "sha256:" + "e" * 64,
             "generated_at": fleet_generated.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -247,7 +250,7 @@ def _receipt_payload(
             "published_at": published_at.isoformat(),
             "expires_at": (published_at + timedelta(minutes=15)).isoformat(),
         }
-    payload["payload_sha256"] = adapter.hashlib.sha256(
+    payload["payload_sha256"] = hashlib.sha256(
         adapter._canonical_json(payload),
     ).hexdigest()
     return payload
@@ -260,12 +263,7 @@ def _write_receipt(
     payload: dict[str, Any] | None = None,
 ) -> Path:
     receipt = payload or _receipt_payload(now=now)
-    path = (
-        config.runtime_attestation_root
-        / config.sandbox
-        / SHA
-        / "combined.json"
-    )
+    path = config.runtime_attestation_root / config.sandbox / SHA / "combined.json"
     _write(path, adapter._canonical_json(receipt).decode() + "\n", 0o600)
     path.parent.chmod(0o700)
     path.parent.parent.chmod(0o700)
@@ -275,11 +273,26 @@ def _write_receipt(
 
 @pytest.fixture(autouse=True)
 def _accepted_runtime_attestation(monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextmanager
+    def accepted_collector_lock(
+        _config: adapter.AdapterConfig,
+    ) -> Iterator[None]:
+        yield
+
     monkeypatch.setattr(
         adapter,
         "_validate_runtime_attestation",
         lambda *_args, **_kwargs: "d" * 64,
     )
+    monkeypatch.setattr(
+        adapter,
+        "_shared_collector_lock",
+        accepted_collector_lock,
+    )
+
+
+def _last_put(control_plane: FakeControlPlane | EmptyControlPlane) -> dict[str, Any]:
+    return next(call["body"] for call in reversed(control_plane.calls) if call["method"] == "PUT")
 
 
 def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> None:
@@ -291,8 +304,8 @@ def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> N
 
     assert first["status"] == "applied"
     assert first["max_slots"] == 12
-    assert [call["method"] for call in control_plane.calls] == ["GET", "PUT"]
-    put = control_plane.calls[-1]["body"]
+    assert [call["method"] for call in control_plane.calls] == ["GET", "PUT", "GET"]
+    put = _last_put(control_plane)
     assert put["enabled"] is True
     assert put["min_slots"] == 0
     assert put["max_slots"] == 12
@@ -305,16 +318,37 @@ def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> N
         "preemptible": True,
     }
     observation = json.loads(config.observation_path.read_text())
-    assert observation == [
-        {
-            "request_id": REQUEST_ID,
-            "lease_epoch": 3,
-            "pending_slots": 0,
-            "active_slots": 0,
-            "draining_slots": 0,
-            "terminal_slots": 0,
-        },
-    ]
+    assert len(observation) == 1
+    observed = observation[0]
+    assert observed["sandbox"] == "qianyi"
+    assert observed["pool_name"] == "gb10"
+    assert observed["candidate_sha"] == SHA
+    assert observed["request_id"] == REQUEST_ID
+    assert observed["lease_epoch"] == 3
+    assert observed["capacity_lease_state"] == "active"
+    assert observed["observation_sequence"] == 1
+    assert {
+        field: observed[field]
+        for field in (
+            "pending_slots",
+            "active_slots",
+            "draining_slots",
+            "terminal_slots",
+        )
+    } == {
+        "pending_slots": 0,
+        "active_slots": 0,
+        "draining_slots": 0,
+        "terminal_slots": 0,
+    }
+    unsigned = dict(observed)
+    digest = unsigned.pop("payload_sha256")
+    assert (
+        digest
+        == hashlib.sha256(
+            adapter._canonical_json(unsigned),
+        ).hexdigest()
+    )
     persisted = config.adapter_state_path.read_text()
     assert "loom_admin_test_secret" not in persisted
     assert json.loads(persisted)["preemptible"] is True
@@ -326,7 +360,13 @@ def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> N
     )
 
     assert second["status"] == "unchanged"
-    assert [call["method"] for call in control_plane.calls] == ["GET", "PUT", "GET"]
+    assert json.loads(config.observation_path.read_text())[0]["observation_sequence"] == 2
+    assert [call["method"] for call in control_plane.calls] == [
+        "GET",
+        "PUT",
+        "GET",
+        "GET",
+    ]
 
 
 def test_adapter_rejects_overlapping_invocations(tmp_path: Path) -> None:
@@ -344,6 +384,77 @@ def test_adapter_rejects_overlapping_invocations(tmp_path: Path) -> None:
     assert control_plane.calls == []
 
 
+def test_activation_holds_shared_collector_lock_through_put(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    config.runtime_attestation_root.mkdir(mode=0o700)
+    lock_path = config.runtime_attestation_root / ".collector.lock"
+    _write(lock_path, "", 0o600)
+    monkeypatch.setattr(
+        adapter,
+        "_shared_collector_lock",
+        REAL_SHARED_COLLECTOR_LOCK,
+    )
+
+    class LockProbe(FakeControlPlane):
+        blocked = False
+
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["method"] == "PUT":
+                descriptor = os.open(lock_path, os.O_RDONLY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(
+                            descriptor,
+                            fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                    self.blocked = True
+                finally:
+                    os.close(descriptor)
+            return super().__call__(**kwargs)
+
+    control_plane = LockProbe(_policy())
+
+    adapter.run_once(
+        config,
+        now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+        http_json=control_plane,
+    )
+
+    assert control_plane.blocked is True
+    descriptor = os.open(lock_path, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(descriptor)
+
+
+def test_disabled_handoff_does_not_take_collector_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _fixture(
+        tmp_path,
+        expires_at=datetime(2026, 7, 28, 13, 0, tzinfo=UTC),
+    )
+
+    @contextmanager
+    def forbidden_lock(_config: adapter.AdapterConfig) -> Iterator[None]:
+        raise AssertionError("disabled path must not take collector lock")
+        yield
+
+    monkeypatch.setattr(adapter, "_shared_collector_lock", forbidden_lock)
+    report = adapter.run_once(
+        config,
+        now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+        http_json=FakeControlPlane(_policy()),
+    )
+
+    assert report["enabled"] is False
+
+
 def test_run_cycle_holds_one_lock_across_bootstrap_and_apply(
     tmp_path: Path,
 ) -> None:
@@ -357,10 +468,10 @@ def test_run_cycle_holds_one_lock_across_bootstrap_and_apply(
     )
 
     assert report["status"] == "applied"
-    assert [call["method"] for call in control_plane.calls] == ["GET", "PUT"]
+    assert [call["method"] for call in control_plane.calls] == ["GET", "PUT", "GET"]
 
 
-def test_bootstrap_creates_missing_candidate_bound_nonexclusive_policy_once(
+def test_bootstrap_creates_disabled_unbound_nonexclusive_policy_once(
     tmp_path: Path,
 ) -> None:
     config, _ = _fixture(tmp_path)
@@ -370,27 +481,20 @@ def test_bootstrap_creates_missing_candidate_bound_nonexclusive_policy_once(
     first = adapter.bootstrap_policy(config, now=now, http_json=control_plane)
     second = adapter.bootstrap_policy(config, now=now, http_json=control_plane)
 
-    assert first["status"] == "applied"
+    assert first["status"] == "created"
     assert second["status"] == "unchanged"
-    assert [call["method"] for call in control_plane.calls] == ["GET", "PUT", "GET"]
+    assert [call["method"] for call in control_plane.calls] == [
+        "GET",
+        "PUT",
+        "GET",
+        "GET",
+    ]
     assert control_plane.policy is not None
     policy = control_plane.policy
-    assert policy["enabled"] is True
-    assert policy["max_slots"] == 12
-    assert policy["capacity_lease_state"]["request_id"] == REQUEST_ID
-    assert policy["capacity_lease_state"]["state"] == "active"
-    assert all(
-        call.get("body", {}).get("shared_capacity_binding")
-        == {
-            "schema_version": 1,
-            "request_id": REQUEST_ID,
-            "lease_epoch": 3,
-            "candidate_sha": SHA,
-            "preemptible": True,
-        }
-        for call in control_plane.calls
-        if call["method"] == "PUT"
-    )
+    assert policy["enabled"] is False
+    assert policy["max_slots"] == 0
+    assert policy["capacity_lease_state"] is None
+    assert "shared_capacity_binding" not in _last_put(control_plane)
     actuator = policy["actuator_config"]
     assert actuator["candidate_sha"] == SHA
     assert actuator["exclusive"] is False
@@ -401,12 +505,43 @@ def test_bootstrap_creates_missing_candidate_bound_nonexclusive_policy_once(
     assert actuator["container_pids"] == 4096
     assert actuator["job_pids_max"] == 65536
     assert (
-        actuator["job_pids_max"]
-        >= actuator["container_pids"] * actuator["requested_concurrency"]
+        actuator["job_pids_max"] >= actuator["container_pids"] * actuator["requested_concurrency"]
     )
     assert actuator["slurm_account"] == "loom-dev-qianyi"
     assert actuator["qos_normal"] == "loom-dev"
     assert "loom_admin_test_secret" not in json.dumps(policy)
+
+
+def test_bootstrap_never_consumes_enabled_handoff_or_mutates_bound_policy(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    binding = {
+        "schema_version": 1,
+        "request_id": REQUEST_ID,
+        "lease_epoch": 3,
+        "candidate_sha": SHA,
+        "preemptible": True,
+    }
+    control_plane = FakeControlPlane(
+        _policy(
+            max_slots=12,
+            enabled=True,
+            capacity_lease_state=_lease_state(binding, enabled=True),
+        ),
+    )
+
+    report = adapter.bootstrap_policy(
+        config,
+        now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+        http_json=control_plane,
+    )
+
+    assert report["status"] == "unchanged"
+    assert report["enabled"] is True
+    assert report["bound"] is True
+    assert [call["method"] for call in control_plane.calls] == ["GET"]
+    assert control_plane.policy["max_slots"] == 12
 
 
 def test_missing_policy_expired_first_handoff_retires_then_new_epoch_activates(
@@ -425,9 +560,7 @@ def test_missing_policy_expired_first_handoff_retires_then_new_epoch_activates(
     assert first["enabled"] is False
     assert control_plane.policy is not None
     assert control_plane.policy["capacity_lease_state"]["state"] == "retiring"
-    put_bodies = [
-        call["body"] for call in control_plane.calls if call["method"] == "PUT"
-    ]
+    put_bodies = [call["body"] for call in control_plane.calls if call["method"] == "PUT"]
     assert len(put_bodies) == 1
     assert put_bodies[0]["enabled"] is False
     assert put_bodies[0]["shared_capacity_binding"]["lease_epoch"] == 3
@@ -450,7 +583,7 @@ def test_missing_policy_expired_first_handoff_retires_then_new_epoch_activates(
 
     assert second["enabled"] is True
     assert control_plane.policy["capacity_lease_state"]["state"] == "active"
-    assert control_plane.calls[-1]["body"]["shared_capacity_binding"]["lease_epoch"] == 4
+    assert _last_put(control_plane)["shared_capacity_binding"]["lease_epoch"] == 4
 
 
 def test_bootstrap_rejects_existing_policy_authority_drift(tmp_path: Path) -> None:
@@ -475,14 +608,12 @@ def test_bootstrap_rejects_existing_policy_authority_drift(tmp_path: Path) -> No
 
 def test_bootstrap_rejects_job_pid_budget_below_concurrency_bound(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, _ = _fixture(tmp_path)
     templates = tmp_path / "policy-templates"
     templates.mkdir()
-    source = (
-        ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml"
-    ).read_text()
+    source = (ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml").read_text()
     _write(
         templates / "gb10.toml",
         source.replace("job_pids_max = 65536", "job_pids_max = 32768"),
@@ -514,7 +645,7 @@ def test_handoff_epoch_regression_and_same_epoch_rewrite_fail_closed(
         adapter.run_once(config, now=now, http_json=control_plane)
 
 
-def test_candidate_mismatch_never_calls_control_plane(tmp_path: Path) -> None:
+def test_candidate_mismatch_reads_policy_before_failing(tmp_path: Path) -> None:
     config, handoff_path = _fixture(tmp_path)
     payload = json.loads(handoff_path.read_text())
     payload["candidate_sha"] = OTHER_SHA
@@ -528,7 +659,49 @@ def test_candidate_mismatch_never_calls_control_plane(tmp_path: Path) -> None:
             http_json=control_plane,
         )
 
-    assert control_plane.calls == []
+    assert [call["method"] for call in control_plane.calls] == ["GET"]
+
+
+def test_candidate_mismatch_retires_old_exact_active_lease(
+    tmp_path: Path,
+) -> None:
+    config, handoff_path = _fixture(tmp_path)
+    payload = json.loads(handoff_path.read_text())
+    payload["candidate_sha"] = OTHER_SHA
+    _write(handoff_path, json.dumps(payload) + "\n")
+    old_binding = {
+        "schema_version": 1,
+        "request_id": REQUEST_ID,
+        "lease_epoch": 3,
+        "candidate_sha": OTHER_SHA,
+        "preemptible": True,
+    }
+    control_plane = FakeControlPlane(
+        _policy(
+            candidate_sha=OTHER_SHA,
+            max_slots=12,
+            enabled=True,
+            capacity_lease_state=_lease_state(old_binding, enabled=True),
+        ),
+    )
+
+    with pytest.raises(adapter.AdapterError, match="old active lease retired"):
+        adapter.run_once(
+            config,
+            now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+            http_json=control_plane,
+        )
+
+    assert [call["method"] for call in control_plane.calls] == [
+        "GET",
+        "PUT",
+        "GET",
+    ]
+    put = _last_put(control_plane)
+    assert put["enabled"] is False
+    assert put["max_slots"] == 0
+    assert put["shared_capacity_binding"] == old_binding
+    assert control_plane.policy["capacity_lease_state"]["state"] == "retiring"
 
 
 def test_policy_candidate_mismatch_never_mutates_policy(tmp_path: Path) -> None:
@@ -578,7 +751,7 @@ def test_expired_handoff_only_drains_to_zero(tmp_path: Path) -> None:
     assert report["expired"] is True
     assert report["enabled"] is False
     assert report["max_slots"] == 0
-    assert control_plane.calls[-1]["body"]["max_slots"] == 0
+    assert _last_put(control_plane)["max_slots"] == 0
     assert report["observation"]["pending_slots"] == 2
     assert report["observation"]["active_slots"] == 8
     assert report["observation"]["draining_slots"] == 2
@@ -610,10 +783,10 @@ def test_missing_handoff_after_restart_drains_using_durable_epoch(
     assert report["enabled"] is False
     assert report["max_slots"] == 0
     assert report["lease_epoch"] == 3
-    assert control_plane.calls[-1]["body"]["max_slots"] == 0
+    assert _last_put(control_plane)["max_slots"] == 0
     assert report["observation"]["active_slots"] == 8
     assert report["observation"]["draining_slots"] == 4
-    assert control_plane.calls[-1]["body"]["shared_capacity_binding"]["preemptible"] is True
+    assert _last_put(control_plane)["shared_capacity_binding"]["preemptible"] is True
 
 
 def test_state_loss_and_missing_handoff_disable_from_exact_db_binding(
@@ -646,7 +819,7 @@ def test_state_loss_and_missing_handoff_disable_from_exact_db_binding(
     assert report["enabled"] is False
     assert report["lease_epoch"] == 7
     assert report["preemptible"] is False
-    put = control_plane.calls[-1]["body"]
+    put = _last_put(control_plane)
     assert put["enabled"] is False
     assert put["max_slots"] == 0
     assert put["shared_capacity_binding"] == binding
@@ -672,7 +845,7 @@ def test_nonpreemptible_handoff_remains_exact_during_missing_handoff_disable(
     )
 
     assert report["preemptible"] is False
-    assert control_plane.calls[-1]["body"]["shared_capacity_binding"]["preemptible"] is False
+    assert _last_put(control_plane)["shared_capacity_binding"]["preemptible"] is False
     assert json.loads(config.adapter_state_path.read_text())["preemptible"] is False
 
 
@@ -684,7 +857,7 @@ def test_invalid_capacity_lease_readback_never_persists_applied_state(
     class BadReadback(FakeControlPlane):
         def __call__(self, **kwargs: Any) -> dict[str, Any]:
             result = super().__call__(**kwargs)
-            if kwargs["method"] == "PUT":
+            if kwargs["method"] == "GET" and any(call["method"] == "PUT" for call in self.calls):
                 result["capacity_lease_state"]["lease_epoch"] += 1
             return result
 
@@ -764,7 +937,7 @@ def test_combined_runtime_attestation_rejects_stale_or_bad_receipt(
     if mutation != "digest":
         unsigned = dict(payload)
         unsigned.pop("payload_sha256")
-        payload["payload_sha256"] = adapter.hashlib.sha256(
+        payload["payload_sha256"] = hashlib.sha256(
             adapter._canonical_json(unsigned),
         ).hexdigest()
     path = _write_receipt(config, now=now, payload=payload)
@@ -780,6 +953,196 @@ def test_combined_runtime_attestation_rejects_stale_or_bad_receipt(
             candidate=adapter.CandidateBinding(SHA, TREE),
             now=now,
         )
+
+
+@pytest.mark.parametrize("mutation", ["replace", "delete"])
+def test_receipt_change_during_put_retires_exact_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    now = datetime(2026, 7, 28, 14, 0, tzinfo=UTC)
+    path = _write_receipt(config, now=now)
+    monkeypatch.setattr(
+        adapter,
+        "_validate_runtime_attestation",
+        REAL_VALIDATE_RUNTIME_ATTESTATION,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_secure_runtime_attestation_file",
+        lambda _path, *, config: path,
+    )
+
+    class ReceiptRace(FakeControlPlane):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            result = super().__call__(**kwargs)
+            if kwargs["method"] == "PUT" and kwargs["body"]["enabled"]:
+                if mutation == "delete":
+                    path.unlink()
+                else:
+                    replacement = _receipt_payload(now=now)
+                    replacement["candidate_tree"] = OTHER_SHA
+                    unsigned = dict(replacement)
+                    unsigned.pop("payload_sha256")
+                    replacement["payload_sha256"] = hashlib.sha256(
+                        adapter._canonical_json(unsigned),
+                    ).hexdigest()
+                    _write(
+                        path,
+                        adapter._canonical_json(replacement).decode() + "\n",
+                        0o600,
+                    )
+            return result
+
+    binding = {
+        "schema_version": 1,
+        "request_id": REQUEST_ID,
+        "lease_epoch": 3,
+        "candidate_sha": SHA,
+        "preemptible": True,
+    }
+    control_plane = ReceiptRace(
+        _policy(
+            capacity_lease_state=_lease_state(
+                binding,
+                enabled=False,
+                state="retired",
+            ),
+        ),
+    )
+
+    with pytest.raises(adapter.AdapterError, match="fail-closed disable"):
+        adapter.run_once(
+            config,
+            now=now,
+            http_json=control_plane,
+        )
+
+    puts = [call["body"] for call in control_plane.calls if call["method"] == "PUT"]
+    assert [body["enabled"] for body in puts] == [True, False]
+    assert all(body["shared_capacity_binding"] == binding for body in puts)
+    assert control_plane.policy["capacity_lease_state"]["state"] == "retiring"
+    state = json.loads(config.adapter_state_path.read_text())
+    assert state["applied_enabled"] is False
+    assert state["runtime_attestation_status"] == "rejected"
+
+
+def test_receipt_expiring_during_put_retires_and_exits_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    start = datetime(2026, 7, 28, 14, 0, tzinfo=UTC)
+    payload = _receipt_payload(now=start)
+    payload["collector"]["expires_at"] = (start + timedelta(seconds=40)).isoformat()
+    unsigned = dict(payload)
+    unsigned.pop("payload_sha256")
+    payload["payload_sha256"] = hashlib.sha256(
+        adapter._canonical_json(unsigned),
+    ).hexdigest()
+    path = _write_receipt(config, now=start, payload=payload)
+    monkeypatch.setattr(
+        adapter,
+        "_validate_runtime_attestation",
+        REAL_VALIDATE_RUNTIME_ATTESTATION,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_secure_runtime_attestation_file",
+        lambda _path, *, config: path,
+    )
+    moments = iter(
+        (
+            start,
+            start,
+            start,
+            start,
+            start + timedelta(seconds=41),
+            start + timedelta(seconds=41),
+        ),
+    )
+
+    binding = {
+        "schema_version": 1,
+        "request_id": REQUEST_ID,
+        "lease_epoch": 3,
+        "candidate_sha": SHA,
+        "preemptible": True,
+    }
+    control_plane = FakeControlPlane(
+        _policy(
+            capacity_lease_state=_lease_state(
+                binding,
+                enabled=False,
+                state="retired",
+            ),
+        ),
+    )
+
+    with pytest.raises(adapter.AdapterError, match="fail-closed disable"):
+        adapter.run_once(
+            config,
+            clock=lambda: next(moments),
+            http_json=control_plane,
+        )
+
+    assert [call["body"]["enabled"] for call in control_plane.calls if call["method"] == "PUT"] == [
+        True,
+        False,
+    ]
+    assert control_plane.policy["capacity_lease_state"]["state"] == "retiring"
+
+
+def test_receipt_at_timeout_safety_boundary_is_rejected_before_enable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    now = datetime(2026, 7, 28, 14, 0, tzinfo=UTC)
+    payload = _receipt_payload(now=now)
+    payload["collector"]["expires_at"] = (
+        now + timedelta(seconds=config.timeout_seconds * 3)
+    ).isoformat()
+    unsigned = dict(payload)
+    unsigned.pop("payload_sha256")
+    payload["payload_sha256"] = hashlib.sha256(
+        adapter._canonical_json(unsigned),
+    ).hexdigest()
+    path = _write_receipt(config, now=now, payload=payload)
+    monkeypatch.setattr(
+        adapter,
+        "_validate_runtime_attestation",
+        REAL_VALIDATE_RUNTIME_ATTESTATION,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_secure_runtime_attestation_file",
+        lambda _path, *, config: path,
+    )
+    binding = {
+        "schema_version": 1,
+        "request_id": REQUEST_ID,
+        "lease_epoch": 3,
+        "candidate_sha": SHA,
+        "preemptible": True,
+    }
+    control_plane = FakeControlPlane(
+        _policy(
+            max_slots=12,
+            enabled=True,
+            capacity_lease_state=_lease_state(binding, enabled=True),
+        ),
+    )
+
+    with pytest.raises(adapter.AdapterError, match="fail-closed disable"):
+        adapter.run_once(config, now=now, http_json=control_plane)
+
+    puts = [call["body"] for call in control_plane.calls if call["method"] == "PUT"]
+    assert len(puts) == 1
+    assert puts[0]["enabled"] is False
+    assert control_plane.policy["capacity_lease_state"]["state"] == "retiring"
 
 
 def test_active_policy_missing_attestation_disables_and_records_blocker(
@@ -814,7 +1177,7 @@ def test_active_policy_missing_attestation_disables_and_records_blocker(
             http_json=control_plane,
         )
 
-    put = control_plane.calls[-1]["body"]
+    put = _last_put(control_plane)
     assert put["enabled"] is False
     assert put["max_slots"] == 0
     assert put["shared_capacity_binding"] == binding
@@ -921,6 +1284,29 @@ def test_unknown_status_preserves_committed_slots_after_restart(tmp_path: Path) 
     assert report["observation"]["draining_slots"] == 2
 
 
+def test_observation_sequence_recovers_from_observation_if_state_write_lagged(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    control_plane = FakeControlPlane(_policy())
+    now = datetime(2026, 7, 28, 14, 0, tzinfo=UTC)
+    adapter.run_once(config, now=now, http_json=control_plane)
+    state = json.loads(config.adapter_state_path.read_text())
+    state.pop("observation_sequence")
+    _write(config.adapter_state_path, json.dumps(state) + "\n", 0o600)
+
+    adapter.run_once(
+        config,
+        now=now + timedelta(seconds=15),
+        http_json=control_plane,
+    )
+
+    observation = json.loads(config.observation_path.read_text())[0]
+    assert set(observation) == adapter._OBSERVATION_FIELDS
+    assert observation["observation_sequence"] == 2
+    assert json.loads(config.adapter_state_path.read_text())["observation_sequence"] == 2
+
+
 def test_terminal_counter_is_monotonic_when_nonterminal_slots_finish(
     tmp_path: Path,
 ) -> None:
@@ -947,7 +1333,10 @@ def test_terminal_counter_is_monotonic_when_nonterminal_slots_finish(
     assert report["observation"]["terminal_slots"] == 5
 
 
-def test_main_prints_only_generic_error(tmp_path: Path, capsys) -> None:
+def test_main_prints_only_generic_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     _, handoff_path = _fixture(tmp_path)
     handoff_path.unlink()
 
@@ -1023,10 +1412,7 @@ def test_service_renderer_binds_exact_candidate_and_rejects_drift() -> None:
     assert " run" in rendered
     assert "ProtectSystem=strict" in rendered
     assert "ReadWritePaths=/var/lib/loom-shared-capacity" in rendered
-    assert (
-        "ReadOnlyPaths=-/var/lib/loom-shared-capacity/runtime-attestations"
-        in rendered
-    )
+    assert "ReadOnlyPaths=-/var/lib/loom-shared-capacity/runtime-attestations" in rendered
     with pytest.raises(ValueError, match="40-character"):
         renderer.render_service_unit(template, git_sha="abc")
     with pytest.raises(ValueError, match="placeholder"):

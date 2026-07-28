@@ -163,6 +163,16 @@ process from the broker:
   exact sandbox, candidate SHA, and candidate tree; an invalid receipt blocks
   a first create and first disables an existing active policy with its exact
   binding before the adapter exits nonzero;
+- activation holds a shared lock on
+  `/var/lib/loom-shared-capacity/runtime-attestations/.collector.lock` from
+  receipt validation through the policy PUT and independent GET readback. The
+  collector takes the same lock exclusively before invalidating or replacing
+  a receipt;
+- immediately before mutation, the receipt must retain more lifetime than
+  three configured HTTP timeout windows (GET, PUT, and readback). The adapter
+  uses the live clock again after readback and reopens the receipt; expiry,
+  deletion, or digest replacement causes an exact-bound disable/max-zero
+  transition to `retiring` and a nonzero exit;
 - a malformed, rewritten-same-epoch, regressing-epoch, or
   candidate-mismatched handoff fails without an autoscaler mutation;
 - restart state is durable. Unknown Control Plane counters retain the last
@@ -200,10 +210,16 @@ complete generation, never a mixed six-file set. The current and immediately
 previous generations are retained. Files are mode `0600`, directories are mode
 `0700`, and a sandbox account has no write access.
 
-The adapter writes a one-element JSON observation array compatible with
-`--observations-json`. Observation files are inputs, never grants. A
-sandbox-written observation cannot increase capacity: the broker rejects old
-epochs and nonterminal counts above its commitment.
+The adapter writes a one-element closed-schema JSON observation array compatible
+with `--observations-json`. Each item binds sandbox, pool, candidate, request,
+epoch, and final Control Plane lease state; includes a UTC observation time and
+durably monotonic sequence; and carries a canonical SHA-256 over the counters
+and all binding fields. The sequence is recovered from both adapter state and
+the last valid observation, so a crash between the two atomic writes cannot
+rebind a sequence. Replaying an unchanged file is not a new observation.
+Observation files are inputs, never grants. A sandbox-written observation
+cannot increase capacity: the broker rejects stale/rebound sequences, old
+epochs, wrong bindings, and nonterminal counts above its commitment.
 
 ### Persistent broker supervisor
 
@@ -261,17 +277,20 @@ commitment and reduce utilization rather than freeing uncertain capacity.
 
 ### Initial sandbox autoscaler policies
 
-A fresh sandbox Control Plane has no GB10 or OLDLAB autoscaler row. The adapter
-runs one locked reconciliation path for both `bootstrap` and `run`. The
-checked-in policy templates are:
+A fresh sandbox Control Plane has no GB10 or OLDLAB autoscaler row. `bootstrap`
+is the sole explicit exception to grant binding: it only creates a disabled,
+max-zero, unbound policy, or validates an existing policy without mutating a
+bound lease. It never consumes an enabled handoff. `run` owns the locked
+grant-reconciliation path. The checked-in policy templates are:
 
 ```text
 deploy/developer-sandboxes/shared-capacity-policies/gb10.toml
 deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml
 ```
 
-For a missing row, a valid enabled first grant creates the policy directly as
-active with the grant's exact binding; there is no unbound disabled bootstrap.
+For a missing row, `bootstrap` creates the unbound disabled baseline. A valid
+enabled first `run` can also create the policy directly as active with the
+grant's exact binding.
 A disabled or expired first handoff creates a bound scale-to-zero row in
 `retiring`, which cannot activate until retirement completes and the broker
 issues a newer epoch. The policy binds the exact sandbox candidate,
@@ -293,9 +312,9 @@ python scripts/ops/shared_capacity_adapter.py \
   bootstrap
 ```
 
-This executes the same locked reconciliation as `run`; with no durable binding
-it does not create an unbound row. The candidate checkout remains immutable
-under the candidate namespace.
+This never activates capacity. It creates or validates only the disabled
+baseline and leaves an existing bound policy unchanged. The candidate checkout
+remains immutable under the candidate namespace.
 The secret-bearing worker env uses the separate canonical runtime path:
 
 ```text
