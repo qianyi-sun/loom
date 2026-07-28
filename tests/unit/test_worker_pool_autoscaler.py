@@ -839,6 +839,7 @@ def test_slurm_config_from_policy_can_disable_exclusive_node_allocation() -> Non
             "container_cpus": 2.0,
             "container_memory_mib": 8000,
             "container_pids": 512,
+            "job_pids_max": 512,
             "candidate_sha": "a" * 40,
         },
     )
@@ -846,6 +847,29 @@ def test_slurm_config_from_policy_can_disable_exclusive_node_allocation() -> Non
     request = build_sbatch_request(_slurm_config_from_policy(row), node="oldlab-4")
 
     assert "--exclusive" not in request.args
+    assert "--comment=loom-cgroup-v1:pids=512" in request.args
+
+
+def test_slurm_config_from_policy_rejects_missing_nonexclusive_job_pids_max() -> None:
+    row = _policy_row(
+        max_slots=1,
+        actuator_config={
+            "allowed_nodes": ["oldlab-4"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 1,
+            "requested_cpus": 2,
+            "requested_memory_mib": 8000,
+            "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 8000,
+            "container_pids": 512,
+            "candidate_sha": "a" * 40,
+        },
+    )
+
+    with pytest.raises(ValueError, match="job_pids_max is required"):
+        _slurm_config_from_policy(row)
 
 
 async def test_policy_upsert_and_status_helpers_use_normalized_fields() -> None:

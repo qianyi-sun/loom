@@ -301,6 +301,7 @@ async def test_trial_run_passes_task_sandbox_start_options(
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
         sandbox_extra_hosts=(("host.docker.internal", "host-gateway"),),
+        container_cgroup_parent="/system.slice/slurmstepd.scope/job_123",
     )
 
     result = await Trial(ctx=ctx).run()
@@ -309,6 +310,7 @@ async def test_trial_run_passes_task_sandbox_start_options(
     assert len(driver.start_options) == 1
     start_options = driver.start_options[0]
     assert start_options is not None
+    assert start_options.cgroup_parent == "/system.slice/slurmstepd.scope/job_123"
     assert start_options.environment == (("ALPHA", "1"), ("BETA", "2"))
     assert start_options.extra_hosts == (
         ("archive.ubuntu.com", "162.242.195.82"),

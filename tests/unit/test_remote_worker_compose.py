@@ -4,6 +4,7 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.remote-worker.yml"
+_CGROUP_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.remote-worker.cgroup-parent.yml"
 _DEV_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.dev.yml"
 _WORKER_NOFILE_LIMIT = 65_536
 
@@ -79,22 +80,28 @@ def test_remote_worker_compose_container_caps_passthrough() -> None:
     assert worker["cpus"] == "${LOOM_WORKER_CONTAINER_CPUS:-0}"
     assert worker["mem_limit"] == "${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}m"
     assert worker["pids_limit"] == "${LOOM_WORKER_CONTAINER_PIDS:--1}"
+    assert env["LOOM_WORKER_REQUIRE_CGROUP_PARENT"] == (
+        "${LOOM_WORKER_REQUIRE_CGROUP_PARENT:-false}"
+    )
+    assert env["LOOM_WORKER_CGROUP_PARENT"] == "${LOOM_WORKER_CGROUP_PARENT:-}"
+
+
+def test_nonexclusive_compose_overlay_requires_exact_cgroup_parent() -> None:
+    worker = _worker_service(_CGROUP_COMPOSE)
+
+    assert worker == {
+        "cgroup_parent": ("${LOOM_WORKER_CGROUP_PARENT:?set by the Slurm batch controller}"),
+    }
 
 
 def test_remote_worker_compose_stamps_slurm_identity_and_disables_restart() -> None:
     worker = _worker_service(_COMPOSE)
     env = _env_map(worker["environment"])
 
-    assert env["LOOM_WORKER_SANDBOX_IDENTITY"] == (
-        "${LOOM_WORKER_SANDBOX_IDENTITY:-manual}"
-    )
-    assert env["LOOM_WORKER_CANDIDATE_SHA"] == (
-        "${LOOM_WORKER_CANDIDATE_SHA:-legacy}"
-    )
+    assert env["LOOM_WORKER_SANDBOX_IDENTITY"] == ("${LOOM_WORKER_SANDBOX_IDENTITY:-manual}")
+    assert env["LOOM_WORKER_CANDIDATE_SHA"] == ("${LOOM_WORKER_CANDIDATE_SHA:-legacy}")
     assert env["LOOM_WORKER_SLURM_JOB_ID"] == "${LOOM_WORKER_SLURM_JOB_ID:-none}"
-    assert env["LOOM_WORKER_COMPOSE_PROJECT"] == (
-        "${LOOM_WORKER_COMPOSE_PROJECT:-manual}"
-    )
+    assert env["LOOM_WORKER_COMPOSE_PROJECT"] == ("${LOOM_WORKER_COMPOSE_PROJECT:-manual}")
     assert env["LOOM_WORKER_SLURM_ALLOCATED_GPUS"] == ("${LOOM_WORKER_SLURM_ALLOCATED_GPUS:--1}")
     assert worker["labels"] == {
         "loom.sandbox": "${LOOM_WORKER_SANDBOX_IDENTITY:-manual}",

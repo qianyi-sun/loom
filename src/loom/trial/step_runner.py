@@ -396,6 +396,7 @@ def _isolated_verifier_start_options(ctx: TrialContext) -> StartOptions:
         container_cpus=ctx.container_cpus,
         container_memory_mib=ctx.container_memory_mib,
         container_pids=ctx.container_pids,
+        cgroup_parent=ctx.container_cgroup_parent,
         slurm_allocated_gpus=ctx.slurm_allocated_gpus,
         slurm_gpu_device_ids=ctx.slurm_gpu_device_ids,
     )

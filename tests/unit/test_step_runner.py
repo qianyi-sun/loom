@@ -27,7 +27,7 @@ from loom.models.verifier import VerifierResult
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
-from loom.trial.step_runner import run_step
+from loom.trial.step_runner import _isolated_verifier_start_options, run_step
 from loom.trial.trial import TrialContext
 from loom.trial.workspace import (
     TB21_AGENT_WORKSPACE_POLICY,
@@ -96,6 +96,16 @@ async def context(tmp_path: Path) -> TrialContext:
         object_store=FakeObjectStore(),
         local_trajectory_path=tmp_path / "events.jsonl",
     )
+
+
+def test_isolated_verifier_inherits_slurm_cgroup_parent(
+    context: TrialContext,
+) -> None:
+    context.container_cgroup_parent = "/system.slice/slurmstepd.scope/job_123"
+
+    options = _isolated_verifier_start_options(context)
+
+    assert options.cgroup_parent == "/system.slice/slurmstepd.scope/job_123"
 
 
 async def test_run_step_happy_path(context: TrialContext, tmp_path: Path):
