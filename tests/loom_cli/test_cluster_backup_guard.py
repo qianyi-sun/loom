@@ -99,6 +99,19 @@ def _bounded_limits(**overrides: Any) -> BackupTraversalLimits:
     return BackupTraversalLimits(**values)
 
 
+def _replace_same_size_and_advance_mtime(path: Path, payload: bytes) -> None:
+    """Make metadata-guard mutation tests independent of filesystem clock ticks."""
+    before = path.stat()
+    assert len(payload) == before.st_size
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    os.utime(
+        path,
+        ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
+        follow_symlinks=False,
+    )
+
+
 @pytest.mark.parametrize(
     ("namespace", "environment"),
     [
@@ -946,8 +959,7 @@ def test_manifest_writer_rejects_earlier_component_mutation_during_later_walk(
         nonlocal mutated
         chunk = real_read(fd, size)
         if chunk and not mutated and os.fstat(fd).st_ino == target_inode:
-            earlier.write_bytes(b"n")
-            earlier.chmod(0o600)
+            _replace_same_size_and_advance_mtime(earlier, b"n")
             mutated = True
         return chunk
 
@@ -986,8 +998,7 @@ def test_strict_validation_rejects_earlier_component_mutation_during_later_walk(
         nonlocal mutated
         chunk = real_read(fd, size)
         if chunk and not mutated and os.fstat(fd).st_ino == target_inode:
-            earlier.write_bytes(b"n")
-            earlier.chmod(0o600)
+            _replace_same_size_and_advance_mtime(earlier, b"n")
             mutated = True
         return chunk
 
