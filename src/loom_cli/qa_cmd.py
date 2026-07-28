@@ -272,6 +272,15 @@ def _repo_known_service_mode_ready_agents() -> list[CompatibilityAgentMetadata]:
     for name, ready in adapter_ready.items():
         if not ready or name in entries:
             continue
+        catalog_entry = agent_catalog.get_agent(
+            str(name),
+            include_internal=True,
+        )
+        if (
+            catalog_entry is not None
+            and catalog_entry.catalog_visibility != "displayed"
+        ):
+            continue
         providers, sources = adapter_overrides.get(name, default_adapter_support)
         entries[name] = CompatibilityAgentMetadata(
             name=str(name),

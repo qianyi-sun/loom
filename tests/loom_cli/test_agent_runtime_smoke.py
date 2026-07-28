@@ -43,13 +43,13 @@ def test_run_agent_smoke_matrix_filters_requested_agent(
 
     items = smoke.run_agent_smoke_matrix(
         image="loom-sandbox:test",
-        agents=["hello"],
+        agents=["oracle"],
         timeout_sec=2.5,
         model_name="smoke-model",
     )
 
-    assert [item.name for item in items] == ["hello"]
-    assert seen == [("hello", "loom-sandbox:test", 2.5, "smoke-model")]
+    assert [item.name for item in items] == ["oracle"]
+    assert seen == [("oracle", "loom-sandbox:test", 2.5, "smoke-model")]
 
 
 def test_run_agent_smoke_matrix_rejects_unknown_agent() -> None:
@@ -70,11 +70,11 @@ def test_run_agent_smoke_matrix_records_agent_failure(
 
     items = smoke.run_agent_smoke_matrix(
         image="loom-sandbox:test",
-        agents=["hello"],
+        agents=["oracle"],
     )
 
     assert len(items) == 1
-    assert items[0].name == "hello"
+    assert items[0].name == "oracle"
     assert items[0].smoke_state == "failed"
     assert items[0].failure_reason == "runtime_error"
     assert "kaboom" in (items[0].failure_message or "")

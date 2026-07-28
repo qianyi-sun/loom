@@ -1,8 +1,9 @@
-"""HelloAdapter — placeholder reference for exercising the contract.
+"""HelloAdapter — internal no-model canary for exercising the contract.
 
-Not a real agent. Its `build_invocation` returns `["echo", "hello"]` so
-contract tests can run it against a FakeDriver / scripted ExecHandle
-without any external setup.
+Not a real agent. It is intentionally hidden from user-facing service
+catalogs and model compatibility matrices. Its `build_invocation` returns an
+`echo` command so launcher contract tests can run it against a FakeDriver /
+scripted ExecHandle without any external setup or model call.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from loom_launcher.registry import register_adapter
 @dataclass(frozen=True)
 class HelloAdapter:
     name: str = "hello"
+    needs_model: bool = False
+    catalog_visibility: str = "internal"
     supports_os: frozenset[str] = frozenset({"linux"})
     endpoint_dialect: str = "openai_chat"
     api_key_env: str = "OPENAI_API_KEY"

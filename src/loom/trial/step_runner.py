@@ -31,6 +31,7 @@ from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.artifacts import ArtifactCollector
 from loom.trial.phase_network import phase_network
+from loom.trial.stale_running import effective_agent_timeout_sec
 from loom.trial.workspace import materialize_workspace
 from loom.trial.workspace_snapshot import handoff_workspace_snapshot
 
@@ -580,12 +581,14 @@ async def _post_mortem_verifier_probe(driver: object) -> str:
 
 
 def _resolve_agent_timeout(ctx: TrialContext, step: StepConfig) -> float:
-    base = ctx.task_config.agent.timeout_sec
-    if step.agent and step.agent.timeout_sec is not None:
-        base = step.agent.timeout_sec
-    if ctx.trial_config.override_agent_timeout_sec is not None:
-        base = ctx.trial_config.override_agent_timeout_sec
-    return base * ctx.trial_config.agent_timeout_multiplier
+    timeout = effective_agent_timeout_sec(
+        task_config=ctx.task_config,
+        trial_config=ctx.trial_config,
+        step_config=step,
+    )
+    if timeout is None:  # TaskConfig validation guarantees a positive default.
+        raise ValueError("agent timeout could not be resolved")
+    return timeout
 
 
 def _resolve_verifier_timeout(ctx: TrialContext, step: StepConfig) -> float:

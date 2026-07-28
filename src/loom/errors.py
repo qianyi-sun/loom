@@ -117,11 +117,18 @@ _TEXTUAL_PROVIDER_TRANSPORT_RE = re.compile(
 _PROVIDER_TRANSPORT_DISCONNECT_MESSAGE = (
     "Provider transport disconnected before returning a response."
 )
-_TEXTUAL_STEP_JWT_AUTH_RE = re.compile(
+_TEXTUAL_CREDENTIAL_SCOPE_RE = re.compile(
     r"""["']detail["']\s*:\s*["']not authorized["']""",
     re.IGNORECASE,
 )
-_STEP_JWT_AUTH_MESSAGE = "Loom gateway rejected or expired the step token (HTTP 401)."
+_TEXTUAL_INVALID_BEARER_RE = re.compile(
+    r"""["']detail["']\s*:\s*["']invalid bearer token["']"""
+    r"|step token (?:is )?(?:invalid|expired)"
+    r"|token has expired",
+    re.IGNORECASE,
+)
+_CREDENTIAL_SCOPE_MESSAGE = "Loom gateway rejected a credential without llm:call scope (HTTP 401)."
+_STEP_JWT_INVALID_MESSAGE = "Loom gateway rejected an invalid or expired step token (HTTP 401)."
 
 
 def _redact_body(raw: str) -> str:
@@ -151,8 +158,10 @@ def classify_failure_message(message: str) -> tuple[FailureReason, str | None] |
     grouped with model/agent logic errors.
     """
 
-    if "401" in message and _TEXTUAL_STEP_JWT_AUTH_RE.search(message):
-        return FailureReason.GATEWAY_ERROR, _STEP_JWT_AUTH_MESSAGE
+    if "401" in message and _TEXTUAL_CREDENTIAL_SCOPE_RE.search(message):
+        return FailureReason.GATEWAY_ERROR, _CREDENTIAL_SCOPE_MESSAGE
+    if "401" in message and _TEXTUAL_INVALID_BEARER_RE.search(message):
+        return FailureReason.GATEWAY_ERROR, _STEP_JWT_INVALID_MESSAGE
 
     if not _TEXTUAL_PROVIDER_TRANSPORT_RE.search(message):
         return None
@@ -181,6 +190,15 @@ def _classify_http_status_error(exc: BaseException) -> tuple[FailureReason, str 
         return None
 
     status = exc.response.status_code
+    if status == 401:
+        try:
+            body_text = exc.response.text
+        except Exception:
+            body_text = ""
+        if _TEXTUAL_CREDENTIAL_SCOPE_RE.search(body_text):
+            return FailureReason.GATEWAY_ERROR, _CREDENTIAL_SCOPE_MESSAGE
+        if _TEXTUAL_INVALID_BEARER_RE.search(body_text):
+            return FailureReason.GATEWAY_ERROR, _STEP_JWT_INVALID_MESSAGE
     if 400 <= status <= 499:
         try:
             body_text = exc.response.text

@@ -22,6 +22,7 @@ from loom_benchmark_tool.publish_cmd import (
     MANIFEST_SCHEMA_VERSION,
     _bundle_checksum,
     _prepare_adapter_source,
+    _required_artifact_contract_tag,
     _safe_dirname,
     repo_id_for,
 )
@@ -106,6 +107,23 @@ def test_manifest_schema_version_is_int() -> None:
     to a string would silently break the manifest reader."""
     assert isinstance(MANIFEST_SCHEMA_VERSION, int)
     assert MANIFEST_SCHEMA_VERSION >= 3
+
+
+def test_required_artifact_contract_tag_distinguishes_declared_from_none() -> None:
+    assert _required_artifact_contract_tag({"steps": [{"name": "main"}]}) == "none"
+    assert (
+        _required_artifact_contract_tag(
+            {
+                "steps": [
+                    {
+                        "name": "main",
+                        "required_artifacts": ["design_parameters.json"],
+                    }
+                ]
+            }
+        )
+        == "declared"
+    )
 
 
 def test_prepare_adapter_source_fetches_independent_audit_manifest(
@@ -264,6 +282,7 @@ async def test_run_publish_includes_valid_task_config_in_manifest(
     assert task["tags"] == {
         "difficulty": "smoke",
         "license_execution_policy": "notice",
+        "required_artifacts_contract": "none",
     }
 
 

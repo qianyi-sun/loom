@@ -91,7 +91,7 @@ def test_provider_transport_disconnect_message_classification_is_idempotent():
     assert msg.count(prefix) == 1
 
 
-def test_textual_loom_step_jwt_401_is_actionable_and_redacted() -> None:
+def test_textual_credential_scope_401_is_actionable_and_redacted() -> None:
     result = classify_failure_message(
         "litellm.AuthenticationError: Error code: 401 - "
         "{'detail': 'not authorized'} Authorization: Bearer secret-token"
@@ -100,7 +100,25 @@ def test_textual_loom_step_jwt_401_is_actionable_and_redacted() -> None:
     assert result is not None
     reason, msg = result
     assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == "Loom gateway rejected or expired the step token (HTTP 401)."
+    assert msg == (
+        "Loom gateway rejected a credential without llm:call scope (HTTP 401)."
+    )
+    assert "secret-token" not in msg
+
+
+def test_textual_expired_step_jwt_401_is_distinct_and_redacted() -> None:
+    result = classify_failure_message(
+        "litellm.AuthenticationError: Error code: 401 - "
+        "{'detail': 'invalid bearer token'} "
+        "Authorization: Bearer loom_step_secret-token"
+    )
+
+    assert result is not None
+    reason, msg = result
+    assert reason == FailureReason.GATEWAY_ERROR
+    assert msg == (
+        "Loom gateway rejected an invalid or expired step token (HTTP 401)."
+    )
     assert "secret-token" not in msg
 
 
@@ -122,9 +140,37 @@ def test_http_400_is_provider_error():
     assert "400" in msg
 
 
-def test_http_401_is_provider_error():
+def test_unclassified_http_401_is_provider_error():
     reason, _ = classify_failure(_http_status_error(401))
     assert reason == FailureReason.PROVIDER_ERROR
+
+
+def test_http_401_scope_rejection_is_gateway_error_and_redacted():
+    reason, msg = classify_failure(
+        _http_status_error(
+            401,
+            '{"detail":"not authorized","token":"loom_worker_supersecret"}',
+        ),
+    )
+    assert reason == FailureReason.GATEWAY_ERROR
+    assert msg == (
+        "Loom gateway rejected a credential without llm:call scope (HTTP 401)."
+    )
+    assert "supersecret" not in msg
+
+
+def test_http_401_expired_step_jwt_is_distinct_and_redacted():
+    reason, msg = classify_failure(
+        _http_status_error(
+            401,
+            '{"detail":"invalid bearer token","token":"loom_step_supersecret"}',
+        ),
+    )
+    assert reason == FailureReason.GATEWAY_ERROR
+    assert msg == (
+        "Loom gateway rejected an invalid or expired step token (HTTP 401)."
+    )
+    assert "supersecret" not in msg
 
 
 def test_http_429_is_provider_error():

@@ -159,7 +159,6 @@ def test_catalog_entries_include_service_mode_runtime_contract() -> None:
         "claude-code",
         "codex",
         "gemini-cli",
-        "hello",
         "kimi-cli",
         "mini-swe-agent",
         "opencode",
@@ -170,6 +169,7 @@ def test_catalog_entries_include_service_mode_runtime_contract() -> None:
     }
     by_name = {a.name: a.to_dict() for a in list_agents()}
     assert displayed.issubset(by_name)
+    assert "hello" not in by_name
 
     for name in displayed:
         data = by_name[name]
@@ -184,6 +184,18 @@ def test_catalog_entries_include_service_mode_runtime_contract() -> None:
         assert "endpoint_dialect" in contract
         assert "api_key_env" in contract
         assert "base_url_env" in contract
+
+
+def test_hello_is_an_internal_no_model_canary() -> None:
+    assert get_agent("hello") is None
+
+    hello = get_agent("hello", include_internal=True)
+    assert hello is not None
+    assert hello.catalog_visibility == "internal"
+    assert hello.needs_model is False
+    assert hello.supported_providers == ()
+    assert hello.supported_model_sources == ()
+    assert "no model call" in hello.description
 
 
 def test_catalog_package_hints_use_verified_install_sources() -> None:

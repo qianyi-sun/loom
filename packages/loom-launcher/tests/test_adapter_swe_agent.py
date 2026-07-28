@@ -78,6 +78,33 @@ def test_build_invocation_argv() -> None:
     assert env["OPENAI_API_BASE"] == "http://gateway"
 
 
+def test_install_and_runtime_do_not_require_python_alias() -> None:
+    adapter = get_adapter("swe-agent")
+    assert adapter is not None
+    assert adapter.install_script is not None
+
+    managed_python = "/opt/loom-agents/swe-agent/bin/python"
+    assert "apk add --no-cache python3 py3-pip py3-virtualenv git" in (
+        adapter.install_script
+    )
+    assert (
+        "apt-get install -y --no-install-recommends "
+        "python3 python3-pip python3-venv git"
+    ) in adapter.install_script
+    assert "python3 -m venv /opt/loom-agents/swe-agent" in adapter.install_script
+    assert f"{managed_python} -m pip install" in adapter.install_script
+    assert f'{managed_python} -c "import sweagent"' in adapter.install_script
+    assert "\npython " not in adapter.install_script
+
+    argv = adapter.build_invocation(
+        instruction="fix this issue",
+        workdir=PurePosixPath("/workspace"),
+        model=ModelSpec(provider="openai", name="gpt-5"),
+        env={"OPENAI_API_BASE": "http://gateway"},
+    )
+    assert f"exec {managed_python} -m sweagent.run.run_single" in argv[2]
+
+
 async def test_capture_via_trajectory_jsonl_tail() -> None:
     adapter = get_adapter("swe-agent")
     assert adapter is not None

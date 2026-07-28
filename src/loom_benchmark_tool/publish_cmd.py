@@ -133,6 +133,26 @@ def _bundle_checksum(bundle_dir: Path) -> str:
     return cast(str, sha256_of_dir(bundle_dir))
 
 
+def _required_artifact_contract_tag(task_config: dict[str, object]) -> str:
+    """Record whether the published config carries verifier-required outputs.
+
+    The explicit ``none`` value matters as much as ``declared``: downstream
+    diagnostics can distinguish a task that intentionally has no required
+    outputs from an older manifest that predates the contract metadata.
+    """
+    raw_steps = task_config.get("steps")
+    if isinstance(raw_steps, list):
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, dict):
+                continue
+            required = raw_step.get("required_artifacts")
+            if isinstance(required, list) and any(
+                isinstance(item, str) and bool(item.strip()) for item in required
+            ):
+                return "declared"
+    return "none"
+
+
 def _object_store_revision(task_entries: list[dict[str, Any]]) -> str:
     """Content-addressed revision derived from the sorted per-task
     byte and mode checksums. Republishing identical bundles produces the
@@ -211,6 +231,13 @@ def _stage_bundles(
                 "adapter bundle file mode provenance does not match staged bundle",
             )
         source_provenance["bundle_file_metadata_sha256"] = metadata_sha256
+        task_tags = tags_with_license_execution_policy(
+            inst.tags,
+            getattr(adapter, "license_execution_policy", None),
+        )
+        task_tags["required_artifacts_contract"] = (
+            _required_artifact_contract_tag(task_config)
+        )
         task_entries.append(
             {
                 "task_id": converted.task_id,
@@ -219,10 +246,7 @@ def _stage_bundles(
                 "checksum": checksum,
                 "license_spdx": converted.license_spdx,
                 "split": split,
-                "tags": tags_with_license_execution_policy(
-                    inst.tags,
-                    getattr(adapter, "license_execution_policy", None),
-                ),
+                "tags": task_tags,
                 "task_config": task_config,
                 "source_provenance": source_provenance,
             }

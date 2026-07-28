@@ -94,7 +94,9 @@ expects root-level artifacts. SkillLearnBench `[evaluation].required_files`
 entries are normalized relative to `/root` and emitted as
 `steps[0].required_artifacts`, so verifier-required outputs are preserved even
 when they are not covered by the generic artifact extension list; missing
-required outputs become retryable invalid-evidence diagnostics. The shim runs
+required outputs become retryable invalid-evidence diagnostics. Published task
+metadata explicitly classifies the contract as `declared` or `none`; missing
+classification identifies an old manifest and is itself invalid evidence. The shim runs
 the upstream
 `tests/test.sh` from the task root, reads `/logs/verifier/reward.txt`, and
 converts that reward into Loom's structured `VerifierResult` JSON. When the

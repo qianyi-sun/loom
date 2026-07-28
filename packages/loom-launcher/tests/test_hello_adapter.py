@@ -12,6 +12,8 @@ from loom_launcher.adapter import ModelSpec
 async def test_hello_adapter_capture_returns_one_event(make_handle) -> None:
     adapter = get_adapter("hello")
     assert adapter is not None
+    assert adapter.needs_model is False
+    assert adapter.catalog_visibility == "internal"
 
     env: dict[str, str] = {}
     argv = adapter.build_invocation(

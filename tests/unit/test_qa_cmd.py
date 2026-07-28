@@ -476,6 +476,16 @@ def test_provider_compatibility_matrix_covers_default_ready_agent_catalog() -> N
         *(
             name for name, ready in agent_catalog._ADAPTER_RUNTIME_READY.items()
             if ready
+            and (
+                (
+                    entry := agent_catalog.get_agent(
+                        name,
+                        include_internal=True,
+                    )
+                )
+                is None
+                or entry.catalog_visibility == "displayed"
+            )
         ),
     }
     live_catalog_ready_agents = {
@@ -483,6 +493,7 @@ def test_provider_compatibility_matrix_covers_default_ready_agent_catalog() -> N
         if agent.service_mode_ready
     }
     expected_agents = repo_known_ready_agents | live_catalog_ready_agents
+    assert "hello" not in expected_agents
     endpoint_types = {
         endpoint["id"] for endpoint in payload["provider_endpoint_types"]
     }
@@ -495,6 +506,7 @@ def test_provider_compatibility_matrix_covers_default_ready_agent_catalog() -> N
     assert expected_agents.issubset(emitted_by_agent)
     for agent_name in expected_agents:
         assert emitted_by_agent[agent_name] == endpoint_types
+    assert "hello" not in emitted_by_agent
 
 
 def test_provider_compatibility_matrix_includes_generic_agents_per_agent() -> None:

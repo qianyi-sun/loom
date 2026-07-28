@@ -389,6 +389,15 @@ def _required_artifact_refs(
     trajectory_index: dict[str, Any] | None,
 ) -> dict[str, Any]:
     expected = _task_required_artifacts(task)
+    benchmark_id = getattr(task, "benchmark_id", None) if task is not None else None
+    tags = getattr(task, "tags", None) if task is not None else None
+    contract_tag = (
+        tags.get("required_artifacts_contract") if isinstance(tags, dict) else None
+    )
+    contract_consistent = (
+        benchmark_id != "skilllearnbench"
+        or contract_tag == ("declared" if expected else "none")
+    )
     raw_artifacts = []
     if isinstance(trajectory_index, dict) and isinstance(
         trajectory_index.get("artifacts"),
@@ -410,7 +419,16 @@ def _required_artifact_refs(
         else:
             missing.append(required)
     return {
-        "status": ("not_declared" if not expected else "missing" if missing else "complete"),
+        "status": (
+            "contract_missing"
+            if not contract_consistent
+            else "not_declared"
+            if not expected
+            else "missing"
+            if missing
+            else "complete"
+        ),
+        "contract_tag": contract_tag,
         "expected": expected,
         "present": present,
         "missing": missing,
@@ -421,7 +439,8 @@ def _missing_required_artifacts_failure(
     trial: Trial,
     required_artifacts: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    if trial.state != "succeeded" or required_artifacts.get("status") != "missing":
+    status = required_artifacts.get("status")
+    if trial.state != "succeeded" or status not in {"missing", "contract_missing"}:
         return None
     missing = required_artifacts.get("missing")
     missing_patterns = []
@@ -431,9 +450,15 @@ def _missing_required_artifacts_failure(
             for item in missing
             if isinstance(item, dict) and item.get("pattern")
         ]
-    message = "Verifier-required artifact evidence is incomplete" + (
-        f": {', '.join(missing_patterns)}" if missing_patterns else ""
-    )
+    if status == "contract_missing":
+        message = (
+            "SkillLearnBench required-artifact contract metadata is missing or "
+            "inconsistent; republish and register the benchmark manifest"
+        )
+    else:
+        message = "Verifier-required artifact evidence is incomplete" + (
+            f": {', '.join(missing_patterns)}" if missing_patterns else ""
+        )
     return {
         "reason_code": "trial.missing_required_artifacts",
         "reason": "missing_required_artifacts",
@@ -754,6 +779,12 @@ def build_trial_debug_evidence(
                 "Confirm the task writes required files under the task workdir before verifier exit.",
             ]
             if required_artifacts["status"] == "missing"
+            else [
+                "Exclude this trial from clean benchmark evidence.",
+                "Republish and register the SkillLearnBench manifest so every task "
+                "declares its required-artifact contract.",
+            ]
+            if required_artifacts["status"] == "contract_missing"
             else _next_actions_for_trial(trial)
         ),
     }

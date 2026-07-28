@@ -19,21 +19,24 @@ from loom_launcher.registry import register_adapter
 # pinning is the version-pin equivalent for git+https installs; CI
 # lint accepts the `@<tag>` portion via _looks_pinned_pip.
 _SWE_AGENT_TAG = "v1.1.0"
+_SWE_AGENT_VENV = "/opt/loom-agents/swe-agent"
+_SWE_AGENT_PYTHON = f"{_SWE_AGENT_VENV}/bin/python"
 _SWE_AGENT_INSTALL_SCRIPT = f"""\
 set -euo pipefail
 if command -v apk >/dev/null 2>&1; then
-  apk add --no-cache python3 py3-pip git
+  apk add --no-cache python3 py3-pip py3-virtualenv git
 elif command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends python3 python3-pip git
+  apt-get install -y --no-install-recommends python3 python3-pip python3-venv git
 else
   echo "no supported package manager (apk/apt-get); cannot install swe-agent" >&2
   exit 1
 fi
-pip install --no-cache-dir --break-system-packages \\
+python3 -m venv {_SWE_AGENT_VENV}
+{_SWE_AGENT_PYTHON} -m pip install --no-cache-dir \\
   -e git+https://github.com/SWE-agent/SWE-agent@{_SWE_AGENT_TAG}#egg=sweagent
-python -c "import sweagent"
+{_SWE_AGENT_PYTHON} -c "import sweagent"
 """
 
 
@@ -74,7 +77,7 @@ class SweAgentAdapter:
             'if git -C "$repo" remote get-url origin >/dev/null 2>&1; then '
             'git -C "$repo" remote set-url origin "$repo"; '
             'else git -C "$repo" remote add origin "$repo"; fi; '
-            "exec python -m sweagent.run.run_single "
+            f"exec {_SWE_AGENT_PYTHON} -m sweagent.run.run_single "
             f"--agent.model.name {shlex.quote(model_name)} "
             "--agent.model.per_instance_cost_limit 0 "
             "--agent.model.total_cost_limit 0 "
