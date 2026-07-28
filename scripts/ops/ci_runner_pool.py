@@ -666,6 +666,17 @@ apt-get install -y --no-install-recommends \
   sudo \
   unzip
 systemctl enable --now docker
+wait_for_registry() {{
+  for _attempt in $(seq 1 30); do
+    if curl --fail --silent http://127.0.0.1:5000/v2/ >/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  systemctl status --no-pager docker-registry >&2 || true
+  journalctl --no-pager -u docker-registry -n 50 >&2 || true
+  return 1
+}}
 install -d -o docker-registry -g docker-registry -m 0750 \
   /var/lib/loom-ci-registry
 cat >/etc/docker/registry/config.yml <<'EOF'
@@ -681,7 +692,7 @@ http:
 EOF
 systemctl enable docker-registry
 systemctl restart docker-registry
-curl --fail --silent --show-error http://127.0.0.1:5000/v2/ >/dev/null
+wait_for_registry
 install -d -m 0700 /run/loom-ci-registry
 install -d -m 0755 /mnt/loom-ci-assets
 mount -o ro LABEL=LOOMCIASSETS /mnt/loom-ci-assets
@@ -732,6 +743,7 @@ http:
   addr: 0.0.0.0:5000
 EOF
 systemctl restart docker-registry
+wait_for_registry
 cat >/etc/docker/daemon.json <<'EOF'
 {{
   "insecure-registries": ["127.0.0.1:5000"],
