@@ -729,12 +729,17 @@ def _write_or_verify_secure(path: Path, payload: Mapping[str, Any]) -> None:
     expected = _canonical_bytes(payload)
     _validate_secure_directory(path.parent)
     try:
+        path.lstat()
+    except FileNotFoundError:
+        # Only an artifact that existed before this call is an idempotent crash
+        # replay.  A create/fsync/readback failure must propagate even if the
+        # leaf became visible, otherwise a failed directory fsync could be
+        # mistaken for a durably committed checkpoint.
         _write_secure_exclusive(path, payload)
-    except AcceptanceError:
-        try:
-            actual = _secure_bytes_load(path)
-        except AcceptanceError:
-            raise
+    except OSError as exc:
+        raise AcceptanceError("acceptance state file is unavailable") from exc
+    else:
+        actual = _secure_bytes_load(path)
         if actual != expected:
             raise AcceptanceError("existing acceptance state file does not match") from None
 

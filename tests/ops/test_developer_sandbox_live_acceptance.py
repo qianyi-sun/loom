@@ -577,6 +577,33 @@ def test_state_file_owner_mismatch_fails_readback(
         ACCEPTANCE._session_state(state["session_id"])
 
 
+def test_late_checkpoint_create_failure_is_not_mistaken_for_durable_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_live_host(tmp_path, monkeypatch)
+    state = ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+    destination = (
+        tmp_path
+        / "state/sessions"
+        / state["session_id"]
+        / "checkpoints/00-preflight.json"
+    )
+    payload = {"schema_version": 1, "phase": "preflight"}
+    original_create = ACCEPTANCE._write_secure_exclusive
+
+    def fail_after_visible(path: Path, value: dict[str, Any]) -> None:
+        original_create(path, value)
+        raise ACCEPTANCE.AcceptanceError("simulated directory fsync failure")
+
+    monkeypatch.setattr(ACCEPTANCE, "_write_secure_exclusive", fail_after_visible)
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="directory fsync failure"):
+        ACCEPTANCE._write_or_verify_secure(destination, payload)
+
+    monkeypatch.setattr(ACCEPTANCE, "_write_secure_exclusive", original_create)
+    ACCEPTANCE._write_or_verify_secure(destination, payload)
+
+
 def test_checkpoint_is_crash_idempotent_and_rejects_changed_phase(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
