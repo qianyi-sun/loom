@@ -876,3 +876,161 @@ def test_receipt_invalidation_fsyncs_parent_after_unlink(
 
     assert not target.exists()
     assert fsynced == [target.parent]
+
+
+def test_rollback_uses_the_same_transaction_lock_as_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    receipt_path = Path("/var/lib/loom-developer-domain-runtime/receipt.json")
+    receipt = {
+        "domain": "oldlab",
+        "sandbox": "qianyi",
+        "candidate_sha": "a" * 40,
+    }
+    events: list[str] = []
+
+    @contextmanager
+    def lock(_config: object, domain: str, sandbox: str, sha: str) -> object:
+        events.append(f"lock:{domain}:{sandbox}:{sha}")
+        yield
+
+    monkeypatch.setattr(runtime, "_read_rollback_receipt", lambda *_args: receipt)
+    monkeypatch.setattr(runtime, "_transaction_lock", lock)
+    monkeypatch.setattr(
+        runtime,
+        "_rollback_locked",
+        lambda *_args, **_kwargs: events.append("rollback") or {"status": "rolled-back"},
+    )
+
+    result = runtime._rollback(config, receipt_path, allow_committed=True)
+
+    assert result["status"] == "rolled-back"
+    assert events == [f"lock:oldlab:qianyi:{'a' * 40}", "rollback"]
+
+
+def test_old_receipt_cannot_mutate_a_newer_attestation_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    sha = "a" * 40
+    tree = "b" * 40
+    current_env = tmp_path / "worker.env"
+    current_env.write_text("new-env\n", encoding="utf-8")
+    (tmp_path / "previous.env").write_bytes(b"old-env\n")
+    manifest = tmp_path / "oldlab.json"
+    signature = tmp_path / "oldlab.sig"
+    raw_signature = b"newer-signature"
+    manifest.write_text(
+        json.dumps(
+            {
+                "payload_sha256": "9" * 64,
+                "publisher": {"generation": 8},
+            },
+        ),
+        encoding="utf-8",
+    )
+    signature.write_bytes(runtime.base64.b64encode(raw_signature) + b"\n")
+    receipt = {
+        "schema_version": 1,
+        "status": "committed",
+        "domain": "oldlab",
+        "sandbox": "qianyi",
+        "candidate_sha": sha,
+        "candidate_tree": tree,
+        "candidate_created": False,
+        "env_previously_existed": True,
+        "previous_env_sha256": runtime.hashlib.sha256(b"old-env\n").hexdigest(),
+        "published_env_sha256": runtime.hashlib.sha256(b"new-env\n").hexdigest(),
+        "attestation_previously_existed": False,
+        "previous_attestation_payload_sha256": None,
+        "previous_attestation_signature_sha256": None,
+        "attestation": {
+            "payload_sha256": "8" * 64,
+            "signature_sha256": runtime.hashlib.sha256(b"older-signature").hexdigest(),
+            "generation": 7,
+        },
+    }
+    mutations: list[str] = []
+    monkeypatch.setattr(runtime, "_read_rollback_receipt", lambda *_args: receipt)
+    monkeypatch.setattr(
+        runtime,
+        "runtime_paths",
+        lambda *_args: SimpleNamespace(env=current_env, candidate=tmp_path / "candidate"),
+    )
+    monkeypatch.setattr(runtime, "_attestation_paths", lambda *_args: (manifest, signature))
+    monkeypatch.setattr(runtime, "_secure_snapshot", lambda *_args: b"old-env\n")
+    monkeypatch.setattr(
+        runtime,
+        "_atomic_env_write",
+        lambda *_args, **_kwargs: mutations.append("env"),
+    )
+    monkeypatch.setattr(runtime, "_write_json", lambda *_args, **_kwargs: mutations.append("receipt"))
+
+    with pytest.raises(runtime.ConvergenceError, match="no longer matches"):
+        runtime._rollback_locked(config, tmp_path / "receipt.json", allow_committed=True)
+
+    assert mutations == []
+    assert current_env.read_text(encoding="utf-8") == "new-env\n"
+
+
+def test_rollback_resumes_after_attestation_restore_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    sha = "a" * 40
+    current_env = tmp_path / "worker.env"
+    current_env.write_text("new-env\n", encoding="utf-8")
+    (tmp_path / "previous.env").write_bytes(b"old-env\n")
+    receipt = {
+        "schema_version": 1,
+        "status": "rolling-back",
+        "rollback_phase": "attestation-restored",
+        "domain": "oldlab",
+        "sandbox": "qianyi",
+        "candidate_sha": sha,
+        "candidate_tree": "b" * 40,
+        "candidate_created": False,
+        "env_previously_existed": True,
+        "previous_env_sha256": runtime.hashlib.sha256(b"old-env\n").hexdigest(),
+        "published_env_sha256": runtime.hashlib.sha256(b"new-env\n").hexdigest(),
+        "attestation_previously_existed": False,
+        "previous_attestation_payload_sha256": None,
+        "previous_attestation_signature_sha256": None,
+        "attestation": {
+            "payload_sha256": "8" * 64,
+            "signature_sha256": "9" * 64,
+            "generation": 7,
+        },
+    }
+    restored: list[bytes] = []
+    monkeypatch.setattr(runtime, "_read_rollback_receipt", lambda *_args: receipt)
+    monkeypatch.setattr(
+        runtime,
+        "runtime_paths",
+        lambda *_args: SimpleNamespace(env=current_env, candidate=tmp_path / "candidate"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_attestation_paths",
+        lambda *_args: (tmp_path / "manifest", tmp_path / "signature"),
+    )
+    monkeypatch.setattr(runtime, "_secure_snapshot", lambda *_args: b"old-env\n")
+    monkeypatch.setattr(
+        runtime,
+        "_atomic_env_write",
+        lambda source, *_args, **_kwargs: restored.append(source.read_bytes()),
+    )
+    monkeypatch.setattr(runtime, "_write_json", lambda *_args, **_kwargs: None)
+
+    result = runtime._rollback_locked(
+        config,
+        tmp_path / "receipt.json",
+        allow_committed=True,
+    )
+
+    assert restored == [b"old-env\n"]
+    assert result["status"] == "rolled-back"
+    assert "rollback_phase" not in result

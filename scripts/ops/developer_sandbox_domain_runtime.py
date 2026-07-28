@@ -987,11 +987,39 @@ def _create_receipt(
     os.chown(receipt_dir, 0, 0)
     os.chmod(receipt_dir, 0o700)
     previous = env_path.exists()
+    previous_env_sha256: str | None = None
     if previous:
         backup = receipt_dir / "previous.env"
-        backup.write_bytes(env_path.read_bytes())
+        previous_bytes = env_path.read_bytes()
+        backup.write_bytes(previous_bytes)
         os.chown(backup, 0, 0)
         os.chmod(backup, 0o600)
+        previous_env_sha256 = hashlib.sha256(previous_bytes).hexdigest()
+    manifest_path, signature_path = _attestation_paths(domain.name, sandbox, identity.sha)
+    prior_attestation = manifest_path.exists() or signature_path.exists()
+    if manifest_path.exists() != signature_path.exists():
+        raise ConvergenceError("existing domain attestation pair is incomplete")
+    previous_attestation_payload_sha256: str | None = None
+    previous_attestation_signature_sha256: str | None = None
+    if prior_attestation:
+        previous_manifest_bytes = manifest_path.read_bytes()
+        previous_signature_bytes = signature_path.read_bytes()
+        _atomic_bytes(
+            receipt_dir / "previous-attestation.json",
+            previous_manifest_bytes,
+            mode=0o600,
+        )
+        _atomic_bytes(
+            receipt_dir / "previous-attestation.sig",
+            previous_signature_bytes,
+            mode=0o600,
+        )
+        previous_attestation_payload_sha256 = hashlib.sha256(
+            previous_manifest_bytes,
+        ).hexdigest()
+        previous_attestation_signature_sha256 = hashlib.sha256(
+            previous_signature_bytes,
+        ).hexdigest()
     receipt: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "status": "prepared",
@@ -1001,6 +1029,11 @@ def _create_receipt(
         "candidate_tree": identity.tree,
         "candidate_created": False,
         "env_previously_existed": previous,
+        "previous_env_sha256": previous_env_sha256,
+        "published_env_sha256": None,
+        "attestation_previously_existed": prior_attestation,
+        "previous_attestation_payload_sha256": previous_attestation_payload_sha256,
+        "previous_attestation_signature_sha256": previous_attestation_signature_sha256,
         "env_values": "redacted",
     }
     receipt_path = receipt_dir / "receipt.json"
@@ -2150,21 +2183,90 @@ def _rollback(
     *,
     allow_committed: bool,
 ) -> dict[str, object]:
+    receipt = _read_rollback_receipt(config, receipt_path)
+    domain_name = receipt.get("domain")
+    sandbox = receipt.get("sandbox")
+    sha = receipt.get("candidate_sha")
+    if (
+        not isinstance(domain_name, str)
+        or domain_name not in config.domains
+        or not isinstance(sandbox, str)
+        or sandbox not in ALLOWED_SANDBOXES
+        or not isinstance(sha, str)
+        or _SHA_RE.fullmatch(sha) is None
+    ):
+        raise ConvergenceError("rollback receipt identity is invalid")
+    with _transaction_lock(config, domain_name, sandbox, sha):
+        return _rollback_locked(
+            config,
+            receipt_path,
+            allow_committed=allow_committed,
+        )
+
+
+def _read_rollback_receipt(
+    config: RuntimeConfig,
+    receipt_path: Path,
+) -> dict[str, object]:
     try:
+        original_metadata = receipt_path.lstat()
         resolved_receipt = receipt_path.resolve(strict=True)
         resolved_root = config.state_root.resolve(strict=True)
     except OSError as exc:
         raise ConvergenceError("rollback receipt is unavailable or invalid") from exc
-    if resolved_root not in resolved_receipt.parents:
+    if (
+        stat.S_ISLNK(original_metadata.st_mode)
+        or not stat.S_ISREG(original_metadata.st_mode)
+        or original_metadata.st_uid != 0
+        or original_metadata.st_gid != 0
+        or stat.S_IMODE(original_metadata.st_mode) != 0o600
+        or resolved_root not in resolved_receipt.parents
+    ):
         raise ConvergenceError("rollback receipt is outside the transaction state root")
-    receipt_path = resolved_receipt
+    parent = resolved_receipt.parent.lstat()
+    if (
+        stat.S_ISLNK(parent.st_mode)
+        or not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != 0
+        or parent.st_gid != 0
+        or stat.S_IMODE(parent.st_mode) != 0o700
+    ):
+        raise ConvergenceError("rollback receipt parent metadata is invalid")
     try:
-        raw_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        raw_receipt = json.loads(resolved_receipt.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ConvergenceError("rollback receipt is unavailable or invalid") from exc
     if not isinstance(raw_receipt, dict):
         raise ConvergenceError("rollback receipt is unavailable or invalid")
-    receipt = cast(dict[str, object], raw_receipt)
+    return cast(dict[str, object], raw_receipt)
+
+
+def _secure_snapshot(path: Path, expected_digest: object, label: str) -> bytes:
+    try:
+        metadata = path.lstat()
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ConvergenceError(f"{label} is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or not isinstance(expected_digest, str)
+        or hashlib.sha256(content).hexdigest() != expected_digest
+    ):
+        raise ConvergenceError(f"{label} metadata or digest is invalid")
+    return content
+
+
+def _rollback_locked(
+    config: RuntimeConfig,
+    receipt_path: Path,
+    *,
+    allow_committed: bool,
+) -> dict[str, object]:
+    receipt = _read_rollback_receipt(config, receipt_path)
     if receipt.get("schema_version") != SCHEMA_VERSION:
         raise ConvergenceError("rollback receipt schema is invalid")
     status = receipt.get("status")
@@ -2172,6 +2274,8 @@ def _rollback(
         return receipt
     if status == "committed" and not allow_committed:
         raise ConvergenceError("committed transaction requires explicit rollback command")
+    if status not in {"prepared", "mutating", "committed", "rolling-back"}:
+        raise ConvergenceError("rollback receipt status is invalid")
     domain_name = receipt.get("domain")
     sandbox = receipt.get("sandbox")
     sha = receipt.get("candidate_sha")
@@ -2182,61 +2286,161 @@ def _rollback(
         or not isinstance(sandbox, str)
         or sandbox not in ALLOWED_SANDBOXES
         or not isinstance(sha, str)
+        or _SHA_RE.fullmatch(sha) is None
         or not isinstance(tree, str)
+        or _SHA_RE.fullmatch(tree) is None
     ):
         raise ConvergenceError("rollback receipt identity is invalid")
     domain = config.domains[domain_name]
     identity = CandidateIdentity(sha=sha, tree=tree)
     paths = runtime_paths(domain, sandbox, sha)
     backup = receipt_path.parent / "previous.env"
+    phase = receipt.get("rollback_phase")
+    if phase not in {None, "preflighted", "attestation-restored", "env-restored"}:
+        raise ConvergenceError("rollback receipt phase is invalid")
+    previous_env: bytes | None = None
     if receipt.get("env_previously_existed") is True:
-        if not backup.is_file() or stat.S_IMODE(backup.stat().st_mode) != 0o600:
-            raise ConvergenceError("rollback secret snapshot is unavailable")
-        _atomic_env_write(backup, paths.env, config.sandbox_groups[sandbox].gid)
-    else:
-        paths.env.unlink(missing_ok=True)
-    if receipt.get("candidate_created") is True and paths.candidate.exists():
-        _verify_candidate(paths.candidate, identity, config.shared_gid)
-        shutil.rmtree(paths.candidate)
-    attestation = receipt.get("attestation")
-    if isinstance(attestation, dict):
-        manifest_path, signature_path = _attestation_paths(
-            domain.name,
-            sandbox,
-            sha,
+        previous_env = _secure_snapshot(
+            backup,
+            receipt.get("previous_env_sha256"),
+            "rollback env snapshot",
         )
-        if manifest_path.exists():
+    elif receipt.get("previous_env_sha256") is not None:
+        raise ConvergenceError("rollback env snapshot binding is invalid")
+    if phase in {None, "preflighted", "attestation-restored"}:
+        published_digest = receipt.get("published_env_sha256")
+        if published_digest is not None:
+            try:
+                current_env = paths.env.read_bytes()
+            except OSError as exc:
+                raise ConvergenceError("published env is unavailable during rollback") from exc
+            if (
+                not isinstance(published_digest, str)
+                or hashlib.sha256(current_env).hexdigest() != published_digest
+            ):
+                raise ConvergenceError("published env no longer matches rollback receipt")
+    if receipt.get("candidate_created") is True and phase != "env-restored":
+        _verify_candidate(paths.candidate, identity, config.shared_gid)
+    attestation = receipt.get("attestation")
+    manifest_path, signature_path = _attestation_paths(domain.name, sandbox, sha)
+    previous_manifest: bytes | None = None
+    previous_signature: bytes | None = None
+    if isinstance(attestation, dict):
+        if phase is None:
             try:
                 current = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
+                encoded_signature = signature_path.read_bytes().strip()
+                decoded_signature = base64.b64decode(encoded_signature, validate=True)
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
                 raise ConvergenceError(
                     "current attestation is invalid during rollback",
                 ) from exc
-            if current.get("payload_sha256") != attestation.get("payload_sha256"):
+            publisher = current.get("publisher")
+            if (
+                current.get("payload_sha256") != attestation.get("payload_sha256")
+                or not isinstance(publisher, dict)
+                or publisher.get("generation") != attestation.get("generation")
+                or hashlib.sha256(decoded_signature).hexdigest()
+                != attestation.get("signature_sha256")
+            ):
                 raise ConvergenceError("current attestation no longer matches receipt")
         if receipt.get("attestation_previously_existed") is True:
-            previous_manifest = receipt_path.parent / "previous-attestation.json"
-            previous_signature = receipt_path.parent / "previous-attestation.sig"
-            if not previous_manifest.is_file() or not previous_signature.is_file():
-                raise ConvergenceError("previous attestation snapshot is unavailable")
+            previous_manifest = _secure_snapshot(
+                receipt_path.parent / "previous-attestation.json",
+                receipt.get("previous_attestation_payload_sha256"),
+                "previous attestation snapshot",
+            )
+            previous_signature = _secure_snapshot(
+                receipt_path.parent / "previous-attestation.sig",
+                receipt.get("previous_attestation_signature_sha256"),
+                "previous attestation signature snapshot",
+            )
+        elif (
+            receipt.get("previous_attestation_payload_sha256") is not None
+            or receipt.get("previous_attestation_signature_sha256") is not None
+        ):
+            raise ConvergenceError("previous attestation snapshot binding is invalid")
+    elif receipt.get("attestation_previously_existed") is True:
+        previous_manifest = _secure_snapshot(
+            receipt_path.parent / "previous-attestation.json",
+            receipt.get("previous_attestation_payload_sha256"),
+            "previous attestation snapshot",
+        )
+        previous_signature = _secure_snapshot(
+            receipt_path.parent / "previous-attestation.sig",
+            receipt.get("previous_attestation_signature_sha256"),
+            "previous attestation signature snapshot",
+        )
+        if phase is None and (
+            not manifest_path.is_file()
+            or not signature_path.is_file()
+            or hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            != receipt.get("previous_attestation_payload_sha256")
+            or hashlib.sha256(signature_path.read_bytes()).hexdigest()
+            != receipt.get("previous_attestation_signature_sha256")
+        ):
+            raise ConvergenceError("current attestation changed before rollback")
+    elif phase is None and (manifest_path.exists() or signature_path.exists()):
+        raise ConvergenceError("rollback receipt attestation binding is incomplete")
+
+    if phase is None:
+        receipt["status"] = "rolling-back"
+        receipt["rollback_phase"] = "preflighted"
+        _write_json(receipt_path, receipt)
+        phase = "preflighted"
+    if phase == "preflighted":
+        if isinstance(attestation, dict) and receipt.get("attestation_previously_existed") is True:
+            assert previous_manifest is not None and previous_signature is not None
             _atomic_bytes(
                 manifest_path,
-                previous_manifest.read_bytes(),
+                previous_manifest,
                 mode=0o644,
                 parent_mode=0o755,
             )
             _atomic_bytes(
                 signature_path,
-                previous_signature.read_bytes(),
+                previous_signature,
                 mode=0o644,
                 parent_mode=0o755,
             )
-        else:
+        elif isinstance(attestation, dict):
             manifest_path.unlink(missing_ok=True)
             signature_path.unlink(missing_ok=True)
+        receipt["rollback_phase"] = "attestation-restored"
+        _write_json(receipt_path, receipt)
+        phase = "attestation-restored"
+    if phase == "attestation-restored":
+        if previous_env is not None:
+            _atomic_env_write(backup, paths.env, config.sandbox_groups[sandbox].gid)
+        else:
+            paths.env.unlink(missing_ok=True)
+        receipt["rollback_phase"] = "env-restored"
+        _write_json(receipt_path, receipt)
+        phase = "env-restored"
+    if phase == "env-restored" and receipt.get("candidate_created") is True:
+        if paths.candidate.exists():
+            _verify_candidate(paths.candidate, identity, config.shared_gid)
+            shutil.rmtree(paths.candidate)
     receipt["status"] = "rolled-back"
+    receipt.pop("rollback_phase", None)
     _write_json(receipt_path, receipt)
     return receipt
+
+
+def _recover_orphaned_transactions(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    sha: str,
+) -> None:
+    root = config.state_root / domain.name / sandbox / sha
+    if not root.exists():
+        return
+    for receipt_path in sorted(root.glob("transaction-*/receipt.json")):
+        receipt = _read_rollback_receipt(config, receipt_path)
+        status = receipt.get("status")
+        if status in {"prepared", "mutating", "rolling-back"}:
+            _rollback_locked(config, receipt_path, allow_committed=False)
 
 
 def _converge_publish_locked(
@@ -2250,6 +2454,12 @@ def _converge_publish_locked(
     _require_root()
     if _hostname() != domain.publisher_hostname:
         raise ConvergenceError("publish must run on the declared NFS domain publisher")
+    _recover_orphaned_transactions(
+        config,
+        domain,
+        sandbox,
+        identity.sha,
+    )
     plan = publish_plan(config, domain, sandbox, identity, env_seed)
     group = config.sandbox_groups[sandbox]
     if _group_status(group.name, group.gid, group.member) != "ok":
@@ -2281,6 +2491,8 @@ def _converge_publish_locked(
         )
         if not paths.env.exists() or paths.env.read_bytes() != seed.read_bytes():
             _atomic_env_write(seed, paths.env, group.gid)
+        receipt["published_env_sha256"] = hashlib.sha256(paths.env.read_bytes()).hexdigest()
+        _write_json(receipt_path, receipt)
         reports = _peer_readback(config, domain, sandbox, identity)
         manifest_path, signature_path = _attestation_paths(
             domain.name,
@@ -2291,11 +2503,22 @@ def _converge_publish_locked(
         if manifest_path.exists() != signature_path.exists():
             raise ConvergenceError("existing domain attestation pair is incomplete")
         receipt["attestation_previously_existed"] = prior_attestation
+        receipt["previous_attestation_payload_sha256"] = None
+        receipt["previous_attestation_signature_sha256"] = None
         if prior_attestation:
             previous_manifest = receipt_path.parent / "previous-attestation.json"
             previous_signature = receipt_path.parent / "previous-attestation.sig"
-            _atomic_bytes(previous_manifest, manifest_path.read_bytes(), mode=0o600)
-            _atomic_bytes(previous_signature, signature_path.read_bytes(), mode=0o600)
+            previous_manifest_bytes = manifest_path.read_bytes()
+            previous_signature_bytes = signature_path.read_bytes()
+            _atomic_bytes(previous_manifest, previous_manifest_bytes, mode=0o600)
+            _atomic_bytes(previous_signature, previous_signature_bytes, mode=0o600)
+            receipt["previous_attestation_payload_sha256"] = hashlib.sha256(
+                previous_manifest_bytes,
+            ).hexdigest()
+            receipt["previous_attestation_signature_sha256"] = hashlib.sha256(
+                previous_signature_bytes,
+            ).hexdigest()
+        _write_json(receipt_path, receipt)
         try:
             attestation = _emit_attestation(
                 config,
@@ -2328,7 +2551,7 @@ def _converge_publish_locked(
         receipt["peer_hostnames"] = [item["hostname"] for item in reports]
         _write_json(receipt_path, receipt)
     except Exception:
-        _rollback(config, receipt_path, allow_committed=False)
+        _rollback_locked(config, receipt_path, allow_committed=False)
         raise
     result = dict(plan)
     result["mode"] = "applied"
