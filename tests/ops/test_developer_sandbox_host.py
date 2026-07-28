@@ -289,6 +289,7 @@ def test_candidate_child_environment_drops_ambient_secret(
 
     assert "DO_NOT_FORWARD_PRIVATE_VALUE" not in environment
     assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
     assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
