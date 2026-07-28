@@ -148,7 +148,12 @@ sudo rm /etc/loom-ci-runner-pool/dockerhub-credentials.json
 driver, and a QEMU image whose OCI candidate label matches the requested SHA.
 `prepare-base` verifies the pinned Ubuntu cloud image and Actions runner
 checksums, installs Docker/Buildx/Compose, a `python` → Python 3 compatibility
-command, and the C compiler required by Go race tests in a KVM guest. It also
+command, and the C compiler required by Go race tests in a KVM guest. It copies
+the checksum-pinned x86_64 `uv` archive into the sealed guest and serves a
+single-version manifest plus that archive on loopback only. Accelerated
+workflows select this manifest by the bounded runner-name prefix, avoiding a
+synchronized external manifest request while preserving the same version and
+archive checksum used on GitHub-hosted runners. It also
 authenticates only for the base-image mirror population, logs out, removes
 root's Docker configuration, switches the guest registry to read-only, and
 verifies the credential is absent before sealing the candidate-bound qcow2

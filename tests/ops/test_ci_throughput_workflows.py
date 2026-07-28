@@ -115,6 +115,10 @@ ACCELERATOR_RUNS_ON = (
     "${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || "
     """'["ubuntu-latest"]') }}"""
 )
+OLDLAB_UV_MANIFEST = (
+    "${{ startsWith(runner.name, 'oldlab5-kvm-') && "
+    "'http://127.0.0.1:8181/uv.ndjson' || '' }}"
+)
 
 ACCELERATED_JOBS = {
     ".github/workflows/ci.yml": {
@@ -154,6 +158,25 @@ def test_profitable_ci_jobs_use_opt_in_accelerator_with_hosted_default() -> None
         jobs = _workflow(workflow_path)["jobs"]
         for job_id in job_ids:
             assert jobs[job_id]["runs-on"] == ACCELERATOR_RUNS_ON
+
+
+def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:
+    workflow_paths = (
+        ".github/workflows/ci.yml",
+        ".github/workflows/cluster-smoke.yml",
+        ".github/workflows/staging-smoke.yml",
+    )
+
+    for workflow_path in workflow_paths:
+        setup_steps = [
+            step
+            for job in _workflow(workflow_path)["jobs"].values()
+            for step in job.get("steps", [])
+            if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+        ]
+        assert setup_steps
+        for step in setup_steps:
+            assert step["with"]["manifest-file"] == OLDLAB_UV_MANIFEST
 
 
 def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:

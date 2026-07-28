@@ -138,6 +138,8 @@ def _seal_golden(profile: pool.PoolProfile) -> None:
                 "candidate_sha": CANDIDATE_SHA,
                 "cloud_image_sha256": profile.cloud_image_sha256,
                 "actions_runner_sha256": profile.actions_runner_sha256,
+                "uv_version": pool.UV_VERSION,
+                "uv_archive_sha256": pool.UV_ARCHIVE_SHA256,
                 "base_images": list(pool.GUEST_BASE_IMAGES),
                 "golden_sha256": digest,
             },
@@ -365,6 +367,30 @@ def test_golden_guest_installs_github_hosted_compatibility_tools(
     assert "sudo -u runner docker compose version" in script
     assert "sudo -u runner python --version" in script
     assert "test -x /usr/bin/cc" in script
+
+
+def test_golden_guest_serves_checksum_pinned_uv_assets_on_loopback(
+    tmp_path: Path,
+) -> None:
+    script = pool._base_install_script(_profile(tmp_path))
+    toolchain = tomllib.loads(
+        (
+            Path(__file__).resolve().parents[2] / "config/uv-toolchain.toml"
+        ).read_text(encoding="utf-8"),
+    )
+
+    assert pool.UV_VERSION == toolchain["version"]
+    assert pool.UV_ARCHIVE_NAME == toolchain["archives"]["linux-x86_64"]["asset"]
+    assert (
+        pool.UV_ARCHIVE_SHA256
+        == toolchain["archives"]["linux-x86_64"]["sha256"]
+    )
+    assert f"{pool.UV_ARCHIVE_SHA256}  /mnt/loom-ci-assets/" in script
+    assert pool._uv_manifest() in script
+    assert "--bind 127.0.0.1" in script
+    assert "ProtectSystem=strict" in script
+    assert "systemctl enable --now loom-ci-uv-assets.service" in script
+    assert f"curl --fail --silent {pool.UV_MANIFEST_URL}" in script
 
 
 def test_golden_guest_seeds_images_without_retaining_registry_credentials(

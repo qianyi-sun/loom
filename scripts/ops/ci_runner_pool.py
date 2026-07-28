@@ -50,6 +50,18 @@ GOLDEN_IMAGE_NAME = "golden.qcow2"
 GOLDEN_MANIFEST_NAME = "golden-manifest.json"
 STATE_SCHEMA_VERSION = 1
 DOCKERHUB_CREDENTIALS_NAME = "dockerhub-credentials.json"
+UV_VERSION = "0.11.26"
+UV_TARGET = "x86_64-unknown-linux-gnu"
+UV_ARCHIVE_NAME = f"uv-{UV_TARGET}.tar.gz"
+UV_ARCHIVE_URL = (
+    f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{UV_ARCHIVE_NAME}"
+)
+UV_ARCHIVE_SHA256 = (
+    "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0"
+)
+UV_ASSET_PORT = 8181
+UV_MANIFEST_NAME = "uv.ndjson"
+UV_MANIFEST_URL = f"http://127.0.0.1:{UV_ASSET_PORT}/{UV_MANIFEST_NAME}"
 GUEST_BASE_IMAGES = (
     "alpine:3.19",
     "alpine/socat:1.7.4.4",
@@ -566,6 +578,24 @@ def _docker_utility_command(
     )
 
 
+def _uv_manifest() -> str:
+    return json.dumps(
+        {
+            "version": UV_VERSION,
+            "artifacts": [
+                {
+                    "platform": UV_TARGET,
+                    "variant": "default",
+                    "url": f"http://127.0.0.1:{UV_ASSET_PORT}/{UV_ARCHIVE_NAME}",
+                    "archive_format": "tar.gz",
+                    "sha256": UV_ARCHIVE_SHA256,
+                },
+            ],
+        },
+        separators=(",", ":"),
+    )
+
+
 def _qemu_container_command(
     profile: PoolProfile,
     *,
@@ -647,6 +677,7 @@ def _qemu_container_command(
 def _base_install_script(profile: PoolProfile) -> str:
     runner_sha = profile.actions_runner_sha256
     base_images = " ".join(GUEST_BASE_IMAGES)
+    uv_manifest = _uv_manifest()
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -803,10 +834,42 @@ id runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash runner
 usermod -aG docker runner
 printf 'runner ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/runner
 chmod 0440 /etc/sudoers.d/runner
-mkdir -p /mnt/loom-ci-assets /opt/actions-runner
+mkdir -p /mnt/loom-ci-assets /opt/actions-runner /opt/loom-ci-assets
 printf '{runner_sha}  /mnt/loom-ci-assets/{profile.actions_runner_name}\\n' | sha256sum -c -
 tar -xzf /mnt/loom-ci-assets/{profile.actions_runner_name} -C /opt/actions-runner
+printf '{UV_ARCHIVE_SHA256}  /mnt/loom-ci-assets/{UV_ARCHIVE_NAME}\\n' | sha256sum -c -
+install -m 0644 \
+  /mnt/loom-ci-assets/{UV_ARCHIVE_NAME} \
+  /opt/loom-ci-assets/{UV_ARCHIVE_NAME}
+cat >/opt/loom-ci-assets/{UV_MANIFEST_NAME} <<'EOF'
+{uv_manifest}
+EOF
+chmod 0644 /opt/loom-ci-assets/{UV_MANIFEST_NAME}
 umount /mnt/loom-ci-assets
+cat >/etc/systemd/system/loom-ci-uv-assets.service <<'EOF'
+[Unit]
+Description=Loom CI pinned uv assets
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/bin/python3 -m http.server {UV_ASSET_PORT} --bind 127.0.0.1 --directory /opt/loom-ci-assets
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now loom-ci-uv-assets.service
+curl --fail --silent {UV_MANIFEST_URL} \
+  | jq -e --arg version '{UV_VERSION}' '.version == $version' >/dev/null
 /opt/actions-runner/bin/installdependencies.sh
 chown -R runner:runner /opt/actions-runner
 sudo -u runner docker version
@@ -1043,6 +1106,7 @@ def prepare_base(
         "mutation_authorized": execute,
         "cloud_image": profile.cloud_image_name,
         "actions_runner": profile.actions_runner_name,
+        "uv_archive": UV_ARCHIVE_NAME,
         "golden_image": str(profile.golden_image),
     }
     if not execute:
@@ -1058,12 +1122,14 @@ def prepare_base(
     profile.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     cloud_image = profile.cache_root / profile.cloud_image_name
     actions_runner = profile.cache_root / profile.actions_runner_name
+    uv_archive = profile.cache_root / UV_ARCHIVE_NAME
     _download_pinned(profile.cloud_image_url, cloud_image, profile.cloud_image_sha256)
     _download_pinned(
         profile.actions_runner_url,
         actions_runner,
         profile.actions_runner_sha256,
     )
+    _download_pinned(UV_ARCHIVE_URL, uv_archive, UV_ARCHIVE_SHA256)
 
     build_root = profile.state_root / f".base-build-{uuid.uuid4().hex}"
     build_root.mkdir(mode=0o700)
@@ -1149,6 +1215,7 @@ def prepare_base(
                         f"{profile.actions_runner_name}="
                         f"/cache/{profile.actions_runner_name}"
                     ),
+                    f"{UV_ARCHIVE_NAME}=/cache/{UV_ARCHIVE_NAME}",
                     (
                         f"{DOCKERHUB_CREDENTIALS_NAME}="
                         f"/state/{DOCKERHUB_CREDENTIALS_NAME}"
@@ -1249,6 +1316,8 @@ def prepare_base(
                 "candidate_sha": candidate_sha,
                 "cloud_image_sha256": profile.cloud_image_sha256,
                 "actions_runner_sha256": profile.actions_runner_sha256,
+                "uv_version": UV_VERSION,
+                "uv_archive_sha256": UV_ARCHIVE_SHA256,
                 "base_images": list(GUEST_BASE_IMAGES),
                 "golden_sha256": golden_sha,
                 "created_at": datetime.now(UTC).isoformat(),
@@ -1273,6 +1342,8 @@ def _verify_golden(profile: PoolProfile, candidate_sha: str) -> None:
         "candidate_sha": candidate_sha,
         "cloud_image_sha256": profile.cloud_image_sha256,
         "actions_runner_sha256": profile.actions_runner_sha256,
+        "uv_version": UV_VERSION,
+        "uv_archive_sha256": UV_ARCHIVE_SHA256,
         "base_images": list(GUEST_BASE_IMAGES),
     }
     if any(manifest.get(key) != value for key, value in expected.items()):
