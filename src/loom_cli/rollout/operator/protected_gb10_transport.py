@@ -37,6 +37,9 @@ _UNIT_ROOT = PurePosixPath("deploy/worker-pools/gb10")
 _FIXED_REPO = PurePosixPath("/home/qianyi/loom-worker-build-staging")
 _FIXED_ENV_FILE = _FIXED_REPO / ".env"
 _FIXED_NODE_AGENT_SERVICE = "loom-gb10-node-agent.service"
+# Shared candidate Git reads traverse live NFS. Keep ordinary remote probes at
+# ten seconds, but give exact shared-source reads a bounded tail-latency budget.
+_REMOTE_SHARED_GIT_TIMEOUT_SECONDS = 30
 # Installed transports retry transient single-bastion SSH failures. Six attempts
 # with a 2s pause tolerate the connection storms the fleet observe competes with
 # (the 30s autoscaler cadence) while keeping the total per-host budget bounded.
@@ -380,14 +383,16 @@ timer = {timer!r}
 legacy = {_LEGACY_SERVICE!r}
 unit_paths = {unit_paths!r}
 
-def run(argv, *, cwd=None):
+def run(argv, *, cwd=None, timeout_seconds=10):
     return subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True,
-                          timeout=10, env={{"HOME": str(pathlib.Path.home()), "LANG": "C.UTF-8",
+                          timeout=timeout_seconds,
+                          env={{"HOME": str(pathlib.Path.home()), "LANG": "C.UTF-8",
                           "LC_ALL": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin",
                           "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
 
 def git(root, *args):
-    result = run(["git", "-c", f"safe.directory={{root}}", "-C", str(root), *args])
+    result = run(["git", "-c", f"safe.directory={{root}}", "-C", str(root), *args],
+                 timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS})
     return result.stdout.strip() if result.returncode == 0 and not result.stderr else None
 
 def plain_directory(path):
@@ -561,9 +566,10 @@ def run(argv, *, cwd=None):
     if result.returncode != 0:
         raise SystemExit(1)
 
-def output(argv):
+def output(argv, *, timeout_seconds=20):
     result = subprocess.run(argv, check=False, capture_output=True, text=True,
-                            timeout=20, env={{"HOME": str(pathlib.Path.home()),
+                            timeout=timeout_seconds,
+                            env={{"HOME": str(pathlib.Path.home()),
                             "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
                             "PATH": "/usr/local/bin:/usr/bin:/bin",
                             "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
@@ -576,9 +582,12 @@ def exact_shared_source():
     if not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode):
         return False
     prefix = ["git", "-c", f"safe.directory={{shared}}", "-C", str(shared)]
-    return (output([*prefix, "rev-parse", "HEAD"]) == candidate_sha
-            and output([*prefix, "rev-parse", "HEAD^{{tree}}"]) == candidate_tree
-            and output([*prefix, "status", "--porcelain=v1", "--untracked-files=all"]) == "")
+    return (output([*prefix, "rev-parse", "HEAD"],
+                   timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}) == candidate_sha
+            and output([*prefix, "rev-parse", "HEAD^{{tree}}"],
+                       timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}) == candidate_tree
+            and output([*prefix, "status", "--porcelain=v1", "--untracked-files=all"],
+                       timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}) == "")
 
 def ensure_user_directory(path):
     home = pathlib.Path.home()

@@ -14,6 +14,7 @@ from loom_cli.rollout.gb10_convergence import (
     GB10MutationKind,
 )
 from loom_cli.rollout.operator.protected_gb10_transport import (
+    _REMOTE_SHARED_GIT_TIMEOUT_SECONDS,
     FixedGB10SSHTransport,
     GB10TransportTarget,
     _remote_apply_source,
@@ -265,6 +266,24 @@ def test_fixed_remote_programs_compile_and_apply_rejects_noncanonical_order(tmp_
     )
     with pytest.raises(RuntimeError, match="failed safely"):
         transport.apply(plan, convergence)
+
+
+def test_remote_shared_candidate_git_uses_live_nfs_timeout_budget(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1")
+    observation = _remote_observation_source(_target(), plan)
+    apply = _remote_apply_source(
+        _target(),
+        plan,
+        (GB10MutationKind.CHECKOUT, GB10MutationKind.SERVICE_TIMER),
+    )
+
+    assert _REMOTE_SHARED_GIT_TIMEOUT_SECONDS == 30
+    assert "def run(argv, *, cwd=None, timeout_seconds=10):" in observation
+    assert "timeout=timeout_seconds" in observation
+    assert f"timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}" in observation
+    assert "def output(argv, *, timeout_seconds=20):" in apply
+    assert "timeout=timeout_seconds" in apply
+    assert f"timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}" in apply
 
 
 def test_fixed_transport_aggregates_unavailable_hosts_and_rejects_inventory_drift(
