@@ -97,6 +97,9 @@ class ElasticSlurmWorkerControllerConfig:
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
+    # Aggregate pids.max applied by the administrator-owned root guard to the
+    # non-exclusive job cgroup. 0 is allowed only for exclusive jobs.
+    job_pids_max: int = 0
     candidate_sha: str = ""
     gpu_tres: str = ""
     requested_gpus: int = 0
@@ -191,6 +194,33 @@ def _require_positive(value: int | float, name: str) -> None:
         raise ValueError(f"{name} must be positive")
 
 
+def _validate_job_pids_contract(
+    *,
+    exclusive: bool,
+    job_pids_max: int,
+    container_pids: int,
+    requested_concurrency: int,
+    resource_aware: bool,
+    max_concurrency_per_node: int,
+) -> None:
+    if type(job_pids_max) is not int or job_pids_max < 0:
+        raise ValueError("job_pids_max must be a non-negative integer")
+    if exclusive:
+        return
+    if job_pids_max == 0:
+        raise ValueError("job_pids_max is required for non-exclusive workers")
+    if job_pids_max < container_pids:
+        raise ValueError("job_pids_max must not be lower than container_pids")
+
+    concurrency_ceiling = max_concurrency_per_node if resource_aware else requested_concurrency
+    minimum_for_slots = container_pids * concurrency_ceiling
+    if job_pids_max < minimum_for_slots:
+        raise ValueError(
+            "job_pids_max must be at least container_pids times the configured "
+            f"concurrency ceiling ({minimum_for_slots})",
+        )
+
+
 def _parse_gpu_tres(value: str) -> tuple[str, int]:
     cleaned = value.strip()
     if not cleaned:
@@ -238,6 +268,7 @@ def build_controller_config(
     container_cpus: float = 0.0,
     container_memory_mib: int = 0,
     container_pids: int = 0,
+    job_pids_max: int = 0,
     candidate_sha: str = "",
     gpu_tres: str = "",
 ) -> ElasticSlurmWorkerControllerConfig | None:
@@ -285,6 +316,14 @@ def build_controller_config(
         raise ValueError("container_memory_mib must be non-negative")
     if container_pids < 0:
         raise ValueError("container_pids must be non-negative")
+    _validate_job_pids_contract(
+        exclusive=exclusive,
+        job_pids_max=job_pids_max,
+        container_pids=container_pids,
+        requested_concurrency=requested_concurrency,
+        resource_aware=resource_aware,
+        max_concurrency_per_node=max_concurrency_per_node,
+    )
     candidate_sha = candidate_sha.strip()
     if candidate_sha and _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
         raise ValueError("candidate_sha must be a 40-character lowercase Git SHA")
@@ -346,6 +385,7 @@ def build_controller_config(
         container_cpus=container_cpus,
         container_memory_mib=container_memory_mib,
         container_pids=container_pids,
+        job_pids_max=job_pids_max,
         candidate_sha=candidate_sha,
         gpu_tres=gpu_tres,
         requested_gpus=requested_gpus,
@@ -578,6 +618,14 @@ def build_sbatch_request(
     *,
     node: str,
 ) -> SbatchRequest:
+    _validate_job_pids_contract(
+        exclusive=config.exclusive,
+        job_pids_max=config.job_pids_max,
+        container_pids=config.container_pids,
+        requested_concurrency=config.requested_concurrency,
+        resource_aware=config.resource_aware,
+        max_concurrency_per_node=config.max_concurrency_per_node,
+    )
     job_node = _SAFE_JOB_NAME_RE.sub("-", node).strip("-") or "worker"
     sandbox_identity = slurm_sandbox_identity(config)
     candidate_sha = config.candidate_sha or "legacy"
@@ -603,6 +651,12 @@ def build_sbatch_request(
         )
     if config.container_pids > 0:
         export_vars.append(f"LOOM_WORKER_CONTAINER_PIDS={config.container_pids}")
+    if not config.exclusive:
+        # The batch process must prove and export the exact delegated Slurm job
+        # cgroup before Docker Compose starts.  This marker is controller-owned;
+        # the remote-worker env file cannot opt itself out of containment.
+        export_vars.append("LOOM_WORKER_REQUIRE_CGROUP_PARENT=1")
+        export_vars.append(f"LOOM_WORKER_JOB_PIDS_MAX={config.job_pids_max}")
     export = ",".join(export_vars)
     args = [
         config.sbatch_path,
@@ -612,6 +666,10 @@ def build_sbatch_request(
     ]
     if config.exclusive:
         args.append("--exclusive")
+    else:
+        # Closed, versioned grammar consumed by the administrator-owned root
+        # cgroup guard. No free-form user text crosses the privilege boundary.
+        args.append(f"--comment=loom-cgroup-v1:pids={config.job_pids_max}")
     args.append(f"--time={config.time_limit}")
     if config.partition:
         args.append(f"--partition={config.partition}")
@@ -648,7 +706,21 @@ project_job="${SLURM_JOB_ID//[^A-Za-z0-9_-]/-}"
 export LOOM_WORKER_COMPOSE_PROJECT="loom-${LOOM_WORKER_SANDBOX_IDENTITY}-${project_candidate}-${project_job}"
 
 cd "$LOOM_REMOTE_WORKER_REPO_DIR"
-compose_args=(--project-name "$LOOM_WORKER_COMPOSE_PROJECT" --env-file "$LOOM_REMOTE_WORKER_ENV_FILE" -f deploy/docker-compose.remote-worker.yml)
+compose_files=(-f deploy/docker-compose.remote-worker.yml)
+if [[ "${LOOM_WORKER_REQUIRE_CGROUP_PARENT:-0}" == "1" ]]; then
+  export LOOM_WORKER_CGROUP_PARENT="$(
+    PYTHONPATH="$LOOM_REMOTE_WORKER_REPO_DIR/src" \
+      /usr/bin/python3 -m loom_control_plane.slurm_job_cgroup \
+      --job-id "$SLURM_JOB_ID" \
+      --pids-max "$LOOM_WORKER_JOB_PIDS_MAX" \
+      --wait-seconds 30
+  )"
+  : "${LOOM_WORKER_CGROUP_PARENT:?delegated Slurm job cgroup is required}"
+  compose_files+=(-f deploy/docker-compose.remote-worker.cgroup-parent.yml)
+else
+  unset LOOM_WORKER_CGROUP_PARENT
+fi
+compose_args=(--project-name "$LOOM_WORKER_COMPOSE_PROJECT" --env-file "$LOOM_REMOTE_WORKER_ENV_FILE" "${compose_files[@]}")
 
 cleanup() {
   status=${1:-$?}

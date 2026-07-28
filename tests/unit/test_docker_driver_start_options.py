@@ -269,6 +269,72 @@ async def test_docker_driver_applies_container_caps_when_set(
     assert container.started is True
 
 
+async def test_docker_driver_applies_exact_cgroup_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_kwargs: dict[str, Any] = {}
+    container = _FakeContainer()
+
+    class _Containers:
+        def create(self, image: str, **kwargs: Any) -> object:
+            create_kwargs.update(kwargs)
+            return container
+
+    class _Client:
+        containers = _Containers()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+
+    async def _noop_wait(self: DockerDriver) -> None:
+        return None
+
+    async def _noop_policy(self: DockerDriver, policy: object) -> None:
+        return None
+
+    monkeypatch.setattr(DockerDriver, "_wait_until_running", _noop_wait)
+    monkeypatch.setattr(DockerDriver, "set_network_policy", _noop_policy)
+
+    driver = DockerDriver(image="loom-agent-sandbox:dev")
+    await driver.start(
+        options=StartOptions(
+            cgroup_parent="/system.slice/slurmstepd.scope/job_123",
+        )
+    )
+
+    assert create_kwargs["cgroup_parent"] == ("/system.slice/slurmstepd.scope/job_123")
+
+
+@pytest.mark.parametrize("cgroup_parent", ["", "/", "relative/path", "/a/../b"])
+async def test_docker_driver_rejects_unsafe_cgroup_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    cgroup_parent: str,
+) -> None:
+    class _Images:
+        def get(self, image: str) -> object:
+            return object()
+
+    class _Containers:
+        def create(self, image: str, **kwargs: Any) -> object:
+            raise AssertionError("unsafe cgroup parent reached Docker")
+
+    class _Client:
+        images = _Images()
+        containers = _Containers()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+
+    driver = DockerDriver(image="loom-agent-sandbox:dev")
+    with pytest.raises(DriverError, match="cgroup parent"):
+        await driver.start(options=StartOptions(cgroup_parent=cgroup_parent))
+
+
 async def test_docker_driver_omits_container_caps_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import socket
 import tempfile
@@ -31,7 +32,7 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -113,6 +114,7 @@ _SETUP_FAILURE_HEAD_CHARS = 360
 _SETUP_FAILURE_TRUNCATION_MARKER = (
     "\n...[truncated setup diagnostic; preserved trailing output]...\n"
 )
+_SLURM_JOB_ID_RE = re.compile(r"^[1-9][0-9]*(?:_[0-9]+)?$")
 
 logger = logging.getLogger(__name__)
 
@@ -179,11 +181,59 @@ def _runtime_identity_labels(
 def _slurm_gpu_device_ids(settings: WorkerSettings) -> tuple[str, ...]:
     """Normalize Slurm's comma-separated GPU device allocation."""
     raw_device_ids = getattr(settings, "slurm_gpu_device_ids", "")
-    return tuple(
-        device_id.strip()
-        for device_id in raw_device_ids.split(",")
-        if device_id.strip()
-    )
+    return tuple(device_id.strip() for device_id in raw_device_ids.split(",") if device_id.strip())
+
+
+def _worker_cgroup_parent(settings: WorkerSettings) -> str | None:
+    """Validate the controller-bound Docker parent before worker registration."""
+
+    required = bool(getattr(settings, "require_cgroup_parent", False))
+    raw_parent = str(getattr(settings, "cgroup_parent", "")).strip()
+    if not raw_parent:
+        if required:
+            raise RuntimeError(
+                "non-exclusive Slurm worker requires an allocation cgroup parent",
+            )
+        return None
+    if "\x00" in raw_parent or "\n" in raw_parent or "\r" in raw_parent:
+        raise RuntimeError("worker cgroup parent is malformed")
+    parent = PurePosixPath(raw_parent)
+    if not parent.is_absolute() or parent == PurePosixPath("/"):
+        raise RuntimeError("worker cgroup parent must be a non-root absolute path")
+    if any(part in {".", ".."} for part in raw_parent.split("/")):
+        raise RuntimeError("worker cgroup parent contains traversal")
+    if required:
+        slurm_job_id = str(getattr(settings, "slurm_job_id", "")).strip()
+        if _SLURM_JOB_ID_RE.fullmatch(slurm_job_id) is None:
+            raise RuntimeError(
+                "required worker cgroup parent needs a valid Slurm job ID",
+            )
+        parts = parent.parts[1:]
+        marker_indexes = [
+            index
+            for index, part in enumerate(parts)
+            if part == "slurm" or part == "slurmstepd.scope" or part.endswith("_slurmstepd.scope")
+        ]
+        if not marker_indexes:
+            raise RuntimeError(
+                "required worker cgroup parent has no identifiable Slurm scope",
+            )
+        expected_jobs = {f"job_{slurm_job_id}"}
+        if "_" in slurm_job_id:
+            expected_jobs.add(f"job_{slurm_job_id.split('_', 1)[0]}")
+        for index, part in enumerate(parts):
+            if not any(marker_index < index for marker_index in marker_indexes):
+                continue
+            if part in expected_jobs:
+                return parent.as_posix()
+            if part.startswith("job_"):
+                raise RuntimeError(
+                    "required worker cgroup parent does not match the Slurm job ID",
+                )
+        raise RuntimeError(
+            "required worker cgroup parent has no job scope after the Slurm marker",
+        )
+    return parent.as_posix()
 
 
 _DEFAULT_CAPS = [
@@ -321,6 +371,10 @@ async def run_worker(settings: WorkerSettings) -> None:
     state = ShutdownState()
     install_signal_handlers(state)
 
+    # Evaluate the controller-owned containment binding before registration,
+    # cleanup, or claims. A non-exclusive worker must never become visible if
+    # its allocation cgroup was lost or replaced.
+    _worker_cgroup_parent(settings)
     settings.trajectory_cache_dir.mkdir(parents=True, exist_ok=True)
     _configure_blocking_io_executor(settings)
     _log_docker_registry_auth_summary()
@@ -1021,6 +1075,7 @@ async def _spawn_trial(
             container_cpus=settings.container_cpus,
             container_memory_mib=settings.container_memory_mib,
             container_pids=settings.container_pids,
+            container_cgroup_parent=_worker_cgroup_parent(settings),
             runtime_identity_labels=_runtime_identity_labels(settings),
             slurm_allocated_gpus=getattr(settings, "slurm_allocated_gpus", -1),
             slurm_gpu_device_ids=_slurm_gpu_device_ids(settings),
@@ -1033,6 +1088,7 @@ async def _spawn_trial(
                 container_cpus=settings.container_cpus,
                 container_memory_mib=settings.container_memory_mib,
                 container_pids=settings.container_pids,
+                container_cgroup_parent=_worker_cgroup_parent(settings),
                 runtime_identity_labels=_runtime_identity_labels(settings),
                 setup_slot_provider=lambda: _daemon_build_slot(
                     cp_client,

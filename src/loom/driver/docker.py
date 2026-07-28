@@ -67,6 +67,17 @@ def _tmpfs_specs_to_docker_map(specs: tuple[str, ...]) -> dict[str, str]:
     return mounts
 
 
+def _validated_cgroup_parent(value: str) -> str:
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise DriverError("Docker cgroup parent is malformed")
+    path = PurePosixPath(value)
+    if not path.is_absolute() or path == PurePosixPath("/"):
+        raise DriverError("Docker cgroup parent must be a non-root absolute path")
+    if any(part in {".", ".."} for part in value.split("/")):
+        raise DriverError("Docker cgroup parent contains traversal")
+    return path.as_posix()
+
+
 @dataclass
 class DockerDriver:
     """Real-Docker Driver. Uses docker-py SDK throughout."""
@@ -165,6 +176,10 @@ class DockerDriver:
                 run_kwargs["storage_opt"] = {"size": f"{opts.storage_mb}M"}
             if opts.container_pids > 0:
                 run_kwargs["pids_limit"] = opts.container_pids
+            if opts.cgroup_parent is not None:
+                run_kwargs["cgroup_parent"] = _validated_cgroup_parent(
+                    opts.cgroup_parent,
+                )
             if opts.gpus:
                 if opts.slurm_allocated_gpus >= 0:
                     if opts.gpus > opts.slurm_allocated_gpus:

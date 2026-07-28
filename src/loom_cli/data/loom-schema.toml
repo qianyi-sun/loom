@@ -870,6 +870,18 @@ python_type = "int"
 default     = 0
 description = "#896 per-container hard PID cap for the trial and setup-sidecar containers this worker creates. Maps to Docker pids_limit. 0 = unbounded (default); non-exclusive (packed) nodes set a positive ceiling to bound fork-bomb blast radius on a shared double-duty node."
 
+[service_config.require_cgroup_parent]
+used_by     = ["worker"]
+python_type = "bool"
+default     = false
+description = "Controller-owned non-exclusive Slurm containment marker. When true, worker startup and every worker-created Docker container require the exact allocation-owned cgroup_parent; missing or malformed values fail closed."
+
+[service_config.cgroup_parent]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Exact delegated Slurm job cgroup discovered from the batch process. Passed unchanged to Docker HostConfig CgroupParent for the worker, trial, verifier, and sidecar containers. Empty is allowed only when require_cgroup_parent is false."
+
 [service_config.sandbox_identity]
 used_by     = ["worker"]
 python_type = "str"

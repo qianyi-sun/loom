@@ -55,6 +55,11 @@ services:
       - LOOM_WORKER_CONTAINER_CPUS=${LOOM_WORKER_CONTAINER_CPUS:-0}
       - LOOM_WORKER_CONTAINER_MEMORY_MIB=${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}
       - LOOM_WORKER_CONTAINER_PIDS=${LOOM_WORKER_CONTAINER_PIDS:-0}
+      # Non-exclusive Slurm jobs add the strict cgroup-parent Compose overlay.
+      # These values let the worker fail closed and place every container it
+      # creates under that same allocation-owned parent.
+      - LOOM_WORKER_REQUIRE_CGROUP_PARENT=${LOOM_WORKER_REQUIRE_CGROUP_PARENT:-false}
+      - LOOM_WORKER_CGROUP_PARENT=${LOOM_WORKER_CGROUP_PARENT:-}
       # #1023: Slurm jobs set these from the admission-bound sandbox/candidate
       # plus runtime allocation identity. They are forwarded so every child
       # trial/sidecar gets the same cleanup and GPU-allocation boundary.

@@ -1164,6 +1164,68 @@ Until Docker sandbox CPU/RAM limits are enforced per trial, keep shared
 worker hosts conservative. A single workload can otherwise consume more
 than its fair share of the host.
 
+### Slurm cgroup parent for non-exclusive workers
+
+Per-container CPU, memory, and PID limits are necessary but do not prove that
+host-daemon containers belong to the Slurm allocation. For every
+`exclusive=false` submission, the batch wrapper now discovers its unified
+cgroup v2 membership from `/proc/self/cgroup`, identifies the allocation-owned
+job scope, and verifies all of the following before Docker starts:
+
+- the process is below an identifiable Slurm job scope, never `/`, a user
+  slice, Docker's default parent, or another ambient cgroup;
+- a named `job_<id>` scope matches `SLURM_JOB_ID`; opaque scopes that cannot
+  be cryptographically or structurally bound to that job ID fail closed;
+- the job scope is a domain cgroup with no internal processes; and
+- `cpu`, `memory`, and `pids` are present in both `cgroup.controllers` and
+  `cgroup.subtree_control`; and
+- the job scope's actual `pids.max` exactly matches the controller-requested
+  aggregate PID ceiling.
+
+The wrapper exports the validated path as `LOOM_WORKER_CGROUP_PARENT`, adds
+`deploy/docker-compose.remote-worker.cgroup-parent.yml`, and sets the
+controller-owned `LOOM_WORKER_REQUIRE_CGROUP_PARENT=1` marker. The overlay
+places the Compose worker beneath that parent. The worker validates the same
+binding before registration and passes it unchanged to Docker
+`HostConfig.CgroupParent` for every trial, verifier-only driver, and task
+sidecar. The worker requires a Slurm marker followed by `job_<SLURM_JOB_ID>`
+(or the base job component for an array task); a different job, a `job_*`
+outside Slurm, a marker without a job component, or an opaque scope fails
+startup. There is no fallback to Docker's default cgroup parent.
+
+Every non-exclusive actuator config must also provide `job_pids_max` as a
+positive JSON integer. It must be at least `container_pids` multiplied by the
+configured concurrency ceiling (`requested_concurrency`, or
+`max_concurrency_per_node` for a resource-aware policy). The controller emits
+only the closed, versioned Slurm comment
+`loom-cgroup-v1:pids=<job_pids_max>`. A persistent, administrator-owned root
+cgroup-guard daemon must accept that exact grammar, reject all other comment
+forms, wait for the allocation cgroup to exist, and apply the value there.
+Ordinary Slurm 23.11 Prolog is not a valid implementation: it runs outside the
+job cgroup and `_run_prolog` precedes creation of the extern step; the later
+`RunInJob` facility is unavailable in 23.11. Before Compose starts, the batch
+wrapper performs structural validation once, then waits up to 30 seconds using
+monotonic 100 ms polling only for `pids.max` to appear and exactly match. A
+wrong job, unsafe path, missing controller, or invalid delegation fails
+immediately; a missing/stopped guard, an unbounded `max`, or a stale/different
+value fails when the bounded wait expires.
+
+Cluster administrators must first configure cgroup v2, Slurm
+`proctrack/cgroup` and `task/cgroup`, and a delegated job scope whose subtree
+controls include `cpu memory pids`. Compute nodes must also provide
+`/usr/bin/python3`; the wrapper uses that fixed interpreter path so cgroup
+discovery never depends on a login shell, virtual environment, or ambient
+`PATH`. The repository does not change
+`slurm.conf`, `cgroup.conf`, systemd delegation, the root guard service, or
+Docker daemon policy. A
+missing controller, non-delegated scope, wrong job identity, cgroup v1/hybrid
+host, or unsafe path stops the batch before `docker compose up`.
+
+Exclusive and unmanaged remote workers do not add the overlay and preserve
+their current Docker parent. Do not set `LOOM_WORKER_CGROUP_PARENT` manually in
+the remote-worker env file to activate packing; only the Slurm batch wrapper's
+validated export is an accepted source.
+
 ## Single-Worker Capacity Sweep
 
 When validating a new worker image or host class, isolate one worker
@@ -1333,10 +1395,13 @@ after lowering `requested_cpus`, `requested_memory_mib`, and
 `requested_concurrency` to a load-tested slice that coexists with other jobs.
 Non-exclusive admission fails closed unless all of
 `container_cpus`, `container_memory_mib`, and `container_pids` are positive,
-`environment` is a lowercase sandbox identity, and `candidate_sha` is the
-exact 40-character lowercase Git commit. These per-container caps apply to the
-worker, trial, verifier, and sidecars. They are not a substitute for proving
-aggregate cgroup containment on the target Slurm/Docker host.
+`job_pids_max` is a positive integer satisfying the aggregate/concurrency
+minimum described above, `environment` is a lowercase sandbox identity, and
+`candidate_sha` is the exact 40-character lowercase Git commit. The
+per-container caps apply to the worker, trial, verifier, and sidecars;
+`job_pids_max` is the allocation-wide parent ceiling and is carried to the
+root cgroup guard only as `loom-cgroup-v1:pids=N`. Neither setting substitutes
+for reading back effective containment on the target Slurm/Docker host.
 
 GPU pools may set `gpu_tres` using exactly `gpu:COUNT` or
 `gpu:TYPE:COUNT`; the controller emits that value as `sbatch --gres`. The batch

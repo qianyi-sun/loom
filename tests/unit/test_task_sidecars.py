@@ -443,6 +443,32 @@ async def test_sidecar_runtime_applies_container_caps_when_set(
         assert call["pids_limit"] == 256
 
 
+async def test_sidecar_runtime_applies_exact_cgroup_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(task_sidecars.docker, "from_env", lambda: fake_client)
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+        container_cgroup_parent="/system.slice/slurmstepd.scope/job_123",
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert fake_client.containers.create_calls
+    for call in fake_client.containers.create_calls:
+        assert call["cgroup_parent"] == ("/system.slice/slurmstepd.scope/job_123")
+
+
 async def test_sidecar_runtime_omits_container_caps_when_unset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

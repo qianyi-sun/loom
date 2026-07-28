@@ -287,10 +287,10 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         "--mem=58000M",
         "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom,LOOM_WORKER_SANDBOX_IDENTITY=production,LOOM_WORKER_CANDIDATE_SHA=legacy,LOOM_WORKER_SLURM_ALLOCATED_GPUS=0,LOOM_WORKER_RESTART_POLICY=no",
     )
+    assert "compose_files=(-f deploy/docker-compose.remote-worker.yml)" in (request.stdin)
     assert (
         'compose_args=(--project-name "$LOOM_WORKER_COMPOSE_PROJECT" '
-        '--env-file "$LOOM_REMOTE_WORKER_ENV_FILE" '
-        "-f deploy/docker-compose.remote-worker.yml)"
+        '--env-file "$LOOM_REMOTE_WORKER_ENV_FILE" "${compose_files[@]}")'
     ) in request.stdin
     assert 'export LOOM_WORKER_SLURM_JOB_ID="$SLURM_JOB_ID"' in request.stdin
     assert (
@@ -303,9 +303,42 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
 
 
 def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
-    request = build_sbatch_request(_config(exclusive=False), node="oldlab-4")
+    request = build_sbatch_request(
+        _config(
+            exclusive=False,
+            container_pids=512,
+            job_pids_max=3072,
+        ),
+        node="oldlab-4",
+    )
 
     assert "--exclusive" not in request.args
+    assert "--comment=loom-cgroup-v1:pids=3072" in request.args
+    export_arg = next(a for a in request.args if a.startswith("--export="))
+    assert "LOOM_WORKER_REQUIRE_CGROUP_PARENT=1" in export_arg
+    assert "LOOM_WORKER_JOB_PIDS_MAX=3072" in export_arg
+    assert "-m loom_control_plane.slurm_job_cgroup" in request.stdin
+    assert '--job-id "$SLURM_JOB_ID"' in request.stdin
+    assert '--pids-max "$LOOM_WORKER_JOB_PIDS_MAX"' in request.stdin
+    assert "--wait-seconds 30" in request.stdin
+    assert "docker-compose.remote-worker.cgroup-parent.yml" in request.stdin
+
+
+def test_exclusive_sbatch_does_not_require_cgroup_parent() -> None:
+    request = build_sbatch_request(_config(exclusive=True), node="oldlab-4")
+
+    export_arg = next(a for a in request.args if a.startswith("--export="))
+    assert not any(arg.startswith("--comment=") for arg in request.args)
+    assert "LOOM_WORKER_REQUIRE_CGROUP_PARENT" not in export_arg
+    assert "unset LOOM_WORKER_CGROUP_PARENT" in request.stdin
+
+
+def test_nonexclusive_sbatch_rejects_missing_job_pids_max() -> None:
+    with pytest.raises(ValueError, match="job_pids_max is required"):
+        build_sbatch_request(
+            _config(exclusive=False, container_pids=512),
+            node="oldlab-4",
+        )
 
 
 def test_build_sbatch_request_emits_account_qos_reservation_when_set() -> None:
@@ -393,12 +426,14 @@ def test_build_controller_config_threads_container_caps() -> None:
             container_cpus=2.5,
             container_memory_mib=4096,
             container_pids=256,
+            job_pids_max=1536,
         )
     )
     assert config is not None
     assert config.container_cpus == 2.5
     assert config.container_memory_mib == 4096
     assert config.container_pids == 256
+    assert config.job_pids_max == 1536
 
 
 @pytest.mark.parametrize(
@@ -418,6 +453,7 @@ def test_build_controller_config_rejects_negative_container_caps(field: str) -> 
         ("container_cpus", 0.0),
         ("container_memory_mib", 0),
         ("container_pids", 0),
+        ("job_pids_max", 0),
         ("candidate_sha", ""),
     ],
 )
@@ -431,6 +467,7 @@ def test_nonexclusive_admission_requires_complete_containment(
         "container_cpus": 2.0,
         "container_memory_mib": 4096,
         "container_pids": 512,
+        "job_pids_max": 3072,
         "candidate_sha": "a" * 40,
     }
     overrides[field] = value
@@ -439,6 +476,63 @@ def test_nonexclusive_admission_requires_complete_containment(
         build_controller_config(
             **_controller_config_kwargs(**overrides),  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize(
+    ("job_pids_max", "match"),
+    [
+        (511, "must not be lower than container_pids"),
+        (1024, "configured concurrency ceiling"),
+        (3072.0, "non-negative integer"),
+    ],
+)
+def test_nonexclusive_admission_rejects_unsafe_job_pids_max(
+    job_pids_max: object,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        build_controller_config(
+            **_controller_config_kwargs(  # type: ignore[arg-type]
+                exclusive=False,
+                environment="dev-a",
+                container_cpus=2.0,
+                container_memory_mib=4096,
+                container_pids=512,
+                job_pids_max=job_pids_max,
+                candidate_sha="a" * 40,
+            ),
+        )
+
+
+def test_resource_aware_job_pids_max_covers_maximum_node_concurrency() -> None:
+    base = {
+        "exclusive": False,
+        "environment": "dev-a",
+        "resource_aware": True,
+        "requested_concurrency": 1,
+        "max_concurrency_per_node": 8,
+        "container_cpus": 2.0,
+        "container_memory_mib": 4096,
+        "container_pids": 512,
+        "candidate_sha": "a" * 40,
+    }
+
+    with pytest.raises(ValueError, match="configured concurrency ceiling"):
+        build_controller_config(
+            **_controller_config_kwargs(  # type: ignore[arg-type]
+                **base,
+                job_pids_max=4095,
+            ),
+        )
+
+    config = build_controller_config(
+        **_controller_config_kwargs(  # type: ignore[arg-type]
+            **base,
+            job_pids_max=4096,
+        ),
+    )
+    assert config is not None
+    assert config.job_pids_max == 4096
 
 
 def test_gpu_tres_is_validated_and_emitted_in_sbatch_request() -> None:

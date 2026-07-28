@@ -14,6 +14,11 @@
     "default": "''",
     "required": false
   },
+  "cgroup_parent": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "claim_poll_interval_sec": {
     "annotation": "<class 'float'>",
     "default": "1.0",
@@ -172,6 +177,11 @@
   "pre_start_heartbeat_interval_sec": {
     "annotation": "<class 'float'>",
     "default": "60.0",
+    "required": false
+  },
+  "require_cgroup_parent": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
     "required": false
   },
   "sandbox_identity": {
