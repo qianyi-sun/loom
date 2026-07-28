@@ -1,0 +1,21 @@
+schema_version = 1
+expected_hostname = "trt-eai-oldlab-2"
+candidate_parent = "/opt/loom-shared-capacity/candidates"
+current_link = "/opt/loom-shared-capacity/current"
+state_root = "/var/lib/loom-shared-capacity"
+adapter_instances = [
+  "qianyi-gb10",
+  "qianyi-oldlab",
+  "hongjian-gb10",
+  "hongjian-oldlab",
+  "devansh-gb10",
+  "devansh-oldlab",
+]
+
+[slurm_domains.oldlab]
+submit_host = "trt-EAI-OLDLAB-2"
+controller = "TRT-EAI-OLDLAB-1"
+
+[slurm_domains.gb10]
+submit_host = "trt-gb10-1"
+controller = "trt-gb10-1"

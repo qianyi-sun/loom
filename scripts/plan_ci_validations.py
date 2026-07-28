@@ -87,8 +87,10 @@ PROTECTED_STAGING_ROLLOUT_PREFIXES = (
 PROTECTED_DEVELOPER_SANDBOX_EXACT = {
     "scripts/ops/developer_sandbox.py",
     "scripts/ops/developer_sandbox_host.py",
+    "scripts/ops/shared_capacity_runtime_host.py",
     "tests/ops/test_developer_sandbox.py",
     "tests/ops/test_developer_sandbox_host.py",
+    "tests/ops/test_shared_capacity_runtime_host.py",
 }
 
 PROTECTED_DEVELOPER_SANDBOX_PREFIXES = ("deploy/developer-sandboxes/",)

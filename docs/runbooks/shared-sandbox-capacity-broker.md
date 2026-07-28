@@ -429,12 +429,110 @@ python scripts/ops/render_shared_capacity_supervisor_service.py \
   > /tmp/loom-shared-capacity-supervisor.service
 ```
 
-The supervisor timer also runs every 15 seconds and needs no network. Install
-the supervisor timer first; install the six adapter timers only after one
-manual supervisor cycle has published and read back the expected handoffs.
-Both services must render from the same immutable candidate SHA. Use
-`systemd-analyze verify` on both rendered services and both checked-in timers
-before installation.
+The supervisor timer also runs every 15 seconds and needs no network. The
+persistent installer publishes all four unit templates in one transaction but
+leaves the supervisor and every adapter disabled and inactive. A separate
+activation transaction runs the supervisor once and reads back the complete
+six-instance generation before it enables the supervisor timer or starts an
+adapter. Both services render from the same immutable candidate SHA.
+
+Do not assemble the candidate, virtual environment, configs, or units with
+manual `cp`, mutable symlinks, or ad-hoc `systemctl` calls. The persistent
+oldlab2 root converger owns that transaction:
+
+```bash
+sudo python3 scripts/ops/shared_capacity_runtime_host.py plan \
+  --source-repo /root/loom-merged-dev \
+  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA>
+
+sudo python3 scripts/ops/shared_capacity_runtime_host.py install \
+  --source-repo /root/loom-merged-dev \
+  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
+  --execute
+
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host check \
+  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
+  --mode installed \
+  --execute
+
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host activate \
+  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
+  --execute
+
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host check \
+  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
+  --mode activated \
+  --execute
+```
+
+The source must be a clean repository at the exact SHA/tree with its checked-in
+`uv.lock`. Git verification ignores system and user configuration, rejects
+replacement objects, alternates, grafts, shallow history, unsafe index modes
+and flags, and any raw index/tree mismatch. Plan digests and installed files
+are read from exact commit blobs, never from the mutable source worktree after
+verification. The converger clones that immutable commit under
+`/opt/loom-shared-capacity/candidates/<SHA>/repo`, creates
+`/opt/loom-shared-capacity/candidates/<SHA>/venv` with `uv sync --frozen
+--no-dev`, removes every write bit from the root-owned candidate, and renders
+every `ExecStart` directly to that SHA. `/opt/loom-shared-capacity/current` is
+an atomic audit pointer only; no service executes through it.
+
+Before any candidate staging or systemd mutation, the converger durably records
+the transaction-owned staging path, whether the final candidate pre-existed,
+all files, and every unit's enabled/active state below the root-only
+`/var/lib/loom-shared-capacity/runtime-host-installer/transactions`. Recovery
+removes only journal-owned staging/final paths and rejects an unjournaled
+`.install-*` orphan. `install` atomically publishes the six adapter configs,
+supervisor config, exact units and timers, then explicitly leaves all fourteen
+concrete services/timers disabled and inactive. It cannot consume a
+pre-existing nonzero handoff.
+
+`activate` is the only path that may start them. It first verifies the installed
+SHA/tree and inactive state, the broker database and current handoff bindings,
+all six exact configs, each referenced mode-`0600` admin secret file, each
+sandbox-state candidate binding, and all six fresh combined cross-domain
+runtime receipts. First activation additionally requires six explicit
+`enabled=false`, `min_slots=0`, `max_slots=0` broker handoffs, zero broker
+pending/active/draining/committed slots, and six Control Plane policies already
+disabled at max zero with zero last pending/actual/draining/occupied/queued
+slots. Unknown counters fail closed. This zero-capacity gate means a later
+adapter-start failure cannot strand positive capacity written by an earlier
+adapter. Tokens are read only inside the isolated candidate process and are
+never emitted.
+
+Activation then runs the supervisor once, validates its complete atomic
+generation against fresh broker status, enables the supervisor timer, and
+starts/enables each adapter timer in the closed order. Any failure restores the
+pre-activation all-disabled unit snapshot while the zero-capacity CP policies
+remain zero. Only `check --mode activated` accepts enabled timers and successful
+service results; it also re-reads each adapter state and Control Plane policy
+and requires either zero state or the exact current broker handoff binding.
+
+The installed host profile is closed-world. It names exactly six instances and
+records two independent scheduler routes: OLDLAB submits on
+`trt-EAI-OLDLAB-2` to controller `TRT-EAI-OLDLAB-1`; GB10 submits to and is
+controlled by `trt-gb10-1`. Both check modes require all six configs, query
+both `list-units` and `list-unit-files`, and require every concrete unit's exact
+fragment path. They reject an extra config, duplicate systemd readback, or any
+loaded, installed, or enabled `loom-shared-capacity-adapter@...` instance
+outside that allowlist, and never combine the two domains through one
+controller. A seventh adapter or a cross-domain submit/controller fallback is
+a #827 fail-closed blocker.
+
+An interrupted transaction is restored before the next install. A completed
+candidate can be rolled back only through its exact retained transaction:
+
+```bash
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host rollback \
+  --candidate-sha <CURRENT_FULL_SHA> \
+  --execute
+```
+
+Rollback stops the current timers, restores the prior candidate pointer,
+configs, exact units, and each prior enabled/active state, and removes the
+current candidate only when the journal proves it did not pre-exist. Never
+delete the installer state, journal, broker database, adapter state,
+observations, or audit files to force a rollback.
 
 ### Shared-capacity retirement mapping
 
