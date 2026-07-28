@@ -1900,6 +1900,10 @@ class HostSystem:
     def service_user_present(self) -> bool:
         return self._service_user_fields() is not None
 
+    def service_user_convergence_needed(self) -> bool:
+        fields = self._service_user_fields(allow_legacy_shell=True)
+        return fields is None or fields[6] != SERVICE_SHELL
+
     def _service_user_fields(
         self,
         *,
@@ -4735,7 +4739,7 @@ class HostInstaller:
             trust_requires_revocation=trust_requires_revocation,
         )
         group_missing = not self.system.group_present(OPERATOR_GROUP)
-        service_user_missing = not self.system.service_user_present()
+        service_user_missing = self.system.service_user_convergence_needed()
         shared_work2_mount_ready = self.system.shared_work2_mount_ready()
         shared_worker_repo_identity = (
             None
