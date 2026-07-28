@@ -248,7 +248,7 @@ def test_next_apply_recovers_every_orphan_transaction_phase(
     assert stat.S_IMODE(policy._journal_path(root, loaded).stat().st_mode) == 0o600
 
 
-def test_accounting_failure_restores_files_and_dump(
+def test_accounting_failure_uses_targeted_cas_without_cluster_load(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -265,10 +265,6 @@ def test_accounting_failure_restores_files_and_dump(
     def fake_run(argv: tuple[str, ...] | list[str]) -> str:
         command = tuple(argv)
         calls.append(command)
-        if command[:3] == ("sacctmgr", "-n", "dump"):
-            return "Cluster - trt-oldlab\n"
-        if command[:3] == ("sacctmgr", "-i", "load"):
-            return ""
         if "modify" in command and "qos" in command:
             raise policy.PolicyError("accounting mutation failed")
         return ""
@@ -284,9 +280,68 @@ def test_accounting_failure_restores_files_and_dump(
         )
 
     assert (root / "etc/slurm/slurm.conf").read_text() == original
-    assert any(command[:3] == ("sacctmgr", "-i", "load") for command in calls)
+    assert not any("dump" in command or "load" in command for command in calls)
     journal = json.loads(policy._journal_path(root, loaded).read_text())
     assert journal["phase"] == "rolled_back"
+
+
+def test_accounting_cas_ignores_unrelated_accounts_but_rejects_owned_field_drift() -> None:
+    loaded = policy.load_profile(PROFILE)
+    desired = policy._accounting_desired_state(loaded)
+    before = json.loads(json.dumps(desired))
+    before["accounts"][loaded.parent_account]["Fairshare"] = "2"
+    current = json.loads(json.dumps(desired))
+    current["accounts"]["unrelated-research"] = {
+        "ParentName": "",
+        "Fairshare": "99",
+        "GrpTRES": "cpu=999",
+    }
+
+    policy._validate_accounting_cas(current, before, desired)
+
+    current["accounts"][loaded.parent_account]["Fairshare"] = "777"
+    with pytest.raises(policy.PolicyError, match="changed concurrently"):
+        policy._validate_accounting_cas(current, before, desired)
+
+
+def test_accounting_cas_refuses_to_delete_new_identity_with_external_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    desired = policy._accounting_desired_state(loaded)
+    snapshot = tmp_path / "accounting-cas.json"
+    policy._atomic_write(
+        snapshot,
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cluster": loaded.cluster,
+                "before": {"qos": {}, "accounts": {}, "associations": {}},
+                "desired": desired,
+            },
+        )
+        + "\n",
+        mode=0o600,
+    )
+    monkeypatch.setattr(policy, "_accounting_state", lambda _profile: desired)
+    monkeypatch.setattr(
+        policy,
+        "_accounting_external_references",
+        lambda _profile: {loaded.parent_account},
+    )
+
+    def unexpected_run(
+        _argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del timeout
+        pytest.fail("accounting mutation ran before the external-reference gate")
+
+    monkeypatch.setattr(policy, "_run", unexpected_run)
+    with pytest.raises(policy.PolicyError, match="external references"):
+        policy._restore_accounting(loaded, snapshot)
 
 
 def test_service_reload_failure_restores_files(
@@ -512,6 +567,8 @@ def test_strict_candidate_binding_reads_raw_tree_and_private_env(tmp_path: Path)
     )
     assert binding["worker_env"]["keys"] == ["LOOM_WORKER_TOKEN_FILE"]
     assert binding["worker_env"]["inode"] == worker_env.stat().st_ino
+    assert binding["worker_env"]["uid"] == worker_env.stat().st_uid
+    assert binding["worker_env"]["gid"] == worker_env.stat().st_gid
 
 
 @pytest.mark.parametrize("flag", ("--skip-worktree", "--assume-unchanged"))
@@ -585,6 +642,16 @@ def test_strict_candidate_rejects_symlink_parent_and_nonprivate_env(tmp_path: Pa
             candidate_sha=candidate,
         )
 
+    worker_env.chmod(0o600)
+    with pytest.raises(policy.PolicyError, match="batch UID/GID"):
+        policy.strict_candidate_binding(
+            repository,
+            worker_env,
+            candidate_sha=candidate,
+            expected_batch_uid=worker_env.stat().st_uid + 1,
+            expected_batch_gid=worker_env.stat().st_gid,
+        )
+
 
 @pytest.mark.parametrize(
     "contents",
@@ -627,6 +694,191 @@ def test_slurm_profiles_keep_independent_controller_routes() -> None:
     assert oldlab.cluster != gb10.cluster
 
 
+def _allocation_inflight_payload(
+    loaded: policy.Profile,
+    candidate: str,
+    *,
+    job_id: str = "123",
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "candidate_sha": candidate,
+        "cluster": loaded.cluster,
+        "controller": loaded.controller,
+        "submit_host": loaded.submit_host,
+        "job_id": job_id,
+        "job_name": f"loom-policy-{candidate}-probe",
+        "batch_uid": 501,
+        "batch_gid": 20,
+        "phase": "submitted",
+    }
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    (
+        ("allocation probe did not reach a terminal state before timeout", "timeout"),
+        ("sacct failed safely with exit code 1", "sacct failed"),
+    ),
+)
+def test_allocation_probe_poll_failure_cancels_and_waits_for_terminal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+    expected: str,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "e" * 40
+    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    payload = _allocation_inflight_payload(loaded, candidate)
+    policy._write_allocation_state(path, payload, enforce_root_ownership=False)
+    poll_calls = 0
+    commands: list[tuple[str, ...]] = []
+
+    def fake_poll(
+        job_id: str,
+        *,
+        timeout_seconds: float,
+        poll_seconds: float = policy._ALLOCATION_POLL_SECONDS,
+    ) -> list[list[str]]:
+        nonlocal poll_calls
+        del timeout_seconds, poll_seconds
+        poll_calls += 1
+        if poll_calls == 1:
+            raise policy.PolicyError(message)
+        return [[job_id, payload["job_name"], "CANCELLED", "", "", ""]]
+
+    def fake_run(
+        argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del timeout
+        commands.append(tuple(argv))
+        return ""
+
+    monkeypatch.setattr(policy, "_poll_probe_terminal", fake_poll)
+    monkeypatch.setattr(policy, "_run", fake_run)
+    with pytest.raises(policy.PolicyError, match=expected):
+        policy._poll_allocation_or_cancel(
+            path,
+            payload,
+            loaded,
+            timeout_seconds=5,
+            enforce_root_ownership=False,
+        )
+
+    assert poll_calls == 2
+    assert commands == [("scancel", f"--clusters={loaded.cluster}", "123")]
+    assert not path.exists()
+    assert list(path.parent.glob(f"{candidate}.123.cancelled.json"))
+
+
+def test_allocation_probe_recovers_crash_journal_before_new_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "f" * 40
+    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    payload = _allocation_inflight_payload(loaded, candidate)
+    policy._write_allocation_state(path, payload, enforce_root_ownership=False)
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(
+        argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del timeout
+        command = tuple(argv)
+        commands.append(command)
+        return ""
+
+    monkeypatch.setattr(policy, "_run", fake_run)
+    monkeypatch.setattr(
+        policy,
+        "_poll_probe_terminal",
+        lambda job_id, **_kwargs: [
+            [job_id, payload["job_name"], "CANCELLED", "", "", ""],
+        ],
+    )
+    policy._recover_allocation_probe(
+        path,
+        loaded,
+        candidate_sha=candidate,
+        job_name=str(payload["job_name"]),
+        enforce_root_ownership=False,
+    )
+
+    assert commands == [
+        ("scancel", f"--clusters={loaded.cluster}", "123"),
+        ("squeue", "-h", "-n", payload["job_name"], "-o", "%A|%j|%T"),
+    ]
+    assert not path.exists()
+    assert list(path.parent.glob(f"{candidate}.123.cancelled.json"))
+
+
+def test_allocation_probe_scancel_failure_remains_durably_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "1" * 40
+    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    payload = _allocation_inflight_payload(loaded, candidate)
+    policy._write_allocation_state(path, payload, enforce_root_ownership=False)
+
+    def fail_scancel(
+        argv: tuple[str, ...] | list[str],
+        *,
+        timeout: float = 60,
+    ) -> str:
+        del argv, timeout
+        raise policy.PolicyError("scancel failed safely with exit code 1")
+
+    monkeypatch.setattr(policy, "_run", fail_scancel)
+    with pytest.raises(policy.PolicyError, match="scancel failed"):
+        policy._cancel_allocation_job(
+            path,
+            payload,
+            loaded,
+            enforce_root_ownership=False,
+        )
+
+    assert path.exists()
+    assert json.loads(path.read_text())["phase"] == "cancel_failed"
+
+
+def test_allocation_probe_cancel_readback_failure_remains_durably_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "2" * 40
+    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    payload = _allocation_inflight_payload(loaded, candidate)
+    policy._write_allocation_state(path, payload, enforce_root_ownership=False)
+    monkeypatch.setattr(policy, "_run", lambda _argv, **_kwargs: "")
+
+    def fail_readback(_job_id: str, **_kwargs: float) -> list[list[str]]:
+        raise policy.PolicyError("cancel readback timed out")
+
+    monkeypatch.setattr(policy, "_poll_probe_terminal", fail_readback)
+
+    with pytest.raises(policy.PolicyError, match="cancel readback timed out"):
+        policy._cancel_allocation_job(
+            path,
+            payload,
+            loaded,
+            enforce_root_ownership=False,
+        )
+
+    assert path.exists()
+    assert json.loads(path.read_text())["phase"] == "cancel_readback_failed"
+
+
 def test_allocation_probe_readback_is_candidate_and_route_bound(tmp_path: Path) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "a" * 40
@@ -641,6 +893,8 @@ def test_allocation_probe_readback_is_candidate_and_route_bound(tmp_path: Path) 
             "path": "/private/worker.env",
             "device": 1,
             "inode": 2,
+            "uid": 501,
+            "gid": 20,
             "sha256": "c" * 64,
             "keys": ["LOOM_WORKER_TOKEN_FILE"],
         },
@@ -664,6 +918,8 @@ def test_allocation_probe_readback_is_candidate_and_route_bound(tmp_path: Path) 
         "gpu_verified": True,
         "sbatch_verified": True,
         "srun_verified": True,
+        "batch_uid": 501,
+        "batch_gid": 20,
         "candidate_binding": binding,
     }
     target = policy._allocation_probe_path(tmp_path, loaded, candidate)

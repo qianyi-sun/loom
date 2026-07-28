@@ -13,6 +13,7 @@ import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
 import socket
 import stat
@@ -57,6 +58,21 @@ _GUARD_STATUS_RELATIVE = _STATE_RELATIVE / "guard-status.json"
 _GUARD_STATUS_MAX_AGE = timedelta(seconds=30)
 _ALLOCATION_PROBE_RELATIVE = _STATE_RELATIVE / "allocation-probes"
 _ALLOCATION_PROBE_MAX_AGE = timedelta(minutes=15)
+_ALLOCATION_POLL_SECONDS = 1.0
+_ALLOCATION_TIMEOUT_SECONDS = 180.0
+_TERMINAL_JOB_STATES = frozenset(
+    {
+        "BOOT_FAIL",
+        "CANCELLED",
+        "COMPLETED",
+        "DEADLINE",
+        "FAILED",
+        "NODE_FAIL",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "TIMEOUT",
+    },
+)
 _ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -388,18 +404,29 @@ def _safe_path_chain(path: Path, *, leaf_directory: bool) -> Path:
     return path
 
 
-def _read_private_env(path: Path) -> dict[str, Any]:
+def _read_private_env(
+    path: Path,
+    *,
+    expected_uid: int | None = None,
+    expected_gid: int | None = None,
+) -> dict[str, Any]:
     _safe_path_chain(path, leaf_directory=False)
     before = path.lstat()
     if stat.S_IMODE(before.st_mode) != 0o600:
         raise PolicyError("worker env must have exact mode 0600")
+    if (
+        expected_uid is not None
+        and expected_gid is not None
+        and (before.st_uid, before.st_gid) != (expected_uid, expected_gid)
+    ):
+        raise PolicyError("worker env owner does not match the batch UID/GID")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (
+            opened.st_dev,
+            opened.st_ino,
         ):
             raise PolicyError("worker env inode changed while it was opened")
         chunks: list[bytes] = []
@@ -442,6 +469,8 @@ def _read_private_env(path: Path) -> dict[str, Any]:
         "path": str(path),
         "device": opened.st_dev,
         "inode": opened.st_ino,
+        "uid": opened.st_uid,
+        "gid": opened.st_gid,
         "sha256": hashlib.sha256(payload).hexdigest(),
         "keys": sorted(keys),
     }
@@ -571,12 +600,16 @@ def verify_candidate_repository(
     _verify_git_metadata_path(repository)
     if _git_read(repository, "rev-parse", "--verify", "HEAD").decode().strip() != candidate_sha:
         raise PolicyError("candidate repository HEAD drifted")
-    tree = _git_read(
-        repository,
-        "rev-parse",
-        "--verify",
-        f"{candidate_sha}^{{tree}}",
-    ).decode().strip()
+    tree = (
+        _git_read(
+            repository,
+            "rev-parse",
+            "--verify",
+            f"{candidate_sha}^{{tree}}",
+        )
+        .decode()
+        .strip()
+    )
     if _CANDIDATE_RE.fullmatch(tree) is None:
         raise PolicyError("candidate repository tree identity is invalid")
 
@@ -680,13 +713,19 @@ def strict_candidate_binding(
     worker_env: Path,
     *,
     candidate_sha: str,
+    expected_batch_uid: int | None = None,
+    expected_batch_gid: int | None = None,
 ) -> dict[str, Any]:
     return {
         "repository": verify_candidate_repository(
             repository,
             candidate_sha=candidate_sha,
         ),
-        "worker_env": _read_private_env(worker_env),
+        "worker_env": _read_private_env(
+            worker_env,
+            expected_uid=expected_batch_uid,
+            expected_gid=expected_batch_gid,
+        ),
     }
 
 
@@ -921,11 +960,7 @@ def _fsync_directory(path: Path) -> None:
 def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     effective_mode = (
-        mode
-        if mode is not None
-        else stat.S_IMODE(path.stat().st_mode)
-        if path.exists()
-        else 0o644
+        mode if mode is not None else stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
     )
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
@@ -1084,15 +1119,380 @@ def _restore_snapshot(root: Path, snapshot: Path) -> None:
             raise PolicyError("Slurm policy snapshot presence is invalid")
 
 
+def _accounting_desired_state(profile: Profile) -> dict[str, Any]:
+    return {
+        "qos": {
+            profile.qos: {
+                "Priority": str(profile.qos_priority),
+                "MaxWall": profile.qos_max_wall,
+                "MaxJobsPU": str(profile.qos_max_jobs_per_user),
+                "MaxSubmitJobsPU": str(profile.qos_max_submit_jobs_per_user),
+            },
+        },
+        "accounts": {
+            profile.parent_account: {
+                "ParentName": "",
+                "Fairshare": str(profile.fairshare),
+                "GrpTRES": ",".join(profile.parent_group_tres),
+            },
+            **{
+                account: {
+                    "ParentName": profile.parent_account,
+                }
+                for account in profile.child_accounts
+            },
+        },
+        "associations": {
+            f"{user}|{account}": {
+                "User": user,
+                "Account": account,
+                "Fairshare": str(profile.fairshare),
+                "QOS": profile.qos,
+                "DefaultQOS": profile.qos,
+            }
+            for user, account in zip(profile.users, profile.child_accounts, strict=True)
+        },
+    }
+
+
+def _accounting_state(profile: Profile) -> dict[str, Any]:
+    qos_rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "sacctmgr",
+                "-nP",
+                "show",
+                "qos",
+                "where",
+                f"name={profile.qos}",
+                "format=Name,Priority,MaxWall,MaxJobsPU,MaxSubmitJobsPU",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    if len(qos_rows) > 1 or any(len(row) < 5 for row in qos_rows):
+        raise PolicyError("Loom QoS accounting snapshot is ambiguous")
+    qos = (
+        {}
+        if not qos_rows
+        else {
+            profile.qos: {
+                "Priority": qos_rows[0][1],
+                "MaxWall": qos_rows[0][2],
+                "MaxJobsPU": qos_rows[0][3],
+                "MaxSubmitJobsPU": qos_rows[0][4],
+            },
+        }
+    )
+
+    account_rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "sacctmgr",
+                "-nP",
+                "show",
+                "account",
+                "where",
+                f"cluster={profile.cluster}",
+                "format=Account,ParentName,Fairshare,GrpTRES",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    identities = {profile.parent_account, *profile.child_accounts}
+    accounts: dict[str, dict[str, str]] = {}
+    for row in account_rows:
+        if len(row) < 4:
+            raise PolicyError("Slurm account accounting snapshot is malformed")
+        if row[0] in identities:
+            if row[0] in accounts:
+                raise PolicyError("Loom account accounting snapshot is ambiguous")
+            fields = {"ParentName": row[1]}
+            if row[0] == profile.parent_account:
+                fields.update({"Fairshare": row[2], "GrpTRES": row[3]})
+            accounts[row[0]] = fields
+
+    association_rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "sacctmgr",
+                "-nP",
+                "show",
+                "association",
+                "where",
+                f"cluster={profile.cluster}",
+                "format=User,Account,Fairshare,QOS,DefaultQOS",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    exact = set(zip(profile.users, profile.child_accounts, strict=True))
+    associations: dict[str, dict[str, str]] = {}
+    for row in association_rows:
+        if len(row) < 5:
+            raise PolicyError("Slurm association accounting snapshot is malformed")
+        if (row[0], row[1]) in exact:
+            key = f"{row[0]}|{row[1]}"
+            if key in associations:
+                raise PolicyError("Loom association accounting snapshot is ambiguous")
+            associations[key] = {
+                "User": row[0],
+                "Account": row[1],
+                "Fairshare": row[2],
+                "QOS": row[3],
+                "DefaultQOS": row[4],
+            }
+    return {"qos": qos, "accounts": accounts, "associations": associations}
+
+
 def _accounting_snapshot(root: Path, profile: Profile, snapshot: Path) -> Path:
-    content = _run(("sacctmgr", "-n", "dump", "cluster", profile.cluster))
-    target = snapshot / "accounting.dump"
-    _atomic_write(target, content, mode=0o600)
+    del root
+    payload = {
+        "schema_version": 1,
+        "cluster": profile.cluster,
+        "before": _accounting_state(profile),
+        "desired": _accounting_desired_state(profile),
+    }
+    target = snapshot / "accounting-cas.json"
+    _atomic_write(
+        target,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        mode=0o600,
+    )
     return target
 
 
-def _restore_accounting(path: Path) -> None:
-    _run(("sacctmgr", "-i", "load", f"file={path}"))
+def _load_accounting_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError("Loom accounting CAS snapshot is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("before"), dict)
+        or not isinstance(payload.get("desired"), dict)
+    ):
+        raise PolicyError("Loom accounting CAS snapshot is unsafe")
+    return payload
+
+
+def _validate_accounting_cas(
+    current: Mapping[str, Any],
+    before: Mapping[str, Any],
+    desired: Mapping[str, Any],
+) -> None:
+    for category in ("qos", "accounts", "associations"):
+        current_rows = current.get(category)
+        before_rows = before.get(category)
+        desired_rows = desired.get(category)
+        if not all(isinstance(rows, Mapping) for rows in (current_rows, before_rows, desired_rows)):
+            raise PolicyError("Loom accounting CAS state schema is invalid")
+        assert isinstance(current_rows, Mapping)
+        assert isinstance(before_rows, Mapping)
+        assert isinstance(desired_rows, Mapping)
+        for identity, desired_fields in desired_rows.items():
+            prior = before_rows.get(identity)
+            observed = current_rows.get(identity)
+            if prior is None and observed is None:
+                continue
+            if not isinstance(observed, Mapping) or not isinstance(desired_fields, Mapping):
+                raise PolicyError("Loom accounting identity drifted during rollback")
+            if prior is not None and not isinstance(prior, Mapping):
+                raise PolicyError("Loom accounting snapshot identity is invalid")
+            for field, desired_value in desired_fields.items():
+                allowed = {desired_value}
+                if isinstance(prior, Mapping):
+                    allowed.add(prior.get(field))
+                if observed.get(field) not in allowed:
+                    raise PolicyError("Loom accounting field changed concurrently")
+
+
+def _accounting_matches_desired(
+    current: Mapping[str, Any],
+    desired: Mapping[str, Any],
+) -> bool:
+    for category in ("qos", "accounts", "associations"):
+        current_rows = current.get(category)
+        desired_rows = desired.get(category)
+        if not isinstance(current_rows, Mapping) or not isinstance(desired_rows, Mapping):
+            return False
+        for identity, fields in desired_rows.items():
+            observed = current_rows.get(identity)
+            if not isinstance(observed, Mapping) or not isinstance(fields, Mapping):
+                return False
+            if any(observed.get(field) != value for field, value in fields.items()):
+                return False
+    return True
+
+
+def _accounting_external_references(profile: Profile) -> set[str]:
+    account_rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "sacctmgr",
+                "-nP",
+                "show",
+                "account",
+                "where",
+                f"cluster={profile.cluster}",
+                "format=Account,ParentName",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    exact_accounts = {profile.parent_account, *profile.child_accounts}
+    references = {
+        row[1]
+        for row in account_rows
+        if len(row) >= 2 and row[1] in exact_accounts and row[0] not in exact_accounts
+    }
+    exact_associations = set(zip(profile.users, profile.child_accounts, strict=True))
+    association_rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "sacctmgr",
+                "-nP",
+                "show",
+                "association",
+                "where",
+                f"cluster={profile.cluster}",
+                "format=User,Account,QOS,DefaultQOS",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    for row in association_rows:
+        if len(row) < 4 or (row[0], row[1]) in exact_associations:
+            continue
+        if row[1] in exact_accounts:
+            references.add(row[1])
+        if profile.qos in _split_csv(row[2]) or row[3] == profile.qos:
+            references.add(profile.qos)
+    return references
+
+
+def _restore_accounting(profile: Profile, path: Path) -> None:
+    snapshot = _load_accounting_snapshot(path)
+    if snapshot.get("cluster") != profile.cluster:
+        raise PolicyError("Loom accounting CAS snapshot cluster drifted")
+    before = snapshot["before"]
+    desired = snapshot["desired"]
+    current = _accounting_state(profile)
+    _validate_accounting_cas(current, before, desired)
+
+    before_accounts = before["accounts"]
+    created_identities = {
+        account
+        for account in (*profile.child_accounts, profile.parent_account)
+        if account not in before_accounts and account in current["accounts"]
+    }
+    if profile.qos not in before["qos"] and profile.qos in current["qos"]:
+        created_identities.add(profile.qos)
+    if _accounting_external_references(profile) & created_identities:
+        raise PolicyError("new Loom accounting identities have external references")
+
+    before_associations = before["associations"]
+    for key, desired_row in desired["associations"].items():
+        if key in before_associations:
+            row = before_associations[key]
+            _run(
+                (
+                    "sacctmgr",
+                    "-i",
+                    "modify",
+                    "user",
+                    "where",
+                    f"name={row['User']}",
+                    f"account={row['Account']}",
+                    f"cluster={profile.cluster}",
+                    "set",
+                    f"Fairshare={row['Fairshare']}",
+                    f"QOS={row['QOS']}",
+                    f"DefaultQOS={row['DefaultQOS']}",
+                ),
+            )
+        elif key in current["associations"]:
+            _run(
+                (
+                    "sacctmgr",
+                    "-i",
+                    "delete",
+                    "user",
+                    "where",
+                    f"name={desired_row['User']}",
+                    f"account={desired_row['Account']}",
+                    f"cluster={profile.cluster}",
+                ),
+            )
+
+    for account in (*profile.child_accounts, profile.parent_account):
+        if account in before_accounts:
+            row = before_accounts[account]
+            fields = [f"Parent={row['ParentName']}"]
+            if account == profile.parent_account:
+                fields.extend(
+                    (
+                        f"Fairshare={row['Fairshare']}",
+                        f"GrpTRES={row['GrpTRES']}",
+                    ),
+                )
+            _run(
+                (
+                    "sacctmgr",
+                    "-i",
+                    "modify",
+                    "account",
+                    "where",
+                    f"account={account}",
+                    f"cluster={profile.cluster}",
+                    "set",
+                    *fields,
+                ),
+            )
+        elif account in current["accounts"]:
+            _run(
+                (
+                    "sacctmgr",
+                    "-i",
+                    "delete",
+                    "account",
+                    "where",
+                    f"account={account}",
+                    f"cluster={profile.cluster}",
+                ),
+            )
+    before_qos = before["qos"]
+    if profile.qos in before_qos:
+        row = before_qos[profile.qos]
+        _run(
+            (
+                "sacctmgr",
+                "-i",
+                "modify",
+                "qos",
+                "where",
+                f"name={profile.qos}",
+                "set",
+                f"Priority={row['Priority']}",
+                f"MaxWall={row['MaxWall']}",
+                f"MaxJobsPerUser={row['MaxJobsPU']}",
+                f"MaxSubmitJobsPerUser={row['MaxSubmitJobsPU']}",
+            ),
+        )
+    elif profile.qos in current["qos"]:
+        _run(("sacctmgr", "-i", "delete", "qos", profile.qos))
+    if _accounting_state(profile) != before:
+        raise PolicyError("Loom accounting CAS restore readback drifted")
 
 
 def _restart_services(profile: Profile, slurm_node: str) -> None:
@@ -1177,13 +1577,11 @@ def _snapshot_readback(root: Path, snapshot: Path) -> dict[str, Any]:
 
 
 def _accounting_snapshot_matches(profile: Profile, snapshot: Path) -> None:
-    observed = _run(("sacctmgr", "-n", "dump", "cluster", profile.cluster))
-    try:
-        expected = snapshot.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise PolicyError("restored Slurm accounting snapshot is unavailable") from exc
-    if observed.strip() != expected.strip():
-        raise PolicyError("restored Slurm accounting readback drifted")
+    payload = _load_accounting_snapshot(snapshot)
+    if payload.get("cluster") != profile.cluster:
+        raise PolicyError("restored Loom accounting snapshot cluster drifted")
+    if _accounting_state(profile) != payload["before"]:
+        raise PolicyError("restored Loom accounting readback drifted")
 
 
 def _parse_key_values(raw: str) -> dict[str, str]:
@@ -1272,9 +1670,7 @@ def _accounting_readback(profile: Profile) -> dict[str, Any]:
         ).splitlines()
         if line.strip()
     ]
-    associations = {
-        (row[0], row[1]): row for row in association_rows if len(row) >= 5 and row[0]
-    }
+    associations = {(row[0], row[1]): row for row in association_rows if len(row) >= 5 and row[0]}
     for user, account in zip(profile.users, profile.child_accounts, strict=True):
         association = associations.get((user, account))
         if (
@@ -1340,8 +1736,7 @@ def _guard_status_readback(
             raise PolicyError("cgroup guard job probe timestamp is invalid") from exc
         if (
             probe_observed.tzinfo is None
-            or datetime.now(UTC) - probe_observed.astimezone(UTC)
-            > _ALLOCATION_PROBE_MAX_AGE
+            or datetime.now(UTC) - probe_observed.astimezone(UTC) > _ALLOCATION_PROBE_MAX_AGE
         ):
             raise PolicyError("cgroup guard job resource probe is stale")
     return payload
@@ -1374,11 +1769,310 @@ def _allocation_probe_path(root: Path, profile: Profile, candidate_sha: str) -> 
     return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.json"
 
 
+def _allocation_inflight_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
+    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.inflight.json"
+
+
+def _invalidate_allocation_artifact(root: Path, profile: Profile, candidate_sha: str) -> None:
+    path = _allocation_probe_path(root, profile, candidate_sha)
+    _require_root_private_directory(path.parent)
+    path.unlink(missing_ok=True)
+    _fsync_directory(path.parent)
+
+
+def _require_root_private_directory(path: Path) -> None:
+    if not path.is_absolute():
+        raise PolicyError("allocation evidence parent must be absolute")
+    current = Path("/")
+    for index, part in enumerate(path.parts[1:]):
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            try:
+                current.mkdir(mode=0o700)
+                metadata = current.lstat()
+            except OSError as exc:
+                raise PolicyError(
+                    "allocation evidence parent chain could not be created",
+                ) from exc
+        except OSError as exc:
+            raise PolicyError("allocation evidence parent chain is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+        ):
+            raise PolicyError("allocation evidence parent chain must be root-owned directories")
+        is_leaf = index == len(path.parts[1:]) - 1
+        if is_leaf:
+            if stat.S_IMODE(metadata.st_mode) != 0o700:
+                current.chmod(0o700)
+                if stat.S_IMODE(current.lstat().st_mode) != 0o700:
+                    raise PolicyError(
+                        "allocation evidence parent must have exact mode 0700",
+                    )
+        elif stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise PolicyError("allocation evidence parent chain is writable")
+
+
+def _write_allocation_state(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    enforce_root_ownership: bool = True,
+) -> None:
+    if enforce_root_ownership:
+        _require_root_private_directory(path.parent)
+    else:
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path.parent.chmod(0o700)
+    _atomic_write(
+        path,
+        json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n",
+        mode=0o600,
+    )
+    metadata = path.lstat()
+    if enforce_root_ownership and (metadata.st_uid != 0 or metadata.st_gid != 0):
+        raise PolicyError("allocation evidence must be root:root")
+
+
+def _load_allocation_state(
+    path: Path,
+    *,
+    enforce_root_ownership: bool = True,
+) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    if enforce_root_ownership:
+        _require_root_private_directory(path.parent)
+    try:
+        metadata = path.lstat()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError("allocation inflight journal is unreadable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or (enforce_root_ownership and metadata.st_uid != 0)
+        or (enforce_root_ownership and metadata.st_gid != 0)
+        or not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+    ):
+        raise PolicyError("allocation inflight journal is unsafe")
+    return payload
+
+
 def _parse_sacct_rows(raw: str) -> list[list[str]]:
     rows = [line.split("|") for line in raw.splitlines() if line.strip()]
     if any(len(row) < 6 for row in rows):
         raise PolicyError("Slurm allocation probe accounting output is malformed")
     return rows
+
+
+def _probe_accounting_rows(job_id: str) -> list[list[str]]:
+    output = _run(
+        (
+            "sacct",
+            "-nP",
+            "-j",
+            job_id,
+            "--format=JobIDRaw,JobName,State,NodeList,AllocTRES,Account",
+        ),
+        timeout=15,
+    )
+    if not output.strip():
+        return []
+    return _parse_sacct_rows(output)
+
+
+def _base_job_state(rows: Sequence[Sequence[str]], job_id: str) -> str | None:
+    base = next((row for row in rows if row[0] == job_id), None)
+    if base is None:
+        return None
+    return base[2].split("+", 1)[0]
+
+
+def _poll_probe_terminal(
+    job_id: str,
+    *,
+    timeout_seconds: float,
+    poll_seconds: float = _ALLOCATION_POLL_SECONDS,
+) -> list[list[str]]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        rows = _probe_accounting_rows(job_id)
+        state = _base_job_state(rows, job_id)
+        if state in _TERMINAL_JOB_STATES:
+            return rows
+        time.sleep(poll_seconds)
+    raise PolicyError("allocation probe did not reach a terminal state before timeout")
+
+
+def _finish_allocation_inflight(
+    path: Path,
+    payload: dict[str, Any],
+    phase: str,
+    *,
+    enforce_root_ownership: bool,
+) -> None:
+    payload["phase"] = phase
+    payload["updated_at"] = datetime.now(UTC).isoformat()
+    _write_allocation_state(
+        path,
+        payload,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    history = path.with_name(
+        f"{payload['candidate_sha']}.{payload['job_id']}.{phase}.json",
+    )
+    os.replace(path, history)
+    _fsync_directory(path.parent)
+
+
+def _cancel_allocation_job(
+    path: Path,
+    payload: dict[str, Any],
+    profile: Profile,
+    *,
+    enforce_root_ownership: bool,
+) -> None:
+    job_id = str(payload.get("job_id", ""))
+    if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
+        raise PolicyError("allocation inflight journal job ID is invalid")
+    payload["phase"] = "cancel_requested"
+    _write_allocation_state(
+        path,
+        payload,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    try:
+        _run(("scancel", f"--clusters={profile.cluster}", job_id), timeout=30)
+    except PolicyError:
+        payload["phase"] = "cancel_failed"
+        _write_allocation_state(
+            path,
+            payload,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        raise
+    try:
+        rows = _poll_probe_terminal(job_id, timeout_seconds=60)
+    except PolicyError:
+        payload["phase"] = "cancel_readback_failed"
+        _write_allocation_state(
+            path,
+            payload,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        raise
+    state = _base_job_state(rows, job_id)
+    if state not in _TERMINAL_JOB_STATES:
+        raise PolicyError("cancelled allocation probe lacks terminal readback")
+    payload["terminal_state"] = state
+    _finish_allocation_inflight(
+        path,
+        payload,
+        "cancelled",
+        enforce_root_ownership=enforce_root_ownership,
+    )
+
+
+def _poll_allocation_or_cancel(
+    path: Path,
+    payload: dict[str, Any],
+    profile: Profile,
+    *,
+    timeout_seconds: float,
+    enforce_root_ownership: bool,
+) -> list[list[str]]:
+    try:
+        return _poll_probe_terminal(
+            str(payload["job_id"]),
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception:
+        _cancel_allocation_job(
+            path,
+            payload,
+            profile,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        raise
+
+
+def _recover_allocation_probe(
+    path: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    job_name: str,
+    enforce_root_ownership: bool,
+) -> None:
+    recovered_job_id: str | None = None
+    payload = _load_allocation_state(
+        path,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    if payload is not None:
+        if (
+            payload.get("candidate_sha") != candidate_sha
+            or payload.get("cluster") != profile.cluster
+            or payload.get("controller") != profile.controller
+            or payload.get("submit_host") != profile.submit_host
+            or payload.get("job_name") != job_name
+        ):
+            raise PolicyError("allocation inflight journal binding drifted")
+        recovered_job_id = str(payload.get("job_id", ""))
+        _cancel_allocation_job(
+            path,
+            payload,
+            profile,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+    orphan_rows = [
+        line.split("|")
+        for line in _run(
+            ("squeue", "-h", "-n", job_name, "-o", "%A|%j|%T"),
+            timeout=15,
+        ).splitlines()
+        if line.strip()
+    ]
+    if recovered_job_id is not None:
+        orphan_rows = [row for row in orphan_rows if row[0] != recovered_job_id]
+    if not orphan_rows:
+        return
+    if (
+        len(orphan_rows) != 1
+        or len(orphan_rows[0]) < 3
+        or orphan_rows[0][1] != job_name
+        or re.fullmatch(r"[1-9][0-9]*", orphan_rows[0][0]) is None
+    ):
+        raise PolicyError("unjournaled allocation probe jobs are ambiguous")
+    recovered = {
+        "schema_version": 1,
+        "candidate_sha": candidate_sha,
+        "cluster": profile.cluster,
+        "controller": profile.controller,
+        "submit_host": profile.submit_host,
+        "job_id": orphan_rows[0][0],
+        "job_name": job_name,
+        "phase": "recovered_unjournaled",
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    _write_allocation_state(
+        path,
+        recovered,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    _cancel_allocation_job(
+        path,
+        recovered,
+        profile,
+        enforce_root_ownership=enforce_root_ownership,
+    )
 
 
 def _positive_gpu_tres(value: str) -> bool:
@@ -1399,14 +2093,29 @@ def run_allocation_probe(
     candidate_sha: str,
     candidate_root: Path,
     worker_env: Path,
+    batch_uid: int,
+    batch_gid: int,
+    timeout_seconds: float = _ALLOCATION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     if root != Path("/") or os.geteuid() != 0:
         raise PolicyError("allocation-side Slurm probe requires the live root")
+    if batch_uid < 0 or batch_gid < 0:
+        raise PolicyError("allocation probe batch UID/GID must be non-negative")
+    if not 1 <= timeout_seconds <= 600:
+        raise PolicyError("allocation probe timeout must be between 1 and 600 seconds")
     verify_source_candidate(candidate_sha)
+    try:
+        batch_identity = pwd.getpwnam(profile.users[0])
+    except KeyError as exc:
+        raise PolicyError("allocation probe batch user is unavailable") from exc
+    if (batch_identity.pw_uid, batch_identity.pw_gid) != (batch_uid, batch_gid):
+        raise PolicyError("submit-host batch UID/GID differs from the expected identity")
     binding = strict_candidate_binding(
         candidate_root,
         worker_env,
         candidate_sha=candidate_sha,
+        expected_batch_uid=batch_uid,
+        expected_batch_gid=batch_gid,
     )
     host = _canonical_host()
     submit_node = _slurm_node_for_host(profile, host)
@@ -1416,16 +2125,22 @@ def run_allocation_probe(
     if live_config.get("ClusterName") != profile.cluster:
         raise PolicyError("allocation probe reached the wrong Slurm cluster")
     controllers = _split_csv(live_config.get("SlurmctldHost", ""))
-    if controllers and profile.controller.lower() not in {
-        item.lower() for item in controllers
-    }:
+    if controllers and profile.controller.lower() not in {item.lower() for item in controllers}:
         raise PolicyError("allocation probe reached the wrong Slurm controller")
 
     job_name = f"loom-policy-{candidate_sha}-probe"
+    inflight_path = _allocation_inflight_path(root, profile, candidate_sha)
+    _invalidate_allocation_artifact(root, profile, candidate_sha)
+    _recover_allocation_probe(
+        inflight_path,
+        profile,
+        candidate_sha=candidate_sha,
+        job_name=job_name,
+        enforce_root_ownership=True,
+    )
     arguments = [
         "sbatch",
         "--parsable",
-        "--wait",
         f"--job-name={job_name}",
         f"--uid={profile.users[0]}",
         f"--account={profile.child_accounts[0]}",
@@ -1441,95 +2156,156 @@ def run_allocation_probe(
     if profile.gpu_tres_per_slot > 0:
         arguments.append("--gres=gpu:1")
     arguments.append(
-        "--wrap=/usr/bin/srun --nodes=1 --ntasks=1 /bin/sleep 2",
+        (
+            "--wrap=/usr/bin/srun --nodes=1 --ntasks=1 /bin/sh -c "
+            f'\'test "$(/usr/bin/id -u)" -eq {batch_uid} && '
+            f'test "$(/usr/bin/id -g)" -eq {batch_gid} && /bin/sleep 2\''
+        ),
     )
-    output = _run(tuple(arguments), timeout=180)
+    try:
+        output = _run(tuple(arguments), timeout=30)
+    except Exception:
+        _recover_allocation_probe(
+            inflight_path,
+            profile,
+            candidate_sha=candidate_sha,
+            job_name=job_name,
+            enforce_root_ownership=True,
+        )
+        raise
     job_ids = [
         match.group(1)
         for line in output.splitlines()
         if (match := re.fullmatch(r"([1-9][0-9]*)(?:;[A-Za-z0-9_.-]+)?", line.strip()))
     ]
     if len(job_ids) != 1:
+        _recover_allocation_probe(
+            inflight_path,
+            profile,
+            candidate_sha=candidate_sha,
+            job_name=job_name,
+            enforce_root_ownership=True,
+        )
         raise PolicyError("allocation probe did not return one unambiguous job ID")
     job_id = job_ids[0]
-    rows = _parse_sacct_rows(
-        _run(
-            (
-                "sacct",
-                "-nP",
-                "-j",
-                job_id,
-                "--format=JobIDRaw,JobName,State,NodeList,AllocTRES,Account",
-            ),
-        ),
-    )
-    base = next((row for row in rows if row[0] == job_id), None)
-    srun = next((row for row in rows if row[0].startswith(f"{job_id}.0")), None)
-    if (
-        base is None
-        or base[1] != job_name
-        or not base[2].startswith("COMPLETED")
-        or base[5] != profile.child_accounts[0]
-        or srun is None
-        or not srun[2].startswith("COMPLETED")
-    ):
-        raise PolicyError("allocation probe sbatch/srun steps did not complete exactly")
-    allowed = {
-        *(node.lower() for node in profile.allowed_nodes),
-        *profile.host_aliases.values(),
-    }
-    node = base[3].lower()
-    if node not in allowed:
-        raise PolicyError("allocation probe ran outside the reviewed pool")
-    gpu_verified = profile.gpu_tres_per_slot <= 0 or _positive_gpu_tres(base[4])
-    if not gpu_verified:
-        raise PolicyError("allocation probe did not read back a positive GPU TRES")
-
-    guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
-    guard = _wait_for_guard_status(
-        root,
-        candidate_sha=candidate_sha,
-        expected_config_sha256=hashlib.sha256(guard_config.read_bytes()).hexdigest(),
-        require_probe=True,
-    )
-    resource_probe = guard.get("resource_probe")
-    if not isinstance(resource_probe, dict) or resource_probe.get("job_id") != job_id:
-        raise PolicyError("cgroup guard did not attest the exact allocation probe job")
-    payload = {
+    inflight: dict[str, Any] = {
         "schema_version": 1,
         "created_at": datetime.now(UTC).isoformat(),
         "candidate_sha": candidate_sha,
-        "candidate_tree": binding["repository"]["candidate_tree"],
         "cluster": profile.cluster,
         "controller": profile.controller,
         "submit_host": profile.submit_host,
-        "submitting_host": host,
         "job_id": job_id,
         "job_name": job_name,
-        "node": node,
-        "state": "COMPLETED",
-        "account": profile.child_accounts[0],
-        "qos": profile.qos,
-        "alloc_tres": base[4],
-        "gpu_verified": gpu_verified,
-        "sbatch_verified": True,
-        "srun_verified": True,
-        "guard_config_sha256": hashlib.sha256(guard_config.read_bytes()).hexdigest(),
-        "guard_resource_probe": resource_probe,
-        "candidate_binding": binding,
-        "command_sha256": hashlib.sha256(
-            "\0".join(arguments).encode(),
-        ).hexdigest(),
+        "batch_uid": batch_uid,
+        "batch_gid": batch_gid,
+        "phase": "submitted",
     }
-    target = _allocation_probe_path(root, profile, candidate_sha)
-    target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    target.parent.chmod(0o700)
-    _atomic_write(
-        target,
-        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
-        mode=0o600,
+    try:
+        _write_allocation_state(
+            inflight_path,
+            inflight,
+            enforce_root_ownership=True,
+        )
+    except Exception as journal_exc:
+        _run(("scancel", f"--clusters={profile.cluster}", job_id), timeout=30)
+        terminal = _poll_probe_terminal(job_id, timeout_seconds=60)
+        if _base_job_state(terminal, job_id) not in _TERMINAL_JOB_STATES:
+            raise PolicyError(
+                "unjournaled allocation probe lacks terminal readback",
+            ) from journal_exc
+        raise
+    rows = _poll_allocation_or_cancel(
+        inflight_path,
+        inflight,
+        profile,
+        timeout_seconds=timeout_seconds,
+        enforce_root_ownership=True,
     )
-    return payload
+    try:
+        base = next((row for row in rows if row[0] == job_id), None)
+        srun = next((row for row in rows if row[0].startswith(f"{job_id}.0")), None)
+        if (
+            base is None
+            or base[1] != job_name
+            or not base[2].startswith("COMPLETED")
+            or base[5] != profile.child_accounts[0]
+            or srun is None
+            or not srun[2].startswith("COMPLETED")
+        ):
+            raise PolicyError("allocation probe sbatch/srun steps did not complete exactly")
+        allowed = {
+            *(node.lower() for node in profile.allowed_nodes),
+            *profile.host_aliases.values(),
+        }
+        node = base[3].lower()
+        if node not in allowed:
+            raise PolicyError("allocation probe ran outside the reviewed pool")
+        gpu_verified = profile.gpu_tres_per_slot <= 0 or _positive_gpu_tres(base[4])
+        if not gpu_verified:
+            raise PolicyError("allocation probe did not read back a positive GPU TRES")
+
+        guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
+        guard = _wait_for_guard_status(
+            root,
+            candidate_sha=candidate_sha,
+            expected_config_sha256=hashlib.sha256(guard_config.read_bytes()).hexdigest(),
+            require_probe=True,
+        )
+        resource_probe = guard.get("resource_probe")
+        if not isinstance(resource_probe, dict) or resource_probe.get("job_id") != job_id:
+            raise PolicyError("cgroup guard did not attest the exact allocation probe job")
+        payload = {
+            "schema_version": 1,
+            "created_at": datetime.now(UTC).isoformat(),
+            "candidate_sha": candidate_sha,
+            "candidate_tree": binding["repository"]["candidate_tree"],
+            "cluster": profile.cluster,
+            "controller": profile.controller,
+            "submit_host": profile.submit_host,
+            "submitting_host": host,
+            "job_id": job_id,
+            "job_name": job_name,
+            "node": node,
+            "state": "COMPLETED",
+            "account": profile.child_accounts[0],
+            "qos": profile.qos,
+            "alloc_tres": base[4],
+            "gpu_verified": gpu_verified,
+            "sbatch_verified": True,
+            "srun_verified": True,
+            "batch_uid": batch_uid,
+            "batch_gid": batch_gid,
+            "guard_config_sha256": hashlib.sha256(
+                guard_config.read_bytes(),
+            ).hexdigest(),
+            "guard_resource_probe": resource_probe,
+            "candidate_binding": binding,
+            "command_sha256": hashlib.sha256(
+                "\0".join(arguments).encode(),
+            ).hexdigest(),
+        }
+        _write_allocation_state(
+            _allocation_probe_path(root, profile, candidate_sha),
+            payload,
+            enforce_root_ownership=True,
+        )
+        _finish_allocation_inflight(
+            inflight_path,
+            inflight,
+            "completed",
+            enforce_root_ownership=True,
+        )
+        return payload
+    except Exception:
+        _invalidate_allocation_artifact(root, profile, candidate_sha)
+        _cancel_allocation_job(
+            inflight_path,
+            inflight,
+            profile,
+            enforce_root_ownership=True,
+        )
+        raise
 
 
 def allocation_probe_readback(
@@ -1540,6 +2316,10 @@ def allocation_probe_readback(
     candidate_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     path = _allocation_probe_path(root, profile, candidate_sha)
+    if _allocation_inflight_path(root, profile, candidate_sha).exists():
+        raise PolicyError("allocation-side Slurm probe still has an inflight job")
+    if root == Path("/"):
+        _require_root_private_directory(path.parent)
     try:
         metadata = path.lstat()
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1549,6 +2329,8 @@ def allocation_probe_readback(
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISREG(metadata.st_mode)
         or stat.S_IMODE(metadata.st_mode) != 0o600
+        or (root == Path("/") and metadata.st_uid != 0)
+        or (root == Path("/") and metadata.st_gid != 0)
         or not isinstance(payload, dict)
         or payload.get("schema_version") != 1
     ):
@@ -1580,6 +2362,10 @@ def allocation_probe_readback(
         or payload.get("srun_verified") is not True
         or payload.get("account") not in profile.child_accounts
         or payload.get("qos") != profile.qos
+        or type(worker_env_binding.get("uid")) is not int
+        or type(worker_env_binding.get("gid")) is not int
+        or payload.get("batch_uid") != worker_env_binding.get("uid")
+        or payload.get("batch_gid") != worker_env_binding.get("gid")
     ):
         raise PolicyError("allocation-side Slurm probe binding drifted")
     allowed = {
@@ -1609,9 +2395,7 @@ def live_readback(
 ) -> dict[str, Any]:
     desired = desired_files(root, profile, candidate_sha=candidate_sha)
     slurm = _parse_key_values(_run(("scontrol", "show", "config")))
-    expected_slurm = {
-        key: _slurm_value(profile.slurm[field]) for key, field in _SLURM_KEYS.items()
-    }
+    expected_slurm = {key: _slurm_value(profile.slurm[field]) for key, field in _SLURM_KEYS.items()}
     for key, expected in expected_slurm.items():
         observed = slurm.get(key)
         if key in {"TaskPlugin", "AccountingStorageEnforce", "PrologFlags"}:
@@ -1630,13 +2414,19 @@ def live_readback(
     docker_driver = _run(("docker", "info", "--format", "{{.CgroupDriver}}")).strip()
     if docker_driver != profile.docker_cgroup_driver:
         raise PolicyError("live Docker cgroup driver readback drifted")
-    if _run(
-        ("systemctl", "is-enabled", "loom-slurm-job-cgroup-guard.service"),
-    ).strip() != "enabled":
+    if (
+        _run(
+            ("systemctl", "is-enabled", "loom-slurm-job-cgroup-guard.service"),
+        ).strip()
+        != "enabled"
+    ):
         raise PolicyError("cgroup guard is not enabled")
-    if _run(
-        ("systemctl", "is-active", "loom-slurm-job-cgroup-guard.service"),
-    ).strip() != "active":
+    if (
+        _run(
+            ("systemctl", "is-active", "loom-slurm-job-cgroup-guard.service"),
+        ).strip()
+        != "active"
+    ):
         raise PolicyError("cgroup guard is not active")
     guard_config_path = root / "etc/loom/slurm-job-cgroup-guard.json"
     expected_config_sha = _sha256(desired[guard_config_path].encode())
@@ -1687,7 +2477,7 @@ def _recover_orphan(
         _restore_snapshot(root, Path(snapshot_raw))
         accounting_raw = journal.get("accounting_snapshot")
         if isinstance(accounting_raw, str):
-            _restore_accounting(Path(accounting_raw))
+            _restore_accounting(profile, Path(accounting_raw))
         if root == Path("/") and journal.get("restart") is True and slurm_node is not None:
             _restore_services(root, profile, slurm_node)
         _snapshot_readback(root, Path(snapshot_raw))
@@ -1798,6 +2588,14 @@ def apply(
             if apply_accounting:
                 for command in accounting_commands(profile):
                     _run(command)
+                if accounting_snapshot is None:
+                    raise PolicyError("Loom accounting CAS snapshot is missing")
+                accounting_payload = _load_accounting_snapshot(accounting_snapshot)
+                if not _accounting_matches_desired(
+                    _accounting_state(profile),
+                    accounting_payload["desired"],
+                ):
+                    raise PolicyError("Loom accounting apply readback drifted")
             _advance_journal(journal_path, journal, "accounting_applied")
             if restart:
                 if slurm_node is None:
@@ -1824,7 +2622,7 @@ def apply(
             try:
                 _restore_snapshot(root, snapshot)
                 if accounting_snapshot is not None:
-                    _restore_accounting(accounting_snapshot)
+                    _restore_accounting(profile, accounting_snapshot)
                 if restart and slurm_node is not None:
                     _restore_services(root, profile, slurm_node)
                 _snapshot_readback(root, snapshot)
@@ -1914,7 +2712,7 @@ def rollback(
             _advance_journal(journal_path, transaction, "files_written")
             target_accounting = previous.get("accounting_snapshot")
             if isinstance(target_accounting, str):
-                _restore_accounting(Path(target_accounting))
+                _restore_accounting(profile, Path(target_accounting))
             _advance_journal(journal_path, transaction, "accounting_applied")
             if root == Path("/"):
                 if slurm_node is None:
@@ -1949,7 +2747,7 @@ def rollback(
             try:
                 _restore_snapshot(root, current_snapshot)
                 if current_accounting is not None:
-                    _restore_accounting(current_accounting)
+                    _restore_accounting(profile, current_accounting)
                 if root == Path("/") and slurm_node is not None:
                     _restore_services(root, profile, slurm_node)
                 _snapshot_readback(root, current_snapshot)
@@ -1988,6 +2786,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-sha")
     parser.add_argument("--candidate-root", type=Path)
     parser.add_argument("--worker-env", type=Path)
+    parser.add_argument("--batch-uid", type=int)
+    parser.add_argument("--batch-gid", type=int)
+    parser.add_argument(
+        "--allocation-timeout-seconds",
+        type=float,
+        default=_ALLOCATION_TIMEOUT_SECONDS,
+    )
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--apply-accounting", action="store_true")
@@ -2010,9 +2815,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "rollback" and args.execute:
             result = rollback(args.root, profile, candidate_sha=candidate)
         elif args.command == "allocation-probe" and args.execute:
-            if args.candidate_root is None or args.worker_env is None:
+            if (
+                args.candidate_root is None
+                or args.worker_env is None
+                or args.batch_uid is None
+                or args.batch_gid is None
+            ):
                 raise PolicyError(
-                    "allocation-probe requires --candidate-root and --worker-env",
+                    "allocation-probe requires candidate root, worker env, and batch UID/GID",
                 )
             result = run_allocation_probe(
                 args.root,
@@ -2020,6 +2830,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_sha=candidate,
                 candidate_root=args.candidate_root,
                 worker_env=args.worker_env,
+                batch_uid=args.batch_uid,
+                batch_gid=args.batch_gid,
+                timeout_seconds=args.allocation_timeout_seconds,
             )
         else:
             result = plan(args.root, profile, candidate_sha=candidate)
@@ -2029,14 +2842,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 1
                 if args.root == Path("/"):
                     verify_source_candidate(candidate)
-                    if args.candidate_root is None or args.worker_env is None:
+                    if (
+                        args.candidate_root is None
+                        or args.worker_env is None
+                        or args.batch_uid is None
+                        or args.batch_gid is None
+                    ):
                         raise PolicyError(
-                            "live check requires --candidate-root and --worker-env",
+                            "live check requires candidate root, worker env, and batch UID/GID",
                         )
                     binding = strict_candidate_binding(
                         args.candidate_root,
                         args.worker_env,
                         candidate_sha=candidate,
+                        expected_batch_uid=args.batch_uid,
+                        expected_batch_gid=args.batch_gid,
                     )
                     result["live_readback"] = live_readback(
                         args.root,

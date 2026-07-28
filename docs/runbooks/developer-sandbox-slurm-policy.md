@@ -82,11 +82,16 @@ on the node. It validates the desired Docker daemon configuration before the
 atomic writes. Every pass holds a per-cluster lock and records a root-only,
 fsynced transaction journal below
 `/var/lib/loom-developer-sandbox-slurm-policy/transactions/`; its file and
-accounting snapshots remain below the adjacent `snapshots/` directory. Each
-phase is durable before the next mutation. A failed daemon reload, restart,
+accounting snapshots remain below the adjacent `snapshots/` directory. The
+accounting snapshot is a compare-and-swap record scoped only to the Loom QoS,
+parent/child accounts, and three exact user associations; the converger never
+dumps or loads the whole cluster database. Unrelated accounts and concurrent
+unrelated changes are untouched. Owned-field drift or an external reference to
+a newly created Loom identity fails closed instead of deleting it. Each phase
+is durable before the next mutation. A failed daemon reload, restart,
 `scontrol reconfigure`, accounting mutation, or live readback restores both the
-files and the SlurmDB dump automatically. A later invocation recovers an
-orphaned non-terminal journal before starting new work.
+files and the exact owned accounting fields automatically. A later invocation
+recovers an orphaned non-terminal journal before starting new work.
 
 The live command binds the installed guard configuration and status to the
 exact source candidate SHA and refuses a dirty or mismatched policy checkout.
@@ -121,21 +126,35 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py allocation-probe \
   --candidate-sha "$EXACT_CANDIDATE_SHA" \
   --candidate-root "$EXACT_CANDIDATE_ROOT" \
   --worker-env "$PRIVATE_WORKER_ENV" \
+  --batch-uid "$EXPECTED_BATCH_UID" \
+  --batch-gid "$EXPECTED_BATCH_GID" \
   --execute
 
 sudo python scripts/ops/developer_sandbox_slurm_policy.py check \
   --profile deploy/slurm/developer-sandboxes/oldlab.toml \
   --candidate-sha "$EXACT_CANDIDATE_SHA" \
   --candidate-root "$EXACT_CANDIDATE_ROOT" \
-  --worker-env "$PRIVATE_WORKER_ENV"
+  --worker-env "$PRIVATE_WORKER_ENV" \
+  --batch-uid "$EXPECTED_BATCH_UID" \
+  --batch-gid "$EXPECTED_BATCH_GID"
 ```
 
 The probe submits one bounded, non-exclusive `sbatch` job and executes one
-`srun` step inside that allocation. Its root-only artifact binds the full
-candidate SHA/tree, cluster/controller/submit-host route, account/QoS, job,
-allocation node, TRES, guard resource readback, and completion of both batch
-and step. GB10 requests and reads back a positive GPU TRES. The final check
-accepts only a fresh artifact for the exact profile and candidate.
+`srun` step inside that allocation. Submission uses immediate parsable output,
+not `sbatch --wait`; a root-only mode-`0600` inflight record is persisted below
+a non-symlink root-owned mode-`0700` directory before bounded polling begins.
+Every timeout or error sends `scancel` to that exact cluster/job ID and waits
+for terminal accounting readback. Cancellation or readback failure remains
+durably fail-closed, and the next invocation recovers an interrupted inflight
+or exact deterministic-name orphan before submitting anything new.
+
+The final root-only artifact binds the full candidate SHA/tree,
+cluster/controller/submit-host route, account/QoS, job, allocation node, TRES,
+guard resource readback, expected numeric batch UID/GID, and completion of both
+batch and step. The worker env must be owned by that same UID/GID with exact
+mode `0600`; only its safe metadata, digest, and key names are recorded, never
+its values. GB10 requests and reads back a positive GPU TRES. The final check
+accepts only a fresh artifact for the exact profile, candidate, and identity.
 
 Before submission and again during the final check, the candidate verifier
 walks the safe non-symlink, non-group/world-writable parent chain; opens the
@@ -166,8 +185,8 @@ Repeat with `gb10.toml` only from the independently authorized GB10
 administrator path. A failed or partial pass is rerun idempotently; do not
 repair SlurmDB rows or daemon JSON by hand.
 
-To restore the snapshot and SlurmDB dump from the last committed transaction,
-use the same locked, journaled path:
+To restore the file snapshot and exact Loom-owned accounting fields from the
+last committed transaction, use the same locked, journaled path:
 
 ```bash
 sudo python scripts/ops/developer_sandbox_slurm_policy.py rollback \
