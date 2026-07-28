@@ -27,7 +27,6 @@ import stat
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 import tomllib
 import urllib.error
@@ -288,25 +287,82 @@ def _atomic_write(
     mode: int,
     identity: Identity | None = None,
 ) -> None:
-    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise HostConvergeError("atomic write target path is invalid")
+    descriptor = -1
+    temporary_name = ""
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
-        if identity is not None:
-            os.chown(temporary, identity.uid, identity.gid)
-        os.replace(temporary, path)
-        os.chmod(path, mode)
-        if identity is not None:
-            os.chown(path, identity.uid, identity.gid)
-        _fsync_directory(path.parent)
+        with _seized_directory(path.parent, create=True) as parent_fd:
+            try:
+                for _attempt in range(16):
+                    temporary_name = f".{path.name}.{secrets.token_hex(16)}"
+                    try:
+                        descriptor = os.open(
+                            temporary_name,
+                            os.O_WRONLY
+                            | os.O_CREAT
+                            | os.O_EXCL
+                            | getattr(os, "O_CLOEXEC", 0)
+                            | os.O_NOFOLLOW,
+                            0o600,
+                            dir_fd=parent_fd,
+                        )
+                        break
+                    except FileExistsError:
+                        continue
+                else:
+                    raise HostConvergeError(
+                        "could not reserve atomic write temporary file",
+                    )
+
+                view = memoryview(content)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise HostConvergeError("atomic write made no progress")
+                    view = view[written:]
+                if identity is not None:
+                    os.fchown(descriptor, identity.uid, identity.gid)
+                os.fchmod(descriptor, mode)
+                os.fsync(descriptor)
+
+                opened = os.fstat(descriptor)
+                temporary = os.stat(
+                    temporary_name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISREG(temporary.st_mode)
+                    or (temporary.st_dev, temporary.st_ino)
+                    != (opened.st_dev, opened.st_ino)
+                ):
+                    raise HostConvergeError("atomic write temporary binding changed")
+
+                _replace_file_at(parent_fd, temporary_name, path.name)
+                temporary_name = ""
+                rebound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(rebound.st_mode)
+                    or (rebound.st_dev, rebound.st_ino)
+                    != (opened.st_dev, opened.st_ino)
+                ):
+                    raise HostConvergeError("atomic write target binding changed")
+                os.fsync(parent_fd)
+            finally:
+                if temporary_name:
+                    try:
+                        os.unlink(temporary_name, dir_fd=parent_fd)
+                        os.fsync(parent_fd)
+                    except FileNotFoundError:
+                        pass
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        raise HostConvergeError(f"could not atomically write {path.name}") from exc
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -371,6 +427,45 @@ def _open_absolute_directory(path: Path, *, create: bool) -> int:
     except Exception:
         os.close(descriptor)
         raise
+
+
+@contextmanager
+def _seized_directory(path: Path, *, create: bool) -> Iterator[int]:
+    descriptor = -1
+    metadata: os.stat_result | None = None
+    seized = False
+    try:
+        descriptor = _open_absolute_directory(path, create=create)
+        metadata = os.fstat(descriptor)
+        seized = True
+        os.fchown(descriptor, os.geteuid(), os.getegid())
+        os.fchmod(descriptor, 0o700)
+        yield descriptor
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        raise HostConvergeError(f"could not seize directory: {path}") from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                if seized and metadata is not None:
+                    os.fchown(descriptor, metadata.st_uid, metadata.st_gid)
+                    os.fchmod(descriptor, stat.S_IMODE(metadata.st_mode))
+            except OSError as exc:
+                raise HostConvergeError(
+                    f"could not restore directory: {path}",
+                ) from exc
+            finally:
+                os.close(descriptor)
+
+
+def _replace_file_at(parent_fd: int, source: str, target: str) -> None:
+    os.replace(
+        source,
+        target,
+        src_dir_fd=parent_fd,
+        dst_dir_fd=parent_fd,
+    )
 
 
 def _mkdir_private_dir_at(parent_fd: int, name: str) -> None:
@@ -439,9 +534,9 @@ def _private_state_directory(
         if seize:
             # Temporarily remove the sandbox user's authority over child names.
             # All following mutations use the already-bound descriptor.
+            seized = True
             os.fchown(state_fd, os.geteuid(), os.getegid())
             os.fchmod(state_fd, 0o700)
-            seized = True
         yield parent_fd, state_fd, state_metadata
         rebound = os.stat(
             profile.state_root.name,
@@ -468,15 +563,16 @@ def _private_state_directory(
         ) from exc
     finally:
         if state_fd >= 0:
-            if seized:
-                try:
+            try:
+                if seized:
                     os.fchmod(state_fd, 0o700)
                     os.fchown(state_fd, identity.uid, identity.gid)
-                except OSError as exc:
-                    raise HostConvergeError(
-                        f"could not restore private sandbox root: {profile.state_root}",
-                    ) from exc
-            os.close(state_fd)
+            except OSError as exc:
+                raise HostConvergeError(
+                    f"could not restore private sandbox root: {profile.state_root}",
+                ) from exc
+            finally:
+                os.close(state_fd)
         if parent_fd >= 0:
             os.close(parent_fd)
 

@@ -171,6 +171,52 @@ def test_private_root_convergence_does_not_follow_raced_child_symlink(
     )
 
 
+def test_atomic_write_does_not_follow_target_replaced_after_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    identity = _current_identity("qianyi")
+    host.ensure_private_roots(profile, identity)
+    parent_before = profile.secrets_root.stat()
+    target = tmp_path / "unrelated"
+    target.mkdir(mode=0o755)
+    target_before = target.stat()
+    replace_file_at = host._replace_file_at
+
+    def replace_then_swap_target(
+        parent_fd: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        replace_file_at(parent_fd, source, destination)
+        os.unlink(destination, dir_fd=parent_fd)
+        os.symlink(target, destination, dir_fd=parent_fd)
+
+    monkeypatch.setattr(host, "_replace_file_at", replace_then_swap_target)
+
+    with pytest.raises(host.HostConvergeError, match="target binding changed"):
+        host._atomic_write(
+            profile.secrets_env,
+            b"private\n",
+            mode=0o600,
+            identity=identity,
+        )
+
+    target_after = target.stat()
+    assert (target_after.st_dev, target_after.st_ino) == (
+        target_before.st_dev,
+        target_before.st_ino,
+    )
+    assert stat.S_IMODE(target_after.st_mode) == stat.S_IMODE(target_before.st_mode)
+    parent_after = profile.secrets_root.stat()
+    assert stat.S_IMODE(parent_after.st_mode) == stat.S_IMODE(parent_before.st_mode)
+    assert (parent_after.st_uid, parent_after.st_gid) == (
+        parent_before.st_uid,
+        parent_before.st_gid,
+    )
+
+
 def test_exact_candidate_verifier_requires_clean_immutable_tree(tmp_path: Path) -> None:
     profile = _temporary_profile(tmp_path)
     candidate = profile.candidate_root / SHA
