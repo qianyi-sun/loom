@@ -235,6 +235,7 @@ def test_bootstrap_creates_missing_candidate_bound_nonexclusive_policy_once(
     assert actuator["candidate_sha"] == SHA
     assert actuator["exclusive"] is False
     assert actuator["external_runner"] is True
+    assert actuator["shared_capacity_managed"] is True
     assert actuator["container_cpus"] > 0
     assert actuator["container_memory_mib"] > 0
     assert actuator["container_pids"] == 4096
@@ -500,6 +501,7 @@ def test_checked_in_configs_cover_three_sandboxes_and_two_pools() -> None:
         assert actuator["candidate_sha"] == SHA
         assert actuator["exclusive"] is False
         assert actuator["external_runner"] is True
+        assert actuator["shared_capacity_managed"] is True
         assert actuator["slurm_account"] == f"loom-dev-{config.sandbox}"
         assert actuator["qos_normal"] == "loom-dev"
         assert actuator["env_file"] == (

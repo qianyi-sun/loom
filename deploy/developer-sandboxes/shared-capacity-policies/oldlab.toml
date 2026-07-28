@@ -38,6 +38,7 @@ pending_job_cap = 2
 time_limit = "02:00:00"
 exclusive = false
 external_runner = true
+shared_capacity_managed = true
 slurm_account = "loom-dev-${SANDBOX}"
 qos_normal = "loom-dev"
 container_cpus = 2
