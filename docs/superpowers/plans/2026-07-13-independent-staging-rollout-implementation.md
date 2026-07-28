@@ -820,7 +820,7 @@ The installer must:
 
 1. Require root and Ubuntu/systemd prerequisites.
 2. Create `loom-staging-operators` and add `qianyi`, `hongjian`, and `devansh` without removing existing groups.
-3. Create system user `loom-rollout` with home `/var/lib/loom-staging-rollout` and shell `/usr/sbin/nologin`; add it to `docker` only. Grant protected-input access with explicit named ACLs rather than assuming or broadening a shared secrets group.
+3. Create the password-locked system user `loom-rollout` with home `/var/lib/loom-staging-rollout` and shell `/bin/sh`; add it to `docker` only. The minimal shell is required because OpenSSH launches local `ProxyCommand` processes through the passwd shell for the GB10 `ProxyJump` topology. Upgrade the historical installer-owned `/usr/sbin/nologin` value, reject any other shell, and grant protected-input access with explicit named ACLs rather than assuming or broadening a shared secrets group.
 4. Create root-owned `/opt/loom-staging-runner`, `/etc/loom`, `/usr/local/libexec`, and the installed venv, plus service-owned candidate checkout, private state, and `/run/loom-staging-rollout` runtime files with exact modes.
 5. Clone only `https://github.com/qianyi-sun/loom.git` into the candidate checkout, verify the installer source commit is already reachable from `origin/dev`, and install the broker/runtime into the root-owned venv with `uv sync --locked --no-editable --extra cluster --extra rollout --python 3.11`. Never accept a ref or local source checkout. Subsequent candidate fetches cannot modify the installed package or venv.
 6. Generate the service Ed25519 key only if absent, mode 0600, and print only its fingerprint.

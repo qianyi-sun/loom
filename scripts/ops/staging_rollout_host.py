@@ -60,6 +60,8 @@ REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
 FETCH_REF = "refs/heads/dev"
 SERVICE_USER = "loom-rollout"
 SERVICE_GROUP = "loom-rollout"
+SERVICE_SHELL = "/bin/sh"
+LEGACY_SERVICE_SHELL = "/usr/sbin/nologin"
 OPERATOR_GROUP = "loom-staging-operators"
 OPERATORS = ("qianyi", "hongjian", "devansh")
 SHARED_WORK_CONSUMER = "qianyi"
@@ -1869,7 +1871,8 @@ class HostSystem:
         return OPERATOR_GROUP in groups
 
     def ensure_service_user(self) -> bool:
-        if not self.service_user_present():
+        fields = self._service_user_fields(allow_legacy_shell=True)
+        if fields is None:
             self.runner.run(
                 [
                     "useradd",
@@ -1879,30 +1882,46 @@ class HostSystem:
                     "--home-dir",
                     str(STATE_ROOT),
                     "--shell",
-                    "/usr/sbin/nologin",
+                    SERVICE_SHELL,
                     SERVICE_USER,
                 ]
             )
-            if not self.service_user_present():  # pragma: no cover - convergence invariant
-                raise InstallError("service account creation did not converge")
-            return True
-        return False
+        elif fields[6] == LEGACY_SERVICE_SHELL:
+            # OpenSSH executes ProxyCommand through the local account's passwd
+            # shell.  A nologin shell therefore prevents the service account
+            # from reaching every GB10 host behind ProxyJump.
+            self.runner.run(["usermod", "--shell", SERVICE_SHELL, SERVICE_USER])
+        else:
+            return False
+        if not self.service_user_present():  # pragma: no cover - convergence invariant
+            raise InstallError("service account creation did not converge")
+        return True
 
     def service_user_present(self) -> bool:
+        return self._service_user_fields() is not None
+
+    def _service_user_fields(
+        self,
+        *,
+        allow_legacy_shell: bool = False,
+    ) -> list[str] | None:
         result = self._probe(["getent", "passwd", SERVICE_USER])
         if result.returncode != 0:
-            return False
+            return None
         fields = result.stdout.strip().split(":")
+        allowed_shells = {SERVICE_SHELL}
+        if allow_legacy_shell:
+            allowed_shells.add(LEGACY_SERVICE_SHELL)
         if (
             len(fields) < 7
             or not fields[2].isdigit()
             or int(fields[2]) == 0
             or fields[5] != str(STATE_ROOT)
-            or fields[6] != "/usr/sbin/nologin"
+            or fields[6] not in allowed_shells
         ):
             raise InstallError("existing service account has unexpected identity, home, or shell")
         self._service_ids()
-        return True
+        return fields
 
     def ensure_docker_membership(self) -> bool:
         if self.docker_membership_present():
@@ -3714,7 +3733,7 @@ class HostSystem:
             or not fields[2].isdigit()
             or int(fields[2]) == 0
             or fields[5] != str(STATE_ROOT)
-            or fields[6] != "/usr/sbin/nologin"
+            or fields[6] != SERVICE_SHELL
         )
         if not service_account_ready:
             failures.append("service-account")
