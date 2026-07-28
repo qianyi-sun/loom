@@ -176,6 +176,17 @@ def test_checked_in_oldlab5_profile_is_bounded_and_pinned() -> None:
     )
 
 
+def test_runner_timer_arms_when_enabled_after_boot() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    timer = (
+        repo_root / "deploy/ci-runners/loom-ci-runner-pool.timer"
+    ).read_text(encoding="utf-8")
+
+    assert "OnActiveSec=30s" in timer
+    assert "OnBootSec=" not in timer
+    assert "OnUnitActiveSec=30s" in timer
+
+
 def test_profile_rejects_resource_budget_or_label_expansion(tmp_path: Path) -> None:
     profile = _profile(tmp_path, slots=11)
     with pytest.raises(pool.PoolConfigError, match="host_cpu_budget"):
