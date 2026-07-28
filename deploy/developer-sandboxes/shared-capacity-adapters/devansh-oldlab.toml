@@ -8,5 +8,6 @@ handoff_path = "/var/lib/loom-shared-capacity/handoffs/current/devansh-oldlab.js
 observation_path = "/var/lib/loom-shared-capacity/observations/devansh-oldlab.json"
 adapter_state_path = "/var/lib/loom-shared-capacity/adapters/devansh-oldlab.json"
 sandbox_state_path = "/srv/loom/developer-sandboxes/devansh/sandbox-state.json"
+runtime_attestation_root = "/var/lib/loom-shared-capacity/runtime-attestations"
 max_slots_bound = 20
 timeout_seconds = 10

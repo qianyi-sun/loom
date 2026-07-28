@@ -28,9 +28,9 @@ import urllib.request
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _SCHEMA_VERSION = 1
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -57,6 +57,48 @@ _POLICY_TEMPLATE_DIR = (
     Path(__file__).resolve().parents[2]
     / "deploy/developer-sandboxes/shared-capacity-policies"
 )
+_CAPACITY_BINDING_FIELDS = {
+    "schema_version",
+    "request_id",
+    "lease_epoch",
+    "candidate_sha",
+    "preemptible",
+}
+_CAPACITY_LEASE_STATES = {"active", "retiring", "retired"}
+_ATTESTATION_TTL = timedelta(minutes=15)
+_ATTESTATION_MAX_BYTES = 128 * 1024
+_COLLECTOR_HOSTNAME = "trt-eai-oldlab-2"
+_DOMAIN_ATTESTATION_ROOT = Path("/var/lib/loom-developer-domain-attestations")
+_FLEET_ATTESTATION_ROOT = Path(
+    "/var/lib/loom-developer-sandbox-links/attestations",
+)
+_RECEIPT_TOP_LEVEL_FIELDS = {
+    "schema_version",
+    "kind",
+    "sandbox",
+    "candidate_sha",
+    "candidate_tree",
+    "collector",
+    "fleet_attestation",
+    "domains",
+    "payload_sha256",
+}
+_RECEIPT_DOMAIN_FIELDS = {
+    "manifest_path",
+    "signature_path",
+    "payload_sha256",
+    "signature_sha256",
+    "key_id",
+    "generation",
+    "published_at",
+    "expires_at",
+}
+_RECEIPT_FLEET_FIELDS = {
+    "path",
+    "payload_sha256",
+    "generated_at",
+    "expires_at",
+}
 
 
 class AdapterError(RuntimeError):
@@ -78,6 +120,7 @@ class AdapterConfig:
     observation_path: Path
     adapter_state_path: Path
     sandbox_state_path: Path
+    runtime_attestation_root: Path
     max_slots_bound: int
     timeout_seconds: float
 
@@ -95,7 +138,13 @@ class Handoff:
     max_slots: int
     expires_at: datetime
     preemptible: bool
-    digest: str
+    digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateBinding:
+    sha: str
+    tree: str
 
 
 HttpJson = Callable[..., dict[str, Any]]
@@ -213,6 +262,7 @@ def load_config(path: Path) -> AdapterConfig:
         "observation_path",
         "adapter_state_path",
         "sandbox_state_path",
+        "runtime_attestation_root",
         "max_slots_bound",
         "timeout_seconds",
     }
@@ -285,6 +335,11 @@ def load_config(path: Path) -> AdapterConfig:
             "sandbox_state_path",
             "adapter config",
         ),
+        runtime_attestation_root=_required_absolute_path(
+            payload,
+            "runtime_attestation_root",
+            "adapter config",
+        ),
         max_slots_bound=max_slots_bound,
         timeout_seconds=timeout_seconds,
     )
@@ -344,6 +399,9 @@ def load_handoff(config: AdapterConfig) -> Handoff:
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise AdapterError(f"broker handoff {field} must be non-negative")
+    assert isinstance(lease_epoch, int)
+    assert isinstance(min_slots, int)
+    assert isinstance(max_slots, int)
     if min_slots != 0:
         raise AdapterError("broker handoff min_slots must remain zero")
     if max_slots > config.max_slots_bound:
@@ -381,7 +439,7 @@ def load_handoff(config: AdapterConfig) -> Handoff:
     )
 
 
-def _load_sandbox_candidate(config: AdapterConfig) -> str:
+def _load_sandbox_binding(config: AdapterConfig) -> CandidateBinding:
     payload = _read_json_object(config.sandbox_state_path, label="sandbox state")
     if (
         payload.get("schema_version") != _SCHEMA_VERSION
@@ -390,9 +448,19 @@ def _load_sandbox_candidate(config: AdapterConfig) -> str:
     ):
         raise AdapterError("sandbox state identity is invalid")
     candidate_sha = payload.get("candidate_sha")
-    if not isinstance(candidate_sha, str) or _SHA_RE.fullmatch(candidate_sha) is None:
-        raise AdapterError("sandbox state candidate_sha is invalid")
-    return candidate_sha
+    candidate_tree = payload.get("candidate_tree")
+    if (
+        not isinstance(candidate_sha, str)
+        or _SHA_RE.fullmatch(candidate_sha) is None
+        or not isinstance(candidate_tree, str)
+        or _SHA_RE.fullmatch(candidate_tree) is None
+    ):
+        raise AdapterError("sandbox state candidate binding is invalid")
+    return CandidateBinding(sha=candidate_sha, tree=candidate_tree)
+
+
+def _load_sandbox_candidate(config: AdapterConfig) -> str:
+    return _load_sandbox_binding(config).sha
 
 
 def _load_admin_token(path: Path) -> str:
@@ -465,12 +533,16 @@ def _load_adapter_state(path: Path) -> dict[str, Any] | None:
         "lease_epoch",
         "handoff_digest",
         "candidate_sha",
+        "preemptible",
         "applied_enabled",
         "applied_max_slots",
         "pending_slots",
         "active_slots",
         "draining_slots",
         "terminal_slots",
+        "runtime_attestation_status",
+        "runtime_attestation_digest",
+        "blocker",
         "updated_at",
     }
     if set(payload) != required or payload.get("schema_version") != _SCHEMA_VERSION:
@@ -488,9 +560,26 @@ def _load_adapter_state(path: Path) -> dict[str, Any] | None:
             raise AdapterError("adapter state counters are invalid")
     if (
         not isinstance(payload.get("applied_enabled"), bool)
+        or not isinstance(payload.get("preemptible"), bool)
         or _UUID_RE.fullmatch(str(payload.get("request_id"))) is None
         or _SHA_RE.fullmatch(str(payload.get("candidate_sha"))) is None
-        or not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("handoff_digest")))
+        or (
+            payload.get("handoff_digest") is not None
+            and not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("handoff_digest")))
+        )
+        or payload.get("runtime_attestation_status")
+        not in {"verified", "not_required", "rejected"}
+        or (
+            payload.get("runtime_attestation_digest") is not None
+            and not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(payload.get("runtime_attestation_digest")),
+            )
+        )
+        or (
+            payload.get("blocker") is not None
+            and payload.get("blocker") != "runtime_attestation_invalid"
+        )
     ):
         raise AdapterError("adapter state binding is invalid")
     return payload
@@ -513,7 +602,11 @@ def _validate_epoch(
     previous_epoch = int(state["lease_epoch"])
     if handoff.lease_epoch < previous_epoch:
         raise AdapterError("broker handoff lease_epoch regressed")
-    if handoff.lease_epoch == previous_epoch and handoff.digest != state["handoff_digest"]:
+    if (
+        handoff.lease_epoch == previous_epoch
+        and state["handoff_digest"] is not None
+        and handoff.digest != state["handoff_digest"]
+    ):
         raise AdapterError("broker handoff changed without an epoch increment")
 
 
@@ -552,10 +645,13 @@ def _bootstrap_policy_body(
     policy = payload.get("policy")
     if not isinstance(policy, dict):
         raise AdapterError("autoscaler policy template policy is invalid")
-    body = json.loads(
-        json.dumps(policy)
-        .replace("${SANDBOX}", config.sandbox)
-        .replace("${CANDIDATE_SHA}", candidate_sha),
+    body = cast(
+        dict[str, Any],
+        json.loads(
+            json.dumps(policy)
+            .replace("${SANDBOX}", config.sandbox)
+            .replace("${CANDIDATE_SHA}", candidate_sha),
+        ),
     )
     actuator_config = body.get("actuator_config")
     job_pids_max = payload.get("job_pids_max")
@@ -633,21 +729,23 @@ def _validate_bootstrap_policy(
         for field in immutable_fields
     ):
         raise AdapterError("autoscaler policy immutable bootstrap contract drifted")
+    for field in (
+        "container_cpus",
+        "container_memory_mib",
+        "container_pids",
+        "job_pids_max",
+    ):
+        value = actuator_config.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value <= 0
+        ):
+            raise AdapterError("autoscaler policy containment contract drifted")
     if (
         actuator_config.get("exclusive") is not False
         or actuator_config.get("external_runner") is not True
         or actuator_config.get("shared_capacity_managed") is not True
-        or any(
-            isinstance(actuator_config.get(field), bool)
-            or not isinstance(actuator_config.get(field), (int, float))
-            or actuator_config.get(field) <= 0
-            for field in (
-                "container_cpus",
-                "container_memory_mib",
-                "container_pids",
-                "job_pids_max",
-            )
-        )
         or actuator_config["job_pids_max"]
         < actuator_config["container_pids"]
         * actuator_config["requested_concurrency"]
@@ -658,58 +756,13 @@ def _validate_bootstrap_policy(
         raise AdapterError("autoscaler policy lacks non-exclusive containment authority")
 
 
-def _bootstrap_policy_unlocked(
-    config: AdapterConfig,
-    *,
-    http_json: HttpJson = _http_json,
-) -> dict[str, Any]:
-    candidate_sha = _load_sandbox_candidate(config)
-    expected = _bootstrap_policy_body(config, candidate_sha=candidate_sha)
-    token = _load_admin_token(config.admin_secret_file)
-    path = _policy_path(config)
-    try:
-        policy = http_json(
-            method="GET",
-            base_url=config.control_plane_url,
-            token=token,
-            path=path,
-            timeout=config.timeout_seconds,
-        )
-        status = "unchanged"
-    except PolicyMissingError:
-        policy = http_json(
-            method="PUT",
-            base_url=config.control_plane_url,
-            token=token,
-            path=path,
-            body=expected,
-            timeout=config.timeout_seconds,
-        )
-        status = "created"
-    _validate_bootstrap_policy(
-        policy,
-        config=config,
-        candidate_sha=candidate_sha,
-        expected_body=expected,
-    )
-    return {
-        "schema_version": _SCHEMA_VERSION,
-        "artifact_type": "shared-capacity-policy-bootstrap-result",
-        "status": status,
-        "sandbox": config.sandbox,
-        "environment": config.environment,
-        "pool_name": config.pool_name,
-        "candidate_sha": candidate_sha,
-    }
-
-
 def bootstrap_policy(
     config: AdapterConfig,
     *,
+    now: datetime | None = None,
     http_json: HttpJson = _http_json,
 ) -> dict[str, Any]:
-    with _exclusive_adapter_lock(config):
-        return _bootstrap_policy_unlocked(config, http_json=http_json)
+    return run_once(config, now=now, http_json=http_json)
 
 
 def _validate_policy(
@@ -737,6 +790,344 @@ def _validate_policy(
             raise AdapterError(f"autoscaler policy {field} is invalid")
 
 
+def _capacity_binding(
+    *,
+    request_id: object,
+    lease_epoch: object,
+    candidate_sha: object,
+    preemptible: object,
+    label: str,
+) -> dict[str, Any]:
+    if (
+        not isinstance(request_id, str)
+        or _UUID_RE.fullmatch(request_id) is None
+        or isinstance(lease_epoch, bool)
+        or not isinstance(lease_epoch, int)
+        or lease_epoch < 0
+        or not isinstance(candidate_sha, str)
+        or _SHA_RE.fullmatch(candidate_sha) is None
+        or not isinstance(preemptible, bool)
+    ):
+        raise AdapterError(f"{label} is invalid")
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "request_id": request_id,
+        "lease_epoch": lease_epoch,
+        "candidate_sha": candidate_sha,
+        "preemptible": preemptible,
+    }
+
+
+def _handoff_binding(handoff: Handoff) -> dict[str, Any]:
+    return _capacity_binding(
+        request_id=handoff.request_id,
+        lease_epoch=handoff.lease_epoch,
+        candidate_sha=handoff.candidate_sha,
+        preemptible=handoff.preemptible,
+        label="broker handoff capacity binding",
+    )
+
+
+def _capacity_lease_state(policy: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw = policy.get("capacity_lease_state")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise AdapterError("autoscaler capacity_lease_state must be an object")
+    state = raw.get("state")
+    if state not in _CAPACITY_LEASE_STATES:
+        raise AdapterError("autoscaler capacity_lease_state.state is invalid")
+    binding = _capacity_binding(
+        request_id=raw.get("request_id"),
+        lease_epoch=raw.get("lease_epoch"),
+        candidate_sha=raw.get("candidate_sha"),
+        preemptible=raw.get("preemptible"),
+        label="autoscaler capacity_lease_state binding",
+    )
+    expected = _CAPACITY_BINDING_FIELDS | {"state", "activated_at"}
+    if state == "retiring":
+        expected |= {"retire_started_at", "retire_reason"}
+    elif state == "retired":
+        expected |= {"retire_started_at", "retire_reason", "retired_at"}
+    if set(raw) != expected:
+        raise AdapterError("autoscaler capacity_lease_state fields are invalid")
+    for field in expected - _CAPACITY_BINDING_FIELDS - {"state", "retire_reason"}:
+        _parse_capacity_timestamp(raw.get(field), field=field)
+    if "retire_reason" in expected and (
+        not isinstance(raw.get("retire_reason"), str) or not raw["retire_reason"]
+    ):
+        raise AdapterError("autoscaler capacity_lease_state.retire_reason is invalid")
+    return {**raw, **binding}
+
+
+def _parse_capacity_timestamp(value: object, *, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise AdapterError(f"autoscaler capacity_lease_state.{field} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AdapterError(
+            f"autoscaler capacity_lease_state.{field} is invalid",
+        ) from exc
+    if parsed.tzinfo is None:
+        raise AdapterError(f"autoscaler capacity_lease_state.{field} is invalid")
+    return parsed.astimezone(UTC)
+
+
+def _validate_capacity_lease_readback(
+    policy: Mapping[str, Any],
+    *,
+    binding: Mapping[str, Any],
+    enabled: bool,
+) -> dict[str, Any]:
+    state = _capacity_lease_state(policy)
+    if state is None:
+        raise AdapterError("autoscaler response omitted capacity_lease_state")
+    if any(state[field] != binding[field] for field in _CAPACITY_BINDING_FIELDS):
+        raise AdapterError("autoscaler capacity_lease_state binding differs from handoff")
+    if enabled and state["state"] != "active":
+        raise AdapterError("enabled autoscaler capacity lease is not active")
+    if not enabled and state["state"] not in {"retiring", "retired"}:
+        raise AdapterError("disabled autoscaler capacity lease is not retiring")
+    return state
+
+
+def _validate_runtime_attestation(
+    config: AdapterConfig,
+    *,
+    candidate: CandidateBinding,
+    now: datetime,
+) -> str:
+    path = (
+        config.runtime_attestation_root
+        / config.sandbox
+        / candidate.sha
+        / "combined.json"
+    )
+    resolved = _secure_runtime_attestation_file(path, config=config)
+    try:
+        raw = resolved.read_bytes()
+    except OSError as exc:
+        raise AdapterError("combined runtime attestation is unreadable") from exc
+    if not raw or len(raw) > _ATTESTATION_MAX_BYTES:
+        raise AdapterError("combined runtime attestation size is invalid")
+    try:
+        receipt = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("combined runtime attestation is invalid JSON") from exc
+    if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_TOP_LEVEL_FIELDS:
+        raise AdapterError("combined runtime attestation fields are invalid")
+    if (
+        receipt.get("schema_version") != _SCHEMA_VERSION
+        or receipt.get("kind") != "loom.developer-runtime-combined-activation"
+        or receipt.get("sandbox") != config.sandbox
+        or receipt.get("candidate_sha") != candidate.sha
+        or receipt.get("candidate_tree") != candidate.tree
+    ):
+        raise AdapterError("combined runtime attestation identity is invalid")
+    digest = receipt.get("payload_sha256")
+    unsigned = dict(receipt)
+    unsigned.pop("payload_sha256")
+    expected_digest = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+    if not isinstance(digest, str) or digest != expected_digest:
+        raise AdapterError("combined runtime attestation digest is invalid")
+    if raw != _canonical_json(receipt) + b"\n":
+        raise AdapterError("combined runtime attestation is not canonical")
+
+    collector = receipt.get("collector")
+    fleet = receipt.get("fleet_attestation")
+    domains = receipt.get("domains")
+    if (
+        not isinstance(collector, dict)
+        or set(collector) != {"hostname", "collected_at", "expires_at"}
+        or not isinstance(fleet, dict)
+        or set(fleet) != _RECEIPT_FLEET_FIELDS
+        or not isinstance(domains, dict)
+        or set(domains) != {"oldlab", "gb10"}
+    ):
+        raise AdapterError("combined runtime attestation sections are invalid")
+    collected_at = _parse_attestation_timestamp(
+        collector.get("collected_at"),
+        field="collector.collected_at",
+    )
+    expires_at = _parse_attestation_timestamp(
+        collector.get("expires_at"),
+        field="collector.expires_at",
+    )
+    if (
+        collector.get("hostname") != _COLLECTOR_HOSTNAME
+        or not timedelta(0) < expires_at - collected_at <= _ATTESTATION_TTL
+        or collected_at > now + timedelta(seconds=30)
+        or now - collected_at > _ATTESTATION_TTL
+        or expires_at <= now
+    ):
+        raise AdapterError("combined runtime attestation is stale or expired")
+    _validate_fleet_reference(
+        fleet,
+        config=config,
+        candidate=candidate,
+        collected_at=collected_at,
+        combined_expires_at=expires_at,
+        now=now,
+    )
+    for domain in ("oldlab", "gb10"):
+        _validate_domain_reference(
+            domains[domain],
+            domain=domain,
+            config=config,
+            candidate=candidate,
+            collected_at=collected_at,
+            combined_expires_at=expires_at,
+            now=now,
+        )
+    return digest
+
+
+def _canonical_json(payload: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+
+
+def _secure_runtime_attestation_file(
+    path: Path,
+    *,
+    config: AdapterConfig,
+) -> Path:
+    expected_parent = config.runtime_attestation_root / config.sandbox / path.parent.name
+    if path.parent != expected_parent or path.name != "combined.json":
+        raise AdapterError("combined runtime attestation path is invalid")
+    for directory in (
+        config.runtime_attestation_root,
+        config.runtime_attestation_root / config.sandbox,
+        path.parent,
+    ):
+        try:
+            metadata = directory.lstat()
+        except OSError as exc:
+            raise AdapterError("combined runtime attestation directory is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise AdapterError("combined runtime attestation directory is unsafe")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AdapterError("combined runtime attestation is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise AdapterError("combined runtime attestation file is unsafe")
+    return path.resolve(strict=True)
+
+
+def _parse_attestation_timestamp(value: object, *, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise AdapterError(f"combined runtime attestation {field} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AdapterError(
+            f"combined runtime attestation {field} is invalid",
+        ) from exc
+    if parsed.tzinfo is None:
+        raise AdapterError(f"combined runtime attestation {field} is invalid")
+    return parsed.astimezone(UTC)
+
+
+def _validate_fleet_reference(
+    fleet: Mapping[str, Any],
+    *,
+    config: AdapterConfig,
+    candidate: CandidateBinding,
+    collected_at: datetime,
+    combined_expires_at: datetime,
+    now: datetime,
+) -> None:
+    expected_path = (
+        _FLEET_ATTESTATION_ROOT
+        / config.sandbox
+        / candidate.sha
+        / "fleet.json"
+    )
+    generated_at = _parse_attestation_timestamp(
+        fleet.get("generated_at"),
+        field="fleet_attestation.generated_at",
+    )
+    expires_at = _parse_attestation_timestamp(
+        fleet.get("expires_at"),
+        field="fleet_attestation.expires_at",
+    )
+    if (
+        fleet.get("path") != str(expected_path)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(fleet.get("payload_sha256")))
+        is None
+        or expires_at - generated_at != _ATTESTATION_TTL
+        or generated_at > collected_at + timedelta(seconds=30)
+        or collected_at - generated_at > timedelta(seconds=60)
+        or expires_at < combined_expires_at
+        or expires_at <= now
+    ):
+        raise AdapterError("combined runtime fleet attestation is invalid or stale")
+
+
+def _validate_domain_reference(
+    value: object,
+    *,
+    domain: str,
+    config: AdapterConfig,
+    candidate: CandidateBinding,
+    collected_at: datetime,
+    combined_expires_at: datetime,
+    now: datetime,
+) -> None:
+    if not isinstance(value, dict) or set(value) != _RECEIPT_DOMAIN_FIELDS:
+        raise AdapterError("combined runtime domain attestation fields are invalid")
+    root = _DOMAIN_ATTESTATION_ROOT / config.sandbox / candidate.sha
+    published_at = _parse_attestation_timestamp(
+        value.get("published_at"),
+        field=f"domains.{domain}.published_at",
+    )
+    expires_at = _parse_attestation_timestamp(
+        value.get("expires_at"),
+        field=f"domains.{domain}.expires_at",
+    )
+    generation = value.get("generation")
+    if (
+        value.get("manifest_path") != str(root / f"{domain}.json")
+        or value.get("signature_path") != str(root / f"{domain}.sig")
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(value.get(field))) is None
+            for field in (
+                "payload_sha256",
+                "signature_sha256",
+                "key_id",
+            )
+        )
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 1
+        or expires_at - published_at != _ATTESTATION_TTL
+        or published_at > collected_at + timedelta(seconds=30)
+        or collected_at - published_at > _ATTESTATION_TTL
+        or expires_at < combined_expires_at
+        or expires_at <= now
+    ):
+        raise AdapterError("combined runtime domain attestation is invalid or stale")
+
+
 def _observation_counts(
     policy: Mapping[str, Any],
     *,
@@ -758,9 +1149,12 @@ def _observation_counts(
             active = 0
             draining = 0
     else:
-        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in raw):
-            raise AdapterError("autoscaler observation counters are incomplete")
-        pending, active, draining = (int(value) for value in raw)
+        counters: list[int] = []
+        for value in raw:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AdapterError("autoscaler observation counters are incomplete")
+            counters.append(value)
+        pending, active, draining = counters
     previous_terminal = int(state["terminal_slots"]) if same_request and state is not None else 0
     previous_nonterminal = (
         sum(int(state[field]) for field in ("pending_slots", "active_slots", "draining_slots"))
@@ -777,6 +1171,7 @@ def _policy_update_body(
     *,
     enabled: bool,
     max_slots: int,
+    binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     body = {field: policy[field] for field in _POLICY_COPY_FIELDS}
     body.update(
@@ -785,6 +1180,7 @@ def _policy_update_body(
             "min_slots": 0,
             "max_slots": max_slots,
             "disabled_reason": (None if enabled else "shared_capacity_handoff_disabled"),
+            "shared_capacity_binding": dict(binding),
         },
     )
     return body
@@ -837,6 +1233,36 @@ def _atomic_json_write(path: Path, payload: object) -> None:
             temporary.unlink()
 
 
+def _synthetic_disable_handoff(
+    config: AdapterConfig,
+    *,
+    binding: Mapping[str, Any],
+    now: datetime,
+    digest: str | None,
+) -> Handoff:
+    normalized = _capacity_binding(
+        request_id=binding.get("request_id"),
+        lease_epoch=binding.get("lease_epoch"),
+        candidate_sha=binding.get("candidate_sha"),
+        preemptible=binding.get("preemptible"),
+        label="durable capacity binding",
+    )
+    return Handoff(
+        request_id=normalized["request_id"],
+        lease_epoch=normalized["lease_epoch"],
+        sandbox=config.sandbox,
+        environment=config.environment,
+        candidate_sha=normalized["candidate_sha"],
+        pool_name=config.pool_name,
+        enabled=False,
+        min_slots=0,
+        max_slots=0,
+        expires_at=now,
+        preemptible=normalized["preemptible"],
+        digest=digest,
+    )
+
+
 def _run_once_unlocked(
     config: AdapterConfig,
     *,
@@ -847,40 +1273,74 @@ def _run_once_unlocked(
     state = _load_adapter_state(config.adapter_state_path)
     handoff_missing = False
     try:
-        handoff = load_handoff(config)
+        handoff: Handoff | None = load_handoff(config)
     except AdapterError:
-        if state is None or config.handoff_path.exists() or config.handoff_path.is_symlink():
+        if config.handoff_path.exists() or config.handoff_path.is_symlink():
             raise
         handoff_missing = True
-        handoff = Handoff(
-            request_id=str(state["request_id"]),
-            lease_epoch=int(state["lease_epoch"]),
-            sandbox=config.sandbox,
-            environment=config.environment,
-            candidate_sha=str(state["candidate_sha"]),
-            pool_name=config.pool_name,
-            enabled=False,
-            min_slots=0,
-            max_slots=0,
-            expires_at=now,
-            preemptible=True,
-            digest=str(state["handoff_digest"]),
-        )
-    candidate_sha = _load_sandbox_candidate(config)
-    if candidate_sha != handoff.candidate_sha:
-        raise AdapterError("sandbox candidate does not match broker handoff")
-    _validate_epoch(handoff, state)
-    same_request = state is not None and state["request_id"] == handoff.request_id
+        handoff = None
+    candidate = _load_sandbox_binding(config)
+    candidate_sha = candidate.sha
+    if handoff is not None:
+        if candidate_sha != handoff.candidate_sha:
+            raise AdapterError("sandbox candidate does not match broker handoff")
+        _validate_epoch(handoff, state)
     token = _load_admin_token(config.admin_secret_file)
     path = _policy_path(config)
-    policy = http_json(
-        method="GET",
-        base_url=config.control_plane_url,
-        token=token,
-        path=path,
-        timeout=config.timeout_seconds,
-    )
-    _validate_policy(policy, config=config, candidate_sha=candidate_sha)
+    policy_missing = False
+    try:
+        policy = http_json(
+            method="GET",
+            base_url=config.control_plane_url,
+            token=token,
+            path=path,
+            timeout=config.timeout_seconds,
+        )
+    except PolicyMissingError:
+        policy_missing = True
+        policy = None
+    expected_policy = _bootstrap_policy_body(config, candidate_sha=candidate_sha)
+    if policy is not None:
+        _validate_bootstrap_policy(
+            policy,
+            config=config,
+            candidate_sha=candidate_sha,
+            expected_body=expected_policy,
+        )
+    if handoff is None and state is not None:
+        handoff = _synthetic_disable_handoff(
+            config,
+            binding=state,
+            now=now,
+            digest=state["handoff_digest"],
+        )
+    elif handoff is None and policy is not None:
+        durable_policy_state = _capacity_lease_state(policy)
+        if durable_policy_state is None:
+            raise AdapterError("missing handoff has no durable capacity binding")
+        handoff = _synthetic_disable_handoff(
+            config,
+            binding=durable_policy_state,
+            now=now,
+            digest=None,
+        )
+    if handoff is None:
+        raise AdapterError("missing handoff has no durable capacity binding")
+    if candidate_sha != handoff.candidate_sha:
+        raise AdapterError("sandbox candidate does not match broker handoff")
+    if handoff_missing:
+        _validate_epoch(handoff, state)
+    same_request = state is not None and state["request_id"] == handoff.request_id
+    if policy is None:
+        policy = {
+            **expected_policy,
+            "environment": config.environment,
+            "pool_name": config.pool_name,
+            "capacity_lease_state": None,
+            "last_pending_slots": None,
+            "last_actual_slots": None,
+            "last_draining_slots": None,
+        }
     pending, active, draining, terminal = _observation_counts(
         policy,
         state=state,
@@ -889,11 +1349,53 @@ def _run_once_unlocked(
     expired = handoff_missing or now >= handoff.expires_at
     target_enabled = handoff.enabled and not expired
     target_max_slots = handoff.max_slots if target_enabled else 0
+    binding = _handoff_binding(handoff)
+    runtime_attestation_digest = None
+    runtime_attestation_status = "not_required"
+    blocker = None
+    attestation_error: AdapterError | None = None
+    if target_enabled:
+        try:
+            runtime_attestation_digest = _validate_runtime_attestation(
+                config,
+                candidate=candidate,
+                now=now,
+            )
+            runtime_attestation_status = "verified"
+        except AdapterError as exc:
+            if policy_missing:
+                raise
+            attestation_error = exc
+            runtime_attestation_status = "rejected"
+            blocker = "runtime_attestation_invalid"
+            target_enabled = False
+            target_max_slots = 0
     current_enabled = policy.get("enabled")
     current_max_slots = policy.get("max_slots")
     if not isinstance(current_enabled, bool):
         raise AdapterError("autoscaler policy enabled is invalid")
-    changed = current_enabled != target_enabled or current_max_slots != target_max_slots
+    current_lease_state = _capacity_lease_state(policy)
+    lease_binding_matches = current_lease_state is not None and all(
+        current_lease_state[field] == binding[field]
+        for field in _CAPACITY_BINDING_FIELDS
+    )
+    lease_state_matches = (
+        current_lease_state is not None
+        and (
+            (target_enabled and current_lease_state["state"] == "active")
+            or (
+                not target_enabled
+                and current_lease_state["state"] in {"retiring", "retired"}
+            )
+        )
+    )
+    changed = (
+        policy_missing
+        or current_enabled != target_enabled
+        or current_max_slots != target_max_slots
+        or not lease_binding_matches
+        or not lease_state_matches
+    )
     if changed:
         applied = http_json(
             method="PUT",
@@ -904,16 +1406,34 @@ def _run_once_unlocked(
                 policy,
                 enabled=target_enabled,
                 max_slots=target_max_slots,
+                binding=binding,
             ),
             timeout=config.timeout_seconds,
         )
         _validate_policy(applied, config=config, candidate_sha=candidate_sha)
+        _validate_bootstrap_policy(
+            applied,
+            config=config,
+            candidate_sha=candidate_sha,
+            expected_body=expected_policy,
+        )
+        _validate_capacity_lease_readback(
+            applied,
+            binding=binding,
+            enabled=target_enabled,
+        )
         if (
             applied.get("enabled") != target_enabled
             or applied.get("min_slots") != 0
             or applied.get("max_slots") != target_max_slots
         ):
             raise AdapterError("autoscaler policy readback does not match handoff")
+    else:
+        _validate_capacity_lease_readback(
+            policy,
+            binding=binding,
+            enabled=target_enabled,
+        )
 
     observation = {
         "request_id": handoff.request_id,
@@ -929,16 +1449,24 @@ def _run_once_unlocked(
         "lease_epoch": handoff.lease_epoch,
         "handoff_digest": handoff.digest,
         "candidate_sha": candidate_sha,
+        "preemptible": handoff.preemptible,
         "applied_enabled": target_enabled,
         "applied_max_slots": target_max_slots,
         "pending_slots": pending,
         "active_slots": active,
         "draining_slots": draining,
         "terminal_slots": terminal,
+        "runtime_attestation_status": runtime_attestation_status,
+        "runtime_attestation_digest": runtime_attestation_digest,
+        "blocker": blocker,
         "updated_at": now.isoformat().replace("+00:00", "Z"),
     }
     _atomic_json_write(config.observation_path, [observation])
     _atomic_json_write(config.adapter_state_path, adapter_state)
+    if attestation_error is not None:
+        raise AdapterError(
+            "runtime attestation rejected after fail-closed disable",
+        ) from attestation_error
     return {
         "schema_version": 1,
         "artifact_type": "shared-capacity-adapter-result",
@@ -949,10 +1477,14 @@ def _run_once_unlocked(
         "candidate_sha": candidate_sha,
         "request_id": handoff.request_id,
         "lease_epoch": handoff.lease_epoch,
+        "preemptible": handoff.preemptible,
         "enabled": target_enabled,
         "max_slots": target_max_slots,
         "expired": expired,
         "handoff_missing": handoff_missing,
+        "runtime_attestation_digest": runtime_attestation_digest,
+        "runtime_attestation_status": runtime_attestation_status,
+        "blocker": blocker,
         "observation": observation,
     }
 
@@ -974,7 +1506,6 @@ def run_cycle(
     http_json: HttpJson = _http_json,
 ) -> dict[str, Any]:
     with _exclusive_adapter_lock(config):
-        _bootstrap_policy_unlocked(config, http_json=http_json)
         return _run_once_unlocked(config, now=now, http_json=http_json)
 
 

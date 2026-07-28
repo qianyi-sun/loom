@@ -145,13 +145,24 @@ process from the broker:
   bound is `140` and the OLDLAB bound is `20`, and a larger handoff is rejected
   before any Control Plane call;
 - the adapter reads the sandbox's `sandbox-state.json` and requires the local
-  autoscaler policy's `actuator_config.candidate_sha` to match that same SHA;
+  autoscaler policy's `actuator_config.candidate_sha` to match that same SHA
+  and tree;
+- every policy update carries the exact durable
+  `shared_capacity_binding` (`request_id`, `lease_epoch`, `candidate_sha`, and
+  `preemptible`), and the returned `capacity_lease_state` must confirm the
+  requested active or retiring transition before state is committed;
 - the admin credential is read from the existing mode-`0600` admin secret
   TOML. Neither the config, argv, result JSON, observation, nor durable adapter
   state contains the token;
 - an expired or disabled handoff can only lower the local ceiling to zero;
 - after at least one accepted handoff, a missing handoff reuses only its
-  durable request/epoch binding and drains the local ceiling to zero;
+  durable request/epoch/preemptibility binding and drains the local ceiling to
+  zero; if adapter state is lost, that binding is recovered from the Control
+  Plane lease state and can only be used to drain;
+- enabling requires a fresh combined cross-domain runtime attestation for the
+  exact sandbox, candidate SHA, and candidate tree; an invalid receipt blocks
+  a first create and first disables an existing active policy with its exact
+  binding before the adapter exits nonzero;
 - a malformed, rewritten-same-epoch, regressing-epoch, or
   candidate-mismatched handoff fails without an autoscaler mutation;
 - restart state is durable. Unknown Control Plane counters retain the last
@@ -176,6 +187,7 @@ installed contract is:
 /var/lib/loom-shared-capacity/handoffs/current/<sandbox>-<pool>.json
 /var/lib/loom-shared-capacity/observations/<sandbox>-<pool>.json
 /var/lib/loom-shared-capacity/adapters/<sandbox>-<pool>.json
+/var/lib/loom-shared-capacity/runtime-attestations/<sandbox>/<SHA>/combined.json
 ```
 
 The supervisor publishes an immutable generation directory containing all six
@@ -250,17 +262,20 @@ commitment and reduce utilization rather than freeing uncertain capacity.
 ### Initial sandbox autoscaler policies
 
 A fresh sandbox Control Plane has no GB10 or OLDLAB autoscaler row. The adapter
-unit therefore runs the idempotent `bootstrap` command before every handoff
-cycle. The checked-in policy templates are:
+runs one locked reconciliation path for both `bootstrap` and `run`. The
+checked-in policy templates are:
 
 ```text
 deploy/developer-sandboxes/shared-capacity-policies/gb10.toml
 deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml
 ```
 
-Bootstrap creates only a disabled, scale-to-zero row (`enabled=false`,
-`min_slots=max_slots=0`). It binds the exact sandbox candidate, non-exclusive
-Slurm mode, the reviewed node allowlist, `loom-dev-<sandbox>` account,
+For a missing row, a valid enabled first grant creates the policy directly as
+active with the grant's exact binding; there is no unbound disabled bootstrap.
+A disabled or expired first handoff creates a bound scale-to-zero row in
+`retiring`, which cannot activate until retirement completes and the broker
+issues a newer epoch. The policy binds the exact sandbox candidate,
+non-exclusive Slurm mode, the reviewed node allowlist, `loom-dev-<sandbox>` account,
 `loom-dev` QoS, external-runner authority, and positive container CPU, memory,
 and PID containment. `container_pids` is the per-container cap, while the exact
 actuator `job_pids_max` is the Slurm-job aggregate; bootstrap rejects a policy
@@ -278,8 +293,9 @@ python scripts/ops/shared_capacity_adapter.py \
   bootstrap
 ```
 
-This creates the disabled Control Plane row if absent; it does not activate
-Slurm. The candidate checkout remains immutable under the candidate namespace.
+This executes the same locked reconciliation as `run`; with no durable binding
+it does not create an unbound row. The candidate checkout remains immutable
+under the candidate namespace.
 The secret-bearing worker env uses the separate canonical runtime path:
 
 ```text
@@ -292,6 +308,15 @@ materialize the exact candidate-bound mode-`0600` env independently in each
 Slurm domain before authorized activation (`worker-oldlab.env` in OLDLAB and
 `worker-gb10.env` in GB10). Missing, wrong-SHA, wrong-domain, or unsafe-mode
 runtime env materialization is a fail-closed activation blocker.
+
+The adapter accepts only the root-owned mode-`0600`, canonical combined receipt
+at
+`/var/lib/loom-shared-capacity/runtime-attestations/<sandbox>/<SHA>/combined.json`.
+It must carry the exact candidate tree, a fresh collector window, the exact
+OLDLAB and GB10 manifest/signature references and digests, and a fresh fleet
+attestation reference. A Control-Plane-only receipt is insufficient. Formal
+`external_runner` compatibility evidence remains an independent activation
+prerequisite owned outside this adapter; the receipt does not replace it.
 
 Run one supervisor cycle manually:
 

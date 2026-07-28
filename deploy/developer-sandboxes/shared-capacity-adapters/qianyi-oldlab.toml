@@ -8,5 +8,6 @@ handoff_path = "/var/lib/loom-shared-capacity/handoffs/current/qianyi-oldlab.jso
 observation_path = "/var/lib/loom-shared-capacity/observations/qianyi-oldlab.json"
 adapter_state_path = "/var/lib/loom-shared-capacity/adapters/qianyi-oldlab.json"
 sandbox_state_path = "/srv/loom/developer-sandboxes/qianyi/sandbox-state.json"
+runtime_attestation_root = "/var/lib/loom-shared-capacity/runtime-attestations"
 max_slots_bound = 20
 timeout_seconds = 10
