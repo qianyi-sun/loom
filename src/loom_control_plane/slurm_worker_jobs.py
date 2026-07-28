@@ -391,6 +391,14 @@ async def reconcile_slurm_worker_jobs(
                 )
             ).scalar_one_or_none()
             if worker is None or worker.status != "active" or worker.last_seen_at <= cutoff:
+                if job.pending_reason in {
+                    PROD_PRESSURE_CANCEL_IDLE,
+                    PROD_PRESSURE_CANCEL_PREEMPT,
+                }:
+                    # A live Slurm observation is authoritative for capacity.
+                    # While a cancellation is pending, a stale worker heartbeat
+                    # must not masquerade as terminal allocation read-back.
+                    continue
                 job.state = "stale"
                 job.pending_reason = "worker heartbeat stale"
                 job.stale_at = now
@@ -437,6 +445,14 @@ async def reconcile_slurm_worker_jobs(
     for job in stale_candidates:
         last_seen = job.last_reconciled_at or job.submitted_at or job.created_at
         if last_seen is not None and last_seen > cutoff:
+            continue
+        if job.pending_reason in {
+            PROD_PRESSURE_CANCEL_IDLE,
+            PROD_PRESSURE_CANCEL_PREEMPT,
+        }:
+            # `squeue`/`sacct` omission is not proof that a requested
+            # cancellation reached a terminal state. Preserve the durable
+            # marker and keep capacity draining until explicit read-back.
             continue
         job.state = "stale"
         job.pending_reason = "not reported by Slurm reconcile"
