@@ -918,13 +918,13 @@ description = "Cancellation watchdog poll cadence (#360). The worker polls the C
 used_by     = ["worker"]
 python_type = "float"
 default     = 3.0
-description = "Multiplier applied to `agent.timeout_sec` to derive the worker-side hard-deadline backstop (#378). If a trial exceeds `agent.timeout_sec * multiplier + trial_hard_deadline_grace_sec`, the cancellation watchdog force-cancels the runner so a stuck opencode/subprocess-agent doesn't keep the trial `running` for hours past its declared timeout. Set to 0 to disable the backstop (not recommended for production)."
+description = "Multiplier applied to the resolved effective agent timeout to derive the worker-side hard-deadline backstop (#378). Resolution includes the task default, per-step override, trial override, and agent-timeout multiplier. If a trial exceeds `effective_agent_timeout_sec * multiplier + trial_hard_deadline_grace_sec`, the cancellation watchdog force-cancels the runner so a stuck subprocess agent does not keep the trial `running` for hours past its declared timeout. Set to 0 to disable the backstop (not recommended for production)."
 
 [service_config.trial_hard_deadline_grace_sec]
 used_by     = ["worker"]
 python_type = "float"
 default     = 600.0
-description = "Additive grace on top of `agent.timeout_sec * trial_hard_deadline_multiplier` for the hard-deadline backstop (#378). Covers task setup, verifier, and artifact-collection budget so a legitimate long run doesn't trip the watchdog."
+description = "Additive grace on top of `effective_agent_timeout_sec * trial_hard_deadline_multiplier` for the hard-deadline backstop (#378). Covers task setup, verifier, and artifact-collection budget so a legitimate long run doesn't trip the watchdog."
 
 [service_config.enable_worker_vllm]
 used_by     = ["worker"]

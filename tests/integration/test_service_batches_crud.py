@@ -1694,7 +1694,8 @@ async def test_post_batch_rejects_agent_without_service_runtime(
     monkeypatch.setattr(
         agent_catalog,
         "list_agents",
-        lambda: [e for e in base_agents if e.name != "opencode"] + [opencode],
+        lambda **_kwargs: [e for e in base_agents if e.name != "opencode"]
+        + [opencode],
     )
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
