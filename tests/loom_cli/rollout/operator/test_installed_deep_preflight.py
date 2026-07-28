@@ -34,6 +34,7 @@ from loom_cli.rollout.preflight_registered_checks import (
 )
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
+from tests.loom_cli.rollout.rehearsal_fixtures import active_external_supervisor_artifact
 
 
 def _candidate() -> CandidateBinding:
@@ -361,14 +362,13 @@ def test_installed_external_supervisor_predecessor_source_binds_merged_provenanc
     assert snapshot.runtime_ready is True
 
 
-def test_installed_external_supervisor_predecessor_uses_live_schema_after_migration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_committed_staging_profile_cannot_build_active_supervisor_artifact() -> None:
     candidate_root = Path(__file__).resolve().parents[4]
     candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
     candidate_tree = _git_run(
         ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
     ).stdout.strip()
+
     artifact = build_external_supervisor_artifact(
         candidate_root,
         candidate_sha=candidate_sha,
@@ -376,6 +376,40 @@ def test_installed_external_supervisor_predecessor_uses_live_schema_after_migrat
         image_tag=f"staging-{candidate_sha[:7]}",
         environment="staging",
     )
+
+    assert artifact.supervisors
+    assert all(
+        not supervisor.enabled and not supervisor.active for supervisor in artifact.supervisors
+    )
+    assert artifact.validation_argv("loom-rehearsal-regression", "/tmp/unused-kubeconfig") == {}
+
+
+@pytest.mark.parametrize("desired_state", ["active", "disabled"])
+def test_installed_external_supervisor_predecessor_uses_live_schema_after_migration(
+    monkeypatch: pytest.MonkeyPatch,
+    desired_state: str,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
+    candidate_tree = _git_run(
+        ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
+    ).stdout.strip()
+    if desired_state == "active":
+        artifact = active_external_supervisor_artifact(
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            image_tag=f"staging-{candidate_sha[:7]}",
+        )
+        control = _ReadyLegacyExternalSupervisorControl()
+    else:
+        artifact = build_external_supervisor_artifact(
+            candidate_root,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            image_tag=f"staging-{candidate_sha[:7]}",
+            environment="staging",
+        )
+        control = _ReadyDisabledExternalSupervisorControl()
     canonical = ExternalSupervisorCanonicalIdentity.build(
         artifact,
         plan_digest="a" * 64,
@@ -391,7 +425,7 @@ def test_installed_external_supervisor_predecessor_uses_live_schema_after_migrat
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "FixedUserSystemdControl",
-        lambda **_kwargs: _ReadyDisabledExternalSupervisorControl(),
+        lambda **_kwargs: control,
     )
     source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
         candidate_root=candidate_root,
