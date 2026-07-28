@@ -79,11 +79,24 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py apply \
 
 The command refuses the restart while any Slurm job or Docker container remains
 on the node. It validates the desired Docker daemon configuration before the
-atomic writes. Every pass holds a per-cluster lock and records a root-only,
-fsynced transaction journal below
+atomic writes. Every pass holds the persistent per-cluster administration lock
+at `/var/lib/loom-developer-sandbox-slurm-policy/locks/<cluster>.lock` across
+recovery, preflight, every mutation, and final readback. The lock and its
+non-symlink parent chain are root-owned; the lock has exact mode `0600`, is
+validated by descriptor/path device and inode, link count, owner, group, and
+mode, and is acquired with `flock`.
+
+The same pass records a root-only, fsynced transaction journal below
 `/var/lib/loom-developer-sandbox-slurm-policy/transactions/`; its file and
 accounting snapshots remain below the adjacent `snapshots/` directory. The
-accounting snapshot is a compare-and-swap record scoped only to the Loom QoS,
+state directories are root-owned mode `0700`, and journals/manifests/accounting
+records are single-link regular files with exact mode `0600`. Recovery accepts
+only the canonical timestamped snapshot directory and the exact
+`manifest.json` and `accounting-cas.json` filenames recorded by this tool;
+symlink, hardlink, owner, mode, inode, or path drift fails closed before a
+restore.
+
+The accounting snapshot is a compare-and-swap record scoped only to the Loom QoS,
 parent/child accounts, and three exact user associations; the converger never
 dumps or loads the whole cluster database. Unrelated accounts and concurrent
 unrelated changes are untouched. Owned-field drift or an external reference to

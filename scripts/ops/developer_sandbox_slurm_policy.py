@@ -53,6 +53,7 @@ _CGROUP_KEYS = {
 }
 _SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CANDIDATE_RE = re.compile(r"^[0-9a-f]{40}$")
+_SNAPSHOT_NAME_RE = re.compile(r"^[0-9]{8}T[0-9]{6}\.[0-9]{6}Z$")
 _STATE_RELATIVE = Path("var/lib/loom-developer-sandbox-slurm-policy")
 _GUARD_STATUS_RELATIVE = _STATE_RELATIVE / "guard-status.json"
 _GUARD_STATUS_MAX_AGE = timedelta(seconds=30)
@@ -976,22 +977,165 @@ def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _prepare_private_directory(
+    path: Path,
+    *,
+    enforce_root_ownership: bool,
+    create: bool,
+) -> None:
+    if not path.is_absolute():
+        raise PolicyError("private state directory must be absolute")
+    if not enforce_root_ownership:
+        if create:
+            path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise PolicyError("private state directory is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != os.getegid()
+        ):
+            raise PolicyError("private state directory ownership is unsafe")
+        if create and stat.S_IMODE(metadata.st_mode) != 0o700:
+            path.chmod(0o700)
+            metadata = path.lstat()
+        if stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise PolicyError("private state directory must have exact mode 0700")
+        return
+
+    current = Path("/")
+    for index, part in enumerate(path.parts[1:]):
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            if not create:
+                raise PolicyError("private state directory chain is unavailable") from None
+            try:
+                current.mkdir(mode=0o700)
+                metadata = current.lstat()
+            except OSError as exc:
+                raise PolicyError("private state directory could not be created") from exc
+        except OSError as exc:
+            raise PolicyError("private state directory chain is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+        ):
+            raise PolicyError("private state chain must be root-owned directories")
+        is_leaf = index == len(path.parts[1:]) - 1
+        if is_leaf:
+            if create and stat.S_IMODE(metadata.st_mode) != 0o700:
+                current.chmod(0o700)
+                metadata = current.lstat()
+            if stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise PolicyError("private state directory must have exact mode 0700")
+        elif stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise PolicyError("private state directory chain is writable")
+
+
+@contextmanager
+def _persistent_private_lock(
+    path: Path,
+    *,
+    enforce_root_ownership: bool,
+) -> Iterator[None]:
+    _prepare_private_directory(
+        path.parent,
+        enforce_root_ownership=enforce_root_ownership,
+        create=True,
+    )
+    expected_uid, expected_gid = (0, 0) if enforce_root_ownership else (os.geteuid(), os.getegid())
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    created = False
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise PolicyError("private state lock could not be opened safely") from exc
+    except OSError as exc:
+        raise PolicyError("private state lock could not be created safely") from exc
+    locked = False
+    try:
+        if created:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            _fsync_directory(path.parent)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or opened.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+        ):
+            raise PolicyError("private state lock inode is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        locked = True
+        try:
+            linked = path.lstat()
+        except OSError as exc:
+            raise PolicyError("private state lock path is unavailable") from exc
+        if (
+            stat.S_ISLNK(linked.st_mode)
+            or not stat.S_ISREG(linked.st_mode)
+            or stat.S_IMODE(linked.st_mode) != 0o600
+            or linked.st_nlink != 1
+            or linked.st_uid != expected_uid
+            or linked.st_gid != expected_gid
+            or linked.st_dev != opened.st_dev
+            or linked.st_ino != opened.st_ino
+        ):
+            raise PolicyError("private state lock path changed during acquisition")
+        yield
+    finally:
+        if locked:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _snapshot(root: Path, files: Mapping[Path, str]) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     state = root / _STATE_RELATIVE
-    state.mkdir(parents=True, mode=0o700, exist_ok=True)
-    state.chmod(0o700)
+    enforce_root_ownership = root == Path("/")
+    _prepare_private_directory(
+        state,
+        enforce_root_ownership=enforce_root_ownership,
+        create=True,
+    )
     snapshots = state / "snapshots"
-    snapshots.mkdir(mode=0o700, exist_ok=True)
-    snapshots.chmod(0o700)
+    _prepare_private_directory(
+        snapshots,
+        enforce_root_ownership=enforce_root_ownership,
+        create=True,
+    )
     snapshot = snapshots / timestamp
-    snapshot.mkdir(parents=True, mode=0o700)
-    snapshot.chmod(0o700)
+    try:
+        snapshot.mkdir(mode=0o700)
+    except OSError as exc:
+        raise PolicyError("Slurm policy snapshot directory could not be created") from exc
+    _prepare_private_directory(
+        snapshot,
+        enforce_root_ownership=enforce_root_ownership,
+        create=False,
+    )
     manifest: dict[str, Any] = {"schema_version": 1, "files": []}
     for path in files:
         relative = path.relative_to(root)
         target = snapshot / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
+        _prepare_private_directory(
+            target.parent,
+            enforce_root_ownership=enforce_root_ownership,
+            create=True,
+        )
         if path.exists():
             content = path.read_bytes()
             mode = stat.S_IMODE(path.stat().st_mode)
@@ -1031,49 +1175,99 @@ def _journal_path(root: Path, profile: Profile) -> Path:
     return _state_root(root) / "transactions" / f"{profile.cluster}.json"
 
 
+def _state_path_enforces_root(path: Path) -> bool:
+    try:
+        path.relative_to(Path("/") / _STATE_RELATIVE)
+    except ValueError:
+        return False
+    return True
+
+
 @contextmanager
 def _domain_lock(root: Path, profile: Profile) -> Iterator[None]:
-    state = _state_root(root)
-    state.mkdir(parents=True, mode=0o700, exist_ok=True)
-    state.chmod(0o700)
-    lock_path = state / "locks" / f"{profile.cluster}.lock"
-    lock_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    lock_path.parent.chmod(0o700)
-    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    lock_path = _state_root(root) / "locks" / f"{profile.cluster}.lock"
+    with _persistent_private_lock(
+        lock_path,
+        enforce_root_ownership=root == Path("/"),
+    ):
         yield
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
 
 
 def _write_journal(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    path.parent.chmod(0o700)
+    enforce_root_ownership = _state_path_enforces_root(path)
+    _prepare_private_directory(
+        path.parent,
+        enforce_root_ownership=enforce_root_ownership,
+        create=True,
+    )
     _atomic_write(
         path,
         json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n",
         mode=0o600,
     )
-
-
-def _load_journal(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        metadata = path.lstat()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PolicyError("durable Slurm policy journal is unreadable") from exc
+    metadata = path.lstat()
+    expected_uid, expected_gid = (0, 0) if enforce_root_ownership else (os.geteuid(), os.getegid())
     if (
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISREG(metadata.st_mode)
         or stat.S_IMODE(metadata.st_mode) != 0o600
-        or not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
+        or metadata.st_nlink != 1
+        or metadata.st_uid != expected_uid
+        or metadata.st_gid != expected_gid
     ):
+        raise PolicyError("durable Slurm policy journal write is unsafe")
+
+
+def _load_journal(path: Path) -> dict[str, Any] | None:
+    enforce_root_ownership = _state_path_enforces_root(path)
+    _prepare_private_directory(
+        path.parent,
+        enforce_root_ownership=enforce_root_ownership,
+        create=True,
+    )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PolicyError("durable Slurm policy journal is unreadable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        linked = path.lstat()
+        expected_uid, expected_gid = (
+            (0, 0) if enforce_root_ownership else (os.geteuid(), os.getegid())
+        )
+        if (
+            stat.S_ISLNK(linked.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(linked.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or stat.S_IMODE(linked.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or linked.st_nlink != 1
+            or opened.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+            or linked.st_uid != expected_uid
+            or linked.st_gid != expected_gid
+            or opened.st_dev != linked.st_dev
+            or opened.st_ino != linked.st_ino
+        ):
+            raise PolicyError("durable Slurm policy journal is unsafe")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(len(item) for item in chunks) > 1024 * 1024:
+                raise PolicyError("durable Slurm policy journal is too large")
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("durable Slurm policy journal is unreadable") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise PolicyError("durable Slurm policy journal is unsafe")
     return payload
 
@@ -1084,11 +1278,95 @@ def _advance_journal(path: Path, payload: dict[str, Any], phase: str) -> None:
     _write_journal(path, payload)
 
 
-def _restore_snapshot(root: Path, snapshot: Path) -> None:
+def _validate_snapshot_path(root: Path, snapshot: Path) -> Path:
+    expected_parent = _state_root(root) / "snapshots"
+    if (
+        not snapshot.is_absolute()
+        or snapshot.parent != expected_parent
+        or _SNAPSHOT_NAME_RE.fullmatch(snapshot.name) is None
+    ):
+        raise PolicyError("Slurm policy snapshot path is outside the canonical root")
+    enforce_root_ownership = root == Path("/")
+    _prepare_private_directory(
+        expected_parent,
+        enforce_root_ownership=enforce_root_ownership,
+        create=False,
+    )
+    _prepare_private_directory(
+        snapshot,
+        enforce_root_ownership=enforce_root_ownership,
+        create=False,
+    )
+    return snapshot
+
+
+def _validate_accounting_snapshot_path(
+    root: Path,
+    snapshot: Path,
+    accounting: Path,
+) -> Path:
+    validated_snapshot = _validate_snapshot_path(root, snapshot)
+    expected = validated_snapshot / "accounting-cas.json"
+    if accounting != expected:
+        raise PolicyError("Loom accounting snapshot path is not canonical")
+    return accounting
+
+
+def _read_private_json_file(
+    path: Path,
+    *,
+    enforce_root_ownership: bool,
+    description: str,
+) -> Any:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PolicyError("Slurm policy snapshot manifest is unavailable") from exc
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PolicyError(f"{description} is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        linked = path.lstat()
+        expected_uid, expected_gid = (
+            (0, 0) if enforce_root_ownership else (os.geteuid(), os.getegid())
+        )
+        if (
+            stat.S_ISLNK(linked.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(linked.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or stat.S_IMODE(linked.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or linked.st_nlink != 1
+            or opened.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+            or linked.st_uid != expected_uid
+            or linked.st_gid != expected_gid
+            or opened.st_dev != linked.st_dev
+            or opened.st_ino != linked.st_ino
+        ):
+            raise PolicyError(f"{description} is unsafe")
+        content = bytearray()
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > 1024 * 1024:
+                raise PolicyError(f"{description} is too large")
+        return json.loads(bytes(content).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError(f"{description} is unreadable") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _restore_snapshot(root: Path, snapshot: Path) -> None:
+    snapshot = _validate_snapshot_path(root, snapshot)
+    manifest = _read_private_json_file(
+        snapshot / "manifest.json",
+        enforce_root_ownership=root == Path("/"),
+        description="Slurm policy snapshot manifest",
+    )
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
         raise PolicyError("Slurm policy snapshot manifest is invalid")
     rows = manifest.get("files")
@@ -1249,7 +1527,7 @@ def _accounting_state(profile: Profile) -> dict[str, Any]:
 
 
 def _accounting_snapshot(root: Path, profile: Profile, snapshot: Path) -> Path:
-    del root
+    snapshot = _validate_snapshot_path(root, snapshot)
     payload = {
         "schema_version": 1,
         "cluster": profile.cluster,
@@ -1262,20 +1540,22 @@ def _accounting_snapshot(root: Path, profile: Profile, snapshot: Path) -> Path:
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
         mode=0o600,
     )
+    _read_private_json_file(
+        target,
+        enforce_root_ownership=root == Path("/"),
+        description="Loom accounting CAS snapshot",
+    )
     return target
 
 
 def _load_accounting_snapshot(path: Path) -> dict[str, Any]:
-    try:
-        metadata = path.lstat()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PolicyError("Loom accounting CAS snapshot is unavailable") from exc
+    payload = _read_private_json_file(
+        path,
+        enforce_root_ownership=_state_path_enforces_root(path),
+        description="Loom accounting CAS snapshot",
+    )
     if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or not isinstance(payload, dict)
+        not isinstance(payload, dict)
         or payload.get("schema_version") != 1
         or not isinstance(payload.get("before"), dict)
         or not isinstance(payload.get("desired"), dict)
@@ -1560,10 +1840,12 @@ def _restore_services(root: Path, profile: Profile, slurm_node: str) -> None:
 
 
 def _snapshot_readback(root: Path, snapshot: Path) -> dict[str, Any]:
-    try:
-        manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PolicyError("Slurm policy snapshot manifest is unavailable") from exc
+    snapshot = _validate_snapshot_path(root, snapshot)
+    manifest = _read_private_json_file(
+        snapshot / "manifest.json",
+        enforce_root_ownership=root == Path("/"),
+        description="Slurm policy snapshot manifest",
+    )
     rows = manifest.get("files") if isinstance(manifest, dict) else None
     if not isinstance(rows, list):
         raise PolicyError("Slurm policy snapshot file list is invalid")
@@ -1572,6 +1854,8 @@ def _snapshot_readback(root: Path, snapshot: Path) -> dict[str, Any]:
         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
             raise PolicyError("Slurm policy snapshot row is invalid")
         relative = Path(row["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise PolicyError("Slurm policy snapshot path escapes the root")
         live = root / relative
         archived = snapshot / relative
         if row.get("present") is True:
@@ -1801,60 +2085,11 @@ def _allocation_probe_lock(
     if _CANDIDATE_RE.fullmatch(candidate_sha) is None:
         raise PolicyError("allocation probe lock candidate SHA is invalid")
     path = _allocation_lock_path(root, profile, candidate_sha)
-    if enforce_root_ownership:
-        _require_root_private_directory(path.parent)
-        expected_uid, expected_gid = 0, 0
-    else:
-        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        path.parent.chmod(0o700)
-        expected_uid, expected_gid = os.geteuid(), os.getegid()
-    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    created = False
-    try:
-        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
-        created = True
-    except FileExistsError:
-        try:
-            descriptor = os.open(path, flags)
-        except OSError as exc:
-            raise PolicyError("allocation probe lock could not be opened safely") from exc
-    except OSError as exc:
-        raise PolicyError("allocation probe lock could not be created safely") from exc
-    locked = False
-    try:
-        if created:
-            os.fchmod(descriptor, 0o600)
-            os.fsync(descriptor)
-            _fsync_directory(path.parent)
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or stat.S_IMODE(opened.st_mode) != 0o600
-            or opened.st_uid != expected_uid
-            or opened.st_gid != expected_gid
-        ):
-            raise PolicyError("allocation probe lock inode is unsafe")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        locked = True
-        try:
-            linked = path.lstat()
-        except OSError as exc:
-            raise PolicyError("allocation probe lock path is unavailable") from exc
-        if (
-            stat.S_ISLNK(linked.st_mode)
-            or not stat.S_ISREG(linked.st_mode)
-            or stat.S_IMODE(linked.st_mode) != 0o600
-            or linked.st_uid != expected_uid
-            or linked.st_gid != expected_gid
-            or linked.st_dev != opened.st_dev
-            or linked.st_ino != opened.st_ino
-        ):
-            raise PolicyError("allocation probe lock path changed during acquisition")
+    with _persistent_private_lock(
+        path,
+        enforce_root_ownership=enforce_root_ownership,
+    ):
         yield
-    finally:
-        if locked:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
 
 
 def _invalidate_allocation_artifact(root: Path, profile: Profile, candidate_sha: str) -> None:
@@ -1865,40 +2100,11 @@ def _invalidate_allocation_artifact(root: Path, profile: Profile, candidate_sha:
 
 
 def _require_root_private_directory(path: Path) -> None:
-    if not path.is_absolute():
-        raise PolicyError("allocation evidence parent must be absolute")
-    current = Path("/")
-    for index, part in enumerate(path.parts[1:]):
-        current /= part
-        try:
-            metadata = current.lstat()
-        except FileNotFoundError:
-            try:
-                current.mkdir(mode=0o700)
-                metadata = current.lstat()
-            except OSError as exc:
-                raise PolicyError(
-                    "allocation evidence parent chain could not be created",
-                ) from exc
-        except OSError as exc:
-            raise PolicyError("allocation evidence parent chain is unavailable") from exc
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != 0
-            or metadata.st_gid != 0
-        ):
-            raise PolicyError("allocation evidence parent chain must be root-owned directories")
-        is_leaf = index == len(path.parts[1:]) - 1
-        if is_leaf:
-            if stat.S_IMODE(metadata.st_mode) != 0o700:
-                current.chmod(0o700)
-                if stat.S_IMODE(current.lstat().st_mode) != 0o700:
-                    raise PolicyError(
-                        "allocation evidence parent must have exact mode 0700",
-                    )
-        elif stat.S_IMODE(metadata.st_mode) & 0o022:
-            raise PolicyError("allocation evidence parent chain is writable")
+    _prepare_private_directory(
+        path,
+        enforce_root_ownership=True,
+        create=True,
+    )
 
 
 def _write_allocation_state(
@@ -2592,21 +2798,39 @@ def _recover_orphan(
 ) -> dict[str, Any] | None:
     path = _journal_path(root, profile)
     journal = _load_journal(path)
-    if journal is None or journal.get("phase") in {"committed", "rolled_back"}:
+    if journal is None:
         return journal
     snapshot_raw = journal.get("snapshot")
     if not isinstance(snapshot_raw, str):
         raise PolicyError("orphan Slurm policy journal lacks a snapshot")
+    snapshot = _validate_snapshot_path(root, Path(snapshot_raw))
+    accounting_raw = journal.get("accounting_snapshot")
+    if accounting_raw is None:
+        accounting_snapshot = None
+    elif isinstance(accounting_raw, str):
+        accounting_snapshot = _validate_accounting_snapshot_path(
+            root,
+            snapshot,
+            Path(accounting_raw),
+        )
+    else:
+        raise PolicyError("orphan Slurm policy accounting snapshot path is invalid")
+    rollback_target = journal.get("rollback_target")
+    if rollback_target is not None:
+        if not isinstance(rollback_target, str):
+            raise PolicyError("orphan Slurm policy rollback target is invalid")
+        _validate_snapshot_path(root, Path(rollback_target))
+    if journal.get("phase") in {"committed", "rolled_back"}:
+        return journal
     try:
-        _restore_snapshot(root, Path(snapshot_raw))
-        accounting_raw = journal.get("accounting_snapshot")
-        if isinstance(accounting_raw, str):
-            _restore_accounting(profile, Path(accounting_raw))
+        _restore_snapshot(root, snapshot)
+        if accounting_snapshot is not None:
+            _restore_accounting(profile, accounting_snapshot)
         if root == Path("/") and journal.get("restart") is True and slurm_node is not None:
             _restore_services(root, profile, slurm_node)
-        _snapshot_readback(root, Path(snapshot_raw))
-        if isinstance(accounting_raw, str):
-            _accounting_snapshot_matches(profile, Path(accounting_raw))
+        _snapshot_readback(root, snapshot)
+        if accounting_snapshot is not None:
+            _accounting_snapshot_matches(profile, accounting_snapshot)
     except Exception:
         _advance_journal(path, journal, "recovery_failed")
         raise
@@ -2803,7 +3027,18 @@ def rollback(
         target_raw = previous.get("snapshot")
         if not isinstance(target_raw, str):
             raise PolicyError("committed Slurm policy transaction lacks a snapshot")
-        target = Path(target_raw)
+        target = _validate_snapshot_path(root, Path(target_raw))
+        previous_accounting_raw = previous.get("accounting_snapshot")
+        if previous_accounting_raw is None:
+            previous_accounting = None
+        elif isinstance(previous_accounting_raw, str):
+            previous_accounting = _validate_accounting_snapshot_path(
+                root,
+                target,
+                Path(previous_accounting_raw),
+            )
+        else:
+            raise PolicyError("committed accounting snapshot path is invalid")
         current_files = desired_files(
             root,
             profile,
@@ -2812,7 +3047,7 @@ def rollback(
         current_snapshot = _snapshot(root, current_files)
         current_accounting = (
             _accounting_snapshot(root, profile, current_snapshot)
-            if isinstance(previous.get("accounting_snapshot"), str)
+            if previous_accounting is not None
             else None
         )
         transaction: dict[str, Any] = {
@@ -2834,9 +3069,8 @@ def rollback(
         try:
             _restore_snapshot(root, target)
             _advance_journal(journal_path, transaction, "files_written")
-            target_accounting = previous.get("accounting_snapshot")
-            if isinstance(target_accounting, str):
-                _restore_accounting(profile, Path(target_accounting))
+            if previous_accounting is not None:
+                _restore_accounting(profile, previous_accounting)
             _advance_journal(journal_path, transaction, "accounting_applied")
             if root == Path("/"):
                 if slurm_node is None:
@@ -2845,8 +3079,8 @@ def rollback(
             _advance_journal(journal_path, transaction, "services_reconfigured")
             guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
             live = _snapshot_readback(root, target)
-            if isinstance(target_accounting, str):
-                _accounting_snapshot_matches(profile, Path(target_accounting))
+            if previous_accounting is not None:
+                _accounting_snapshot_matches(profile, previous_accounting)
             if guard_config.exists() and root == Path("/"):
                 try:
                     restored_candidate = json.loads(

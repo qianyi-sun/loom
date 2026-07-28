@@ -250,6 +250,106 @@ def test_next_apply_recovers_every_orphan_transaction_phase(
     assert stat.S_IMODE(policy._journal_path(root, loaded).stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("field", ("snapshot", "accounting_snapshot"))
+def test_apply_rejects_noncanonical_paths_from_committed_journal(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    policy.apply(
+        root,
+        loaded,
+        restart=False,
+        apply_accounting=False,
+        candidate_sha="a" * 40,
+    )
+    journal_path = policy._journal_path(root, loaded)
+    journal = json.loads(journal_path.read_text())
+    journal[field] = str(tmp_path / "outside-snapshot")
+    policy._write_journal(journal_path, journal)
+
+    with pytest.raises(policy.PolicyError, match=r"canonical|not canonical"):
+        policy.apply(
+            root,
+            loaded,
+            restart=False,
+            apply_accounting=False,
+            candidate_sha="a" * 40,
+        )
+
+
+def test_apply_rejects_symlink_or_hardlinked_journal(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    policy.apply(
+        root,
+        loaded,
+        restart=False,
+        apply_accounting=False,
+        candidate_sha="a" * 40,
+    )
+    journal = policy._journal_path(root, loaded)
+    hardlink = tmp_path / "journal-hardlink"
+    os.link(journal, hardlink)
+    with pytest.raises(policy.PolicyError, match="journal is unsafe"):
+        policy.apply(
+            root,
+            loaded,
+            restart=False,
+            apply_accounting=False,
+            candidate_sha="a" * 40,
+        )
+    hardlink.unlink()
+
+    external = tmp_path / "external-journal"
+    external.write_bytes(journal.read_bytes())
+    external.chmod(0o600)
+    journal.unlink()
+    journal.symlink_to(external)
+    with pytest.raises(policy.PolicyError, match="journal is unreadable"):
+        policy.apply(
+            root,
+            loaded,
+            restart=False,
+            apply_accounting=False,
+            candidate_sha="a" * 40,
+        )
+
+
+def test_apply_rejects_canonical_snapshot_path_that_is_a_symlink(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    policy.apply(
+        root,
+        loaded,
+        restart=False,
+        apply_accounting=False,
+        candidate_sha="a" * 40,
+    )
+    journal_path = policy._journal_path(root, loaded)
+    journal = json.loads(journal_path.read_text())
+    external = tmp_path / "external-snapshot"
+    external.mkdir(mode=0o700)
+    alias = policy._state_root(root) / "snapshots" / "20000101T000000.000000Z"
+    alias.symlink_to(external, target_is_directory=True)
+    journal["snapshot"] = str(alias)
+    policy._write_journal(journal_path, journal)
+
+    with pytest.raises(policy.PolicyError, match="ownership is unsafe"):
+        policy.apply(
+            root,
+            loaded,
+            restart=False,
+            apply_accounting=False,
+            candidate_sha="a" * 40,
+        )
+
+
 def test_accounting_failure_uses_targeted_cas_without_cluster_load(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
