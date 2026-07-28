@@ -1,0 +1,611 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.example/schemas/nonexclusive-slurm-acceptance-v1.schema.json",
+  "title": "Non-exclusive Slurm containment acceptance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "collected_at",
+    "candidate_sha",
+    "sandbox",
+    "node",
+    "job",
+    "containers",
+    "cgroup",
+    "aggregate_caps",
+    "devices",
+    "headroom",
+    "negative_isolation",
+    "soak",
+    "cleanup"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "collected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "candidate_sha": {
+      "$ref": "#/$defs/sha"
+    },
+    "sandbox": {
+      "$ref": "#/$defs/sandbox"
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hostname",
+        "slurm_node_name"
+      ],
+      "properties": {
+        "hostname": {
+          "$ref": "#/$defs/name"
+        },
+        "slurm_node_name": {
+          "$ref": "#/$defs/name"
+        }
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "candidate_sha",
+        "sandbox",
+        "node",
+        "compose_project",
+        "allocation"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "node": {
+          "$ref": "#/$defs/name"
+        },
+        "compose_project": {
+          "$ref": "#/$defs/name"
+        },
+        "allocation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cpu_cores",
+            "memory_bytes",
+            "pids",
+            "gpu_ids",
+            "tres"
+          ],
+          "properties": {
+            "cpu_cores": {
+              "$ref": "#/$defs/positiveNumber"
+            },
+            "memory_bytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "pids": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "gpu_ids": {
+              "$ref": "#/$defs/allocatedGpuIds"
+            },
+            "tres": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        }
+      }
+    },
+    "containers": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "container_id",
+          "name",
+          "pid",
+          "labels",
+          "cgroup_parent",
+          "cgroup_path",
+          "limits",
+          "device_ids"
+        ],
+        "properties": {
+          "role": {
+            "enum": [
+              "worker",
+              "trial",
+              "verifier",
+              "sidecar"
+            ]
+          },
+          "container_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{12,64}$"
+          },
+          "name": {
+            "$ref": "#/$defs/name"
+          },
+          "pid": {
+            "$ref": "#/$defs/positiveInteger"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "loom.sandbox",
+              "loom.candidate_sha",
+              "loom.slurm_job_id",
+              "loom.compose_project"
+            ],
+            "properties": {
+              "loom.sandbox": {
+                "$ref": "#/$defs/sandbox"
+              },
+              "loom.candidate_sha": {
+                "$ref": "#/$defs/sha"
+              },
+              "loom.slurm_job_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+              },
+              "loom.compose_project": {
+                "$ref": "#/$defs/name"
+              }
+            }
+          },
+          "cgroup_parent": {
+            "$ref": "#/$defs/cgroupPath"
+          },
+          "cgroup_path": {
+            "$ref": "#/$defs/cgroupPath"
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "cpu_cores",
+              "memory_bytes",
+              "pids"
+            ],
+            "properties": {
+              "cpu_cores": {
+                "$ref": "#/$defs/positiveNumber"
+              },
+              "memory_bytes": {
+                "$ref": "#/$defs/positiveInteger"
+              },
+              "pids": {
+                "$ref": "#/$defs/positiveInteger"
+              }
+            }
+          },
+          "device_ids": {
+            "$ref": "#/$defs/uniqueIds"
+          }
+        }
+      }
+    },
+    "cgroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_path",
+        "controllers",
+        "delegated",
+        "cpu_cores_max",
+        "memory_bytes_max",
+        "pids_max"
+      ],
+      "properties": {
+        "job_path": {
+          "$ref": "#/$defs/cgroupPath"
+        },
+        "controllers": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "cpu",
+              "memory",
+              "pids"
+            ]
+          }
+        },
+        "delegated": {
+          "const": true
+        },
+        "cpu_cores_max": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "memory_bytes_max": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids_max": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "aggregate_caps": {
+      "$ref": "#/$defs/resourceCaps"
+    },
+    "devices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allocated_ids",
+        "all_allocated_usable",
+        "unallocated_denied"
+      ],
+      "properties": {
+        "allocated_ids": {
+          "$ref": "#/$defs/allocatedGpuIds"
+        },
+        "all_allocated_usable": {
+          "const": true
+        },
+        "unallocated_denied": {
+          "const": true
+        }
+      }
+    },
+    "headroom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "duration_seconds",
+        "required_duration_seconds",
+        "sample_count",
+        "required_sample_count",
+        "min_free_cpu_cores",
+        "required_free_cpu_cores",
+        "min_free_memory_bytes",
+        "required_free_memory_bytes",
+        "max_pid_usage_ratio",
+        "max_allowed_pid_usage_ratio",
+        "observed_peak_concurrency",
+        "reviewed_max_concurrency",
+        "kube_api_healthy",
+        "minio_quorum_healthy",
+        "longhorn_healthy",
+        "within_reviewed_envelope"
+      ],
+      "properties": {
+        "duration_seconds": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "required_duration_seconds": {
+          "type": "integer",
+          "minimum": 1800
+        },
+        "sample_count": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "required_sample_count": {
+          "type": "integer",
+          "minimum": 30
+        },
+        "min_free_cpu_cores": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "required_free_cpu_cores": {
+          "type": "number",
+          "minimum": 4
+        },
+        "min_free_memory_bytes": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "required_free_memory_bytes": {
+          "type": "integer",
+          "minimum": 16000000000
+        },
+        "max_pid_usage_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "max_allowed_pid_usage_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.7
+        },
+        "observed_peak_concurrency": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "reviewed_max_concurrency": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "kube_api_healthy": {
+          "const": true
+        },
+        "minio_quorum_healthy": {
+          "const": true
+        },
+        "longhorn_healthy": {
+          "const": true
+        },
+        "within_reviewed_envelope": {
+          "const": true
+        }
+      }
+    },
+    "negative_isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandboxes",
+        "checks"
+      ],
+      "properties": {
+        "sandboxes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sandbox"
+          }
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 18,
+          "maxItems": 720,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "target",
+              "resource",
+              "denied"
+            ],
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/sandbox"
+              },
+              "target": {
+                "$ref": "#/$defs/sandbox"
+              },
+              "resource": {
+                "enum": [
+                  "worker_identity",
+                  "object_store",
+                  "result_path"
+                ]
+              },
+              "denied": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "soak": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "duration_seconds",
+        "required_duration_seconds",
+        "sample_count",
+        "required_sample_count",
+        "workloads",
+        "trial_success_ratio",
+        "minimum_trial_success_ratio",
+        "resource_envelope_breaches",
+        "kube_api_healthy",
+        "minio_quorum_healthy",
+        "longhorn_healthy",
+        "non_loom_slurm_healthy"
+      ],
+      "properties": {
+        "duration_seconds": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "required_duration_seconds": {
+          "type": "integer",
+          "minimum": 14400
+        },
+        "sample_count": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "required_sample_count": {
+          "type": "integer",
+          "minimum": 120
+        },
+        "workloads": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "loom",
+              "non_loom_slurm",
+              "kubernetes",
+              "minio",
+              "longhorn"
+            ]
+          }
+        },
+        "trial_success_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "minimum_trial_success_ratio": {
+          "type": "number",
+          "minimum": 0.95,
+          "maximum": 1
+        },
+        "resource_envelope_breaches": {
+          "const": 0
+        },
+        "kube_api_healthy": {
+          "const": true
+        },
+        "minio_quorum_healthy": {
+          "const": true
+        },
+        "longhorn_healthy": {
+          "const": true
+        },
+        "non_loom_slurm_healthy": {
+          "const": true
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_cleanup_seconds",
+        "checkpoints"
+      ],
+      "properties": {
+        "max_cleanup_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "checkpoints": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "event",
+              "observed_within_seconds",
+              "live_containers",
+              "live_jobs",
+              "durable_trial_state",
+              "retryable_interrupted_trials"
+            ],
+            "properties": {
+              "event": {
+                "enum": [
+                  "cancellation",
+                  "ttl_expiry",
+                  "worker_crash",
+                  "submit_host_restart"
+                ]
+              },
+              "observed_within_seconds": {
+                "$ref": "#/$defs/nonNegativeInteger"
+              },
+              "live_containers": {
+                "const": 0
+              },
+              "live_jobs": {
+                "const": 0
+              },
+              "durable_trial_state": {
+                "const": true
+              },
+              "retryable_interrupted_trials": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "sandbox": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,31}$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "cgroupPath": {
+      "type": "string",
+      "pattern": "^/(?!$)[A-Za-z0-9_.:/@-]+(?:/[A-Za-z0-9_.:@-]+)*$",
+      "maxLength": 1024
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "uniqueIds": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      }
+    },
+    "allocatedGpuIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      }
+    },
+    "resourceCaps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_cores",
+        "memory_bytes",
+        "pids"
+      ],
+      "properties": {
+        "cpu_cores": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "memory_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    }
+  }
+}
