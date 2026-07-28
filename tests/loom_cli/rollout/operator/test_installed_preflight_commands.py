@@ -184,4 +184,4 @@ def test_candidate_source_ssh_has_sub_dag_cancellation_timeout(tmp_path: Path) -
     commands.candidate_source(("ssh", "trt-gb10-1", "probe"))
 
     assert calls[0]["argv"] == ("ssh", "trt-gb10-1", "probe")
-    assert calls[0]["timeout"] == 4
+    assert calls[0]["timeout"] == 12
