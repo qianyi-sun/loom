@@ -64,3 +64,20 @@ The service must fail if the staging POST fails. A production GET failure is
 different: the evidence records `fail_closed=true` and the staging POST must
 succeed with a synthetic shortfall. Do not enable the timer until both CP URLs,
 token files, and the staging GB10 desired-state row are present.
+
+For an `actuator = "slurm"` target, this timer writes only the Control Plane
+drain intent and claim fence. The candidate-bound external autoscaler on the
+Slurm submit host remains the sole `scancel` authority. It immediately cancels
+pending and zero-in-flight jobs, holds busy non-preemptible jobs until natural
+completion, and cancels busy preemptible jobs only after grace. Capacity is not
+released until Slurm reads the job back terminal. Successful cancellation
+requests awaiting that read-back are durable and idempotent across timer or
+submit-host restart; failed cancellations remain draining and appear in the
+autoscaler decision reason as `cancel_failed`.
+
+The checked-in unit is deliberately single-target. Multi-pool or per-sandbox
+coverage must be added as reviewed, candidate-bound service instances (or a
+repository change that renders repeated `--target ENVIRONMENT:POOL` arguments),
+not by editing an installed unit or starting ambient watch loops. Separate
+developer sandbox Control Planes require separate instances because they have
+different URLs and token files.
