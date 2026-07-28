@@ -33,6 +33,141 @@ broker service identity is installed. In that bootstrap state, only a
 root-invoked broker may initialize the database. Never grant a sandbox account
 write access to the broker authority.
 
+## Persistent host installer
+
+`scripts/ops/developer_sandbox_host.py` is the root-side converger for the
+three sandbox stacks. It is plan-only by default and has a fixed repository,
+host, account, group, NFS namespace, state namespace, and systemd unit. It does
+not accept a remote URL, ref, path, user, port, or secret-value override.
+
+Render the complete three-sandbox plan from an exact checkout:
+
+```bash
+uv run --no-sync python scripts/ops/developer_sandbox_host.py plan \
+  --candidate-sha <full-lowercase-40-character-commit-SHA>
+```
+
+The JSON plan contains the exact candidate path, Compose project, private
+state and secret paths, all ten reserved ports, expected owner/mode, unit name,
+and read-only NFS readback commands for `oldlab-1` through `oldlab-5`. It never
+contains raw credential values.
+
+After separate live-host authorization, run the same command on
+`trt-eai-oldlab-2` as root with `install --execute`:
+
+```bash
+uv run --no-sync python scripts/ops/developer_sandbox_host.py install \
+  --candidate-sha <SHA> \
+  --execute
+```
+
+The installer performs these bounded steps:
+
+1. require root and the canonical host name `trt-eai-oldlab-2`;
+2. require `/shared_work` to be the NFS mount and resolve the local
+   `loom-rollout`, `sharedwork`, and three developer identities by name, then
+   verify each developer can reach the local Docker daemon through their
+   normal supplementary groups;
+3. fetch the exact commit from the fixed `qianyi-sun/loom` remote into a
+   private temporary directory under each developer's NFS candidate root,
+   verify `HEAD`, commit, tree, and cleanliness, remove every write bit, and
+   atomically rename it to `<candidate_root>/<SHA>`;
+4. converge each local state/cache/evidence/runtime/secrets directory to its
+   developer owner and mode `0700`;
+5. create the per-developer `secrets/sandbox.env` and `secrets/admin.toml`
+   once, atomically, as owner-only mode `0600` files; existing valid files are
+   never rotated or overwritten;
+6. persist the root-only exact desired-state record under
+   `/etc/loom/developer-sandboxes/desired/<developer>.json`, install the fixed
+   host entry and systemd template, and enable/start each unit.
+
+The durable locations for one sandbox are therefore:
+
+| Purpose | Path |
+| --- | --- |
+| immutable candidate | `/shared_work/loom/candidates/sandboxes/<developer>/<SHA>` |
+| lifecycle binding | `/srv/loom/developer-sandboxes/<developer>/sandbox-state.json` |
+| secrets | `/srv/loom/developer-sandboxes/<developer>/secrets/sandbox.env` |
+| admin singleton | `/srv/loom/developer-sandboxes/<developer>/secrets/admin.toml` |
+| cache | `/srv/loom/developer-sandboxes/<developer>/cache` |
+| evidence | `/srv/loom/developer-sandboxes/<developer>/evidence` |
+| runtime | `/srv/loom/developer-sandboxes/<developer>/runtime` |
+| desired candidate | `/etc/loom/developer-sandboxes/desired/<developer>.json` |
+| installed fixed profile | `/etc/loom/developer-sandboxes/profiles/<developer>.toml` |
+
+Do not copy or reveal the private files during readback. Compare only
+owner/mode, required key names, and secret fingerprints when an authorized
+isolation procedure requires it.
+
+### Persistent create, update, and check
+
+The enabled `loom-developer-sandbox@.service` is a replayable oneshot. It
+selects `create`, `update`, or `check` from the persisted lifecycle binding,
+then finishes with the full Compose health check and exact loopback-port
+readback. It is safe to invoke repeatedly:
+
+```bash
+sudo systemctl start loom-developer-sandbox@qianyi.service
+sudo systemctl start loom-developer-sandbox@hongjian.service
+sudo systemctl start loom-developer-sandbox@devansh.service
+```
+
+An installer or unit rerun with the same SHA performs an idempotent forced
+Compose convergence followed by a check; this repairs a partially created or
+mixed stack instead of trusting state alone. A rerun with a different exact
+SHA records the old SHA as the sole rollback target and converges an update.
+Named Compose volumes remain attached to the fixed per-developer Compose
+project.
+
+On a fresh database, the initial worker token is deliberately only bootstrap
+material. After the sandbox Control Plane is healthy, the host entry checks the
+token without registering a worker. If it is rejected, the entry uses that
+sandbox's loopback Admin API and private admin file to mint worker and
+batch-runner tokens, atomically replaces only those env-file values, and
+force-converges the stack so worker and Service receive them. Raw tokens never
+enter argv, JSON output, systemd `Environment=`, or logs.
+
+Run a read-only installed-state check with:
+
+```bash
+uv run --no-sync python scripts/ops/developer_sandbox_host.py check \
+  --candidate-sha <SHA> \
+  --sandbox all \
+  --execute
+```
+
+This validates the NFS mount, candidate owner and immutability, private
+owner/mode, secret-file shape, exact lifecycle SHA, Compose health, and all
+reserved loopback listeners. Run the plan's five fixed `ssh ... stat` commands
+separately and require identical inode, UID, GID, and mode for each candidate
+root and exact candidate. Device numbers may differ between NFS clients.
+
+### Safe rollback
+
+Rollback is limited to the exact `previous_sha` stored by the last successful
+desired-state change:
+
+```bash
+uv run --no-sync python scripts/ops/developer_sandbox_host.py rollback \
+  --sandbox qianyi \
+  --candidate-sha <RECORDED-PREVIOUS-SHA> \
+  --execute
+```
+
+The target must already be a clean immutable published candidate. Both forward
+update and rollback require the current and target candidates to have the same
+Git tree for `migrations/`; the rollback then atomically swaps desired/current
+history and runs the normal unit. If an update unit fails, the installer
+restores desired state and attempts the previous same-migration candidate once.
+For a first-create failure, it retains the new desired record so a repeat can
+repair the partial stack. This rollback preserves named volumes.
+
+If the migration trees differ, code-only rollback is intentionally refused.
+Use a separately reviewed database/object-store backup and restore procedure;
+do not run Alembic downgrade ad hoc. Likewise, never add
+`--delete-volumes` to recovery unless the developer explicitly authorizes
+irreversible sandbox-data deletion.
+
 ## Preconditions
 
 Materialize a clean candidate checkout at the exact profile path:

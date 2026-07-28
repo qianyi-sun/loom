@@ -1,0 +1,18 @@
+[Unit]
+Description=Converge Loom developer sandbox %i to its exact desired candidate
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/loom/developer-sandboxes/desired/%i.json
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/local/libexec/loom-developer-sandbox-host service-converge --sandbox %i
+TimeoutStartSec=infinity
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=multi-user.target

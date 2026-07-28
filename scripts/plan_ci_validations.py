@@ -84,6 +84,15 @@ PROTECTED_STAGING_ROLLOUT_PREFIXES = (
     "tests/ops/test_staging_rollout_",
 )
 
+PROTECTED_DEVELOPER_SANDBOX_EXACT = {
+    "scripts/ops/developer_sandbox.py",
+    "scripts/ops/developer_sandbox_host.py",
+    "tests/ops/test_developer_sandbox.py",
+    "tests/ops/test_developer_sandbox_host.py",
+}
+
+PROTECTED_DEVELOPER_SANDBOX_PREFIXES = ("deploy/developer-sandboxes/",)
+
 
 @dataclass(frozen=True)
 class ValidationPlan:
@@ -184,6 +193,14 @@ def _is_protected_staging_rollout_path(path: str) -> bool:
     )
 
 
+def _is_protected_developer_sandbox_path(path: str) -> bool:
+    return _matches(
+        path,
+        exact=PROTECTED_DEVELOPER_SANDBOX_EXACT,
+        prefixes=PROTECTED_DEVELOPER_SANDBOX_PREFIXES,
+    )
+
+
 def plan_validations(
     *,
     changed_paths: Sequence[str],
@@ -212,9 +229,7 @@ def plan_validations(
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
-    selected = {
-        name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")
-    }
+    selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")}
     reasons: dict[str, list[str]] = {name: [] for name in selected}
 
     def select(name: str, reason: str) -> None:
@@ -243,6 +258,10 @@ def plan_validations(
     if any(_is_protected_staging_rollout_path(path) for path in paths):
         for name in HEAVY_CHECKS:
             select(name, "protected-staging-rollout")
+
+    if any(_is_protected_developer_sandbox_path(path) for path in paths):
+        for name in HEAVY_CHECKS:
+            select(name, "protected-developer-sandbox")
 
     integration_exact = {
         ".github/workflows/ci.yml",
@@ -366,6 +385,7 @@ def plan_validations(
             path in PLANNER_PATHS
             or path in OWNERSHIP_AUTHORITY_PATHS
             or _is_protected_staging_rollout_path(path)
+            or _is_protected_developer_sandbox_path(path)
         )
         if _is_dependency_authority_path(path):
             for name in HEAVY_CHECKS:
