@@ -2321,6 +2321,11 @@ The platform installer refreshes its service-owned local candidate from the
 root-owned sealed install source through a fixed local `git upload-pack`
 command bound to that source's exact `.git` safe-directory exception. It never
 adds a persistent or wildcard Git safety exception.
+Protected GB10 convergence uses the same fixed-command pattern when each
+`qianyi` checkout fetches from the service-owned shared candidate: the
+upload-pack is bound only to that candidate's exact `.git` directory derived
+from the attested SHA. This avoids Git's cross-owner rejection without changing
+shared ownership or any global, system, or user Git configuration.
 
 Before request creation the broker also checks the exact 14 active GB10 SSH
 targets as `qianyi`: the 13 clients must expose the exact NFSv4 source and

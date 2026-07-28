@@ -546,6 +546,7 @@ def _remote_apply_source(
 ) -> str:
     image_tag = f"staging-{plan.candidate_sha[:7]}"
     shared = _SHARED_ROOT / f"loom-remote-worker-{image_tag}"
+    upload_pack = f"/usr/bin/git -c safe.directory={shared}/.git upload-pack"
     service = target.node_agent_service
     timer = target.timer
     unit_paths = tuple(str(_UNIT_ROOT / unit) for unit in (service, timer))
@@ -561,6 +562,7 @@ candidate_sha = {plan.candidate_sha!r}
 candidate_tree = {plan.candidate_tree!r}
 image_tag = {image_tag!r}
 shared = pathlib.Path({str(shared)!r})
+upload_pack = {upload_pack!r}
 repo = pathlib.Path({str(target.repo_path)!r})
 env_file = pathlib.Path({str(target.env_file_path)!r})
 service = {service!r}
@@ -671,7 +673,8 @@ for operation in operations:
             raise SystemExit(1)
         run(["git", "-c", "protocol.file.allow=always", "-c", "fetch.fsckObjects=true",
              "-C", str(repo), "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
-             "--no-write-fetch-head", str(shared), candidate_sha])
+             "--no-write-fetch-head", f"--upload-pack={{upload_pack}}",
+             str(shared), candidate_sha])
         run(["git", "-C", str(repo), "checkout", "--detach", candidate_sha])
     elif operation == "environment":
         existing = (read_regular(env_file).decode("utf-8").splitlines()
