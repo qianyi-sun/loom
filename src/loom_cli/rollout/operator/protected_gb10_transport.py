@@ -56,6 +56,21 @@ _MUTATION_ORDER = (
 )
 
 
+class GB10FleetApplyError(RuntimeError):
+    """Structured, secret-free failure for the fixed GB10 host authority."""
+
+    def __init__(self, failed_hosts: Sequence[str]) -> None:
+        hosts = tuple(sorted(failed_hosts))
+        if (
+            not hosts
+            or len(set(hosts)) != len(hosts)
+            or any(_HOST_RE.fullmatch(host) is None for host in hosts)
+        ):
+            raise ValueError("GB10 failed-host metadata is invalid")
+        self.failed_hosts = hosts
+        super().__init__("GB10 convergence failed safely on fixed hosts")
+
+
 class CommandResult(Protocol):
     returncode: int
     stdout: str
@@ -190,9 +205,7 @@ class FixedGB10SSHTransport:
                 except Exception:
                     failures.append(host)
         if failures:
-            raise RuntimeError(
-                "GB10 convergence failed safely on fixed host(s): " + ",".join(sorted(failures))
-            )
+            raise GB10FleetApplyError(failures)
 
     def _validate_plan_inventory(self, plan: FinalGatePlan) -> None:
         if _SHA_RE.fullmatch(plan.candidate_sha) is None or set(plan.gb10_boot_ids) != {
@@ -797,6 +810,7 @@ def build_fixed_gb10_ssh_transport(
 
 __all__ = [
     "FixedGB10SSHTransport",
+    "GB10FleetApplyError",
     "GB10TransportTarget",
     "build_fixed_gb10_ssh_transport",
 ]

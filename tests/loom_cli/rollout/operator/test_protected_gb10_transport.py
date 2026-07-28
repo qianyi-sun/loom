@@ -16,6 +16,7 @@ from loom_cli.rollout.gb10_convergence import (
 from loom_cli.rollout.operator.protected_gb10_transport import (
     _REMOTE_SHARED_GIT_TIMEOUT_SECONDS,
     FixedGB10SSHTransport,
+    GB10FleetApplyError,
     GB10TransportTarget,
     _remote_apply_source,
     _remote_observation_source,
@@ -234,6 +235,35 @@ def test_fixed_transport_apply_retries_transient_failure(tmp_path) -> None:
 
     assert calls == 2
     assert sleeps == [0.5]
+
+
+def test_fixed_transport_reports_only_validated_failed_hosts(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1", "trt-gb10-2")
+
+    def run(argv):
+        host = argv[-2]
+        return subprocess.CompletedProcess(
+            argv,
+            0 if host == "trt-gb10-1" else 255,
+            "",
+            "" if host == "trt-gb10-1" else "private transport detail",
+        )
+
+    convergence = GB10ConvergencePlan(
+        state=GB10ConvergenceState.READY,
+        mutations=(
+            GB10HostMutation("trt-gb10-1", (GB10MutationKind.ENVIRONMENT,)),
+            GB10HostMutation("trt-gb10-2", (GB10MutationKind.ENVIRONMENT,)),
+        ),
+        blockers={},
+        evidence_digest="1" * 64,
+    )
+
+    with pytest.raises(GB10FleetApplyError) as caught:
+        _transport(run, _target(), _target("trt-gb10-2")).apply(plan, convergence)
+
+    assert caught.value.failed_hosts == ("trt-gb10-2",)
+    assert "private transport detail" not in str(caught.value)
 
 
 def test_fixed_remote_programs_compile_and_apply_rejects_noncanonical_order(tmp_path) -> None:
