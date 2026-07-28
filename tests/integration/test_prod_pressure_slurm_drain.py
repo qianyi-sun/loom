@@ -920,6 +920,120 @@ async def test_actor_restart_settles_confirmed_preemption_without_duplicate_scan
         await engine.dispose()
 
 
+async def test_actor_missing_terminal_readback_keeps_preemption_draining(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        worker_id, _job_id, trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state={
+                "state": "draining",
+                "started_at": (now - timedelta(seconds=30)).isoformat(),
+                "last_grace_action": "cancel_retryable",
+            },
+            with_in_flight_trial=True,
+        )
+        async with session_factory() as s:
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+            job.pending_reason = PROD_PRESSURE_CANCEL_PREEMPT
+            job.last_reconciled_at = now - timedelta(seconds=900)
+            worker = await s.get(Worker, worker_id)
+            assert worker is not None
+            worker.drain_state = "draining"
+            worker.drain_owner = "prod-pressure-controller"
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observations = []
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "prod_pressure_cancel_wait"
+        assert runner.cancelled_job_ids == []
+        assert trial_id is not None
+        async with session_factory() as s:
+            worker = await s.get(Worker, worker_id)
+            trial = await s.get(Trial, trial_id)
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+        assert worker is not None and worker.drain_state == "draining"
+        assert trial is not None
+        assert trial.failure_reason is None
+        assert job.state == "running"
+        assert job.pending_reason == PROD_PRESSURE_CANCEL_PREEMPT
+    finally:
+        await engine.dispose()
+
+
+async def test_actor_live_allocation_with_stale_heartbeat_keeps_cancel_pending(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        worker_id, job_id, trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state={
+                "state": "draining",
+                "started_at": (now - timedelta(seconds=30)).isoformat(),
+                "last_grace_action": "cancel_retryable",
+            },
+            with_in_flight_trial=True,
+        )
+        async with session_factory() as s:
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+            job.pending_reason = PROD_PRESSURE_CANCEL_PREEMPT
+            worker = await s.get(Worker, worker_id)
+            assert worker is not None
+            worker.last_seen_at = now - timedelta(seconds=900)
+            worker.drain_state = "draining"
+            worker.drain_owner = "prod-pressure-controller"
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observations = [
+            _running_job_observation(
+                job_id=job_id,
+                nodelist="oldlab-1",
+                worker_id=worker_id,
+                now=now,
+            ),
+        ]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "prod_pressure_cancel_wait"
+        assert runner.cancelled_job_ids == []
+        assert trial_id is not None
+        async with session_factory() as s:
+            worker = await s.get(Worker, worker_id)
+            trial = await s.get(Trial, trial_id)
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+        assert worker is not None and worker.drain_state == "draining"
+        assert trial is not None and trial.failure_reason is None
+        assert job.state == "running"
+        assert job.pending_reason == PROD_PRESSURE_CANCEL_PREEMPT
+    finally:
+        await engine.dispose()
+
+
 async def test_actor_recovery_reactivates_only_held_live_worker(
     postgres_url: str,
 ) -> None:
