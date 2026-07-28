@@ -126,8 +126,121 @@ The sandbox adapter must:
 5. return an observation for the same request and epoch.
 
 This interface intentionally does not call the existing Control Plane
-autoscaler API. A later environment-specific adapter owns authentication and
-delivery, while this broker remains transport- and token-agnostic.
+autoscaler API. The environment-specific adapter below owns authentication and
+delivery, while the broker remains transport- and token-agnostic.
+
+## Persistent sandbox handoff adapter
+
+The environment-specific adapter is now
+`scripts/ops/shared_capacity_adapter.py`. It is deliberately a separate
+process from the broker:
+
+- the broker remains the only process allowed to increase a grant;
+- the adapter consumes one exact broker-produced `handoffs` item and cannot
+  construct or expand a grant;
+- the adapter validates sandbox, environment, pool, full candidate SHA,
+  request ID, and monotonically increasing lease epoch before calling the
+  sandbox Control Plane;
+- the adapter reads the sandbox's `sandbox-state.json` and requires the local
+  autoscaler policy's `actuator_config.candidate_sha` to match that same SHA;
+- the admin credential is read from the existing mode-`0600` admin secret
+  TOML. Neither the config, argv, result JSON, observation, nor durable adapter
+  state contains the token;
+- an expired or disabled handoff can only lower the local ceiling to zero;
+- after at least one accepted handoff, a missing handoff reuses only its
+  durable request/epoch binding and drains the local ceiling to zero;
+- a malformed, rewritten-same-epoch, regressing-epoch, or
+  candidate-mismatched handoff fails without an autoscaler mutation;
+- restart state is durable. Unknown Control Plane counters retain the last
+  committed observation instead of releasing uncertain capacity.
+
+Checked-in adapter configs cover both pools for all three sandboxes:
+
+```text
+deploy/developer-sandboxes/shared-capacity-adapters/
+  qianyi-gb10.toml       qianyi-oldlab.toml
+  hongjian-gb10.toml     hongjian-oldlab.toml
+  devansh-gb10.toml      devansh-oldlab.toml
+```
+
+Each config contains paths and a secret-file reference, never a secret. The
+installed contract is:
+
+```text
+/etc/loom/shared-capacity-adapters/<sandbox>-<pool>.toml
+/etc/loom/developer-sandboxes/<sandbox>-admin.toml
+/srv/loom/developer-sandboxes/<sandbox>/sandbox-state.json
+/var/lib/loom-shared-capacity/handoffs/<sandbox>-<pool>.json
+/var/lib/loom-shared-capacity/observations/<sandbox>-<pool>.json
+/var/lib/loom-shared-capacity/adapters/<sandbox>-<pool>.json
+```
+
+The handoff transport must atomically copy the **unaltered** matching item from
+the broker's latest accepted `reconcile` result into the handoff path. It must
+not synthesize `max_slots`, change an epoch, or make the file writable by a
+sandbox account. Mode `0600`, owner `root:root`, inside the broker's mode-`0700`
+state root is the current bootstrap contract. A future dedicated broker
+identity may replace root only as one reviewed ownership migration.
+
+The adapter writes a one-element JSON observation array compatible with
+`--observations-json`. A supervisor combines the six arrays without modifying
+their objects, supplies the same reviewed budgets on every broker reconcile,
+then atomically republishes the resulting handoffs. Observation files are
+inputs, never grants. A sandbox-written observation cannot increase capacity:
+the broker rejects old epochs and nonterminal counts above its commitment.
+
+Run one adapter manually for validation:
+
+```bash
+python scripts/ops/shared_capacity_adapter.py \
+  --config /etc/loom/shared-capacity-adapters/qianyi-gb10.toml \
+  run
+```
+
+The secret-free result reports the request, epoch, applied ceiling, expiry
+state, and observation. Exit status `1` emits only:
+
+```json
+{"error":"shared-capacity-adapter-failed-safely"}
+```
+
+### Exact-candidate systemd contract
+
+The checked-in template and timer are:
+
+```text
+deploy/developer-sandboxes/loom-shared-capacity-adapter@.service
+deploy/developer-sandboxes/loom-shared-capacity-adapter@.timer
+```
+
+Render the service against the full candidate SHA:
+
+```bash
+python scripts/ops/render_shared_capacity_adapter_service.py \
+  --git-sha <full-lowercase-40-character-SHA> \
+  > /tmp/loom-shared-capacity-adapter@.service
+```
+
+The renderer rejects a mutable path, an unresolved placeholder, or a partial
+SHA. The installed unit runs from:
+
+```text
+/opt/loom-shared-capacity/candidates/<SHA>/repo
+/opt/loom-shared-capacity/candidates/<SHA>/venv
+```
+
+The timer is a persistent 15-second oneshot schedule. Install and enablement
+mutate shared-host systemd state and therefore require explicit live authority;
+repository merge alone does not authorize them. Before activation, verify the
+rendered service and timer with `systemd-analyze verify`, copy the reviewed
+instance configs to `/etc/loom/shared-capacity-adapters`, and prove the admin
+secret and sandbox-state files have their required ownership/modes.
+
+The bootstrap unit runs as root because the three sandbox roots are private
+mode `0700` under different owners and the broker root is root-only. Do not
+weaken those modes. Replacing root requires a dedicated service identity plus
+reviewed ACLs that grant only the exact state, handoff, observation, and secret
+files needed by each instance.
 
 ## Report observed capacity
 
@@ -196,6 +309,30 @@ Slurm for the current epoch observations, then run `reconcile`. Do not edit the
 SQLite tables or reduce observed slot counts by hand. A missing or uncertain
 observation keeps capacity committed and fails toward lower utilization.
 
+After an adapter restart, its durable state fences replay. Reapplying an
+identical handoff is idempotent. Do not delete adapter state to bypass an epoch
+error: cancel the broker request, publish the zero-ceiling handoff, and wait
+for a same-epoch zero-nonterminal observation first.
+
+## Rollback
+
+Rollback is drain-first and preserves authority records:
+
+1. cancel each nonterminal broker request;
+2. reconcile and atomically publish the resulting `enabled=false`,
+   `max_slots=0` handoffs;
+3. leave the adapter timers running until every same-epoch observation reports
+   zero pending, active, and draining slots and broker status is terminal;
+4. stop and disable the six adapter timers;
+5. retain `broker.sqlite3`, WAL/SHM files, adapter states, observations, and
+   audit/evidence JSON as one incident/recovery record.
+
+Never roll back by deleting the SQLite database, editing a lease epoch,
+lowering an observation by hand, removing the handoff before drain completes,
+or restoring a larger local autoscaler `max_slots`. Named sandbox volumes are
+outside this adapter rollback and remain governed by the developer-sandbox
+destroy contract.
+
 ## Production-pressure drain and retry acceptance
 
 The broker grant ceiling and the Control Plane production-pressure intent are
@@ -261,7 +398,6 @@ The autoscaler decision reason is the operator status surface. It reports
 secret-free counts for `cancelled`, `awaiting_terminal`, `cancel_failed`,
 `held_busy`, and `retryable_trials`. Any nonzero `cancel_failed` count is a
 stop condition; repair the installed Slurm authority and let the timer retry.
-
 ## Evidence retention
 
 Persist the complete JSON output from every accepted request, reconcile,

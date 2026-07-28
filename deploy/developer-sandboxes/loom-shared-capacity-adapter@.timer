@@ -1,0 +1,12 @@
+[Unit]
+Description=Continuously apply Loom shared-capacity handoffs (%i)
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Persistent=true
+Unit=loom-shared-capacity-adapter@%i.service
+
+[Install]
+WantedBy=timers.target
