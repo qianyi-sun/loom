@@ -1,0 +1,11 @@
+schema_version = 1
+sandbox = "devansh"
+environment = "sandbox-devansh"
+pool_name = "oldlab"
+control_plane_url = "http://127.0.0.1:22080"
+admin_secret_file = "/etc/loom/developer-sandboxes/devansh-admin.toml"
+handoff_path = "/var/lib/loom-shared-capacity/handoffs/devansh-oldlab.json"
+observation_path = "/var/lib/loom-shared-capacity/observations/devansh-oldlab.json"
+adapter_state_path = "/var/lib/loom-shared-capacity/adapters/devansh-oldlab.json"
+sandbox_state_path = "/srv/loom/developer-sandboxes/devansh/sandbox-state.json"
+timeout_seconds = 10

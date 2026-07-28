@@ -1,0 +1,11 @@
+schema_version = 1
+sandbox = "hongjian"
+environment = "sandbox-hongjian"
+pool_name = "gb10"
+control_plane_url = "http://127.0.0.1:21080"
+admin_secret_file = "/etc/loom/developer-sandboxes/hongjian-admin.toml"
+handoff_path = "/var/lib/loom-shared-capacity/handoffs/hongjian-gb10.json"
+observation_path = "/var/lib/loom-shared-capacity/observations/hongjian-gb10.json"
+adapter_state_path = "/var/lib/loom-shared-capacity/adapters/hongjian-gb10.json"
+sandbox_state_path = "/srv/loom/developer-sandboxes/hongjian/sandbox-state.json"
+timeout_seconds = 10

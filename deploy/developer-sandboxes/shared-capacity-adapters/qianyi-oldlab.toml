@@ -1,0 +1,11 @@
+schema_version = 1
+sandbox = "qianyi"
+environment = "sandbox-qianyi"
+pool_name = "oldlab"
+control_plane_url = "http://127.0.0.1:20080"
+admin_secret_file = "/etc/loom/developer-sandboxes/qianyi-admin.toml"
+handoff_path = "/var/lib/loom-shared-capacity/handoffs/qianyi-oldlab.json"
+observation_path = "/var/lib/loom-shared-capacity/observations/qianyi-oldlab.json"
+adapter_state_path = "/var/lib/loom-shared-capacity/adapters/qianyi-oldlab.json"
+sandbox_state_path = "/srv/loom/developer-sandboxes/qianyi/sandbox-state.json"
+timeout_seconds = 10
