@@ -131,6 +131,46 @@ def test_private_root_convergence_rejects_symlink(tmp_path: Path) -> None:
     assert stat.S_IMODE(target.stat().st_mode) != 0o700
 
 
+def test_private_root_convergence_does_not_follow_raced_child_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    identity = _current_identity("qianyi")
+    target = tmp_path / "unrelated"
+    target.mkdir(mode=0o755)
+    target_before = target.stat()
+    mkdir_private_dir_at = host._mkdir_private_dir_at
+
+    def replace_created_cache_with_symlink(parent_fd: int, name: str) -> None:
+        mkdir_private_dir_at(parent_fd, name)
+        if name == profile.cache_root.name:
+            profile.cache_root.rmdir()
+            profile.cache_root.symlink_to(target, target_is_directory=True)
+
+    monkeypatch.setattr(
+        host,
+        "_mkdir_private_dir_at",
+        replace_created_cache_with_symlink,
+    )
+
+    with pytest.raises(host.HostConvergeError, match="root is unsafe"):
+        host.ensure_private_roots(profile, identity)
+
+    target_after = target.stat()
+    assert (target_after.st_dev, target_after.st_ino) == (
+        target_before.st_dev,
+        target_before.st_ino,
+    )
+    assert stat.S_IMODE(target_after.st_mode) == stat.S_IMODE(target_before.st_mode)
+    state_metadata = profile.state_root.stat()
+    assert stat.S_IMODE(state_metadata.st_mode) == 0o700
+    assert (state_metadata.st_uid, state_metadata.st_gid) == (
+        identity.uid,
+        identity.gid,
+    )
+
+
 def test_exact_candidate_verifier_requires_clean_immutable_tree(tmp_path: Path) -> None:
     profile = _temporary_profile(tmp_path)
     candidate = profile.candidate_root / SHA

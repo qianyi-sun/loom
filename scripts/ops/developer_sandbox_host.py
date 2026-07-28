@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import fcntl
 import grp
 import hashlib
@@ -343,25 +344,169 @@ def _assert_secure_file(path: Path, identity: Identity, label: str) -> None:
         raise HostConvergeError(f"{label} owner is invalid")
 
 
-def verify_private_roots(profile: Profile, identity: Identity) -> None:
-    for path in (
-        profile.state_root,
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+        | os.O_NOFOLLOW
+    )
+
+
+def _open_absolute_directory(path: Path, *, create: bool) -> int:
+    if not path.is_absolute() or ".." in path.parts:
+        raise HostConvergeError("private sandbox parent path is invalid")
+    descriptor = os.open("/", _directory_open_flags())
+    try:
+        for component in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            child = os.open(component, _directory_open_flags(), dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _mkdir_private_dir_at(parent_fd: int, name: str) -> None:
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        return
+
+
+def _private_child_names(profile: Profile) -> tuple[str, ...]:
+    children = (
         profile.cache_root,
         profile.evidence_root,
         profile.runtime_root,
         profile.secrets_root,
+    )
+    if (
+        any(path.parent != profile.state_root or path.name in {"", ".", ".."} for path in children)
+        or len({path.name for path in children}) != len(children)
     ):
-        try:
-            metadata = path.lstat()
-        except OSError as exc:
-            raise HostConvergeError(f"private sandbox root is unavailable: {path}") from exc
+        raise HostConvergeError("private sandbox child paths are invalid")
+    return tuple(path.name for path in children)
+
+
+def _validate_private_directory_fd(
+    descriptor: int,
+    identity: Identity,
+    path: Path,
+) -> os.stat_result:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or (metadata.st_uid, metadata.st_gid) != (identity.uid, identity.gid)
+    ):
+        raise HostConvergeError(f"private sandbox root is invalid: {path}")
+    return metadata
+
+
+@contextmanager
+def _private_state_directory(
+    profile: Profile,
+    identity: Identity,
+    *,
+    create: bool,
+    seize: bool,
+) -> Iterator[tuple[int, int, os.stat_result]]:
+    parent_fd = -1
+    state_fd = -1
+    state_metadata: os.stat_result | None = None
+    seized = False
+    try:
+        parent_fd = _open_absolute_directory(profile.state_root.parent, create=create)
+        if create:
+            _mkdir_private_dir_at(parent_fd, profile.state_root.name)
+        state_fd = os.open(
+            profile.state_root.name,
+            _directory_open_flags(),
+            dir_fd=parent_fd,
+        )
+        state_metadata = os.fstat(state_fd)
+        if not stat.S_ISDIR(state_metadata.st_mode):
+            raise HostConvergeError(
+                f"private sandbox root is unsafe: {profile.state_root}",
+            )
+        if seize:
+            # Temporarily remove the sandbox user's authority over child names.
+            # All following mutations use the already-bound descriptor.
+            os.fchown(state_fd, os.geteuid(), os.getegid())
+            os.fchmod(state_fd, 0o700)
+            seized = True
+        yield parent_fd, state_fd, state_metadata
+        rebound = os.stat(
+            profile.state_root.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        current = os.fstat(state_fd)
         if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or stat.S_ISLNK(metadata.st_mode)
-            or stat.S_IMODE(metadata.st_mode) != 0o700
-            or (metadata.st_uid, metadata.st_gid) != (identity.uid, identity.gid)
+            not stat.S_ISDIR(rebound.st_mode)
+            or (rebound.st_dev, rebound.st_ino) != (current.st_dev, current.st_ino)
         ):
-            raise HostConvergeError(f"private sandbox root is invalid: {path}")
+            raise HostConvergeError(
+                f"private sandbox root binding changed: {profile.state_root}",
+            )
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise HostConvergeError(
+                f"private sandbox root is unsafe: {profile.state_root}",
+            ) from exc
+        raise HostConvergeError(
+            f"could not access private sandbox root: {profile.state_root}",
+        ) from exc
+    finally:
+        if state_fd >= 0:
+            if seized:
+                try:
+                    os.fchmod(state_fd, 0o700)
+                    os.fchown(state_fd, identity.uid, identity.gid)
+                except OSError as exc:
+                    raise HostConvergeError(
+                        f"could not restore private sandbox root: {profile.state_root}",
+                    ) from exc
+            os.close(state_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def verify_private_roots(profile: Profile, identity: Identity) -> None:
+    child_names = _private_child_names(profile)
+    try:
+        with _private_state_directory(
+            profile,
+            identity,
+            create=False,
+            seize=False,
+        ) as (_parent_fd, state_fd, _state_metadata):
+            _validate_private_directory_fd(state_fd, identity, profile.state_root)
+            for name in child_names:
+                descriptor = os.open(name, _directory_open_flags(), dir_fd=state_fd)
+                try:
+                    _validate_private_directory_fd(
+                        descriptor,
+                        identity,
+                        profile.state_root / name,
+                    )
+                finally:
+                    os.close(descriptor)
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        raise HostConvergeError(
+            f"private sandbox root is unavailable: {profile.state_root}",
+        ) from exc
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -397,26 +542,48 @@ def _new_secret_values(sandbox: str) -> dict[str, str]:
 
 
 def ensure_private_roots(profile: Profile, identity: Identity) -> None:
-    for path in (
-        profile.state_root,
-        profile.cache_root,
-        profile.evidence_root,
-        profile.runtime_root,
-        profile.secrets_root,
-    ):
-        try:
-            existing = path.lstat()
-        except FileNotFoundError:
-            existing = None
-        except OSError as exc:
-            raise HostConvergeError(f"could not inspect private sandbox root: {path}") from exc
-        if existing is not None and (
-            stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode)
-        ):
-            raise HostConvergeError(f"private sandbox root is unsafe: {path}")
-        path.mkdir(parents=True, mode=0o700, exist_ok=True)
-        os.chown(path, identity.uid, identity.gid)
-        os.chmod(path, 0o700)
+    child_names = _private_child_names(profile)
+    try:
+        with _private_state_directory(
+            profile,
+            identity,
+            create=True,
+            seize=True,
+        ) as (_parent_fd, state_fd, _state_metadata):
+            for name in child_names:
+                _mkdir_private_dir_at(state_fd, name)
+                descriptor = os.open(name, _directory_open_flags(), dir_fd=state_fd)
+                try:
+                    metadata = os.fstat(descriptor)
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        raise HostConvergeError(
+                            f"private sandbox root is unsafe: {profile.state_root / name}",
+                        )
+                    os.fchown(descriptor, identity.uid, identity.gid)
+                    os.fchmod(descriptor, 0o700)
+                    current = os.fstat(descriptor)
+                    rebound = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+                    if (
+                        not stat.S_ISDIR(rebound.st_mode)
+                        or (current.st_dev, current.st_ino)
+                        != (rebound.st_dev, rebound.st_ino)
+                    ):
+                        raise HostConvergeError(
+                            f"private sandbox root binding changed: "
+                            f"{profile.state_root / name}",
+                        )
+                finally:
+                    os.close(descriptor)
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise HostConvergeError(
+                f"private sandbox root is unsafe: {profile.state_root}",
+            ) from exc
+        raise HostConvergeError(
+            f"could not converge private sandbox root: {profile.state_root}",
+        ) from exc
     verify_private_roots(profile, identity)
 
 
