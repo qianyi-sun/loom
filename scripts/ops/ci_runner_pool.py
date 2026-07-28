@@ -764,13 +764,38 @@ for image in {base_images}; do
   if [[ "$repository" != */* ]]; then
     repository="library/${{repository}}"
   fi
-  skopeo copy \
-    --override-os linux \
-    --override-arch amd64 \
-    --src-tls-verify=false \
-    "docker://127.0.0.1:5000/${{repository}}:${{tag}}" \
-    "docker-daemon:${{image}}" \
-    >/dev/null
+  registry_ref="127.0.0.1:5000/${{repository}}:${{tag}}"
+  raw_manifest=$(
+    skopeo inspect \
+      --raw \
+      --tls-verify=false \
+      "docker://${{registry_ref}}"
+  )
+  media_type=$(jq -r '.mediaType // ""' <<<"${{raw_manifest}}")
+  case "${{media_type}}" in
+    application/vnd.docker.distribution.manifest.list.v2+json|\
+    application/vnd.oci.image.index.v1+json)
+      platform_digest=$(
+        jq -er '
+          first(
+            .manifests[]
+            | select(
+                .platform.os == "linux"
+                and .platform.architecture == "amd64"
+              )
+            | .digest
+          )
+        ' <<<"${{raw_manifest}}"
+      )
+      source_ref="127.0.0.1:5000/${{repository}}@${{platform_digest}}"
+      ;;
+    *)
+      source_ref="${{registry_ref}}"
+      ;;
+  esac
+  unset raw_manifest media_type platform_digest
+  docker pull "${{source_ref}}" >/dev/null
+  docker tag "${{source_ref}}" "${{image}}"
   docker image inspect "${{image}}" >/dev/null
 done
 test "$(systemctl is-active docker-registry)" = active
