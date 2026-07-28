@@ -124,12 +124,38 @@ uv run --no-sync python scripts/ops/developer_sandbox_crossover_probe.py \
   --write-evidence /tmp/a3-crossover-dry-run.json
 ```
 
-Add `--execute` only after three sandboxes are installed (see installer
-follow-up) for the live six-edge pairwise matrix. Evidence JSON records
-fingerprints and status codes only — never raw `loom_w_*` / admin / MinIO
-secrets.
+Dry-run / CI dual-stack negatives are **not** live A3 host evidence and are
+**not** `#896` soak evidence. Evidence JSON records fingerprints and status
+codes only — never raw `loom_w_*` / admin / MinIO secrets.
 
-A3 crossover evidence is **not** `#896` soak evidence.
+Live `--execute` is fail-closed: it binds CP/MinIO URLs to the exact reviewed
+profile loopback endpoints, requires mode-`0600` non-symlink secret files owned
+by the invoking user, requires complete MinIO negatives plus same-sandbox
+positive controls for all three sandboxes, and requires one candidate SHA that
+matches every `sandbox-state.json` readback:
+
+```bash
+uv run --no-sync python scripts/ops/developer_sandbox_crossover_probe.py \
+  --execute \
+  --profiles-dir deploy/developer-sandboxes \
+  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
+  --qianyi-worker-token-file /secure/qianyi.env \
+  --qianyi-admin-secret-file /secure/qianyi-admin.toml \
+  --qianyi-minio-access-key-file /secure/qianyi-minio-access \
+  --qianyi-minio-secret-key-file /secure/qianyi-minio-secret \
+  --hongjian-worker-token-file /secure/hongjian.env \
+  --hongjian-admin-secret-file /secure/hongjian-admin.toml \
+  --hongjian-minio-access-key-file /secure/hongjian-minio-access \
+  --hongjian-minio-secret-key-file /secure/hongjian-minio-secret \
+  --devansh-worker-token-file /secure/devansh.env \
+  --devansh-admin-secret-file /secure/devansh-admin.toml \
+  --devansh-minio-access-key-file /secure/devansh-minio-access \
+  --devansh-minio-secret-key-file /secure/devansh-minio-secret \
+  --write-evidence /tmp/a3-crossover-execute.json
+```
+
+Optional `--<sandbox>-cp-url` / `--<sandbox>-minio-endpoint` overrides are
+accepted only when they exactly equal the reviewed profile endpoints.
 
 ### Profile identity notes
 
