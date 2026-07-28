@@ -689,6 +689,11 @@ class _Control:
             raise RuntimeError("timer disable failed")
         self.enabled = False
 
+    def stop_service(self, name):
+        self.calls.append(f"stop-service:{name}")
+        self.result = "success"
+        self.status = 0
+
     def start_service(self, name, *, timeout_seconds):
         self.calls.append(f"service:{name}:{timeout_seconds}")
         if self.fail_service:
@@ -727,6 +732,67 @@ def test_fixed_transport_runs_closed_convergence_sequence(tmp_path: Path) -> Non
         "intent",
         "activated",
         "canonical",
+    ]
+    assert store.compensation_blockers() == {}
+
+
+def test_fixed_transport_converges_active_canonical_to_disabled_target(
+    tmp_path: Path,
+) -> None:
+    plan, candidate_root, active_artifact = _bound_artifact(tmp_path)
+    profile = candidate_root / "deploy/environment-state/staging.toml"
+    profile.write_text(
+        profile.read_text(encoding="utf-8").replace(
+            "enabled = true\nactive = true",
+            "enabled = false\nactive = false",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    disabled_artifact = _build_active_artifact(
+        candidate_root,
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        image_tag=f"staging-{plan.candidate_sha[:7]}",
+        environment=plan.environment,
+    )
+    assert len(disabled_artifact.supervisors) == 1
+    disabled = disabled_artifact.supervisors[0]
+    assert not disabled.enabled
+    assert not disabled.active
+
+    store = _Store()
+    control = _Control(active_artifact, store)
+    transport = FixedExternalSupervisorTransport(store=store, control=control)
+    transport.apply(
+        active_artifact,
+        transport.observe(active_artifact, _absent_authority()),
+        plan_digest="a" * 64,
+        attestation_digest="b" * 64,
+        transition_digest="c" * 64,
+    )
+    before = transport.observe(disabled_artifact)
+    assert classify_external_supervisor_live_state(disabled_artifact, before) == "ready"
+
+    transport.apply(
+        disabled_artifact,
+        before,
+        plan_digest="d" * 64,
+        attestation_digest="e" * 64,
+        transition_digest="f" * 64,
+    )
+
+    after = transport.observe(disabled_artifact)
+    assert classify_external_supervisor_live_state(disabled_artifact, after) == "exact"
+    assert control.calls[-4:] == [
+        "daemon-reload",
+        f"stop:{disabled.timer_name}",
+        f"disable:{disabled.timer_name}",
+        f"stop-service:{disabled.service_name}",
+    ]
+    assert [record.reason for record in store.compensations if record.phase == "activated"] == [
+        "timer-active",
+        "timer-disabled",
     ]
     assert store.compensation_blockers() == {}
 

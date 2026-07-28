@@ -64,6 +64,7 @@ from .protected_external_supervisor_transport import (
     AtomicUserUnitStore,
     ExternalSupervisorLiveObservation,
     FixedUserSystemdControl,
+    canonical_external_supervisor_runtime_ready,
 )
 from .readonly_capacity_client import (
     InstalledReadonlyCapacitySource,
@@ -255,66 +256,61 @@ def _external_supervisor_predecessor_source(
         ):
             raise ValueError("external supervisor database schema binding drifted")
         pool_identity.require_predecessor_kind(authority.kind)
-        live_unit_sha256 = {
-            name: hashlib.sha256(payload).hexdigest()
-            for name, payload in units.items()
-            if payload is not None
-        }
-        runtime_ready = live_unit_sha256 == dict(authority.unit_sha256)
-        for name, payload in units.items():
-            expected = authority.unit_sha256.get(name)
-            if name.endswith(".timer"):
-                timer_status = timers[name]
-                if expected is None:
-                    runtime_ready = runtime_ready and (
-                        payload is None
-                        and timer_status.load_state == "not-found"
-                        and timer_status.unit_file_state in {"", "disabled", "not-found"}
-                        and timer_status.active_state == "inactive"
-                        and timer_status.fragment_path == ""
-                        and timer_status.need_daemon_reload == "no"
-                    )
-                else:
-                    runtime_ready = runtime_ready and (
-                        timer_status.load_state == "loaded"
-                        and timer_status.unit_file_state == "enabled"
-                        and timer_status.active_state == "active"
-                        and timer_status.fragment_path == str(PROTECTED_USER_UNIT_DIR / name)
-                        and timer_status.need_daemon_reload == "no"
-                    )
-            else:
-                service_status = services[name]
-                if expected is None:
-                    runtime_ready = runtime_ready and (
-                        payload is None
-                        and service_status.load_state == "not-found"
-                        and service_status.result == ""
-                        and service_status.exec_main_status is None
-                        and service_status.fragment_path == ""
-                        and service_status.need_daemon_reload == "no"
-                    )
-                else:
-                    runtime_ready = runtime_ready and (
-                        service_status.load_state == "loaded"
-                        and service_status.result == "success"
-                        and service_status.exec_main_status == 0
-                        and service_status.fragment_path == str(PROTECTED_USER_UNIT_DIR / name)
-                        and service_status.need_daemon_reload == "no"
-                    )
         if canonical is not None:
-            runtime_digest = _hash_json(
-                {
-                    "unit_dir": str(PROTECTED_USER_UNIT_DIR),
-                    "services": {
-                        name: status.to_dict() for name, status in sorted(services.items())
-                    },
-                    "timers": {name: status.to_dict() for name, status in sorted(timers.items())},
-                    "unit_sha256": dict(authority.unit_sha256),
-                }
+            runtime_ready = canonical_external_supervisor_runtime_ready(
+                canonical,
+                unit_payloads=units,
+                timer_statuses=timers,
+                service_statuses=services,
             )
-            runtime_ready = runtime_ready and (canonical.runtime_evidence_digest == runtime_digest)
             pointer_digest = ExternalSupervisorCanonicalPointer.build(canonical).pointer_digest
         else:
+            live_unit_sha256 = {
+                name: hashlib.sha256(payload).hexdigest()
+                for name, payload in units.items()
+                if payload is not None
+            }
+            runtime_ready = live_unit_sha256 == dict(authority.unit_sha256)
+            for name, payload in units.items():
+                expected = authority.unit_sha256.get(name)
+                if name.endswith(".timer"):
+                    timer_status = timers[name]
+                    if expected is None:
+                        runtime_ready = runtime_ready and (
+                            payload is None
+                            and timer_status.load_state == "not-found"
+                            and timer_status.unit_file_state in {"", "disabled", "not-found"}
+                            and timer_status.active_state == "inactive"
+                            and timer_status.fragment_path == ""
+                            and timer_status.need_daemon_reload == "no"
+                        )
+                    else:
+                        runtime_ready = runtime_ready and (
+                            timer_status.load_state == "loaded"
+                            and timer_status.unit_file_state == "enabled"
+                            and timer_status.active_state == "active"
+                            and timer_status.fragment_path == str(PROTECTED_USER_UNIT_DIR / name)
+                            and timer_status.need_daemon_reload == "no"
+                        )
+                else:
+                    service_status = services[name]
+                    if expected is None:
+                        runtime_ready = runtime_ready and (
+                            payload is None
+                            and service_status.load_state == "not-found"
+                            and service_status.result == ""
+                            and service_status.exec_main_status is None
+                            and service_status.fragment_path == ""
+                            and service_status.need_daemon_reload == "no"
+                        )
+                    else:
+                        runtime_ready = runtime_ready and (
+                            service_status.load_state == "loaded"
+                            and service_status.result == "success"
+                            and service_status.exec_main_status == 0
+                            and service_status.fragment_path == str(PROTECTED_USER_UNIT_DIR / name)
+                            and service_status.need_daemon_reload == "no"
+                        )
             pointer_digest = ABSENT_PREDECESSOR_DIGEST
         return ExternalSupervisorPredecessorSnapshot(
             kind=authority.kind,

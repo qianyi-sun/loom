@@ -1200,10 +1200,16 @@ def render_external_slurm_autoscaler_service(supervisor: dict[str, Any]) -> str:
 
 
 def render_external_slurm_autoscaler_timer(supervisor: dict[str, Any]) -> str:
+    desired_state = (
+        "active"
+        if supervisor.get("enabled") is True and supervisor.get("active") is True
+        else "disabled"
+    )
     return "\n".join(
         [
             "[Unit]",
             f"Description=Run Loom {supervisor['pool_name']} external autoscaler reconcile",
+            f"# LoomDesiredState={desired_state}",
             "",
             "[Timer]",
             f"OnBootSec={supervisor['timer_on_boot_sec']}",

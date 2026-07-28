@@ -1462,6 +1462,17 @@ from the replayable `--worker-token` source, forces mode `0600`, and prepares
 a clean shared checkout at the target `repo_dir` before the environment-state
 check validates existence, git HEAD, clean status, and token parity.
 
+A pool listed under `external_slurm_runner_prerequisites.pools` remains in the
+protected supervisor artifact even while its supervisor is fully disabled.
+The rendered timer carries the exact `LoomDesiredState` marker, so a protected
+rollout can journal and verify the transition from an older active canonical
+timer to loaded-but-disabled unit files without invoking the external
+actuator. Rehearsal runs the actuator validation command only for supervisors
+whose desired state is both enabled and active. The next requestless preflight
+reads the same marker and accepts only the corresponding active or disabled
+runtime state; legacy canonical units without a marker retain their historical
+active interpretation.
+
 The platform-dev installer owns the dedicated GB10 staging checkout root at
 `/shared_work2/qianyi/.loom-staging-rollout/worker-repos` as
 `loom-rollout:sharedwork` mode `2750`. It creates or verifies that root only

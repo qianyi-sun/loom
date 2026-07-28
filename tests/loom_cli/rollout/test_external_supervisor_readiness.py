@@ -116,6 +116,7 @@ def _candidate(
     *,
     supervisors: list[str] | None = None,
     control_plane_environment: str | None = None,
+    protected_pools: tuple[str, ...] = (),
 ) -> Path:
     root = tmp_path / "candidate"
     profile = root / PROFILE_PATH
@@ -125,6 +126,11 @@ def _candidate(
     profile_header = 'environment = "staging"\n'
     if control_plane_environment is not None:
         profile_header += f'control_plane_environment = "{control_plane_environment}"\n'
+    if protected_pools:
+        profile_header += (
+            "\n[external_slurm_runner_prerequisites]\n"
+            f"pools = {json.dumps(list(protected_pools))}\n"
+        )
     profile.write_text(
         profile_header + "\n" + "\n\n".join(supervisors or [_supervisor()]) + "\n",
         encoding="utf-8",
@@ -220,6 +226,26 @@ def test_artifact_omits_only_fully_disabled_supervisors(tmp_path: Path) -> None:
     artifact = _build(root)
 
     assert [item.name for item in artifact.supervisors] == ["gb10-staging"]
+
+
+def test_artifact_retains_disabled_protected_pool_without_validation_command(
+    tmp_path: Path,
+) -> None:
+    root = _candidate(
+        tmp_path,
+        supervisors=[_supervisor(enabled=False, active=False)],
+        protected_pools=("gb10",),
+    )
+
+    artifact = _build(root)
+
+    assert len(artifact.supervisors) == 1
+    supervisor = artifact.supervisors[0]
+    assert not supervisor.enabled
+    assert not supervisor.active
+    assert "# LoomDesiredState=disabled" in supervisor.timer_unit
+    assert artifact.validation_argv("loom-rehearsal-abc123", REHEARSAL_KUBECONFIG) == {}
+    assert ExternalSupervisorArtifact.from_bytes(artifact.to_bytes()) == artifact
 
 
 @pytest.mark.parametrize(("enabled", "active"), [(True, False), (False, True)])

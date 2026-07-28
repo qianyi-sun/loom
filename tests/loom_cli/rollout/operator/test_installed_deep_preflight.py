@@ -208,6 +208,26 @@ class _ReadyLegacyExternalSupervisorControl:
         )
 
 
+class _ReadyDisabledExternalSupervisorControl:
+    def timer_status(self, name: str) -> TimerRuntimeStatus:
+        return TimerRuntimeStatus(
+            load_state="loaded",
+            unit_file_state="disabled",
+            active_state="inactive",
+            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            need_daemon_reload="no",
+        )
+
+    def service_status(self, name: str) -> ServiceRuntimeStatus:
+        return ServiceRuntimeStatus(
+            load_state="loaded",
+            result="success",
+            exec_main_status=0,
+            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            need_daemon_reload="no",
+        )
+
+
 class _CanonicalExternalSupervisorStore:
     def __init__(self, canonical: ExternalSupervisorCanonicalIdentity) -> None:
         self.canonical = canonical
@@ -371,7 +391,7 @@ def test_installed_external_supervisor_predecessor_uses_live_schema_after_migrat
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "FixedUserSystemdControl",
-        lambda **_kwargs: _ReadyLegacyExternalSupervisorControl(),
+        lambda **_kwargs: _ReadyDisabledExternalSupervisorControl(),
     )
     source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
         candidate_root=candidate_root,
@@ -394,11 +414,14 @@ def test_installed_external_supervisor_predecessor_uses_live_schema_after_migrat
 
     assert snapshot.kind == "canonical"
     assert snapshot.runtime_ready is True
-    assert snapshot.pool_identity_digest == _pool_identity(
-        "0074",
-        legacy_count=0,
-        target_count=1,
-    ).evidence_digest
+    assert (
+        snapshot.pool_identity_digest
+        == _pool_identity(
+            "0074",
+            legacy_count=0,
+            target_count=1,
+        ).evidence_digest
+    )
 
 
 def test_installed_external_supervisor_predecessor_source_declares_safe_directory(

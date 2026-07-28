@@ -667,6 +667,7 @@ class ExternalSupervisorArtifact:
             {
                 supervisor.name: supervisor.validation_argv(namespace, kubeconfig)
                 for supervisor in self.supervisors
+                if supervisor.enabled and supervisor.active
             }
         )
 
@@ -954,12 +955,21 @@ def build_external_supervisor_artifact(
         for raw in profile.external_slurm_autoscaler_supervisors
     ):
         raise ValueError("external supervisor enabled and active state must converge together")
+    protected_pools = {
+        str(pool)
+        for pool in profile.external_slurm_runner_prerequisites.get("pools", ())
+        if isinstance(pool, str) and pool
+    }
     supervisors = tuple(
         sorted(
             (
                 _normalize_supervisor(raw)
                 for raw in profile.external_slurm_autoscaler_supervisors
-                if raw.get("enabled") is True or raw.get("active") is True
+                if (
+                    raw.get("enabled") is True
+                    or raw.get("active") is True
+                    or raw.get("pool_name") in protected_pools
+                )
             ),
             key=lambda item: item.name,
         )
