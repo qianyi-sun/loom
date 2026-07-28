@@ -132,6 +132,38 @@ def test_state_authority_is_owner_only_and_sidecars_are_not_world_readable(
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_transient_sqlite_sidecar_can_disappear_during_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    transient = broker.state_db.with_name("transient-sidecar")
+    transient.write_bytes(b"")
+    transient.chmod(0o600)
+    original_sidecars = broker._sqlite_sidecar_paths()
+    monkeypatch.setattr(
+        broker,
+        "_sqlite_sidecar_paths",
+        lambda: (*original_sidecars, transient),
+    )
+    real_lstat = os.lstat
+    disappeared = False
+
+    def disappearing_lstat(path: os.PathLike[str] | str) -> os.stat_result:
+        nonlocal disappeared
+        if Path(path) == transient and not disappeared:
+            disappeared = True
+            transient.unlink()
+            raise FileNotFoundError(path)
+        return real_lstat(path)
+
+    monkeypatch.setattr(os, "lstat", disappearing_lstat)
+
+    assert broker.status()["aggregate"]["granted_slots"] == 0
+    assert disappeared is True
+
+
 def test_state_authority_rejects_unsafe_parent_and_symlink_db(
     tmp_path: Path,
 ) -> None:
