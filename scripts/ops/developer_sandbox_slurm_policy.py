@@ -24,6 +24,7 @@ import time
 import tomllib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1595,24 +1596,6 @@ def _validate_accounting_cas(
                     raise PolicyError("Loom accounting field changed concurrently")
 
 
-def _accounting_matches_desired(
-    current: Mapping[str, Any],
-    desired: Mapping[str, Any],
-) -> bool:
-    for category in ("qos", "accounts", "associations"):
-        current_rows = current.get(category)
-        desired_rows = desired.get(category)
-        if not isinstance(current_rows, Mapping) or not isinstance(desired_rows, Mapping):
-            return False
-        for identity, fields in desired_rows.items():
-            observed = current_rows.get(identity)
-            if not isinstance(observed, Mapping) or not isinstance(fields, Mapping):
-                return False
-            if any(observed.get(field) != value for field, value in fields.items()):
-                return False
-    return True
-
-
 def _accounting_external_references(profile: Profile) -> set[str]:
     account_rows = [
         line.split("|")
@@ -1665,6 +1648,141 @@ def _accounting_external_references(profile: Profile) -> set[str]:
     return references
 
 
+def _require_accounting_state(
+    profile: Profile,
+    expected: Mapping[str, Any],
+    *,
+    phase: str,
+) -> None:
+    if _accounting_state(profile) != expected:
+        raise PolicyError(f"Loom accounting state drifted {phase}")
+
+
+def _checked_accounting_transition(
+    profile: Profile,
+    command: Sequence[str],
+    expected: dict[str, Any],
+    next_expected: dict[str, Any],
+) -> dict[str, Any]:
+    _require_accounting_state(profile, expected, phase="before mutation")
+    _run(command)
+    _require_accounting_state(profile, next_expected, phase="after mutation")
+    return next_expected
+
+
+def _checked_accounting_add(
+    profile: Profile,
+    command: Sequence[str],
+    expected: dict[str, Any],
+    *,
+    category: str,
+    identity: str,
+    required_fields: Mapping[str, str],
+) -> dict[str, Any]:
+    _require_accounting_state(profile, expected, phase="before add")
+    _run(command)
+    observed = _accounting_state(profile)
+    if identity in expected[category]:
+        if observed != expected:
+            raise PolicyError("Loom accounting add changed an existing identity")
+        return expected
+    row = observed.get(category, {}).get(identity)
+    if not isinstance(row, Mapping) or any(
+        row.get(field) != value for field, value in required_fields.items()
+    ):
+        raise PolicyError("Loom accounting add readback is incomplete")
+    next_expected = deepcopy(expected)
+    next_expected[category][identity] = dict(row)
+    if observed != next_expected:
+        raise PolicyError("Loom accounting add changed an unrelated identity")
+    return next_expected
+
+
+def _apply_accounting(
+    profile: Profile,
+    snapshot: Mapping[str, Any],
+) -> None:
+    before = snapshot["before"]
+    desired = snapshot["desired"]
+    if not isinstance(before, dict) or not isinstance(desired, dict):
+        raise PolicyError("Loom accounting apply snapshot schema is invalid")
+    expected = deepcopy(before)
+    commands = iter(accounting_commands(profile))
+
+    expected = _checked_accounting_add(
+        profile,
+        next(commands),
+        expected,
+        category="qos",
+        identity=profile.qos,
+        required_fields={},
+    )
+    next_expected = deepcopy(expected)
+    next_expected["qos"][profile.qos] = deepcopy(desired["qos"][profile.qos])
+    expected = _checked_accounting_transition(
+        profile,
+        next(commands),
+        expected,
+        next_expected,
+    )
+
+    expected = _checked_accounting_add(
+        profile,
+        next(commands),
+        expected,
+        category="accounts",
+        identity=profile.parent_account,
+        required_fields={"ParentName": ""},
+    )
+    next_expected = deepcopy(expected)
+    next_expected["accounts"][profile.parent_account] = deepcopy(
+        desired["accounts"][profile.parent_account],
+    )
+    expected = _checked_accounting_transition(
+        profile,
+        next(commands),
+        expected,
+        next_expected,
+    )
+
+    for user, account in zip(profile.users, profile.child_accounts, strict=True):
+        expected = _checked_accounting_add(
+            profile,
+            next(commands),
+            expected,
+            category="accounts",
+            identity=account,
+            required_fields={"ParentName": profile.parent_account},
+        )
+        association = f"{user}|{account}"
+        expected = _checked_accounting_add(
+            profile,
+            next(commands),
+            expected,
+            category="associations",
+            identity=association,
+            required_fields={"User": user, "Account": account},
+        )
+        next_expected = deepcopy(expected)
+        next_expected["associations"][association] = deepcopy(
+            desired["associations"][association],
+        )
+        expected = _checked_accounting_transition(
+            profile,
+            next(commands),
+            expected,
+            next_expected,
+        )
+    try:
+        next(commands)
+    except StopIteration:
+        pass
+    else:
+        raise PolicyError("Loom accounting command plan has unexpected mutations")
+    if expected != desired:
+        raise PolicyError("Loom accounting apply did not converge to the desired state")
+
+
 def _restore_accounting(profile: Profile, path: Path) -> None:
     snapshot = _load_accounting_snapshot(path)
     if snapshot.get("cluster") != profile.cluster:
@@ -1685,11 +1803,15 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
     if created_identities and (_accounting_external_references(profile) & created_identities):
         raise PolicyError("new Loom accounting identities have external references")
 
+    expected = deepcopy(current)
     before_associations = before["associations"]
     for key, desired_row in desired["associations"].items():
         if key in before_associations:
             row = before_associations[key]
-            _run(
+            next_expected = deepcopy(expected)
+            next_expected["associations"][key] = deepcopy(row)
+            expected = _checked_accounting_transition(
+                profile,
                 (
                     "sacctmgr",
                     "-i",
@@ -1704,9 +1826,14 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
                     f"QOS={row['QOS']}",
                     f"DefaultQOS={row['DefaultQOS']}",
                 ),
+                expected,
+                next_expected,
             )
-        elif key in current["associations"]:
-            _run(
+        elif key in expected["associations"]:
+            next_expected = deepcopy(expected)
+            next_expected["associations"].pop(key)
+            expected = _checked_accounting_transition(
+                profile,
                 (
                     "sacctmgr",
                     "-i",
@@ -1717,6 +1844,8 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
                     f"account={desired_row['Account']}",
                     f"cluster={profile.cluster}",
                 ),
+                expected,
+                next_expected,
             )
 
     for account in (*profile.child_accounts, profile.parent_account):
@@ -1730,7 +1859,10 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
                         f"GrpTRES={row['GrpTRES']}",
                     ),
                 )
-            _run(
+            next_expected = deepcopy(expected)
+            next_expected["accounts"][account] = deepcopy(row)
+            expected = _checked_accounting_transition(
+                profile,
                 (
                     "sacctmgr",
                     "-i",
@@ -1742,9 +1874,21 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
                     "set",
                     *fields,
                 ),
+                expected,
+                next_expected,
             )
-        elif account in current["accounts"]:
-            _run(
+        elif account in expected["accounts"]:
+            _require_accounting_state(
+                profile,
+                expected,
+                phase="before external-reference readback",
+            )
+            if account in _accounting_external_references(profile):
+                raise PolicyError("new Loom account gained an external reference")
+            next_expected = deepcopy(expected)
+            next_expected["accounts"].pop(account)
+            expected = _checked_accounting_transition(
+                profile,
                 (
                     "sacctmgr",
                     "-i",
@@ -1754,11 +1898,16 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
                     f"account={account}",
                     f"cluster={profile.cluster}",
                 ),
+                expected,
+                next_expected,
             )
     before_qos = before["qos"]
     if profile.qos in before_qos:
         row = before_qos[profile.qos]
-        _run(
+        next_expected = deepcopy(expected)
+        next_expected["qos"][profile.qos] = deepcopy(row)
+        expected = _checked_accounting_transition(
+            profile,
             (
                 "sacctmgr",
                 "-i",
@@ -1772,9 +1921,21 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
                 f"MaxJobsPerUser={row['MaxJobsPU']}",
                 f"MaxSubmitJobsPerUser={row['MaxSubmitJobsPU']}",
             ),
+            expected,
+            next_expected,
         )
-    elif profile.qos in current["qos"]:
-        _run(
+    elif profile.qos in expected["qos"]:
+        _require_accounting_state(
+            profile,
+            expected,
+            phase="before external-reference readback",
+        )
+        if profile.qos in _accounting_external_references(profile):
+            raise PolicyError("new Loom QoS gained an external reference")
+        next_expected = deepcopy(expected)
+        next_expected["qos"].pop(profile.qos)
+        expected = _checked_accounting_transition(
+            profile,
             (
                 "sacctmgr",
                 "-i",
@@ -1783,8 +1944,10 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
                 "where",
                 f"name={profile.qos}",
             ),
+            expected,
+            next_expected,
         )
-    if _accounting_state(profile) != before:
+    if expected != before:
         raise PolicyError("Loom accounting CAS restore readback drifted")
 
 
@@ -2934,16 +3097,10 @@ def apply(
                 )
             _advance_journal(journal_path, journal, "files_written")
             if apply_accounting:
-                for command in accounting_commands(profile):
-                    _run(command)
                 if accounting_snapshot is None:
                     raise PolicyError("Loom accounting CAS snapshot is missing")
                 accounting_payload = _load_accounting_snapshot(accounting_snapshot)
-                if not _accounting_matches_desired(
-                    _accounting_state(profile),
-                    accounting_payload["desired"],
-                ):
-                    raise PolicyError("Loom accounting apply readback drifted")
+                _apply_accounting(profile, accounting_payload)
             _advance_journal(journal_path, journal, "accounting_applied")
             if restart:
                 if slurm_node is None:

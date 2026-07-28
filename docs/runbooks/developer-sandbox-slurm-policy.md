@@ -99,12 +99,23 @@ restore.
 The accounting snapshot is a compare-and-swap record scoped only to the Loom QoS,
 parent/child accounts, and three exact user associations; the converger never
 dumps or loads the whole cluster database. Unrelated accounts and concurrent
-unrelated changes are untouched. Owned-field drift or an external reference to
-a newly created Loom identity fails closed instead of deleting it. Each phase
-is durable before the next mutation. A failed daemon reload, restart,
+unrelated changes are untouched. Each `sacctmgr` mutation has exact scoped
+state checks immediately before and after it, and external references are
+checked again immediately before deleting a newly created account or QoS.
+Owned-field or intermediate-state drift fails closed. Each phase is durable
+before the next mutation. A failed daemon reload, restart,
 `scontrol reconfigure`, accounting mutation, or live readback restores both the
 files and the exact owned accounting fields automatically. A later invocation
 recovers an orphaned non-terminal journal before starting new work.
+
+The administration lock is cooperative across supported operations. Every
+administrator must use this converger for Loom-owned accounting changes and
+must not invoke direct `sacctmgr` writes. A process that bypasses the tool
+cannot be physically blocked by a filesystem `flock`; the per-mutation
+readbacks detect observable bypass drift and stop, but cannot prove that a
+same-field write was overwritten inside the unavoidable database-command
+race. Direct `sacctmgr` mutation is therefore unsupported and invalidates the
+transaction evidence.
 
 The live command binds the installed guard configuration and status to the
 exact source candidate SHA and refuses a dirty or mismatched policy checkout.
@@ -203,7 +214,8 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py apply \
 
 Repeat with `gb10.toml` only from the independently authorized GB10
 administrator path. A failed or partial pass is rerun idempotently; do not
-repair SlurmDB rows or daemon JSON by hand.
+repair SlurmDB rows or daemon JSON by hand, and do not bypass the shared
+administration lock with direct `sacctmgr`.
 
 To restore the file snapshot and exact Loom-owned accounting fields from the
 last committed transaction, use the same locked, journaled path:

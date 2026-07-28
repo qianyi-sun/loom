@@ -367,11 +367,17 @@ def test_accounting_failure_uses_targeted_cas_without_cluster_load(
     def fake_run(argv: tuple[str, ...] | list[str]) -> str:
         command = tuple(argv)
         calls.append(command)
-        if "modify" in command and "qos" in command:
-            raise policy.PolicyError("accounting mutation failed")
         return ""
 
     monkeypatch.setattr(policy, "_run", fake_run)
+
+    def fail_apply(
+        _profile: policy.Profile,
+        _snapshot: dict[str, object],
+    ) -> None:
+        raise policy.PolicyError("accounting mutation failed")
+
+    monkeypatch.setattr(policy, "_apply_accounting", fail_apply)
     with pytest.raises(policy.PolicyError, match="accounting mutation failed"):
         policy.apply(
             root,
@@ -506,8 +512,7 @@ def test_accounting_restore_deletes_only_exact_new_loom_identities(
         + "\n",
         mode=0o600,
     )
-    states = iter((desired, empty))
-    monkeypatch.setattr(policy, "_accounting_state", lambda _profile: next(states))
+    monkeypatch.setattr(policy, "_accounting_state", lambda _profile: desired)
     monkeypatch.setattr(policy, "_accounting_external_references", lambda _profile: set())
     commands: list[tuple[str, ...]] = []
 
@@ -521,6 +526,18 @@ def test_accounting_restore_deletes_only_exact_new_loom_identities(
         return ""
 
     monkeypatch.setattr(policy, "_run", fake_run)
+    monkeypatch.setattr(
+        policy,
+        "_require_accounting_state",
+        lambda _profile, _expected, *, phase: None,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_checked_accounting_transition",
+        lambda _profile, command, _expected, next_expected: (
+            commands.append(tuple(command)) or next_expected
+        ),
+    )
     policy._restore_accounting(loaded, snapshot)
 
     delete_commands = [command for command in commands if "delete" in command]
@@ -554,6 +571,147 @@ def test_accounting_restore_deletes_only_exact_new_loom_identities(
         f"name={loaded.qos}",
     ) in delete_commands
     assert len(delete_commands) == len(loaded.users) + len(loaded.child_accounts) + 2
+
+
+def test_accounting_domain_lock_blocks_second_tool_transaction_between_gate_and_mutation(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    first_preflight = threading.Event()
+    release_first = threading.Event()
+    first_mutation = threading.Event()
+    second_preflight = threading.Event()
+    errors: list[BaseException] = []
+
+    def first_transaction() -> None:
+        try:
+            with policy._domain_lock(root, loaded):
+                first_preflight.set()
+                if not release_first.wait(timeout=2):
+                    raise RuntimeError("first accounting transaction was not released")
+                first_mutation.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def second_transaction() -> None:
+        try:
+            if not first_preflight.wait(timeout=2):
+                raise RuntimeError("first accounting transaction did not acquire the lock")
+            with policy._domain_lock(root, loaded):
+                second_preflight.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=first_transaction)
+    second = threading.Thread(target=second_transaction)
+    first.start()
+    assert first_preflight.wait(timeout=2)
+    second.start()
+    assert not second_preflight.wait(timeout=0.1)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert errors == []
+    assert first_mutation.is_set()
+    assert second_preflight.is_set()
+    lock = policy._state_root(root) / "locks" / f"{loaded.cluster}.lock"
+    metadata = lock.lstat()
+    assert stat.S_IMODE(metadata.st_mode) == 0o600
+    assert metadata.st_nlink == 1
+
+
+def test_accounting_domain_lock_rejects_symlink_and_hardlink(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    lock = policy._state_root(root) / "locks" / f"{loaded.cluster}.lock"
+    lock.parent.mkdir(parents=True, mode=0o700)
+    lock.parent.chmod(0o700)
+    external = tmp_path / "external-lock"
+    external.write_text("")
+    external.chmod(0o600)
+    lock.symlink_to(external)
+    with pytest.raises(policy.PolicyError, match="lock could not be opened safely"):
+        with policy._domain_lock(root, loaded):
+            pytest.fail("symlink lock was acquired")
+
+    lock.unlink()
+    lock.write_text("")
+    lock.chmod(0o600)
+    hardlink = tmp_path / "lock-hardlink"
+    os.link(lock, hardlink)
+    with pytest.raises(policy.PolicyError, match="lock inode is unsafe"):
+        with policy._domain_lock(root, loaded):
+            pytest.fail("hardlinked lock was acquired")
+
+
+def test_accounting_transition_detects_bypass_drift_after_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    expected = policy._accounting_desired_state(loaded)
+    next_expected = json.loads(json.dumps(expected))
+    next_expected["accounts"][loaded.parent_account]["Fairshare"] = "2"
+    bypassed = json.loads(json.dumps(next_expected))
+    bypassed["accounts"][loaded.parent_account]["Fairshare"] = "777"
+    states = iter((expected, bypassed))
+    monkeypatch.setattr(policy, "_accounting_state", lambda _profile: next(states))
+    monkeypatch.setattr(policy, "_run", lambda _command: "")
+
+    with pytest.raises(policy.PolicyError, match="after mutation"):
+        policy._checked_accounting_transition(
+            loaded,
+            ("sacctmgr", "-i", "modify", "account"),
+            expected,
+            next_expected,
+        )
+
+
+def test_accounting_restore_rechecks_external_refs_immediately_before_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    desired = policy._accounting_desired_state(loaded)
+    current = {
+        "qos": {},
+        "accounts": {
+            loaded.parent_account: desired["accounts"][loaded.parent_account],
+        },
+        "associations": {},
+    }
+    snapshot = tmp_path / "accounting-cas.json"
+    policy._atomic_write(
+        snapshot,
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cluster": loaded.cluster,
+                "before": {"qos": {}, "accounts": {}, "associations": {}},
+                "desired": desired,
+            },
+        )
+        + "\n",
+        mode=0o600,
+    )
+    monkeypatch.setattr(policy, "_accounting_state", lambda _profile: current)
+    references = iter((set(), {loaded.parent_account}))
+    monkeypatch.setattr(
+        policy,
+        "_accounting_external_references",
+        lambda _profile: next(references),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda _command: pytest.fail("delete ran after an external reference appeared"),
+    )
+
+    with pytest.raises(policy.PolicyError, match="gained an external reference"):
+        policy._restore_accounting(loaded, snapshot)
 
 
 def test_service_reload_failure_restores_files(
