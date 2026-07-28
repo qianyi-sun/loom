@@ -868,8 +868,21 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now loom-ci-uv-assets.service
-curl --fail --silent {UV_MANIFEST_URL} \
-  | jq -e --arg version '{UV_VERSION}' '.version == $version' >/dev/null
+uv_assets_ready=false
+for _attempt in $(seq 1 30); do
+  if curl --fail --silent {UV_MANIFEST_URL} \
+    | jq -e --arg version '{UV_VERSION}' '.version == $version' >/dev/null; then
+    uv_assets_ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$uv_assets_ready" != true ]]; then
+  systemctl status --no-pager loom-ci-uv-assets.service >&2 || true
+  journalctl --no-pager -u loom-ci-uv-assets.service -n 50 >&2 || true
+  exit 1
+fi
+unset uv_assets_ready
 /opt/actions-runner/bin/installdependencies.sh
 chown -R runner:runner /opt/actions-runner
 sudo -u runner docker version

@@ -391,6 +391,8 @@ def test_golden_guest_serves_checksum_pinned_uv_assets_on_loopback(
     assert "ProtectSystem=strict" in script
     assert "systemctl enable --now loom-ci-uv-assets.service" in script
     assert f"curl --fail --silent {pool.UV_MANIFEST_URL}" in script
+    assert "for _attempt in $(seq 1 30)" in script
+    assert "journalctl --no-pager -u loom-ci-uv-assets.service -n 50" in script
 
 
 def test_golden_guest_seeds_images_without_retaining_registry_credentials(
