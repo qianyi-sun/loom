@@ -1326,7 +1326,7 @@ class SharedWorkerRepoRunner:
         if call == ["getent", "passwd", host.SERVICE_USER]:
             return host.CommandResult(
                 0,
-                f"{host.SERVICE_USER}:x:995:982::{host.STATE_ROOT}:/usr/sbin/nologin\n",
+                f"{host.SERVICE_USER}:x:995:982::{host.STATE_ROOT}:{host.SERVICE_SHELL}\n",
             )
         if call == ["getent", "group", host.SERVICE_GROUP]:
             return host.CommandResult(0, f"{host.SERVICE_GROUP}:x:982:\n")
@@ -3121,7 +3121,7 @@ def _service_identity_result(
     if call == ["getent", "passwd", host.SERVICE_USER]:
         return host.CommandResult(
             0,
-            (f"{host.SERVICE_USER}:x:{uid}:{gid}::{host.STATE_ROOT}:/usr/sbin/nologin\n"),
+            (f"{host.SERVICE_USER}:x:{uid}:{gid}::{host.STATE_ROOT}:{host.SERVICE_SHELL}\n"),
         )
     if call == ["getent", "group", host.SERVICE_GROUP]:
         return host.CommandResult(0, f"{host.SERVICE_GROUP}:x:{gid}:\n")
@@ -3367,6 +3367,102 @@ def test_candidate_source_publication_rejects_tampered_evidence_digest() -> None
         host.HostSystem(TamperedRunner()).preflight_candidate_source_ready(TEST_CANDIDATE_VENV)
 
 
+class ServiceAccountRunner:
+    def __init__(self, *, present: bool, shell: str = host.SERVICE_SHELL) -> None:
+        self.present = present
+        self.shell = shell
+        self.calls: list[list[str]] = []
+
+    def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        call = list(argv)
+        self.calls.append(call)
+        if call == ["getent", "passwd", host.SERVICE_USER]:
+            if not self.present:
+                return host.CommandResult(2)
+            return host.CommandResult(
+                0,
+                (f"{host.SERVICE_USER}:x:1001:1002::{host.STATE_ROOT}:{self.shell}\n"),
+            )
+        if call == ["getent", "group", host.SERVICE_GROUP]:
+            return host.CommandResult(0, f"{host.SERVICE_GROUP}:x:1002:\n")
+        if call == ["id", "-u", host.SERVICE_USER]:
+            return host.CommandResult(0, "1001\n")
+        if call == ["id", "-g", host.SERVICE_USER]:
+            return host.CommandResult(0, "1002\n")
+        if call == [
+            "useradd",
+            "--system",
+            "--user-group",
+            "--create-home",
+            "--home-dir",
+            str(host.STATE_ROOT),
+            "--shell",
+            host.SERVICE_SHELL,
+            host.SERVICE_USER,
+        ]:
+            self.present = True
+            self.shell = host.SERVICE_SHELL
+            return host.CommandResult(0)
+        if call == [
+            "usermod",
+            "--shell",
+            host.SERVICE_SHELL,
+            host.SERVICE_USER,
+        ]:
+            self.shell = host.SERVICE_SHELL
+            return host.CommandResult(0)
+        raise AssertionError(f"unexpected command: {call}")
+
+
+def test_service_account_creation_uses_proxyjump_capable_shell() -> None:
+    runner = ServiceAccountRunner(present=False)
+    system = host.HostSystem(runner)
+
+    assert system.ensure_service_user() is True
+    assert runner.shell == host.SERVICE_SHELL
+    assert [
+        "useradd",
+        "--system",
+        "--user-group",
+        "--create-home",
+        "--home-dir",
+        str(host.STATE_ROOT),
+        "--shell",
+        host.SERVICE_SHELL,
+        host.SERVICE_USER,
+    ] in runner.calls
+    calls_after_convergence = list(runner.calls)
+
+    assert system.ensure_service_user() is False
+    assert not any(
+        call[0] in {"useradd", "usermod"} for call in runner.calls[len(calls_after_convergence) :]
+    )
+
+
+def test_service_account_upgrades_legacy_nologin_shell() -> None:
+    runner = ServiceAccountRunner(present=True, shell=host.LEGACY_SERVICE_SHELL)
+    system = host.HostSystem(runner)
+
+    assert system.ensure_service_user() is True
+    assert [
+        "usermod",
+        "--shell",
+        host.SERVICE_SHELL,
+        host.SERVICE_USER,
+    ] in runner.calls
+    assert system.service_user_present() is True
+
+
+def test_service_account_rejects_unexpected_shell() -> None:
+    runner = ServiceAccountRunner(present=True, shell="/bin/bash")
+
+    with pytest.raises(host.InstallError, match="unexpected identity, home, or shell"):
+        host.HostSystem(runner).ensure_service_user()
+
+    assert not any(call[0] in {"useradd", "usermod"} for call in runner.calls)
+
+
 @pytest.mark.parametrize(
     ("passwd_gid", "group_gid", "id_gid"),
     [
@@ -3389,7 +3485,7 @@ def test_service_account_rejects_inconsistent_primary_gid_authorities(
                     0,
                     (
                         f"{host.SERVICE_USER}:x:1001:{passwd_gid}:"
-                        f":{host.STATE_ROOT}:/usr/sbin/nologin\n"
+                        f":{host.STATE_ROOT}:{host.SERVICE_SHELL}\n"
                     ),
                 )
             if call == ["getent", "group", host.SERVICE_GROUP]:
@@ -3421,7 +3517,7 @@ def test_service_ids_reject_uid_mismatch_and_root_uid(
                     0,
                     (
                         f"{host.SERVICE_USER}:x:{passwd_uid}:1002:"
-                        f":{host.STATE_ROOT}:/usr/sbin/nologin\n"
+                        f":{host.STATE_ROOT}:{host.SERVICE_SHELL}\n"
                     ),
                 )
             if call == ["getent", "group", host.SERVICE_GROUP]:
@@ -3444,7 +3540,7 @@ def test_service_account_rejects_root_uid() -> None:
             assert call == ["getent", "passwd", host.SERVICE_USER]
             return host.CommandResult(
                 0,
-                (f"{host.SERVICE_USER}:x:0:1002::{host.STATE_ROOT}:/usr/sbin/nologin\n"),
+                (f"{host.SERVICE_USER}:x:0:1002::{host.STATE_ROOT}:{host.SERVICE_SHELL}\n"),
             )
 
     with pytest.raises(host.InstallError, match="unexpected identity"):

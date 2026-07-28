@@ -33,9 +33,14 @@ a deliberately malicious root-equivalent administrator.
 
 ## Decision
 
-Install one root-managed runner on `platform-dev` with a non-login
-`loom-rollout` service account and a `loom-staging-operators` group containing
-`qianyi`, `hongjian`, and `devansh`. The root-owned client exposes only:
+Install one root-managed runner on `platform-dev` with a dedicated,
+password-locked `loom-rollout` system account and a
+`loom-staging-operators` group containing `qianyi`, `hongjian`, and `devansh`.
+The account uses the minimal `/bin/sh` passwd shell because OpenSSH launches a
+local `ProxyCommand` through that shell for every GB10 `ProxyJump` child; a
+`nologin` shell makes the private-host topology unreachable. The account's
+authority remains limited by its fixed groups, file permissions, and root-owned
+sudoers policy. The root-owned client exposes only:
 
 ```text
 loom-staging-rollout preflight
@@ -170,6 +175,9 @@ private key remains mode 0600 and is never shared with an operator.
 The `loom-rollout` passwd UID and `id -u loom-rollout` must resolve to the same
 nonzero value. Its passwd primary GID, the GID of the named `loom-rollout`
 group, and `id -g loom-rollout` must likewise resolve to the same nonzero value.
+Its home must be the fixed private state root and its passwd shell must be
+`/bin/sh`; installation upgrades the historical installer-owned
+`/usr/sbin/nologin` value but rejects any other shell.
 Installation and readiness checks fail closed when those service identity
 views disagree.
 
