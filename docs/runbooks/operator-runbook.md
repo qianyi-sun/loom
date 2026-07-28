@@ -1449,7 +1449,9 @@ For attempts that entered protected apply, `status` may include
 `protected_component` and `protected_component_status`. An `incomplete` value
 identifies the exact component whose intent exists without an immutable
 terminal record; it is safe diagnostic metadata, not permission to edit the
-request store or bypass the broker.
+request store or bypass the broker. For `gb10-candidate`, a
+`protected_failed_hosts` list contains only validated names from the fixed
+release inventory; it deliberately excludes SSH or remote-command output.
 
 `qianyi`, `hongjian`, and `devansh` are members of
 `loom-staging-operators`. Invoke these broker commands directly as the

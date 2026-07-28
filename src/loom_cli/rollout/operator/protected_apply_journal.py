@@ -27,6 +27,7 @@ from .final_gate_plan import FinalGatePlan
 from .model import validate_safe_identifier
 
 _COMPONENT_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
+_GB10_HOST_RE = re.compile(r"^trt-gb10-(?:[1-9]|1[0-5])$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
@@ -149,6 +150,53 @@ class ComponentIntent:
         if _hash_json(payload) != intent.intent_digest:
             raise ValueError("protected component intent content drifted")
         return intent
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentFailure:
+    schema_version: int
+    component_id: str
+    failure_code: str
+    failed_hosts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 1
+            or self.component_id != "gb10-candidate"
+            or self.failure_code != "gb10-convergence-failed"
+            or not self.failed_hosts
+            or tuple(sorted(self.failed_hosts)) != self.failed_hosts
+            or len(set(self.failed_hosts)) != len(self.failed_hosts)
+            or any(_GB10_HOST_RE.fullmatch(host) is None for host in self.failed_hosts)
+        ):
+            raise ValueError("protected component failure metadata is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "component_id": self.component_id,
+            "failure_code": self.failure_code,
+            "failed_hosts": list(self.failed_hosts),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ComponentFailure:
+        if set(value) != {
+            "schema_version",
+            "component_id",
+            "failure_code",
+            "failed_hosts",
+        }:
+            raise ValueError("protected component failure fields are invalid")
+        hosts = value["failed_hosts"]
+        if not isinstance(hosts, list) or any(not isinstance(host, str) for host in hosts):
+            raise ValueError("protected component failed-host metadata is invalid")
+        return cls(
+            schema_version=_integer(value, "schema_version"),
+            component_id=_string(value, "component_id"),
+            failure_code=_string(value, "failure_code"),
+            failed_hosts=tuple(hosts),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +374,22 @@ class ProtectedApplyJournal:
             )
         applied = False
         if before.state is ComponentState.READY:
-            component.apply(plan)
+            try:
+                component.apply(plan)
+            except BaseException as exc:
+                from .protected_gb10_transport import GB10FleetApplyError
+
+                if component.component_id == "gb10-candidate" and isinstance(
+                    exc, GB10FleetApplyError
+                ):
+                    failure = ComponentFailure(
+                        schema_version=1,
+                        component_id=component.component_id,
+                        failure_code="gb10-convergence-failed",
+                        failed_hosts=exc.failed_hosts,
+                    )
+                    self._publish_or_match(component_root / "failure.json", failure.to_dict())
+                raise
             applied = True
         after = component.classify(plan)
         if after.state is not ComponentState.EXACT:
@@ -514,7 +577,45 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
     return value
 
 
+def read_component_failure(path: Path, *, service_uid: int) -> ComponentFailure:
+    """Read one bounded service-owned failure record for the public broker."""
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or path.name != "failure.json"
+        or service_uid < 0
+    ):
+        raise ProtectedApplyJournalError("protected component failure path is invalid")
+    fd = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0),
+    )
+    try:
+        _require_regular(fd, uid=service_uid)
+        metadata = os.fstat(fd)
+        if metadata.st_size > _MAX_RECORD_BYTES:
+            raise ProtectedApplyJournalError("protected component failure record is too large")
+        payload = os.read(fd, _MAX_RECORD_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(payload) > _MAX_RECORD_BYTES:
+        raise ProtectedApplyJournalError("protected component failure record is too large")
+    try:
+        value = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+        if not isinstance(value, dict):
+            raise ValueError("failure record must be an object")
+        return ComponentFailure.from_dict(value)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ProtectedApplyJournalError(
+            "protected component failure record is invalid"
+        ) from exc
+
+
 __all__ = [
+    "ComponentFailure",
     "ComponentIntent",
     "ComponentObservation",
     "ComponentState",
@@ -522,4 +623,5 @@ __all__ = [
     "ProtectedApplyComponent",
     "ProtectedApplyJournal",
     "ProtectedApplyJournalError",
+    "read_component_failure",
 ]

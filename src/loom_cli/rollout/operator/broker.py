@@ -61,6 +61,10 @@ from .model import (
 )
 from .policy import PolicyError, caller_from_sudo, sanitized_child_environment
 from .preflight import PreflightReport, catalog_secret_values, collect_preflight
+from .protected_apply_journal import (
+    ProtectedApplyJournalError,
+    read_component_failure,
+)
 from .readonly_capacity_client import verify_installed_immutable_objects
 from .readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
@@ -1102,7 +1106,7 @@ def _protected_apply_progress(
     dependencies: BrokerDependencies,
     request_id: str,
     attempt_number: int,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, tuple[str, ...]] | None:
     """Return only secret-free component metadata from the protected journal."""
     root = (
         dependencies.config.state_root
@@ -1159,11 +1163,24 @@ def _protected_apply_progress(
         if not _private_progress_file(component_root / "intent.json", service_uid=service_uid):
             raise RequestStoreError("protected apply progress is incomplete")
         if not _private_progress_file(component_root / "terminal.json", service_uid=service_uid):
-            return component_id, "protected_component_incomplete"
+            failure_path = component_root / "failure.json"
+            failed_hosts: tuple[str, ...] = ()
+            if _private_progress_file(failure_path, service_uid=service_uid):
+                try:
+                    failure = read_component_failure(
+                        failure_path,
+                        service_uid=service_uid,
+                    )
+                except (OSError, ProtectedApplyJournalError) as exc:
+                    raise RequestStoreError("protected apply progress is unsafe") from exc
+                if failure.component_id != component_id:
+                    raise RequestStoreError("protected apply progress is unsafe")
+                failed_hosts = failure.failed_hosts
+            return component_id, "protected_component_incomplete", failed_hosts
         last_complete = component_id
     if last_complete is None:
         return None
-    return last_complete, "protected_component_complete"
+    return last_complete, "protected_component_complete", ()
 
 
 def _request_status(
@@ -1211,9 +1228,11 @@ def _request_status(
         except RequestStoreError:
             protected_progress = None
         if protected_progress is not None:
-            component_id, progress_reason = protected_progress
+            component_id, progress_reason, failed_hosts = protected_progress
             payload["protected_component"] = component_id
             payload["protected_component_status"] = progress_reason
+            if failed_hosts:
+                payload["protected_failed_hosts"] = list(failed_hosts)
     return payload
 
 

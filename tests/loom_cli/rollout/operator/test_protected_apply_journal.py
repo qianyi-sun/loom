@@ -7,12 +7,15 @@ from pathlib import Path
 import pytest
 
 from loom_cli.rollout.operator.protected_apply_journal import (
+    ComponentFailure,
     ComponentObservation,
     ComponentState,
     ProtectedApplyComponent,
     ProtectedApplyJournal,
     ProtectedApplyJournalError,
+    read_component_failure,
 )
+from loom_cli.rollout.operator.protected_gb10_transport import GB10FleetApplyError
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
 
 
@@ -114,6 +117,52 @@ def test_protected_apply_journal_refuses_partial_or_drifted_live_state(tmp_path:
     root = tmp_path / "state/requests/req-alpha/attempts/1/protected-apply"
     assert (root / "00-migration-apply/intent.json").exists()
     assert not (root / "00-migration-apply/terminal.json").exists()
+
+
+def test_protected_apply_journal_persists_only_structured_gb10_failure(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+
+    def classify(_plan):
+        return ComponentObservation(
+            state=ComponentState.READY,
+            evidence_digest="1" * 64,
+            observed_epoch=7,
+        )
+
+    def apply(_plan):
+        raise GB10FleetApplyError(("trt-gb10-10", "trt-gb10-2"))
+
+    component = ProtectedApplyComponent(
+        component_id="gb10-candidate",
+        implementation_digest="2" * 64,
+        input_fingerprint="3" * 64,
+        classify=classify,
+        apply=apply,
+    )
+
+    with pytest.raises(GB10FleetApplyError):
+        journal.execute(_plan(tmp_path), (component,))
+
+    failure_path = (
+        tmp_path
+        / "state/requests/req-alpha/attempts/1/protected-apply"
+        / "00-gb10-candidate/failure.json"
+    )
+    failure = read_component_failure(failure_path, service_uid=os.geteuid())
+    assert failure == ComponentFailure(
+        schema_version=1,
+        component_id="gb10-candidate",
+        failure_code="gb10-convergence-failed",
+        failed_hosts=("trt-gb10-10", "trt-gb10-2"),
+    )
+    assert set(json.loads(failure_path.read_text())) == {
+        "component_id",
+        "failed_hosts",
+        "failure_code",
+        "schema_version",
+    }
 
 
 def test_protected_apply_journal_rejects_plan_or_component_drift(tmp_path: Path) -> None:

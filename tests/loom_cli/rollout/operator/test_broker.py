@@ -1308,6 +1308,14 @@ def test_status_reports_incomplete_protected_component_without_reading_payload(
     gb10 = root / "03-gb10-candidate"
     _private_directory(gb10)
     _private_file(gb10 / "intent.json", '{"private":"must-not-be-read"}\n')
+    _private_file(
+        gb10 / "failure.json",
+        (
+            '{"component_id":"gb10-candidate",'
+            '"failed_hosts":["trt-gb10-10","trt-gb10-2"],'
+            '"failure_code":"gb10-convergence-failed","schema_version":1}\n'
+        ),
+    )
 
     deps.stdout.seek(0)
     deps.stdout.truncate()
@@ -1316,6 +1324,7 @@ def test_status_reports_incomplete_protected_component_without_reading_payload(
     payload = _last_json(deps.stdout)
     assert payload["protected_component"] == "gb10-candidate"
     assert payload["protected_component_status"] == "protected_component_incomplete"
+    assert payload["protected_failed_hosts"] == ["trt-gb10-10", "trt-gb10-2"]
     assert "must-not-be-read" not in deps.stdout.getvalue()
 
 
