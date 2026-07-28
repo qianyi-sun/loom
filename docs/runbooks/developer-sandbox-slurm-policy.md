@@ -79,13 +79,78 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py apply \
 
 The command refuses the restart while any Slurm job or Docker container remains
 on the node. It validates the desired Docker daemon configuration before the
-atomic writes and snapshots the replaced files below
-`/var/lib/loom-developer-sandbox-slurm-policy/snapshots/`.
+atomic writes. Every pass holds a per-cluster lock and records a root-only,
+fsynced transaction journal below
+`/var/lib/loom-developer-sandbox-slurm-policy/transactions/`; its file and
+accounting snapshots remain below the adjacent `snapshots/` directory. Each
+phase is durable before the next mutation. A failed daemon reload, restart,
+`scontrol reconfigure`, accounting mutation, or live readback restores both the
+files and the SlurmDB dump automatically. A later invocation recovers an
+orphaned non-terminal journal before starting new work.
+
+The live command binds the installed guard configuration and status to the
+exact source candidate SHA and refuses a dirty or mismatched policy checkout.
+Supply the binding explicitly when operating a materialized candidate:
+
+```bash
+sudo python scripts/ops/developer_sandbox_slurm_policy.py apply \
+  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
+  --candidate-sha "$EXACT_CANDIDATE_SHA" \
+  --execute --restart
+```
+
 The OLDLAB and GB10 profiles cap opted-in jobs at 32768 and 65536 PIDs,
 respectively; `plan` reports the bound before any mutation. A restart pass
-also daemon-reloads, enables, and starts the cgroup guard. Read back both
-`systemctl is-active loom-slurm-job-cgroup-guard.service` and an opted-in
-job's exact `pids.max` before undraining the node.
+also daemon-reloads, enables, and starts the cgroup guard. Unit activity alone
+is not health. On every scan the guard atomically publishes a root-only status
+record containing its timestamp, candidate/config digests, scanned/verified/
+failed counts, bounded failure reasons, and the last real job resource probe.
+The final live check requires that status to be fresh and failure-free and
+requires a real opted-in job probe with finite CPU, memory, and PID cgroup
+readback; the GB10 profile additionally requires a positive allocated GPU TRES
+readback.
+
+After launching the bounded acceptance probe, run the combined file and live
+check as root. First create the allocation-side artifact from the profile's
+exact submit host (OLDLAB and GB10 are independent controllers; never reuse one
+domain's command or evidence for the other):
+
+```bash
+sudo python scripts/ops/developer_sandbox_slurm_policy.py allocation-probe \
+  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
+  --candidate-sha "$EXACT_CANDIDATE_SHA" \
+  --candidate-root "$EXACT_CANDIDATE_ROOT" \
+  --worker-env "$PRIVATE_WORKER_ENV" \
+  --execute
+
+sudo python scripts/ops/developer_sandbox_slurm_policy.py check \
+  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
+  --candidate-sha "$EXACT_CANDIDATE_SHA" \
+  --candidate-root "$EXACT_CANDIDATE_ROOT" \
+  --worker-env "$PRIVATE_WORKER_ENV"
+```
+
+The probe submits one bounded, non-exclusive `sbatch` job and executes one
+`srun` step inside that allocation. Its root-only artifact binds the full
+candidate SHA/tree, cluster/controller/submit-host route, account/QoS, job,
+allocation node, TRES, guard resource readback, and completion of both batch
+and step. GB10 requests and reads back a positive GPU TRES. The final check
+accepts only a fresh artifact for the exact profile and candidate.
+
+Before submission and again during the final check, the candidate verifier
+walks the safe non-symlink, non-group/world-writable parent chain; opens the
+private env as the same inode with exact mode `0600`; rejects duplicate,
+malformed, or empty env assignments; and compares every repository file's raw
+blob bytes and executable mode directly with the candidate commit tree. It
+also rejects non-zero index stages, skip-worktree/assume-unchanged flags,
+extra or missing files, and filter/working-tree-encoding attributes. `git
+status` is not the trust decision.
+
+The `file_plan` and `live_readback` sections are deliberately separate. The
+live section verifies effective `scontrol show config` task/proctrack/
+accounting/fair-share settings, `cgroup.conf`, Docker's cgroup driver, guard
+enablement/activity/fresh health, and the exact QoS, account hierarchy,
+per-user associations, fair-share, and group TRES returned by `sacctmgr`.
 
 Run the controller last. The controller invocation may also converge the
 parent account, equal-share child accounts, user associations, aggregate TRES
@@ -100,6 +165,20 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py apply \
 Repeat with `gb10.toml` only from the independently authorized GB10
 administrator path. A failed or partial pass is rerun idempotently; do not
 repair SlurmDB rows or daemon JSON by hand.
+
+To restore the snapshot and SlurmDB dump from the last committed transaction,
+use the same locked, journaled path:
+
+```bash
+sudo python scripts/ops/developer_sandbox_slurm_policy.py rollback \
+  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
+  --candidate-sha "$EXACT_CANDIDATE_SHA" \
+  --execute
+```
+
+Rollback also reloads/reconfigures services, performs live readback, and
+automatically restores the pre-rollback state if any rollback phase fails. Do
+not delete or edit the journal or snapshot tree by hand.
 
 ## Fair-share contract
 

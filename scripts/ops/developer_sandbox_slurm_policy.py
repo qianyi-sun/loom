@@ -9,20 +9,22 @@ requesting service restarts.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import re
-import shutil
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +51,13 @@ _CGROUP_KEYS = {
     "EnableControllers": "enable_controllers",
 }
 _SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_CANDIDATE_RE = re.compile(r"^[0-9a-f]{40}$")
+_STATE_RELATIVE = Path("var/lib/loom-developer-sandbox-slurm-policy")
+_GUARD_STATUS_RELATIVE = _STATE_RELATIVE / "guard-status.json"
+_GUARD_STATUS_MAX_AGE = timedelta(seconds=30)
+_ALLOCATION_PROBE_RELATIVE = _STATE_RELATIVE / "allocation-probes"
+_ALLOCATION_PROBE_MAX_AGE = timedelta(minutes=15)
+_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +185,14 @@ def load_profile(path: Path) -> Profile:
     cluster = raw.get("cluster")
     controller = raw.get("controller")
     submit_host = raw.get("submit_host")
-    if not all(isinstance(item, str) and item for item in (cluster, controller, submit_host)):
+    if (
+        not isinstance(cluster, str)
+        or not cluster
+        or not isinstance(controller, str)
+        or not controller
+        or not isinstance(submit_host, str)
+        or not submit_host
+    ):
         raise PolicyError("cluster, controller, and submit_host are required")
     names = (
         str(accounting.get("parent_account", "")),
@@ -265,10 +281,10 @@ def render_key_value_config(
     seen: set[str] = set()
     for line in current.splitlines():
         match = re.match(r"^\s*([A-Za-z][A-Za-z0-9]*)\s*=", line)
-        key = match.group(1) if match else None
-        if key not in desired:
+        if match is None or match.group(1) not in desired:
             output.append(line)
             continue
+        key = match.group(1)
         if key in seen:
             continue
         output.append(f"{key}={desired[key]}")
@@ -309,7 +325,380 @@ def render_daemon_json(current: str, profile: Profile) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def desired_files(root: Path, profile: Profile) -> dict[Path, str]:
+def source_candidate_sha() -> str:
+    repository = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        ("git", "-C", str(repository), "rev-parse", "HEAD"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    candidate = completed.stdout.strip().lower()
+    if completed.returncode or _CANDIDATE_RE.fullmatch(candidate) is None:
+        raise PolicyError("could not bind the Slurm policy to an exact candidate SHA")
+    return candidate
+
+
+def verify_source_candidate(candidate_sha: str) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    if source_candidate_sha() != candidate_sha:
+        raise PolicyError("requested candidate SHA does not match the policy checkout")
+    completed = subprocess.run(
+        (
+            "git",
+            "-C",
+            str(repository),
+            "diff",
+            "--quiet",
+            "HEAD",
+            "--",
+            "scripts/ops/developer_sandbox_slurm_policy.py",
+            "scripts/ops/slurm_job_cgroup_guard.py",
+            "deploy/slurm",
+        ),
+        check=False,
+        timeout=5,
+    )
+    if completed.returncode != 0:
+        raise PolicyError("policy checkout differs from the requested candidate SHA")
+
+
+def _safe_path_chain(path: Path, *, leaf_directory: bool) -> Path:
+    if not path.is_absolute():
+        raise PolicyError("trusted path must be absolute")
+    current = Path("/")
+    parts = path.parts[1:]
+    for index, part in enumerate(parts):
+        current /= part
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise PolicyError("trusted path chain is unavailable") from exc
+        is_leaf = index == len(parts) - 1
+        if stat.S_ISLNK(metadata.st_mode):
+            raise PolicyError("trusted path chain must not contain symlinks")
+        if is_leaf and not leaf_directory:
+            if not stat.S_ISREG(metadata.st_mode):
+                raise PolicyError("trusted file must be regular")
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise PolicyError("trusted path parent must be a directory")
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise PolicyError("trusted path chain must not be group/world writable")
+    return path
+
+
+def _read_private_env(path: Path) -> dict[str, Any]:
+    _safe_path_chain(path, leaf_directory=False)
+    before = path.lstat()
+    if stat.S_IMODE(before.st_mode) != 0o600:
+        raise PolicyError("worker env must have exact mode 0600")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise PolicyError("worker env inode changed while it was opened")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise PolicyError("worker env changed while it was read")
+    finally:
+        os.close(descriptor)
+    payload = b"".join(chunks)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PolicyError("worker env must be UTF-8") from exc
+    keys: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise PolicyError("worker env contains an invalid assignment")
+        key, _separator, value = line.partition("=")
+        if _ENV_KEY_RE.fullmatch(key) is None or not value:
+            raise PolicyError("worker env contains an invalid key or empty value")
+        if key in keys:
+            raise PolicyError("worker env contains a duplicate key")
+        keys.add(key)
+    if not keys:
+        raise PolicyError("worker env contains no assignments")
+    return {
+        "path": str(path),
+        "device": opened.st_dev,
+        "inode": opened.st_ino,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "keys": sorted(keys),
+    }
+
+
+def _git_read(repository: Path, *args: str) -> bytes:
+    environment = {
+        **{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+    completed = subprocess.run(
+        (
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.autocrlf=false",
+            "-C",
+            str(repository),
+            *args,
+        ),
+        check=False,
+        capture_output=True,
+        env=environment,
+        timeout=30,
+    )
+    if completed.returncode:
+        raise PolicyError("candidate repository verification command failed")
+    return completed.stdout
+
+
+def _git_blob_sha(payload: bytes) -> str:
+    header = f"blob {len(payload)}\0".encode()
+    return hashlib.sha1(header + payload).hexdigest()
+
+
+def _repository_paths(repository: Path) -> set[str]:
+    found: set[str] = set()
+    stack = [repository]
+    while stack:
+        directory = stack.pop()
+        for child in directory.iterdir():
+            if child.parent == repository and child.name == ".git":
+                continue
+            metadata = child.lstat()
+            relative = child.relative_to(repository).as_posix()
+            if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+                stack.append(child)
+            else:
+                found.add(relative)
+    return found
+
+
+def _verify_git_metadata_path(repository: Path) -> None:
+    marker = repository / ".git"
+    try:
+        metadata = marker.lstat()
+    except OSError as exc:
+        raise PolicyError("candidate Git metadata is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise PolicyError("candidate Git metadata path is unsafe")
+    if stat.S_ISDIR(metadata.st_mode):
+        _safe_path_chain(marker, leaf_directory=True)
+        return
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PolicyError("candidate Git metadata marker is invalid")
+    descriptor = os.open(marker, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise PolicyError("candidate Git metadata marker inode changed")
+        payload = os.read(descriptor, 4097)
+        if len(payload) > 4096:
+            raise PolicyError("candidate Git metadata marker is too large")
+    finally:
+        os.close(descriptor)
+    try:
+        line = payload.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise PolicyError("candidate Git metadata marker is invalid") from exc
+    prefix = "gitdir: "
+    if not line.startswith(prefix) or "\n" in line:
+        raise PolicyError("candidate Git metadata marker is invalid")
+    raw_git_dir = Path(line[len(prefix) :])
+    git_dir = raw_git_dir if raw_git_dir.is_absolute() else repository / raw_git_dir
+    normalized = Path(os.path.abspath(git_dir))
+    _safe_path_chain(normalized, leaf_directory=True)
+
+
+def _reject_git_attribute_filters(repository: Path, paths: Sequence[str]) -> None:
+    for offset in range(0, len(paths), 200):
+        batch = paths[offset : offset + 200]
+        output = _git_read(
+            repository,
+            "check-attr",
+            "-z",
+            "filter",
+            "working-tree-encoding",
+            "--",
+            *batch,
+        ).split(b"\0")
+        values = [item.decode("utf-8") for item in output if item]
+        if len(values) % 3:
+            raise PolicyError("candidate Git attribute readback is malformed")
+        for index in range(0, len(values), 3):
+            _path, attribute, value = values[index : index + 3]
+            if value not in {"unspecified", "unset"}:
+                raise PolicyError(
+                    f"candidate tracked file has interfering Git {attribute} attributes",
+                )
+
+
+def verify_candidate_repository(
+    repository: Path,
+    *,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    if _CANDIDATE_RE.fullmatch(candidate_sha) is None:
+        raise PolicyError("candidate SHA must be an exact lowercase Git SHA")
+    _safe_path_chain(repository, leaf_directory=True)
+    _verify_git_metadata_path(repository)
+    if _git_read(repository, "rev-parse", "--verify", "HEAD").decode().strip() != candidate_sha:
+        raise PolicyError("candidate repository HEAD drifted")
+    tree = _git_read(
+        repository,
+        "rev-parse",
+        "--verify",
+        f"{candidate_sha}^{{tree}}",
+    ).decode().strip()
+    if _CANDIDATE_RE.fullmatch(tree) is None:
+        raise PolicyError("candidate repository tree identity is invalid")
+
+    tree_rows = _git_read(
+        repository,
+        "ls-tree",
+        "-rz",
+        "--full-tree",
+        candidate_sha,
+    ).split(b"\0")
+    tracked: dict[str, tuple[str, str]] = {}
+    for raw in tree_rows:
+        if not raw:
+            continue
+        metadata, separator, raw_path = raw.partition(b"\t")
+        fields = metadata.decode().split()
+        if not separator or len(fields) != 3 or fields[1] != "blob":
+            raise PolicyError("candidate tree contains an unsupported entry")
+        path = raw_path.decode("utf-8")
+        tracked[path] = (fields[0], fields[2])
+    if not tracked:
+        raise PolicyError("candidate tree contains no tracked files")
+
+    index_rows = _git_read(repository, "ls-files", "--stage", "-z").split(b"\0")
+    indexed: set[str] = set()
+    for raw in index_rows:
+        if not raw:
+            continue
+        metadata, separator, raw_path = raw.partition(b"\t")
+        fields = metadata.decode().split()
+        if not separator or len(fields) != 3 or fields[2] != "0":
+            raise PolicyError("candidate index contains a non-zero or invalid stage")
+        indexed.add(raw_path.decode("utf-8"))
+    if indexed != set(tracked):
+        raise PolicyError("candidate index differs from the commit tree")
+    for raw in _git_read(repository, "ls-files", "-v", "-z").split(b"\0"):
+        if raw and (len(raw) < 3 or raw[:2] != b"H "):
+            raise PolicyError("candidate index has skip-worktree or assume-unchanged flags")
+    if _repository_paths(repository) != set(tracked):
+        raise PolicyError("candidate repository contains extra or missing files")
+    _reject_git_attribute_filters(repository, tuple(sorted(tracked)))
+
+    for relative, (mode, expected_blob) in tracked.items():
+        source_path = repository / relative
+        file_metadata = source_path.lstat()
+        if stat.S_IMODE(file_metadata.st_mode) & 0o022:
+            raise PolicyError("candidate tracked file is group/world writable")
+        if mode not in {"100644", "100755", "120000"}:
+            raise PolicyError("candidate tracked file mode is unsupported")
+        if mode == "120000":
+            if not stat.S_ISLNK(file_metadata.st_mode):
+                raise PolicyError("candidate symlink type differs from the commit tree")
+            payload = os.readlink(source_path).encode()
+        else:
+            if stat.S_ISLNK(file_metadata.st_mode) or not stat.S_ISREG(
+                file_metadata.st_mode,
+            ):
+                raise PolicyError("candidate tracked file type differs from the commit tree")
+            executable = bool(stat.S_IMODE(file_metadata.st_mode) & 0o111)
+            if executable is not (mode == "100755"):
+                raise PolicyError("candidate tracked executable mode differs from the tree")
+            descriptor = os.open(
+                source_path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (
+                    file_metadata.st_dev,
+                    file_metadata.st_ino,
+                ):
+                    raise PolicyError("candidate tracked file inode changed")
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(descriptor, 64 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                after = os.fstat(descriptor)
+                if (
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                    opened.st_ino,
+                ) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                    raise PolicyError("candidate tracked file changed while it was read")
+                payload = b"".join(chunks)
+            finally:
+                os.close(descriptor)
+        if _git_blob_sha(payload) != expected_blob:
+            raise PolicyError("candidate raw tracked bytes differ from the commit tree")
+    return {
+        "path": str(repository),
+        "candidate_sha": candidate_sha,
+        "candidate_tree": tree,
+        "tracked_files": len(tracked),
+    }
+
+
+def strict_candidate_binding(
+    repository: Path,
+    worker_env: Path,
+    *,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    return {
+        "repository": verify_candidate_repository(
+            repository,
+            candidate_sha=candidate_sha,
+        ),
+        "worker_env": _read_private_env(worker_env),
+    }
+
+
+def desired_files(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str | None = None,
+) -> dict[Path, str]:
+    candidate = candidate_sha or source_candidate_sha()
+    if _CANDIDATE_RE.fullmatch(candidate) is None:
+        raise PolicyError("candidate SHA must be an exact lowercase Git SHA")
     slurm_path = root / "etc/slurm/slurm.conf"
     daemon_path = root / "etc/docker/daemon.json"
     try:
@@ -333,9 +722,19 @@ def desired_files(root: Path, profile: Profile) -> dict[Path, str]:
                 {
                     "schema_version": 1,
                     "cluster": profile.cluster,
+                    "controller": profile.controller,
+                    "submit_host": profile.submit_host,
+                    "allowed_nodes": sorted(
+                        {
+                            *(node.lower() for node in profile.allowed_nodes),
+                            *profile.host_aliases.values(),
+                        },
+                    ),
+                    "candidate_sha": candidate,
                     "pids_max": profile.job_pids_max,
                     "allowed_accounts": sorted(profile.child_accounts),
                     "poll_interval_seconds": 0.2,
+                    "require_gpu_probe": profile.gpu_tres_per_slot > 0,
                 },
                 indent=2,
                 sort_keys=True,
@@ -352,23 +751,52 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def plan(root: Path, profile: Profile) -> dict[str, Any]:
-    files = desired_files(root, profile)
+def _desired_file_mode(root: Path, path: Path) -> int:
+    if path == root / "usr/libexec/loom-slurm-job-cgroup-guard":
+        return 0o755
+    if path == root / "etc/loom/slurm-job-cgroup-guard.json":
+        return 0o600
+    if path.exists():
+        hardened = stat.S_IMODE(path.stat().st_mode) & ~0o022
+        if hardened:
+            return hardened
+    return 0o644
+
+
+def plan(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str | None = None,
+) -> dict[str, Any]:
+    candidate = candidate_sha or source_candidate_sha()
+    files = desired_files(root, profile, candidate_sha=candidate)
     rows = []
     for path, desired in files.items():
         live = path.read_bytes() if path.exists() else b""
+        live_metadata = path.stat() if path.exists() else None
+        live_mode = stat.S_IMODE(live_metadata.st_mode) if live_metadata else None
+        live_uid = live_metadata.st_uid if live_metadata else None
+        desired_mode = _desired_file_mode(root, path)
         rows.append(
             {
                 "path": str(path),
                 "live_sha256": _sha256(live),
                 "desired_sha256": _sha256(desired.encode()),
-                "converged": live == desired.encode(),
+                "live_mode": live_mode,
+                "desired_mode": desired_mode,
+                "live_uid": live_uid,
+                "desired_uid": 0 if root == Path("/") else None,
+                "converged": live == desired.encode()
+                and live_mode == desired_mode
+                and (root != Path("/") or live_uid == 0),
             },
         )
     return {
         "schema_version": 1,
         "artifact_type": "developer-sandbox-slurm-policy-plan",
         "cluster": profile.cluster,
+        "candidate_sha": candidate,
         "capacity": {
             "slot_budget": profile.slot_budget,
             "pending_slot_budget": profile.pending_slot_budget,
@@ -378,6 +806,7 @@ def plan(root: Path, profile: Profile) -> dict[str, Any]:
             "job_pids_max": profile.job_pids_max,
         },
         "mutation_authorized": False,
+        "file_plan": {"converged": all(row["converged"] for row in rows)},
         "files": rows,
         "accounting_commands": accounting_commands(profile),
     }
@@ -465,21 +894,39 @@ def accounting_commands(profile: Profile) -> list[list[str]]:
     return commands
 
 
-def _run(argv: Sequence[str]) -> str:
-    completed = subprocess.run(
-        list(argv),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def _run(argv: Sequence[str], *, timeout: float = 60) -> str:
+    try:
+        completed = subprocess.run(
+            list(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError(f"{argv[0]} failed safely before completion") from exc
     if completed.returncode:
         raise PolicyError(f"{argv[0]} failed safely with exit code {completed.returncode}")
     return completed.stdout
 
 
-def _atomic_write(path: Path, content: str) -> None:
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+    effective_mode = (
+        mode
+        if mode is not None
+        else stat.S_IMODE(path.stat().st_mode)
+        if path.exists()
+        else 0o644
+    )
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
@@ -487,28 +934,46 @@ def _atomic_write(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        temporary.chmod(mode)
+        temporary.chmod(effective_mode)
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def _snapshot(root: Path, files: Mapping[Path, str]) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
-    snapshot = root / "var/lib/loom-developer-sandbox-slurm-policy/snapshots" / timestamp
+    state = root / _STATE_RELATIVE
+    state.mkdir(parents=True, mode=0o700, exist_ok=True)
+    state.chmod(0o700)
+    snapshots = state / "snapshots"
+    snapshots.mkdir(mode=0o700, exist_ok=True)
+    snapshots.chmod(0o700)
+    snapshot = snapshots / timestamp
     snapshot.mkdir(parents=True, mode=0o700)
+    snapshot.chmod(0o700)
     manifest: dict[str, Any] = {"schema_version": 1, "files": []}
     for path in files:
         relative = path.relative_to(root)
         target = snapshot / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
-            shutil.copy2(path, target)
-            manifest["files"].append({"path": str(relative), "present": True})
+            content = path.read_bytes()
+            mode = stat.S_IMODE(path.stat().st_mode)
+            _atomic_write(target, content.decode("utf-8"), mode=mode)
+            manifest["files"].append(
+                {"path": str(relative), "present": True, "mode": mode},
+            )
         else:
-            manifest["files"].append({"path": str(relative), "present": False})
-    _atomic_write(snapshot / "manifest.json", json.dumps(manifest, sort_keys=True) + "\n")
-    (snapshot / "manifest.json").chmod(0o600)
+            manifest["files"].append(
+                {"path": str(relative), "present": False, "mode": None},
+            )
+    _atomic_write(
+        snapshot / "manifest.json",
+        json.dumps(manifest, sort_keys=True) + "\n",
+        mode=0o600,
+    )
+    _fsync_directory(snapshot)
     return snapshot
 
 
@@ -523,20 +988,732 @@ def _slurm_node_for_host(profile: Profile, host: str) -> str | None:
     return None
 
 
-def apply(
+def _state_root(root: Path) -> Path:
+    return root / _STATE_RELATIVE
+
+
+def _journal_path(root: Path, profile: Profile) -> Path:
+    return _state_root(root) / "transactions" / f"{profile.cluster}.json"
+
+
+@contextmanager
+def _domain_lock(root: Path, profile: Profile) -> Iterator[None]:
+    state = _state_root(root)
+    state.mkdir(parents=True, mode=0o700, exist_ok=True)
+    state.chmod(0o700)
+    lock_path = state / "locks" / f"{profile.cluster}.lock"
+    lock_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    lock_path.parent.chmod(0o700)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _write_journal(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    path.parent.chmod(0o700)
+    _atomic_write(
+        path,
+        json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n",
+        mode=0o600,
+    )
+
+
+def _load_journal(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        metadata = path.lstat()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError("durable Slurm policy journal is unreadable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+    ):
+        raise PolicyError("durable Slurm policy journal is unsafe")
+    return payload
+
+
+def _advance_journal(path: Path, payload: dict[str, Any], phase: str) -> None:
+    payload["phase"] = phase
+    payload["updated_at"] = datetime.now(UTC).isoformat()
+    _write_journal(path, payload)
+
+
+def _restore_snapshot(root: Path, snapshot: Path) -> None:
+    try:
+        manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError("Slurm policy snapshot manifest is unavailable") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        raise PolicyError("Slurm policy snapshot manifest is invalid")
+    rows = manifest.get("files")
+    if not isinstance(rows, list):
+        raise PolicyError("Slurm policy snapshot file list is invalid")
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise PolicyError("Slurm policy snapshot row is invalid")
+        relative = Path(row["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise PolicyError("Slurm policy snapshot path escapes the root")
+        target = root / relative
+        if row.get("present") is True:
+            source = snapshot / relative
+            try:
+                content = source.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PolicyError("Slurm policy snapshot content is unavailable") from exc
+            mode = row.get("mode")
+            if type(mode) is not int:
+                raise PolicyError("Slurm policy snapshot mode is invalid")
+            _atomic_write(target, content, mode=mode)
+        elif row.get("present") is False:
+            target.unlink(missing_ok=True)
+            if target.parent.exists():
+                _fsync_directory(target.parent)
+        else:
+            raise PolicyError("Slurm policy snapshot presence is invalid")
+
+
+def _accounting_snapshot(root: Path, profile: Profile, snapshot: Path) -> Path:
+    content = _run(("sacctmgr", "-n", "dump", "cluster", profile.cluster))
+    target = snapshot / "accounting.dump"
+    _atomic_write(target, content, mode=0o600)
+    return target
+
+
+def _restore_accounting(path: Path) -> None:
+    _run(("sacctmgr", "-i", "load", f"file={path}"))
+
+
+def _restart_services(profile: Profile, slurm_node: str) -> None:
+    _run(("systemctl", "daemon-reload"))
+    _run(("systemctl", "enable", "loom-slurm-job-cgroup-guard.service"))
+    _run(("systemctl", "restart", "docker"))
+    _run(("systemctl", "restart", "slurmd"))
+    _run(("systemctl", "restart", "loom-slurm-job-cgroup-guard.service"))
+    if slurm_node == profile.controller:
+        _run(("systemctl", "restart", "slurmctld"))
+    _run(("scontrol", "reconfigure"))
+
+
+def _run_status(argv: Sequence[str]) -> tuple[int, str]:
+    try:
+        completed = subprocess.run(
+            list(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError(f"{argv[0]} status readback failed safely") from exc
+    return completed.returncode, completed.stdout
+
+
+def _restore_services(root: Path, profile: Profile, slurm_node: str) -> None:
+    guard_unit = root / "etc/systemd/system/loom-slurm-job-cgroup-guard.service"
+    _run(("systemctl", "daemon-reload"))
+    if guard_unit.exists():
+        _run(("systemctl", "enable", "loom-slurm-job-cgroup-guard.service"))
+    else:
+        _run_status(
+            ("systemctl", "disable", "--now", "loom-slurm-job-cgroup-guard.service"),
+        )
+        active_code, _active = _run_status(
+            ("systemctl", "is-active", "loom-slurm-job-cgroup-guard.service"),
+        )
+        enabled_code, _enabled = _run_status(
+            ("systemctl", "is-enabled", "loom-slurm-job-cgroup-guard.service"),
+        )
+        if active_code == 0 or enabled_code == 0:
+            raise PolicyError("restored cgroup guard should be inactive and disabled")
+    _run(("systemctl", "restart", "docker"))
+    _run(("systemctl", "restart", "slurmd"))
+    if guard_unit.exists():
+        _run(("systemctl", "restart", "loom-slurm-job-cgroup-guard.service"))
+    if slurm_node == profile.controller:
+        _run(("systemctl", "restart", "slurmctld"))
+    _run(("scontrol", "reconfigure"))
+
+
+def _snapshot_readback(root: Path, snapshot: Path) -> dict[str, Any]:
+    try:
+        manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError("Slurm policy snapshot manifest is unavailable") from exc
+    rows = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(rows, list):
+        raise PolicyError("Slurm policy snapshot file list is invalid")
+    checked: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise PolicyError("Slurm policy snapshot row is invalid")
+        relative = Path(row["path"])
+        live = root / relative
+        archived = snapshot / relative
+        if row.get("present") is True:
+            try:
+                if live.read_bytes() != archived.read_bytes():
+                    raise PolicyError("restored Slurm policy file readback drifted")
+            except OSError as exc:
+                raise PolicyError("restored Slurm policy file is unavailable") from exc
+        elif row.get("present") is False:
+            if live.exists():
+                raise PolicyError("restored Slurm policy file should be absent")
+        else:
+            raise PolicyError("Slurm policy snapshot presence is invalid")
+        checked.append(str(relative))
+    return {"converged": True, "snapshot": str(snapshot), "files": checked}
+
+
+def _accounting_snapshot_matches(profile: Profile, snapshot: Path) -> None:
+    observed = _run(("sacctmgr", "-n", "dump", "cluster", profile.cluster))
+    try:
+        expected = snapshot.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PolicyError("restored Slurm accounting snapshot is unavailable") from exc
+    if observed.strip() != expected.strip():
+        raise PolicyError("restored Slurm accounting readback drifted")
+
+
+def _parse_key_values(raw: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in raw.splitlines():
+        match = re.match(r"^\s*([A-Za-z][A-Za-z0-9]*)\s*=\s*(.*?)\s*$", line)
+        if match is not None:
+            parsed[match.group(1)] = match.group(2)
+    return parsed
+
+
+def _split_csv(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _accounting_readback(profile: Profile) -> dict[str, Any]:
+    qos_rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "sacctmgr",
+                "-nP",
+                "show",
+                "qos",
+                "where",
+                f"name={profile.qos}",
+                "format=Name,Priority,MaxWall,MaxJobsPU,MaxSubmitJobsPU",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    if len(qos_rows) != 1 or len(qos_rows[0]) < 5:
+        raise PolicyError("live Slurm QoS readback is missing or ambiguous")
+    qos = qos_rows[0][:5]
+    expected_qos = [
+        profile.qos,
+        str(profile.qos_priority),
+        profile.qos_max_wall,
+        str(profile.qos_max_jobs_per_user),
+        str(profile.qos_max_submit_jobs_per_user),
+    ]
+    if qos != expected_qos:
+        raise PolicyError("live Slurm QoS readback drifted")
+
+    account_rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "sacctmgr",
+                "-nP",
+                "show",
+                "account",
+                "where",
+                f"cluster={profile.cluster}",
+                "format=Account,ParentName,Fairshare,GrpTRES",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    accounts = {row[0]: row for row in account_rows if len(row) >= 4}
+    expected_accounts = {profile.parent_account, *profile.child_accounts}
+    if not expected_accounts.issubset(accounts):
+        raise PolicyError("live Slurm account hierarchy is incomplete")
+    parent = accounts[profile.parent_account]
+    if parent[2] != str(profile.fairshare) or _split_csv(parent[3]) != set(
+        profile.parent_group_tres,
+    ):
+        raise PolicyError("live Slurm parent account fair-share or TRES drifted")
+    for child in profile.child_accounts:
+        row = accounts[child]
+        if row[1] != profile.parent_account:
+            raise PolicyError("live Slurm child account parent drifted")
+
+    association_rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "sacctmgr",
+                "-nP",
+                "show",
+                "association",
+                "where",
+                f"cluster={profile.cluster}",
+                "format=User,Account,Fairshare,QOS,DefaultQOS",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    associations = {
+        (row[0], row[1]): row for row in association_rows if len(row) >= 5 and row[0]
+    }
+    for user, account in zip(profile.users, profile.child_accounts, strict=True):
+        association = associations.get((user, account))
+        if (
+            association is None
+            or association[2] != str(profile.fairshare)
+            or profile.qos not in _split_csv(association[3])
+            or association[4] != profile.qos
+        ):
+            raise PolicyError("live Slurm user association or fair-share drifted")
+    return {
+        "qos": profile.qos,
+        "accounts": sorted(expected_accounts),
+        "associations": [
+            {"user": user, "account": account}
+            for user, account in zip(profile.users, profile.child_accounts, strict=True)
+        ],
+    }
+
+
+def _guard_status_readback(
+    root: Path,
+    *,
+    candidate_sha: str,
+    expected_config_sha256: str,
+    require_probe: bool,
+) -> dict[str, Any]:
+    path = root / _GUARD_STATUS_RELATIVE
+    try:
+        metadata = path.lstat()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError("cgroup guard status is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+    ):
+        raise PolicyError("cgroup guard status is unsafe")
+    try:
+        observed = datetime.fromisoformat(str(payload["timestamp"]))
+    except (KeyError, ValueError) as exc:
+        raise PolicyError("cgroup guard status timestamp is invalid") from exc
+    if observed.tzinfo is None or datetime.now(UTC) - observed.astimezone(UTC) > (
+        _GUARD_STATUS_MAX_AGE
+    ):
+        raise PolicyError("cgroup guard status is stale")
+    if (
+        payload.get("candidate_sha") != candidate_sha
+        or payload.get("config_sha256") != expected_config_sha256
+        or payload.get("failed") != 0
+        or payload.get("failures") != []
+    ):
+        raise PolicyError("cgroup guard status failed or drifted")
+    if require_probe:
+        probe = payload.get("resource_probe")
+        if not isinstance(probe, dict) or probe.get("candidate_sha") != candidate_sha:
+            raise PolicyError("cgroup guard lacks a candidate-bound live job probe")
+        try:
+            probe_observed = datetime.fromisoformat(str(probe["observed_at"]))
+        except (KeyError, ValueError) as exc:
+            raise PolicyError("cgroup guard job probe timestamp is invalid") from exc
+        if (
+            probe_observed.tzinfo is None
+            or datetime.now(UTC) - probe_observed.astimezone(UTC)
+            > _ALLOCATION_PROBE_MAX_AGE
+        ):
+            raise PolicyError("cgroup guard job resource probe is stale")
+    return payload
+
+
+def _wait_for_guard_status(
+    root: Path,
+    *,
+    candidate_sha: str,
+    expected_config_sha256: str,
+    require_probe: bool,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + 10
+    last_error: PolicyError | None = None
+    while time.monotonic() < deadline:
+        try:
+            return _guard_status_readback(
+                root,
+                candidate_sha=candidate_sha,
+                expected_config_sha256=expected_config_sha256,
+                require_probe=require_probe,
+            )
+        except PolicyError as exc:
+            last_error = exc
+            time.sleep(0.25)
+    raise PolicyError("cgroup guard did not publish matching fresh status") from last_error
+
+
+def _allocation_probe_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
+    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.json"
+
+
+def _parse_sacct_rows(raw: str) -> list[list[str]]:
+    rows = [line.split("|") for line in raw.splitlines() if line.strip()]
+    if any(len(row) < 6 for row in rows):
+        raise PolicyError("Slurm allocation probe accounting output is malformed")
+    return rows
+
+
+def _positive_gpu_tres(value: str) -> bool:
+    for item in value.split(","):
+        key, separator, raw = item.partition("=")
+        if separator and (key == "gres/gpu" or key.startswith("gres/gpu:")):
+            try:
+                return float(raw) > 0
+            except ValueError:
+                return False
+    return False
+
+
+def run_allocation_probe(
     root: Path,
     profile: Profile,
     *,
+    candidate_sha: str,
+    candidate_root: Path,
+    worker_env: Path,
+) -> dict[str, Any]:
+    if root != Path("/") or os.geteuid() != 0:
+        raise PolicyError("allocation-side Slurm probe requires the live root")
+    verify_source_candidate(candidate_sha)
+    binding = strict_candidate_binding(
+        candidate_root,
+        worker_env,
+        candidate_sha=candidate_sha,
+    )
+    host = _canonical_host()
+    submit_node = _slurm_node_for_host(profile, host)
+    if submit_node != profile.submit_host:
+        raise PolicyError("allocation probe must run from the profile's exact submit host")
+    live_config = _parse_key_values(_run(("scontrol", "show", "config")))
+    if live_config.get("ClusterName") != profile.cluster:
+        raise PolicyError("allocation probe reached the wrong Slurm cluster")
+    controllers = _split_csv(live_config.get("SlurmctldHost", ""))
+    if controllers and profile.controller.lower() not in {
+        item.lower() for item in controllers
+    }:
+        raise PolicyError("allocation probe reached the wrong Slurm controller")
+
+    job_name = f"loom-policy-{candidate_sha}-probe"
+    arguments = [
+        "sbatch",
+        "--parsable",
+        "--wait",
+        f"--job-name={job_name}",
+        f"--uid={profile.users[0]}",
+        f"--account={profile.child_accounts[0]}",
+        f"--qos={profile.qos}",
+        "--nodes=1",
+        "--ntasks=1",
+        "--cpus-per-task=1",
+        "--mem=256M",
+        "--time=00:02:00",
+        f"--comment=loom-cgroup-v1:pids={profile.job_pids_max}",
+        f"--export=LOOM_POLICY_CANDIDATE_SHA={candidate_sha}",
+    ]
+    if profile.gpu_tres_per_slot > 0:
+        arguments.append("--gres=gpu:1")
+    arguments.append(
+        "--wrap=/usr/bin/srun --nodes=1 --ntasks=1 /bin/sleep 2",
+    )
+    output = _run(tuple(arguments), timeout=180)
+    job_ids = [
+        match.group(1)
+        for line in output.splitlines()
+        if (match := re.fullmatch(r"([1-9][0-9]*)(?:;[A-Za-z0-9_.-]+)?", line.strip()))
+    ]
+    if len(job_ids) != 1:
+        raise PolicyError("allocation probe did not return one unambiguous job ID")
+    job_id = job_ids[0]
+    rows = _parse_sacct_rows(
+        _run(
+            (
+                "sacct",
+                "-nP",
+                "-j",
+                job_id,
+                "--format=JobIDRaw,JobName,State,NodeList,AllocTRES,Account",
+            ),
+        ),
+    )
+    base = next((row for row in rows if row[0] == job_id), None)
+    srun = next((row for row in rows if row[0].startswith(f"{job_id}.0")), None)
+    if (
+        base is None
+        or base[1] != job_name
+        or not base[2].startswith("COMPLETED")
+        or base[5] != profile.child_accounts[0]
+        or srun is None
+        or not srun[2].startswith("COMPLETED")
+    ):
+        raise PolicyError("allocation probe sbatch/srun steps did not complete exactly")
+    allowed = {
+        *(node.lower() for node in profile.allowed_nodes),
+        *profile.host_aliases.values(),
+    }
+    node = base[3].lower()
+    if node not in allowed:
+        raise PolicyError("allocation probe ran outside the reviewed pool")
+    gpu_verified = profile.gpu_tres_per_slot <= 0 or _positive_gpu_tres(base[4])
+    if not gpu_verified:
+        raise PolicyError("allocation probe did not read back a positive GPU TRES")
+
+    guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
+    guard = _wait_for_guard_status(
+        root,
+        candidate_sha=candidate_sha,
+        expected_config_sha256=hashlib.sha256(guard_config.read_bytes()).hexdigest(),
+        require_probe=True,
+    )
+    resource_probe = guard.get("resource_probe")
+    if not isinstance(resource_probe, dict) or resource_probe.get("job_id") != job_id:
+        raise PolicyError("cgroup guard did not attest the exact allocation probe job")
+    payload = {
+        "schema_version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "candidate_sha": candidate_sha,
+        "candidate_tree": binding["repository"]["candidate_tree"],
+        "cluster": profile.cluster,
+        "controller": profile.controller,
+        "submit_host": profile.submit_host,
+        "submitting_host": host,
+        "job_id": job_id,
+        "job_name": job_name,
+        "node": node,
+        "state": "COMPLETED",
+        "account": profile.child_accounts[0],
+        "qos": profile.qos,
+        "alloc_tres": base[4],
+        "gpu_verified": gpu_verified,
+        "sbatch_verified": True,
+        "srun_verified": True,
+        "guard_config_sha256": hashlib.sha256(guard_config.read_bytes()).hexdigest(),
+        "guard_resource_probe": resource_probe,
+        "candidate_binding": binding,
+        "command_sha256": hashlib.sha256(
+            "\0".join(arguments).encode(),
+        ).hexdigest(),
+    }
+    target = _allocation_probe_path(root, profile, candidate_sha)
+    target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    target.parent.chmod(0o700)
+    _atomic_write(
+        target,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        mode=0o600,
+    )
+    return payload
+
+
+def allocation_probe_readback(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    candidate_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    path = _allocation_probe_path(root, profile, candidate_sha)
+    try:
+        metadata = path.lstat()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError("allocation-side Slurm probe evidence is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+    ):
+        raise PolicyError("allocation-side Slurm probe evidence is unsafe")
+    try:
+        created = datetime.fromisoformat(str(payload["created_at"]))
+    except (KeyError, ValueError) as exc:
+        raise PolicyError("allocation-side Slurm probe timestamp is invalid") from exc
+    if created.tzinfo is None or datetime.now(UTC) - created.astimezone(UTC) > (
+        _ALLOCATION_PROBE_MAX_AGE
+    ):
+        raise PolicyError("allocation-side Slurm probe evidence is stale")
+    repository = candidate_binding.get("repository")
+    worker_env_binding = candidate_binding.get("worker_env")
+    evidence_binding = payload.get("candidate_binding")
+    if (
+        not isinstance(repository, Mapping)
+        or not isinstance(worker_env_binding, Mapping)
+        or not isinstance(evidence_binding, Mapping)
+        or payload.get("candidate_sha") != candidate_sha
+        or payload.get("candidate_tree") != repository.get("candidate_tree")
+        or evidence_binding.get("repository") != repository
+        or evidence_binding.get("worker_env") != worker_env_binding
+        or payload.get("cluster") != profile.cluster
+        or payload.get("controller") != profile.controller
+        or payload.get("submit_host") != profile.submit_host
+        or payload.get("state") != "COMPLETED"
+        or payload.get("sbatch_verified") is not True
+        or payload.get("srun_verified") is not True
+        or payload.get("account") not in profile.child_accounts
+        or payload.get("qos") != profile.qos
+    ):
+        raise PolicyError("allocation-side Slurm probe binding drifted")
+    allowed = {
+        *(node.lower() for node in profile.allowed_nodes),
+        *profile.host_aliases.values(),
+    }
+    if str(payload.get("node", "")).lower() not in allowed:
+        raise PolicyError("allocation-side Slurm probe node drifted")
+    if profile.gpu_tres_per_slot > 0 and (
+        payload.get("gpu_verified") is not True
+        or not _positive_gpu_tres(str(payload.get("alloc_tres", "")))
+    ):
+        raise PolicyError("allocation-side Slurm GPU probe drifted")
+    return payload
+
+
+def live_readback(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    require_probe: bool,
+    check_accounting: bool = True,
+    wait_for_guard: bool = False,
+    candidate_binding: Mapping[str, Any] | None = None,
+    require_allocation_probe: bool = False,
+) -> dict[str, Any]:
+    desired = desired_files(root, profile, candidate_sha=candidate_sha)
+    slurm = _parse_key_values(_run(("scontrol", "show", "config")))
+    expected_slurm = {
+        key: _slurm_value(profile.slurm[field]) for key, field in _SLURM_KEYS.items()
+    }
+    for key, expected in expected_slurm.items():
+        observed = slurm.get(key)
+        if key in {"TaskPlugin", "AccountingStorageEnforce", "PrologFlags"}:
+            if _split_csv(observed or "") != _split_csv(expected):
+                raise PolicyError(f"live Slurm {key} readback drifted")
+        elif observed != expected:
+            raise PolicyError(f"live Slurm {key} readback drifted")
+    cgroup_path = root / "etc/slurm/cgroup.conf"
+    try:
+        cgroup = _parse_key_values(cgroup_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise PolicyError("live cgroup.conf is unavailable") from exc
+    expected_cgroup = _parse_key_values(render_cgroup_conf(profile))
+    if any(cgroup.get(key) != value for key, value in expected_cgroup.items()):
+        raise PolicyError("live cgroup.conf readback drifted")
+    docker_driver = _run(("docker", "info", "--format", "{{.CgroupDriver}}")).strip()
+    if docker_driver != profile.docker_cgroup_driver:
+        raise PolicyError("live Docker cgroup driver readback drifted")
+    if _run(
+        ("systemctl", "is-enabled", "loom-slurm-job-cgroup-guard.service"),
+    ).strip() != "enabled":
+        raise PolicyError("cgroup guard is not enabled")
+    if _run(
+        ("systemctl", "is-active", "loom-slurm-job-cgroup-guard.service"),
+    ).strip() != "active":
+        raise PolicyError("cgroup guard is not active")
+    guard_config_path = root / "etc/loom/slurm-job-cgroup-guard.json"
+    expected_config_sha = _sha256(desired[guard_config_path].encode())
+    guard_reader = _wait_for_guard_status if wait_for_guard else _guard_status_readback
+    guard = guard_reader(
+        root,
+        candidate_sha=candidate_sha,
+        expected_config_sha256=expected_config_sha,
+        require_probe=require_probe,
+    )
+    accounting = _accounting_readback(profile) if check_accounting else None
+    if require_allocation_probe:
+        if candidate_binding is None:
+            raise PolicyError("strict candidate binding is required for allocation readback")
+        allocation = allocation_probe_readback(
+            root,
+            profile,
+            candidate_sha=candidate_sha,
+            candidate_binding=candidate_binding,
+        )
+    else:
+        allocation = None
+    return {
+        "converged": True,
+        "slurm": expected_slurm,
+        "cgroup": expected_cgroup,
+        "docker_cgroup_driver": docker_driver,
+        "guard": guard,
+        "accounting": accounting,
+        "allocation_probe": allocation,
+    }
+
+
+def _recover_orphan(
+    root: Path,
+    profile: Profile,
+    *,
+    slurm_node: str | None,
+) -> dict[str, Any] | None:
+    path = _journal_path(root, profile)
+    journal = _load_journal(path)
+    if journal is None or journal.get("phase") in {"committed", "rolled_back"}:
+        return journal
+    snapshot_raw = journal.get("snapshot")
+    if not isinstance(snapshot_raw, str):
+        raise PolicyError("orphan Slurm policy journal lacks a snapshot")
+    try:
+        _restore_snapshot(root, Path(snapshot_raw))
+        accounting_raw = journal.get("accounting_snapshot")
+        if isinstance(accounting_raw, str):
+            _restore_accounting(Path(accounting_raw))
+        if root == Path("/") and journal.get("restart") is True and slurm_node is not None:
+            _restore_services(root, profile, slurm_node)
+        _snapshot_readback(root, Path(snapshot_raw))
+        if isinstance(accounting_raw, str):
+            _accounting_snapshot_matches(profile, Path(accounting_raw))
+    except Exception:
+        _advance_journal(path, journal, "recovery_failed")
+        raise
+    _advance_journal(path, journal, "rolled_back")
+    return journal
+
+
+def _validate_live_apply(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
     restart: bool,
     apply_accounting: bool,
-) -> dict[str, Any]:
+) -> tuple[str, str | None]:
     host = _canonical_host()
     slurm_node = _slurm_node_for_host(profile, host)
     if root != Path("/") and (restart or apply_accounting):
-        raise PolicyError(
-            "service restart and accounting apply require the live root",
-        )
+        raise PolicyError("service restart and accounting apply require the live root")
     if root == Path("/"):
+        verify_source_candidate(candidate_sha)
         if os.geteuid() != 0:
             raise PolicyError("live apply requires root")
         if slurm_node is None:
@@ -551,49 +1728,266 @@ def apply(
             if _run(("squeue", "-h", "-w", slurm_node)).strip():
                 raise PolicyError("node still has Slurm jobs; drain and retry")
             if _run(("docker", "ps", "-q")).strip():
-                raise PolicyError(
-                    "node still has running Docker containers; drain and retry",
+                raise PolicyError("node still has running Docker containers; drain and retry")
+    return host, slurm_node
+
+
+def apply(
+    root: Path,
+    profile: Profile,
+    *,
+    restart: bool,
+    apply_accounting: bool,
+    candidate_sha: str | None = None,
+) -> dict[str, Any]:
+    candidate = candidate_sha or source_candidate_sha()
+    _host, slurm_node = _validate_live_apply(
+        root,
+        profile,
+        candidate_sha=candidate,
+        restart=False,
+        apply_accounting=False,
+    )
+    with _domain_lock(root, profile):
+        _recover_orphan(root, profile, slurm_node=slurm_node)
+        _host, slurm_node = _validate_live_apply(
+            root,
+            profile,
+            candidate_sha=candidate,
+            restart=restart,
+            apply_accounting=apply_accounting,
+        )
+        files = desired_files(root, profile, candidate_sha=candidate)
+        if root == Path("/"):
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix="loom-dockerd-validate-",
+            ) as handle:
+                handle.write(files[root / "etc/docker/daemon.json"])
+                handle.flush()
+                _run(("dockerd", "--validate", "--config-file", handle.name))
+        snapshot = _snapshot(root, files)
+        accounting_snapshot = (
+            _accounting_snapshot(root, profile, snapshot) if apply_accounting else None
+        )
+        journal_path = _journal_path(root, profile)
+        journal: dict[str, Any] = {
+            "schema_version": 1,
+            "operation": "apply",
+            "cluster": profile.cluster,
+            "candidate_sha": candidate,
+            "snapshot": str(snapshot),
+            "accounting_snapshot": (
+                str(accounting_snapshot) if accounting_snapshot is not None else None
+            ),
+            "restart": restart,
+            "apply_accounting": apply_accounting,
+            "phase": "prepared",
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_journal(journal_path, journal)
+        try:
+            for path, content in files.items():
+                _atomic_write(
+                    path,
+                    content,
+                    mode=_desired_file_mode(root, path),
                 )
-    files = desired_files(root, profile)
-    if root == Path("/"):
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            prefix="loom-dockerd-validate-",
-        ) as handle:
-            handle.write(files[root / "etc/docker/daemon.json"])
-            handle.flush()
-            _run(("dockerd", "--validate", "--config-file", handle.name))
-    snapshot = _snapshot(root, files)
-    for path, content in files.items():
-        _atomic_write(path, content)
-        if path == root / "usr/libexec/loom-slurm-job-cgroup-guard":
-            path.chmod(0o755)
-    if apply_accounting:
-        for command in accounting_commands(profile):
-            _run(command)
-    if restart:
-        _run(("systemctl", "daemon-reload"))
-        _run(("systemctl", "enable", "loom-slurm-job-cgroup-guard.service"))
-        _run(("systemctl", "restart", "docker"))
-        _run(("systemctl", "restart", "slurmd"))
-        _run(("systemctl", "restart", "loom-slurm-job-cgroup-guard.service"))
-        if slurm_node == profile.controller:
-            _run(("systemctl", "restart", "slurmctld"))
+            _advance_journal(journal_path, journal, "files_written")
+            if apply_accounting:
+                for command in accounting_commands(profile):
+                    _run(command)
+            _advance_journal(journal_path, journal, "accounting_applied")
+            if restart:
+                if slurm_node is None:
+                    raise PolicyError("live restart lacks an allowed Slurm node")
+                _restart_services(profile, slurm_node)
+            _advance_journal(journal_path, journal, "services_reconfigured")
+            if root == Path("/"):
+                live = live_readback(
+                    root,
+                    profile,
+                    candidate_sha=candidate,
+                    require_probe=False,
+                    check_accounting=apply_accounting,
+                    wait_for_guard=True,
+                )
+            else:
+                rendered = plan(root, profile, candidate_sha=candidate)
+                if not rendered["file_plan"]["converged"]:
+                    raise PolicyError("offline Slurm policy write readback drifted")
+                live = {"converged": True, "offline": True}
+            _advance_journal(journal_path, journal, "verified")
+            _advance_journal(journal_path, journal, "committed")
+        except Exception as exc:
+            try:
+                _restore_snapshot(root, snapshot)
+                if accounting_snapshot is not None:
+                    _restore_accounting(accounting_snapshot)
+                if restart and slurm_node is not None:
+                    _restore_services(root, profile, slurm_node)
+                _snapshot_readback(root, snapshot)
+                if accounting_snapshot is not None:
+                    _accounting_snapshot_matches(profile, accounting_snapshot)
+                _advance_journal(journal_path, journal, "rolled_back")
+            except Exception as rollback_exc:
+                _advance_journal(journal_path, journal, "rollback_failed")
+                raise PolicyError(
+                    "Slurm policy apply failed and automatic rollback did not converge",
+                ) from rollback_exc
+            if isinstance(exc, PolicyError):
+                raise
+            raise PolicyError("Slurm policy apply failed and was rolled back") from exc
     return {
-        **plan(root, profile),
+        **plan(root, profile, candidate_sha=candidate),
         "mutation_authorized": True,
         "snapshot": str(snapshot),
+        "journal": str(journal_path),
+        "phase": "committed",
         "restart_requested": restart,
         "accounting_requested": apply_accounting,
+        "live_readback": live,
+    }
+
+
+def rollback(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str | None = None,
+) -> dict[str, Any]:
+    current_candidate = candidate_sha or source_candidate_sha()
+    _host, slurm_node = _validate_live_apply(
+        root,
+        profile,
+        candidate_sha=current_candidate,
+        restart=False,
+        apply_accounting=False,
+    )
+    with _domain_lock(root, profile):
+        _recover_orphan(root, profile, slurm_node=slurm_node)
+        _host, slurm_node = _validate_live_apply(
+            root,
+            profile,
+            candidate_sha=current_candidate,
+            restart=root == Path("/"),
+            apply_accounting=False,
+        )
+        journal_path = _journal_path(root, profile)
+        previous = _load_journal(journal_path)
+        if previous is None or previous.get("phase") != "committed":
+            raise PolicyError("no committed Slurm policy transaction is available to roll back")
+        target_raw = previous.get("snapshot")
+        if not isinstance(target_raw, str):
+            raise PolicyError("committed Slurm policy transaction lacks a snapshot")
+        target = Path(target_raw)
+        current_files = desired_files(
+            root,
+            profile,
+            candidate_sha=current_candidate,
+        )
+        current_snapshot = _snapshot(root, current_files)
+        current_accounting = (
+            _accounting_snapshot(root, profile, current_snapshot)
+            if isinstance(previous.get("accounting_snapshot"), str)
+            else None
+        )
+        transaction: dict[str, Any] = {
+            "schema_version": 1,
+            "operation": "rollback",
+            "cluster": profile.cluster,
+            "candidate_sha": current_candidate,
+            "snapshot": str(current_snapshot),
+            "accounting_snapshot": (
+                str(current_accounting) if current_accounting is not None else None
+            ),
+            "rollback_target": str(target),
+            "restart": root == Path("/"),
+            "apply_accounting": current_accounting is not None,
+            "phase": "prepared",
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_journal(journal_path, transaction)
+        try:
+            _restore_snapshot(root, target)
+            _advance_journal(journal_path, transaction, "files_written")
+            target_accounting = previous.get("accounting_snapshot")
+            if isinstance(target_accounting, str):
+                _restore_accounting(Path(target_accounting))
+            _advance_journal(journal_path, transaction, "accounting_applied")
+            if root == Path("/"):
+                if slurm_node is None:
+                    raise PolicyError("live rollback lacks an allowed Slurm node")
+                _restore_services(root, profile, slurm_node)
+            _advance_journal(journal_path, transaction, "services_reconfigured")
+            guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
+            live = _snapshot_readback(root, target)
+            if isinstance(target_accounting, str):
+                _accounting_snapshot_matches(profile, Path(target_accounting))
+            if guard_config.exists() and root == Path("/"):
+                try:
+                    restored_candidate = json.loads(
+                        guard_config.read_text(encoding="utf-8"),
+                    )["candidate_sha"]
+                except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                    raise PolicyError("restored guard candidate binding is invalid") from exc
+                if (
+                    not isinstance(restored_candidate, str)
+                    or _CANDIDATE_RE.fullmatch(restored_candidate) is None
+                ):
+                    raise PolicyError("restored guard candidate binding is invalid")
+                live["guard"] = _wait_for_guard_status(
+                    root,
+                    candidate_sha=restored_candidate,
+                    expected_config_sha256=_sha256(guard_config.read_bytes()),
+                    require_probe=False,
+                )
+            _advance_journal(journal_path, transaction, "verified")
+            _advance_journal(journal_path, transaction, "committed")
+        except Exception as exc:
+            try:
+                _restore_snapshot(root, current_snapshot)
+                if current_accounting is not None:
+                    _restore_accounting(current_accounting)
+                if root == Path("/") and slurm_node is not None:
+                    _restore_services(root, profile, slurm_node)
+                _snapshot_readback(root, current_snapshot)
+                if current_accounting is not None:
+                    _accounting_snapshot_matches(profile, current_accounting)
+                _advance_journal(journal_path, transaction, "rolled_back")
+            except Exception as rollback_exc:
+                _advance_journal(journal_path, transaction, "rollback_failed")
+                raise PolicyError(
+                    "Slurm policy rollback failed and prior state could not be restored",
+                ) from rollback_exc
+            if isinstance(exc, PolicyError):
+                raise
+            raise PolicyError("Slurm policy rollback failed safely") from exc
+    return {
+        "schema_version": 1,
+        "artifact_type": "developer-sandbox-slurm-policy-rollback",
+        "cluster": profile.cluster,
+        "mutation_authorized": True,
+        "restored_snapshot": str(target),
+        "recovery_snapshot": str(current_snapshot),
+        "journal": str(journal_path),
+        "phase": "committed",
+        "live_readback": live,
     }
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("command", choices=("plan", "check", "apply"))
+    parser.add_argument(
+        "command",
+        choices=("plan", "check", "apply", "rollback", "allocation-probe"),
+    )
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--root", type=Path, default=Path("/"))
+    parser.add_argument("--candidate-sha")
+    parser.add_argument("--candidate-root", type=Path)
+    parser.add_argument("--worker-env", type=Path)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--apply-accounting", action="store_true")
@@ -604,18 +1998,60 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
         profile = load_profile(args.profile)
+        candidate = args.candidate_sha or source_candidate_sha()
         if args.command == "apply" and args.execute:
             result = apply(
                 args.root,
                 profile,
                 restart=args.restart,
                 apply_accounting=args.apply_accounting,
+                candidate_sha=candidate,
+            )
+        elif args.command == "rollback" and args.execute:
+            result = rollback(args.root, profile, candidate_sha=candidate)
+        elif args.command == "allocation-probe" and args.execute:
+            if args.candidate_root is None or args.worker_env is None:
+                raise PolicyError(
+                    "allocation-probe requires --candidate-root and --worker-env",
+                )
+            result = run_allocation_probe(
+                args.root,
+                profile,
+                candidate_sha=candidate,
+                candidate_root=args.candidate_root,
+                worker_env=args.worker_env,
             )
         else:
-            result = plan(args.root, profile)
-            if args.command == "check" and not all(row["converged"] for row in result["files"]):
-                sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
-                return 1
+            result = plan(args.root, profile, candidate_sha=candidate)
+            if args.command == "check":
+                if not result["file_plan"]["converged"]:
+                    sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+                    return 1
+                if args.root == Path("/"):
+                    verify_source_candidate(candidate)
+                    if args.candidate_root is None or args.worker_env is None:
+                        raise PolicyError(
+                            "live check requires --candidate-root and --worker-env",
+                        )
+                    binding = strict_candidate_binding(
+                        args.candidate_root,
+                        args.worker_env,
+                        candidate_sha=candidate,
+                    )
+                    result["live_readback"] = live_readback(
+                        args.root,
+                        profile,
+                        candidate_sha=candidate,
+                        require_probe=True,
+                        check_accounting=True,
+                        candidate_binding=binding,
+                        require_allocation_probe=True,
+                    )
+                else:
+                    result["live_readback"] = {
+                        "converged": None,
+                        "performed": False,
+                    }
         sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
         return 0
     except PolicyError as exc:

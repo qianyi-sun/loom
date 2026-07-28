@@ -7,7 +7,7 @@ Requires=slurmd.service
 Type=simple
 User=root
 Group=root
-ExecStart=/usr/bin/python3 -I -B /usr/libexec/loom-slurm-job-cgroup-guard --config /etc/loom/slurm-job-cgroup-guard.json run
+ExecStart=/usr/bin/python3 -I -B /usr/libexec/loom-slurm-job-cgroup-guard --config /etc/loom/slurm-job-cgroup-guard.json --status /var/lib/loom-developer-sandbox-slurm-policy/guard-status.json run
 Restart=always
 RestartSec=1s
 UMask=0077
@@ -16,7 +16,9 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadOnlyPaths=/etc/loom/slurm-job-cgroup-guard.json
-ReadWritePaths=/sys/fs/cgroup
+StateDirectory=loom-developer-sandbox-slurm-policy
+StateDirectoryMode=0700
+ReadWritePaths=/sys/fs/cgroup /var/lib/loom-developer-sandbox-slurm-policy
 
 [Install]
 WantedBy=multi-user.target
