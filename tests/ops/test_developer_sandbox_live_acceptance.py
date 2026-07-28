@@ -656,18 +656,28 @@ def test_late_checkpoint_create_failure_is_not_mistaken_for_durable_replay(
         / "checkpoints/00-preflight.json"
     )
     payload = {"schema_version": 1, "phase": "preflight"}
-    original_create = ACCEPTANCE._write_secure_exclusive
+    original_fsync_directory = ACCEPTANCE._fsync_directory
+    destination_fsync_attempts = 0
 
-    def fail_after_visible(path: Path, value: dict[str, Any]) -> None:
-        original_create(path, value)
-        raise ACCEPTANCE.AcceptanceError("simulated directory fsync failure")
+    def fail_first_destination_fsync(path: Path) -> None:
+        nonlocal destination_fsync_attempts
+        if path == destination.parent:
+            destination_fsync_attempts += 1
+            if destination_fsync_attempts == 1:
+                raise OSError("simulated directory fsync failure")
+        original_fsync_directory(path)
 
-    monkeypatch.setattr(ACCEPTANCE, "_write_secure_exclusive", fail_after_visible)
-    with pytest.raises(ACCEPTANCE.AcceptanceError, match="directory fsync failure"):
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "_fsync_directory",
+        fail_first_destination_fsync,
+    )
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="cannot create"):
         ACCEPTANCE._write_or_verify_secure(destination, payload)
+    assert destination.is_file()
 
-    monkeypatch.setattr(ACCEPTANCE, "_write_secure_exclusive", original_create)
     ACCEPTANCE._write_or_verify_secure(destination, payload)
+    assert destination_fsync_attempts == 2
 
 
 def test_checkpoint_is_crash_idempotent_and_rejects_changed_phase(

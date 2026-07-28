@@ -812,6 +812,33 @@ def _secure_json_load(path: Path) -> Any:
         raise AcceptanceError("acceptance state file contains invalid JSON") from exc
 
 
+def _fsync_secure_file(path: Path) -> None:
+    """Re-establish leaf and directory durability for an idempotent replay."""
+
+    _validate_secure_directory(path.parent)
+    before = _secure_file_metadata(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AcceptanceError("cannot open acceptance state file safely") from exc
+    try:
+        opened = os.fstat(descriptor)
+        _validate_secure_file_metadata(opened)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise AcceptanceError("acceptance state file changed before fsync")
+        os.fsync(descriptor)
+        after = path.lstat()
+        _validate_secure_file_metadata(after)
+        if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+            raise AcceptanceError("acceptance state file changed during fsync")
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        raise AcceptanceError("cannot fsync acceptance state safely") from exc
+    finally:
+        os.close(descriptor)
+
+
 def _prepare_secure_descriptor(descriptor: int) -> None:
     os.fchmod(descriptor, 0o600)
     os.fchown(descriptor, REQUIRED_OWNER_UID, REQUIRED_OWNER_GID)
@@ -854,6 +881,7 @@ def _write_or_verify_secure(path: Path, payload: Mapping[str, Any]) -> None:
         actual = _secure_bytes_load(path)
         if actual != expected:
             raise AcceptanceError("existing acceptance state file does not match") from None
+        _fsync_secure_file(path)
 
 
 def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
