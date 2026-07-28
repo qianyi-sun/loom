@@ -221,19 +221,48 @@ class FixedGB10SSHTransport:
         # Retry transient transport failures (unreachable bastion, non-zero exit,
         # stderr noise, oversize/unparseable output) within the settle budget; a
         # host that never yields a well-formed observation still fails closed.
+        # A well-formed observation whose only non-exact reason is a healthy
+        # node-agent oneshot momentarily firing (``service_timer_transient``) is
+        # also settled within the budget: the durable checkout/env/units are
+        # converged and the timer will return to "waiting" once the oneshot
+        # completes, so the fleet is not held drifted by ordinary reconcile
+        # activity. A durably non-exact host (a real mutation is required) or an
+        # exact host is returned immediately.
+        last: GB10HostCandidateObservation | None = None
         for attempt in range(self.settle_attempts):
-            observation = self._observe_once(target, plan)
-            if observation is not None:
-                return observation
+            outcome = self._observe_once(target, plan)
+            if outcome is not None:
+                observation, service_timer_transient = outcome
+                last = observation
+                if not self._settling_node_agent(observation, service_timer_transient):
+                    return observation
             if attempt + 1 < self.settle_attempts:
                 self.sleep(self.settle_interval_seconds)
-        return self._failed_observation(target)
+        return last if last is not None else self._failed_observation(target)
+
+    @staticmethod
+    def _settling_node_agent(
+        observation: GB10HostCandidateObservation,
+        service_timer_transient: bool,
+    ) -> bool:
+        """Whether the host is non-exact ONLY because its node-agent is firing."""
+        return (
+            service_timer_transient
+            and not observation.exact
+            and not observation.service_timer_exact
+            and observation.baseline_ready
+            and observation.candidate_source_exact
+            and observation.checkout_exact
+            and observation.environment_exact
+            and observation.units_exact
+            and observation.legacy_absent
+        )
 
     def _observe_once(
         self,
         target: GB10TransportTarget,
         plan: FinalGatePlan,
-    ) -> GB10HostCandidateObservation | None:
+    ) -> tuple[GB10HostCandidateObservation, bool] | None:
         command = _remote_observation_command(target, plan)
         try:
             result = self.run(self._ssh_argv(target, command))
@@ -249,6 +278,11 @@ class FixedGB10SSHTransport:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
             return None
+        # ``service_timer_transient`` reports that the node-agent oneshot is
+        # momentarily firing (timer SubState "running" rather than "waiting").
+        # It is settle-only signalling and is deliberately excluded from the
+        # exactness evidence digest so the durable convergence digest never folds
+        # in that volatile runtime substate.
         expected = {
             "baseline_ready",
             "boot_id",
@@ -257,6 +291,7 @@ class FixedGB10SSHTransport:
             "environment_exact",
             "legacy_absent",
             "service_timer_exact",
+            "service_timer_transient",
             "units_exact",
         }
         if (
@@ -266,8 +301,10 @@ class FixedGB10SSHTransport:
             or any(type(payload[key]) is not bool for key in expected - {"boot_id"})
         ):
             return None
-        evidence_digest = _hash_json(payload)
-        return GB10HostCandidateObservation(
+        evidence_digest = _hash_json(
+            {key: payload[key] for key in payload if key != "service_timer_transient"}
+        )
+        observation = GB10HostCandidateObservation(
             host=target.ssh_target,
             boot_id=payload["boot_id"],
             baseline_ready=payload["baseline_ready"],
@@ -279,6 +316,7 @@ class FixedGB10SSHTransport:
             service_timer_exact=payload["service_timer_exact"],
             evidence_digest=evidence_digest,
         )
+        return observation, payload["service_timer_transient"]
 
     def _apply_one(
         self,
@@ -513,6 +551,13 @@ service_timer_exact = bool(service_props == {{"LoadState": "loaded", "Type": "on
     and timer_props == {{"LoadState": "loaded", "ActiveState": "active",
     "SubState": "waiting", "Unit": service, "NeedDaemonReload": "no"}}
     and timer_enabled.returncode == 0 and timer_enabled.stdout.strip() == "enabled")
+service_timer_transient = bool(service_props is not None
+    and service_props.get("LoadState") == "loaded"
+    and service_props.get("Type") == "oneshot"
+    and service_props.get("NeedDaemonReload") == "no"
+    and timer_props == {{"LoadState": "loaded", "ActiveState": "active",
+    "SubState": "running", "Unit": service, "NeedDaemonReload": "no"}}
+    and timer_enabled.returncode == 0 and timer_enabled.stdout.strip() == "enabled")
 legacy_enabled = run(["systemctl", "--user", "is-enabled", legacy])
 legacy_props = properties(legacy, ["LoadState", "ActiveState", "SubState"])
 legacy_absent = bool(legacy_enabled.returncode != 0 and (
@@ -527,6 +572,7 @@ print(json.dumps({{
     "environment_exact": exact_environment(),
     "legacy_absent": legacy_absent,
     "service_timer_exact": service_timer_exact,
+    "service_timer_transient": service_timer_transient,
     "units_exact": exact_units(),
 }}, sort_keys=True, separators=(",", ":")))"""
 

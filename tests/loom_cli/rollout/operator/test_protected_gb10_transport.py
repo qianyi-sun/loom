@@ -62,6 +62,7 @@ def test_fixed_transport_observes_exact_candidate_without_remote_mutation(tmp_pa
         "environment_exact": False,
         "legacy_absent": True,
         "service_timer_exact": False,
+        "service_timer_transient": False,
         "units_exact": False,
     }
 
@@ -142,6 +143,7 @@ def test_fixed_transport_retries_transient_observe_failure(tmp_path) -> None:
         "environment_exact": True,
         "legacy_absent": True,
         "service_timer_exact": True,
+        "service_timer_transient": False,
         "units_exact": True,
     }
 
@@ -193,6 +195,7 @@ def test_fixed_transport_does_not_retry_a_valid_drifted_observation(tmp_path) ->
         "environment_exact": False,
         "legacy_absent": True,
         "service_timer_exact": False,
+        "service_timer_transient": False,
         "units_exact": False,
     }
 
@@ -206,6 +209,71 @@ def test_fixed_transport_does_not_retry_a_valid_drifted_observation(tmp_path) ->
     # A well-formed observation is authoritative -- genuine drift is never retried.
     assert not observed.hosts["trt-gb10-1"].applicable
     assert observed.hosts["trt-gb10-1"].boot_id == "boot-1"
+    assert calls == 1
+    assert sleeps == []
+
+
+def test_fixed_transport_settles_a_firing_node_agent_to_exact(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1")
+    calls = 0
+    sleeps: list[float] = []
+    firing = {
+        "baseline_ready": True,
+        "boot_id": "boot-1",
+        "candidate_source_exact": True,
+        "checkout_exact": True,
+        "environment_exact": True,
+        "legacy_absent": True,
+        "service_timer_exact": False,
+        "service_timer_transient": True,
+        "units_exact": True,
+    }
+    settled = {**firing, "service_timer_exact": True, "service_timer_transient": False}
+
+    def run(argv):
+        nonlocal calls
+        calls += 1
+        # The node-agent oneshot fires on the first two observes; then the timer
+        # returns to "waiting" and the host reads exact.
+        return subprocess.CompletedProcess(
+            argv, 0, json.dumps(firing if calls < 3 else settled), ""
+        )
+
+    observed = _retrying_transport(run, _target(), sleeps=sleeps).observe(plan)
+
+    assert observed.hosts["trt-gb10-1"].exact
+    assert calls == 3
+    assert sleeps == [0.5, 0.5]
+
+
+def test_fixed_transport_does_not_settle_a_durably_non_exact_host(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1")
+    calls = 0
+    sleeps: list[float] = []
+    # checkout_exact is False -- a real convergence mutation is required -- so even
+    # with the timer firing the observation is authoritative and returned at once.
+    payload = {
+        "baseline_ready": True,
+        "boot_id": "boot-1",
+        "candidate_source_exact": True,
+        "checkout_exact": False,
+        "environment_exact": True,
+        "legacy_absent": True,
+        "service_timer_exact": False,
+        "service_timer_transient": True,
+        "units_exact": True,
+    }
+
+    def run(argv):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    observed = _retrying_transport(run, _target(), sleeps=sleeps).observe(plan)
+
+    host = observed.hosts["trt-gb10-1"]
+    assert not host.exact
+    assert host.applicable
     assert calls == 1
     assert sleeps == []
 
