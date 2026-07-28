@@ -1,0 +1,22 @@
+[Unit]
+Description=Apply reviewed PID ceilings to Loom Slurm job cgroups
+After=slurmd.service
+Requires=slurmd.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I -B /usr/libexec/loom-slurm-job-cgroup-guard --config /etc/loom/slurm-job-cgroup-guard.json run
+Restart=always
+RestartSec=1s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/loom/slurm-job-cgroup-guard.json
+ReadWritePaths=/sys/fs/cgroup
+
+[Install]
+WantedBy=multi-user.target

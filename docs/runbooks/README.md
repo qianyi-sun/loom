@@ -47,6 +47,9 @@ environments. `docs/index.md` at the repo docs root is the task-router.
 9. **[shared-sandbox-capacity-broker.md](shared-sandbox-capacity-broker.md)** —
    submit-host request/lease, fair-share, drain, observation, and evidence
    contract for the three disposable developer sandboxes sharing GB10/OLDLAB.
+10. [`developer-sandbox-slurm-policy.md`](developer-sandbox-slurm-policy.md) —
+   canonical OLDLAB/GB10 cgroup, accounting, QoS, fair-share, and rolling host
+   convergence contract for non-exclusive developer-sandbox workers.
 
 ## When to open a new runbook
 
