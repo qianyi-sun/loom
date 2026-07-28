@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import traceback
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -63,6 +64,34 @@ def _backup_failure_code(error: BaseException) -> str:
     return "backup_failed"
 
 
+def _backup_failure_diagnostic_text(error: BaseException) -> str | None:
+    """Secret-safe diagnostic text for a sealed backup failure.
+
+    A ``BackupError`` carries a curated, already-secret-safe ``diagnostic``.
+    An unanticipated (non-``BackupError``) failure previously produced no
+    diagnostic at all, so the worker collapsed it to a bare ``backup_failed``
+    with no operator-visible reason (#924) — leaving the real cause
+    unrecoverable.
+
+    An arbitrary exception's *message* cannot be assumed secret-safe (only
+    best-effort redaction applies), so we deliberately do not surface it here;
+    failure paths with known-safe context must raise ``BackupError`` with a
+    curated code+diagnostic instead. What we can always surface safely is the
+    exception *type name* and the raise-site *code location* (file, line, and
+    function) — neither carries runtime values or secrets — which is enough to
+    attribute a generic ``backup_failed`` to a specific point in the source and
+    distinguish an unclassified crash from a handled backup outcome.
+    """
+    if isinstance(error, BackupError):
+        return error.diagnostic
+    location = ""
+    frames = traceback.extract_tb(error.__traceback__)
+    if frames:
+        last = frames[-1]
+        location = f" at {Path(last.filename).name}:{last.lineno} in {last.name}"
+    return f"unclassified backup failure: {type(error).__name__}{location}"
+
+
 def _write_backup_failure_diagnostic(
     dependencies: WorkerDependencies,
     *,
@@ -71,7 +100,7 @@ def _write_backup_failure_diagnostic(
     failure_code: str,
     error: BaseException,
 ) -> None:
-    diagnostic = error.diagnostic if isinstance(error, BackupError) else None
+    diagnostic = _backup_failure_diagnostic_text(error)
     if diagnostic is None:
         return
     safe_diagnostic = redact_rollout_text(diagnostic, limit=8 * 1024)

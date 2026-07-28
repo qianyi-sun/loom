@@ -618,13 +618,14 @@ def test_backup_worker_redacts_unclassified_failure_text(tmp_path: Path) -> None
     def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
         raise ValueError("secret-bearing diagnostic")
 
+    stderr = io.StringIO()
     deps = WorkerDependencies(
         store=store,
         lifecycle=object(),
         run_driver=lambda _path, _resume: 0,
         run_backup=fail_backup,
         now=lambda: "2026-07-19T22:00:00Z",
-        stderr=io.StringIO(),
+        stderr=stderr,
     )
 
     assert run_backup_job(job, deps) == 1
@@ -635,6 +636,40 @@ def test_backup_worker_redacts_unclassified_failure_text(tmp_path: Path) -> None
         store.root / "requests" / REQUEST_ID / "preflight-backup" / "state.json"
     ).read_text()
     assert "secret-bearing" not in persisted
+    # The unclassified (non-BackupError) message is never surfaced, but the
+    # exception class must be — so the generic backup_failed is no longer a
+    # dead end (#924).
+    assert "secret-bearing" not in stderr.getvalue()
+    assert "unclassified backup failure: ValueError" in stderr.getvalue()
+
+
+def test_backup_worker_unclassified_failure_pinpoints_raise_site(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        raise RuntimeError("value=private-token")
+
+    stderr = io.StringIO()
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=fail_backup,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=stderr,
+    )
+
+    assert run_backup_job(job, deps) == 1
+    rendered = stderr.getvalue()
+    # Secret-safe: class + raise-site code location surface; the message does not.
+    assert "private-token" not in rendered
+    assert "unclassified backup failure: RuntimeError" in rendered
+    assert "test_worker.py" in rendered
+    assert "in fail_backup" in rendered
+    # The durable public reason stays the safe generic fallback.
+    event = store.read_events(REQUEST_ID)[-1]
+    assert event.event == "backup_failed"
+    assert event.reason == "backup_failed"
 
 
 def _install_fake_signal_handlers(
