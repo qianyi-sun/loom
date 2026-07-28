@@ -1929,6 +1929,41 @@ async def _apply_slurm_prod_pressure_drain(
     terminal_jobs = list(
         (await session.execute(terminal_stmt.with_for_update())).scalars().all(),
     )
+    registered_workers: list[Worker] = []
+    if capacity_retiring:
+        # A sandbox Control Plane is itself the environment boundary, so the
+        # pool name closes the Worker registry scope here.  Do not infer that
+        # an empty SlurmWorkerJob query means the pool is empty: a worker row
+        # can outlive, or become detached from, its allocation row.
+        registered_workers = list(
+            (
+                await session.execute(
+                    select(Worker)
+                    .where(
+                        Worker.pool_name == row.pool_name,
+                        Worker.status == "active",
+                    )
+                    .with_for_update(),
+                )
+            )
+            .scalars()
+            .all(),
+        )
+        registered_worker_ids = {worker.id for worker in registered_workers}
+        if registered_worker_ids:
+            await session.execute(
+                update(Worker)
+                .where(
+                    Worker.id.in_(registered_worker_ids),
+                    Worker.drain_state == "active",
+                )
+                .values(
+                    drain_state="draining",
+                    drain_requested_at=now,
+                    drain_reason="shared capacity lease retirement",
+                    drain_owner="shared-capacity-retirement",
+                ),
+            )
 
     relevant_worker_ids = {
         job.worker_id for job in (*active_jobs, *terminal_jobs) if job.worker_id is not None
@@ -2053,6 +2088,21 @@ async def _apply_slurm_prod_pressure_drain(
         for job in active_jobs
         if job.state in ACTIVE_STATES and job.worker_id is not None
     }
+    terminal_proven_worker_ids = {
+        job.worker_id
+        for job in terminal_jobs
+        if job.worker_id is not None and job.worker_id not in remaining_active_worker_ids
+    }
+    unmatched_worker_ids = (
+        {
+            worker.id
+            for worker in registered_workers
+            if worker.id not in remaining_active_worker_ids
+            and worker.id not in terminal_proven_worker_ids
+        }
+        if capacity_retiring
+        else set()
+    )
     settled_worker_ids: set[Any] = set()
     retryable_trial_ids: set[str] = set()
     for job in terminal_jobs:
@@ -2115,6 +2165,7 @@ async def _apply_slurm_prod_pressure_drain(
         and not remaining_active_jobs
         and not cancel_failed_job_ids
         and not awaiting_job_ids
+        and not unmatched_worker_ids
     ):
         assert capacity_state is not None
         row.capacity_lease_state = {
@@ -2123,6 +2174,8 @@ async def _apply_slurm_prod_pressure_drain(
             "retired_at": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
         action = "shared_capacity_retired"
+    elif unmatched_worker_ids:
+        action = "shared_capacity_worker_reconciliation_blocked"
     elif cancel_failed_job_ids:
         action = (
             "shared_capacity_cancel_blocked"
@@ -2143,6 +2196,7 @@ async def _apply_slurm_prod_pressure_drain(
         "awaiting_terminal_job_ids": sorted(set(awaiting_job_ids)),
         "cancel_failed_job_ids": sorted(cancel_failed_job_ids),
         "held_busy_job_ids": sorted(held_busy_job_ids),
+        "unmatched_worker_ids": sorted(str(worker_id) for worker_id in unmatched_worker_ids),
         "settled_worker_count": len(settled_worker_ids),
         "retryable_trial_count": len(retryable_trial_ids),
     }
@@ -2430,6 +2484,8 @@ async def reconcile_worker_pool_autoscaler_once(
                         f"{len(prod_pressure_summary['awaiting_terminal_job_ids'])} "
                         f"cancel_failed={len(prod_pressure_summary['cancel_failed_job_ids'])} "
                         f"held_busy={len(prod_pressure_summary['held_busy_job_ids'])} "
+                        "unmatched_workers="
+                        f"{len(prod_pressure_summary['unmatched_worker_ids'])} "
                         f"retryable_trials={prod_pressure_summary['retryable_trial_count']}"
                     ),
                     policy=_policy_to_config(row),
@@ -2442,6 +2498,13 @@ async def reconcile_worker_pool_autoscaler_once(
                         "prod-pressure scancel failed for "
                         f"{len(prod_pressure_summary['cancel_failed_job_ids'])} job(s); "
                         "capacity remains draining"
+                    )
+                elif prod_pressure_summary["unmatched_worker_ids"]:
+                    row.last_error = (
+                        "shared capacity retirement found "
+                        f"{len(prod_pressure_summary['unmatched_worker_ids'])} "
+                        "active worker registration(s) without terminal allocation proof; "
+                        "capacity remains retiring"
                     )
                 elif actuator_error is not None:
                     row.last_error = actuator_error

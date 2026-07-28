@@ -79,7 +79,7 @@ WITH next AS (
                AND p.actuator = 'slurm'
                AND (
                     p.prod_pressure_state->>'state' = 'draining'
-                    OR p.capacity_lease_state->>'state' = 'retiring'
+                    OR p.capacity_lease_state->>'state' IN ('retiring', 'retired')
                )
           )
      )

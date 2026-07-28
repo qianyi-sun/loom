@@ -1179,6 +1179,7 @@ async def test_disabled_shared_capacity_cancels_pending_and_retires(
             job.state = "pending"
             job.slurm_state = "PENDING"
             job.worker_id = None
+            await s.execute(delete(Worker))
             policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
             policy.enabled = False
             policy.max_slots = 0
@@ -1208,6 +1209,69 @@ async def test_disabled_shared_capacity_cancels_pending_and_retires(
         assert policy.enabled is False
         assert policy.capacity_lease_state["state"] == "retired"
         assert job.state == "cancelled"
+    finally:
+        await engine.dispose()
+
+
+async def test_shared_capacity_retirement_blocks_on_orphan_worker_registration(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        worker_id, _job_id, _trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state=None,
+        )
+        async with session_factory() as s:
+            await s.execute(delete(SlurmWorkerJob))
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            policy.enabled = False
+            policy.max_slots = 0
+            policy.capacity_lease_state = _capacity_lease_state(
+                state="retiring",
+                now=now,
+                preemptible=False,
+            )
+            await s.commit()
+
+        async with session_factory() as s:
+            blocked = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now + timedelta(seconds=30),
+                slurm_runner=FakeSlurmRunner(),
+            )
+            await s.commit()
+
+        assert blocked[0].action == "shared_capacity_worker_reconciliation_blocked"
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            worker = await s.get(Worker, worker_id)
+        assert policy.capacity_lease_state["state"] == "retiring"
+        assert "without terminal allocation proof" in (policy.last_error or "")
+        assert worker is not None
+        assert worker.drain_state == "draining"
+        assert worker.drain_owner == "shared-capacity-retirement"
+
+        async with session_factory() as s:
+            await s.execute(delete(Worker).where(Worker.id == worker_id))
+            await s.commit()
+        async with session_factory() as s:
+            retired = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now + timedelta(seconds=60),
+                slurm_runner=FakeSlurmRunner(),
+            )
+            await s.commit()
+
+        assert retired[0].action == "shared_capacity_retired"
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+        assert policy.capacity_lease_state["state"] == "retired"
     finally:
         await engine.dispose()
 
@@ -1727,5 +1791,99 @@ async def test_claim_is_fenced_while_slurm_pool_is_draining(
             await s.commit()
         assert claimed is not None
         assert claimed["task_id"] == "t"
+    finally:
+        await engine.dispose()
+
+
+async def test_claim_stays_fenced_for_retired_shared_capacity_binding(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    worker_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Team).values(id=team_id, name=f"retired-{team_id}"))
+            await s.execute(insert(TeamQuota).values(team_id=team_id))
+            await s.execute(insert(Task).values(id="retired-task", checksum="0" * 64, config={}))
+            await s.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    task_id="retired-task",
+                    config={},
+                    requires_caps={
+                        "os": "linux",
+                        "gpu_vendor": "none",
+                        "network_policies": ["public"],
+                        "worker_pool": "oldlab",
+                    },
+                    state="queued",
+                ),
+            )
+            await s.execute(
+                insert(Worker).values(
+                    id=worker_id,
+                    hostname="oldlab-1",
+                    version="v",
+                    capabilities=[
+                        {
+                            "os": "linux",
+                            "gpu_vendor": "none",
+                            "network_policies": ["public"],
+                            "dynamic_network_policy": True,
+                            "mounted_fs": True,
+                            "resource_modes": ["auto"],
+                        }
+                    ],
+                    pool_name="oldlab",
+                    drain_state="active",
+                    registered_at=now,
+                    last_seen_at=now,
+                    status="active",
+                ),
+            )
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(
+                        enabled=False,
+                        max_slots=0,
+                        capacity_lease_state=_capacity_lease_state(
+                            state="retired",
+                            now=now,
+                        ),
+                    ),
+                ),
+            )
+            await s.commit()
+
+        claim_kwargs = {
+            "worker_id": worker_id,
+            "worker_os": ["linux"],
+            "worker_cpu_arches": ["x86_64"],
+            "worker_gpu_vendors": ["none"],
+            "worker_network_policies": ["public"],
+        }
+        async with session_factory() as s:
+            assert await claim_one(s, **claim_kwargs) is None
+            await s.commit()
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            policy.enabled = True
+            policy.max_slots = 6
+            policy.capacity_lease_state = _capacity_lease_state(
+                state="active",
+                now=now,
+                epoch=4,
+            )
+            await s.commit()
+        async with session_factory() as s:
+            claimed = await claim_one(s, **claim_kwargs)
+            await s.commit()
+        assert claimed is not None
+        assert claimed["task_id"] == "retired-task"
     finally:
         await engine.dispose()
