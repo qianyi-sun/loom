@@ -1193,6 +1193,67 @@ temp dirs, or trajectory cache files.
 
 ## Validation Gate
 
+### Non-exclusive Slurm containment acceptance
+
+Non-exclusive Slurm workers stay disabled until a candidate-bound evidence
+artifact passes the repository acceptance tool. The tool is intentionally
+non-mutating: it does not run SSH, Slurm, Docker, or shell commands, and it
+cannot activate workers. Live observation is a separate operator action that
+requires its own authority.
+
+Review the contract before collecting anything:
+
+```bash
+python scripts/ops/nonexclusive_slurm_acceptance.py plan
+```
+
+The evidence contract is
+[`docs/evidence/nonexclusive-slurm-acceptance-v1.schema.json`](../evidence/nonexclusive-slurm-acceptance-v1.schema.json).
+Build a secret-free JSON snapshot from separately authorized, read-only
+observations. Do not store raw `docker inspect`, environment variables,
+headers, URLs with credentials, command transcripts, or service responses.
+Record only the bounded fields allowed by the schema.
+
+The snapshot must bind one full candidate SHA to the exact sandbox, node,
+Slurm job, and Compose project. It must include exactly the worker, trial,
+verifier, and sidecar containers; prove that every container is a strict child
+of the finite Slurm job cgroup; and account conservatively for the sum of all
+CPU, memory, PID, and device caps. It also requires:
+
+- allocated-device usability and denial of an unallocated device;
+- reviewed node CPU, memory, PID, concurrency, Kubernetes, MinIO, and Longhorn
+  headroom;
+- every ordered cross-sandbox pair for worker identity, object storage, and
+  result paths, with every probe denied;
+- a mixed Loom, non-Loom Slurm, Kubernetes, MinIO, and Longhorn soak; and
+- cancellation, TTL-expiry, worker-crash, and submit-host-restart cleanup
+  checkpoints with no surviving job/container and durable retryable trial
+  state.
+
+After the read-only observation is complete, canonicalize it:
+
+```bash
+python scripts/ops/nonexclusive_slurm_acceptance.py collect \
+  --input /secure/operator/nonexclusive-observed.json \
+  --output /secure/operator/nonexclusive-evidence.json
+```
+
+`collect` writes nothing when any required field or checkpoint fails and will
+not overwrite an existing output artifact. Verify the resulting artifact again
+on any offline review host:
+
+```bash
+python scripts/ops/nonexclusive_slurm_acceptance.py verify \
+  --evidence /secure/operator/nonexclusive-evidence.json
+```
+
+Stop and keep non-exclusive workers disabled if the candidate identity is
+ambiguous, any cgroup ancestry or controller is missing, aggregate caps exceed
+the Slurm allocation, device isolation is incomplete, a headroom/soak/cleanup
+threshold is missed, a cross-sandbox probe succeeds, or any secret-like field
+or value is present. A passing artifact is acceptance evidence only; this
+repository tool does not grant rollout or activation authority.
+
 Before treating a remote worker pool as usable:
 
 1. Install or verify durable control-node service tunnels with

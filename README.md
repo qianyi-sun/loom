@@ -252,6 +252,9 @@ Primary runbooks:
   [`docs/runbooks/operator-runbook.md`](docs/runbooks/operator-runbook.md)
 - Remote worker capacity:
   [`docs/runbooks/remote-worker-pool.md`](docs/runbooks/remote-worker-pool.md)
+  (including the repo-only, fail-closed
+  [non-exclusive Slurm containment acceptance](docs/runbooks/remote-worker-pool.md#non-exclusive-slurm-containment-acceptance)
+  workflow)
 
 ## Where to Read More
 
