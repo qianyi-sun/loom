@@ -110,6 +110,58 @@ def _normalized_expression(value: str) -> str:
     return " ".join(value.split())
 
 
+ACCELERATOR_RUNS_ON = (
+    "${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || "
+    """'["ubuntu-latest"]') }}"""
+)
+
+ACCELERATED_JOBS = {
+    ".github/workflows/ci.yml": {
+        "lint-and-static",
+        "tests-root",
+        "tests-packages",
+        "runtime-payload",
+        "go-checks",
+        "web-checks",
+        "integration",
+        "integration-docker",
+    },
+    ".github/workflows/images.yml": {"build"},
+    ".github/workflows/cluster-smoke.yml": {"smoke"},
+    ".github/workflows/staging-smoke.yml": {"smoke", "system-smoke"},
+    ".github/workflows/cluster-deploy-spikes.yml": {
+        "docker-only-spikes",
+        "k8s-spikes",
+    },
+}
+
+GITHUB_HOSTED_CONTROL_JOBS = {
+    ".github/workflows/ci.yml": {
+        "workflow-plan",
+        "fast-checks",
+        "coverage-summary",
+        "repository-checks",
+    },
+    ".github/workflows/images.yml": {"plan", "publish", "images-gate"},
+    ".github/workflows/cluster-smoke.yml": {"plan", "cluster-smoke-gate"},
+    ".github/workflows/staging-smoke.yml": {"plan", "staging-smoke-gate"},
+}
+
+
+def test_profitable_ci_jobs_use_opt_in_accelerator_with_hosted_default() -> None:
+    for workflow_path, job_ids in ACCELERATED_JOBS.items():
+        jobs = _workflow(workflow_path)["jobs"]
+        for job_id in job_ids:
+            assert jobs[job_id]["runs-on"] == ACCELERATOR_RUNS_ON
+
+
+def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
+    for workflow_path, job_ids in GITHUB_HOSTED_CONTROL_JOBS.items():
+        jobs = _workflow(workflow_path)["jobs"]
+        for job_id in job_ids:
+            assert jobs[job_id]["runs-on"] == "ubuntu-latest"
+
+
 def test_source_workflows_share_authoritative_generation_marker() -> None:
     workflows = {path: _workflow(path) for path in GATE_CONTRACTS}
     run_names = {workflow["run-name"] for workflow in workflows.values()}

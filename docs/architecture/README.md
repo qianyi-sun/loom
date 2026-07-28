@@ -91,6 +91,9 @@ there.
 
 ## Deployment shapes
 
+- **[ci-runner-acceleration.md](ci-runner-acceleration.md)** — opt-in
+  GitHub-hosted/self-hosted runner routing, oldlab-5 ephemeral-KVM isolation
+  prerequisites, activation, and rollback.
 - **[cluster-deploy.md](cluster-deploy.md)** — the `loom cluster` CLI:
   `render`, `preflight`, `audit`, `up`, `down`, `doctor`,
   `bootstrap-secrets`.
