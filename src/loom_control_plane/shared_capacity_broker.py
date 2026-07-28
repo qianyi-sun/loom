@@ -9,6 +9,7 @@ policy.  Sandboxes never mutate the shared budget directly.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -32,10 +33,29 @@ _SECRET_HINT_RE = re.compile(
     r"\bsk-[A-Za-z0-9_-]{8,})",
     re.IGNORECASE,
 )
-_SCHEMA_VERSION = "1"
+_SCHEMA_VERSION = "2"
+_PREVIOUS_SCHEMA_VERSION = "1"
 _MAX_TTL_SECONDS = 24 * 60 * 60
 _MAX_REQUEST_SLOTS = 10_000
 _MAX_BUDGET_SLOTS = 100_000
+_OBSERVATION_MAX_AGE = timedelta(seconds=60)
+_OBSERVATION_MAX_FUTURE_SKEW = timedelta(seconds=30)
+_OBSERVATION_LEASE_STATES = {"active", "retiring", "retired"}
+_OBSERVATION_FIELDS = {
+    "sandbox",
+    "pool_name",
+    "candidate_sha",
+    "request_id",
+    "lease_epoch",
+    "capacity_lease_state",
+    "observed_at",
+    "observation_sequence",
+    "pending_slots",
+    "active_slots",
+    "draining_slots",
+    "terminal_slots",
+    "payload_sha256",
+}
 
 
 class BrokerError(ValueError):
@@ -95,6 +115,9 @@ class CapacityLease:
     terminal_slots: int
     state: RequestState
     last_observed_at: str | None
+    last_observation_sequence: int | None
+    last_observation_digest: str | None
+    last_policy_lease_state: str | None
     updated_at: str
 
     @property
@@ -113,24 +136,94 @@ class CapacityLease:
 
 @dataclass(frozen=True, slots=True)
 class LeaseObservation:
+    sandbox: SandboxId
+    pool_name: str
+    candidate_sha: str
     request_id: str
     lease_epoch: int
+    capacity_lease_state: str
+    observed_at: str
+    observation_sequence: int
     pending_slots: int
     active_slots: int
     draining_slots: int
     terminal_slots: int
+    payload_sha256: str
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> LeaseObservation:
+        if set(value) != _OBSERVATION_FIELDS:
+            raise BrokerError("observation fields do not match the closed schema")
+        try:
+            sandbox = SandboxId(_exact_text(value.get("sandbox"), "sandbox"))
+        except ValueError as exc:
+            raise BrokerError("observation sandbox is not in the fixed allowlist") from exc
+        pool_name = _exact_text(value.get("pool_name"), "pool_name")
+        if _POOL_RE.fullmatch(pool_name) is None:
+            raise BrokerError("observation pool_name is invalid")
+        candidate_sha = _exact_text(value.get("candidate_sha"), "candidate_sha")
+        if _SHA_RE.fullmatch(candidate_sha) is None:
+            raise BrokerError("observation candidate_sha is invalid")
         request_id = _exact_text(value.get("request_id"), "request_id")
+        capacity_lease_state = _exact_text(
+            value.get("capacity_lease_state"),
+            "capacity_lease_state",
+        )
+        if capacity_lease_state not in _OBSERVATION_LEASE_STATES:
+            raise BrokerError("observation capacity_lease_state is invalid")
+        observed_at = _exact_text(value.get("observed_at"), "observed_at")
+        if _timestamp(_parse_timestamp(observed_at)) != observed_at:
+            raise BrokerError("observation observed_at must be canonical UTC")
+        observation_sequence = _nonnegative_int(
+            value.get("observation_sequence"),
+            "observation_sequence",
+        )
+        if observation_sequence < 1:
+            raise BrokerError("observation_sequence must be positive")
+        payload_sha256 = _exact_text(value.get("payload_sha256"), "payload_sha256")
+        if re.fullmatch(r"[0-9a-f]{64}", payload_sha256) is None:
+            raise BrokerError("observation payload_sha256 is invalid")
+        unsigned = {key: value[key] for key in value if key != "payload_sha256"}
+        expected_digest = hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+        ).hexdigest()
+        if payload_sha256 != expected_digest:
+            raise BrokerError("observation payload_sha256 does not match its payload")
         return cls(
+            sandbox=sandbox,
+            pool_name=pool_name,
+            candidate_sha=candidate_sha,
             request_id=request_id,
             lease_epoch=_nonnegative_int(value.get("lease_epoch"), "lease_epoch"),
+            capacity_lease_state=capacity_lease_state,
+            observed_at=observed_at,
+            observation_sequence=observation_sequence,
             pending_slots=_nonnegative_int(value.get("pending_slots"), "pending_slots"),
             active_slots=_nonnegative_int(value.get("active_slots"), "active_slots"),
             draining_slots=_nonnegative_int(value.get("draining_slots"), "draining_slots"),
             terminal_slots=_nonnegative_int(value.get("terminal_slots"), "terminal_slots"),
+            payload_sha256=payload_sha256,
         )
+
+
+def _lease_observation_digest(observation: LeaseObservation) -> str:
+    unsigned = {
+        "sandbox": observation.sandbox.value,
+        "pool_name": observation.pool_name,
+        "candidate_sha": observation.candidate_sha,
+        "request_id": observation.request_id,
+        "lease_epoch": observation.lease_epoch,
+        "capacity_lease_state": observation.capacity_lease_state,
+        "observed_at": observation.observed_at,
+        "observation_sequence": observation.observation_sequence,
+        "pending_slots": observation.pending_slots,
+        "active_slots": observation.active_slots,
+        "draining_slots": observation.draining_slots,
+        "terminal_slots": observation.terminal_slots,
+    }
+    return hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +440,9 @@ class SharedCapacityBroker:
                     terminal_slots INTEGER NOT NULL DEFAULT 0,
                     state TEXT NOT NULL,
                     last_observed_at TEXT,
+                    last_observation_sequence INTEGER,
+                    last_observation_digest TEXT,
+                    last_policy_lease_state TEXT,
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS capacity_audit_events (
@@ -368,16 +464,41 @@ class SharedCapacityBroker:
                     ON capacity_requests(sandbox, state);
                 """,
             )
-            current = connection.execute(
-                "SELECT value FROM broker_meta WHERE key = 'schema_version'",
-            ).fetchone()
-            if current is None:
-                connection.execute(
-                    "INSERT INTO broker_meta(key, value) VALUES('schema_version', ?)",
-                    (_SCHEMA_VERSION,),
-                )
-            elif current["value"] != _SCHEMA_VERSION:
-                raise BrokerError("broker state schema version is unsupported")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                current = connection.execute(
+                    "SELECT value FROM broker_meta WHERE key = 'schema_version'",
+                ).fetchone()
+                if current is None:
+                    connection.execute(
+                        "INSERT INTO broker_meta(key, value) VALUES('schema_version', ?)",
+                        (_SCHEMA_VERSION,),
+                    )
+                elif current["value"] == _PREVIOUS_SCHEMA_VERSION:
+                    columns = {
+                        str(row["name"])
+                        for row in connection.execute("PRAGMA table_info(capacity_leases)")
+                    }
+                    additions = (
+                        ("last_observation_sequence", "INTEGER"),
+                        ("last_observation_digest", "TEXT"),
+                        ("last_policy_lease_state", "TEXT"),
+                    )
+                    for column, column_type in additions:
+                        if column not in columns:
+                            connection.execute(
+                                f"ALTER TABLE capacity_leases ADD COLUMN {column} {column_type}",
+                            )
+                    connection.execute(
+                        "UPDATE broker_meta SET value = ? WHERE key = 'schema_version'",
+                        (_SCHEMA_VERSION,),
+                    )
+                elif current["value"] != _SCHEMA_VERSION:
+                    raise BrokerError("broker state schema version is unsupported")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def _connect(self) -> sqlite3.Connection:
         self._validate_authority_file(self.state_db, mode=0o600)
@@ -680,7 +801,12 @@ class SharedCapacityBroker:
         try:
             self._expire_requests(connection, now=now, now_text=now_text)
             for observation in observations:
-                self._apply_observation(connection, observation, now_text=now_text)
+                self._apply_observation(
+                    connection,
+                    observation,
+                    now=now,
+                    now_text=now_text,
+                )
             records = self._records(connection)
             pools = {record.request.pool for record in records if record.eligible}
             budgets.validate_for_pools(pools)
@@ -1068,15 +1194,52 @@ class SharedCapacityBroker:
         connection: sqlite3.Connection,
         observation: LeaseObservation,
         *,
+        now: datetime,
         now_text: str,
     ) -> None:
         request, lease = _record_from_row(
             self._joined_row(connection, observation.request_id),
         )
+        if observation.payload_sha256 != _lease_observation_digest(observation):
+            raise BrokerError("observation payload_sha256 does not match its payload")
+        if (
+            observation.sandbox != request.sandbox
+            or observation.pool_name != request.pool
+            or observation.candidate_sha != request.candidate_sha
+        ):
+            raise BrokerError(
+                f"observation binding differs from request {observation.request_id}",
+            )
         if observation.lease_epoch != lease.lease_epoch:
             raise BrokerError(
                 f"observation lease_epoch is stale for request {observation.request_id}",
             )
+        expected_lease_states = (
+            {"active"}
+            if lease.granted_slots > 0 and not request.cancel_requested
+            else {"retiring", "retired"}
+        )
+        if observation.capacity_lease_state not in expected_lease_states:
+            raise BrokerError(
+                "observation policy lease state differs from the current grant",
+            )
+        observed_at = _parse_timestamp(observation.observed_at)
+        if observed_at > now + _OBSERVATION_MAX_FUTURE_SKEW:
+            raise BrokerError("observation timestamp is ahead of the broker clock")
+        if now - observed_at > _OBSERVATION_MAX_AGE:
+            raise BrokerError("observation is stale")
+        if lease.last_observation_sequence is not None:
+            if observation.observation_sequence < lease.last_observation_sequence:
+                raise BrokerError("observation sequence regressed")
+            if observation.observation_sequence == lease.last_observation_sequence:
+                if observation.payload_sha256 != lease.last_observation_digest:
+                    raise BrokerError("observation sequence was rebound to another payload")
+                return
+            if (
+                lease.last_observed_at is not None
+                and observed_at < _parse_timestamp(lease.last_observed_at)
+            ):
+                raise BrokerError("observation timestamp regressed")
         nonterminal = (
             observation.pending_slots
             + observation.active_slots
@@ -1098,7 +1261,9 @@ class SharedCapacityBroker:
             """
             UPDATE capacity_leases
             SET pending_slots = ?, active_slots = ?, draining_slots = ?,
-                terminal_slots = ?, last_observed_at = ?, updated_at = ?
+                terminal_slots = ?, last_observed_at = ?,
+                last_observation_sequence = ?, last_observation_digest = ?,
+                last_policy_lease_state = ?, updated_at = ?
             WHERE request_id = ?
             """,
             (
@@ -1106,7 +1271,10 @@ class SharedCapacityBroker:
                 observation.active_slots,
                 observation.draining_slots,
                 observation.terminal_slots,
-                now_text,
+                observation.observed_at,
+                observation.observation_sequence,
+                observation.payload_sha256,
+                observation.capacity_lease_state,
                 now_text,
                 observation.request_id,
             ),
@@ -1118,6 +1286,13 @@ class SharedCapacityBroker:
             occurred_at=now_text,
             details={
                 "lease_epoch": observation.lease_epoch,
+                "sandbox": observation.sandbox.value,
+                "pool_name": observation.pool_name,
+                "candidate_sha": observation.candidate_sha,
+                "capacity_lease_state": observation.capacity_lease_state,
+                "observed_at": observation.observed_at,
+                "observation_sequence": observation.observation_sequence,
+                "payload_sha256": observation.payload_sha256,
                 "pending_slots": pending,
                 "active_slots": observation.active_slots,
                 "draining_slots": observation.draining_slots,
@@ -1211,6 +1386,8 @@ class SharedCapacityBroker:
             SELECT r.*, l.lease_epoch, l.granted_slots, l.pending_slots,
                    l.active_slots, l.draining_slots, l.terminal_slots,
                    l.state AS lease_state, l.last_observed_at,
+                   l.last_observation_sequence, l.last_observation_digest,
+                   l.last_policy_lease_state,
                    l.updated_at AS lease_updated_at
             FROM capacity_requests r
             JOIN capacity_leases l ON l.request_id = r.id
@@ -1232,6 +1409,8 @@ class SharedCapacityBroker:
             SELECT r.*, l.lease_epoch, l.granted_slots, l.pending_slots,
                    l.active_slots, l.draining_slots, l.terminal_slots,
                    l.state AS lease_state, l.last_observed_at,
+                   l.last_observation_sequence, l.last_observation_digest,
+                   l.last_policy_lease_state,
                    l.updated_at AS lease_updated_at
             FROM capacity_requests r
             JOIN capacity_leases l ON l.request_id = r.id
@@ -1286,6 +1465,13 @@ def _record_from_row(row: sqlite3.Row) -> tuple[CapacityRequest, CapacityLease]:
         terminal_slots=int(row["terminal_slots"]),
         state=RequestState(row[lease_state_key]),
         last_observed_at=row["last_observed_at"],
+        last_observation_sequence=(
+            int(row["last_observation_sequence"])
+            if row["last_observation_sequence"] is not None
+            else None
+        ),
+        last_observation_digest=row["last_observation_digest"],
+        last_policy_lease_state=row["last_policy_lease_state"],
         updated_at=row[lease_updated_key],
     )
     return request, lease

@@ -246,6 +246,9 @@
         "terminal_slots",
         "state",
         "last_observed_at",
+        "last_observation_sequence",
+        "last_observation_digest",
+        "last_policy_lease_state",
         "updated_at",
         "committed_slots"
       ],
@@ -281,6 +284,32 @@
             "null"
           ],
           "format": "date-time"
+        },
+        "last_observation_sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "last_observation_digest": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "last_policy_lease_state": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "active",
+            "retiring",
+            "retired",
+            null
+          ]
         },
         "updated_at": {
           "type": "string",

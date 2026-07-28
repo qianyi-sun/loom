@@ -122,19 +122,33 @@ def _observation(
     active: int = 0,
     draining: int = 0,
     terminal: int = 0,
+    sequence: int = 1,
+    observed_at: datetime = NOW,
+    capacity_lease_state: str | None = None,
 ) -> None:
+    observation = {
+        "sandbox": handoff["sandbox"],
+        "pool_name": handoff["pool_name"],
+        "candidate_sha": handoff["candidate_sha"],
+        "request_id": handoff["request_id"],
+        "lease_epoch": handoff["lease_epoch"],
+        "capacity_lease_state": (
+            capacity_lease_state
+            or ("active" if handoff["enabled"] else "retiring")
+        ),
+        "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+        "observation_sequence": sequence,
+        "pending_slots": pending,
+        "active_slots": active,
+        "draining_slots": draining,
+        "terminal_slots": terminal,
+    }
+    observation["payload_sha256"] = hashlib.sha256(
+        json.dumps(observation, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
     _write(
         config.observation_dir / f"{instance}.json",
-        [
-            {
-                "request_id": handoff["request_id"],
-                "lease_epoch": handoff["lease_epoch"],
-                "pending_slots": pending,
-                "active_slots": active,
-                "draining_slots": draining,
-                "terminal_slots": terminal,
-            },
-        ],
+        [observation],
     )
 
 
@@ -390,13 +404,13 @@ def test_ahead_epoch_observation_fails_closed(tmp_path: Path) -> None:
     )
     previous_audit = config.audit_path.read_bytes()
 
-    with pytest.raises(supervisor.SupervisorError, match="ahead"):
+    with pytest.raises(supervisor.SupervisorError, match="not current"):
         supervisor.run_once(config, now=NOW)
 
     assert config.audit_path.read_bytes() == previous_audit
 
 
-def test_stale_terminal_observation_is_ignored_for_new_request(
+def test_terminal_tombstone_is_ignored_without_blocking_new_request(
     tmp_path: Path,
 ) -> None:
     config, _ = _fixture(tmp_path)
@@ -418,6 +432,7 @@ def test_stale_terminal_observation_is_ignored_for_new_request(
         handoff={
             **first_handoff,
             "lease_epoch": cancelled["lease"]["lease_epoch"],
+            "enabled": False,
         },
         terminal=4,
     )
@@ -433,8 +448,112 @@ def test_stale_terminal_observation_is_ignored_for_new_request(
 
     result = supervisor.run_once(config, now=NOW)
 
-    assert result["observations"]["qianyi-gb10"]["status"] == ("stale_terminal_ignored")
+    assert (
+        result["observations"]["qianyi-gb10"]["status"]
+        == "terminal_tombstone_ignored"
+    )
+    assert second_id != first_id
     assert _handoff(config, "qianyi-gb10")["request_id"] == second_id
+
+
+def test_duplicate_observation_does_not_refresh_broker_liveness(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    request_id = _request(
+        config,
+        SandboxId.QIANYI,
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="qianyi-gb10-duplicate-observation",
+    )
+    supervisor.run_once(config, now=NOW)
+    handoff = _handoff(config, "qianyi-gb10")
+    _observation(
+        config,
+        "qianyi-gb10",
+        handoff=handoff,
+        active=4,
+        sequence=7,
+    )
+    supervisor.run_once(config, now=NOW)
+    first_lease = next(
+        item["lease"]
+        for item in SharedCapacityBroker(config.state_db).status()["requests"]
+        if item["request"]["id"] == request_id
+    )
+
+    replay = supervisor.run_once(config, now=NOW + datetime.resolution)
+    second_lease = next(
+        item["lease"]
+        for item in SharedCapacityBroker(config.state_db).status()["requests"]
+        if item["request"]["id"] == request_id
+    )
+
+    assert replay["observations"]["qianyi-gb10"]["status"] == "duplicate_ignored"
+    assert second_lease["last_observed_at"] == first_lease["last_observed_at"]
+    assert second_lease["last_observation_sequence"] == 7
+
+
+def test_stale_and_regressed_observations_fail_before_reconcile(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    _request(
+        config,
+        SandboxId.QIANYI,
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="qianyi-gb10-stale-observation",
+    )
+    supervisor.run_once(config, now=NOW)
+    handoff = _handoff(config, "qianyi-gb10")
+    _observation(
+        config,
+        "qianyi-gb10",
+        handoff=handoff,
+        active=4,
+        sequence=2,
+    )
+    supervisor.run_once(config, now=NOW)
+    previous_audit = config.audit_path.read_bytes()
+
+    _observation(
+        config,
+        "qianyi-gb10",
+        handoff=handoff,
+        active=4,
+        sequence=3,
+        observed_at=NOW - supervisor._OBSERVATION_MAX_AGE - datetime.resolution,
+    )
+    with pytest.raises(supervisor.SupervisorError, match="stale"):
+        supervisor.run_once(config, now=NOW)
+    assert config.audit_path.read_bytes() == previous_audit
+
+    _observation(
+        config,
+        "qianyi-gb10",
+        handoff=handoff,
+        active=4,
+        sequence=1,
+    )
+    with pytest.raises(supervisor.SupervisorError, match="sequence regressed"):
+        supervisor.run_once(config, now=NOW)
+    assert config.audit_path.read_bytes() == previous_audit
+
+    _observation(
+        config,
+        "qianyi-gb10",
+        handoff=handoff,
+        active=4,
+        sequence=3,
+        capacity_lease_state="retired",
+    )
+    with pytest.raises(supervisor.SupervisorError, match="binding is not current"):
+        supervisor.run_once(config, now=NOW)
+    assert config.audit_path.read_bytes() == previous_audit
 
 
 def test_duplicate_nonterminal_instance_requests_fail_before_publication(

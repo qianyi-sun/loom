@@ -26,8 +26,10 @@ production/staging reclaim. Those remain gated by their owning issues.
   before every one-slot grant. A final partial grant cannot overshoot.
 - Grant handoffs contain no worker token, admin token, object-store credential,
   provider secret, private endpoint, or environment-file body.
-- An observation with an old lease epoch, regressing terminal count, or more
-  nonterminal slots than the broker committed is rejected atomically.
+- An observation with a stale timestamp, old lease epoch, wrong binding,
+  regressing sequence or terminal count, rebound digest, or more nonterminal
+  slots than the broker committed is rejected atomically. Exact replays do not
+  refresh broker liveness.
 
 The state database should be installed at:
 
@@ -210,16 +212,18 @@ complete generation, never a mixed six-file set. The current and immediately
 previous generations are retained. Files are mode `0600`, directories are mode
 `0700`, and a sandbox account has no write access.
 
-The adapter writes a one-element closed-schema JSON observation array compatible
-with `--observations-json`. Each item binds sandbox, pool, candidate, request,
-epoch, and final Control Plane lease state; includes a UTC observation time and
-durably monotonic sequence; and carries a canonical SHA-256 over the counters
-and all binding fields. The sequence is recovered from both adapter state and
-the last valid observation, so a crash between the two atomic writes cannot
-rebind a sequence. Replaying an unchanged file is not a new observation.
-Observation files are inputs, never grants. A sandbox-written observation
-cannot increase capacity: the broker rejects stale/rebound sequences, old
-epochs, wrong bindings, and nonterminal counts above its commitment.
+The adapter writes a one-element JSON observation array compatible with
+`--observations-json`. Its closed schema binds `sandbox`, `pool_name`,
+`candidate_sha`, `request_id`, `lease_epoch`, the exact Control Plane
+`capacity_lease_state`, `observed_at`, a durable monotonically increasing
+`observation_sequence`, the four slot counters, and `payload_sha256`. The
+digest is SHA-256 of canonical JSON with `payload_sha256` omitted. The sequence
+is recovered from both adapter state and the last valid observation, so a crash
+between the two atomic writes cannot rebind a sequence. Observation files are
+inputs, never grants: the broker rejects old epochs, wrong bindings, stale
+timestamps, sequence regression or rebinding, and nonterminal counts above its
+commitment. An exact sequence-and-digest replay is ignored and does not refresh
+`last_observed_at`.
 
 ### Persistent broker supervisor
 
@@ -245,9 +249,14 @@ One invocation performs this ordered cycle:
 1. read broker status and reject more than one nonterminal request for any
    sandbox/pool instance;
 2. read at most one observation from each of the six configured files;
-3. accept an observation only when its request and epoch exactly match the
-   current broker binding; ignore a proven terminal old request or lower stale
-   epoch, and reject an unknown request or epoch ahead of the broker;
+3. accept an observation only when its sandbox, pool, candidate, request,
+   epoch, policy lease state, timestamp, sequence, and digest exactly match the
+   current broker binding. Stale or wrong-binding observations fail the cycle;
+   an exact duplicate is recorded as `duplicate_ignored` and is not sent to
+   the broker, so a dead adapter cannot renew liveness by replaying one file.
+   The only old-request exception is an exact known terminal tombstone with
+   zero committed and zero nonterminal slots; it is ignored without refreshing
+   liveness so it cannot deadlock publication of the next request;
 4. call `SharedCapacityBroker.reconcile` exactly once, so all accepted
    observations, TTL/cancel changes, fair-share decisions, budgets, leases,
    and broker audit events commit in one `BEGIN IMMEDIATE` transaction;
@@ -468,12 +477,19 @@ Prepare a secret-free JSON array:
 ```json
 [
   {
-    "request_id": "uuid",
+    "sandbox": "qianyi",
+    "pool_name": "gb10",
+    "candidate_sha": "0123456789abcdef0123456789abcdef01234567",
+    "request_id": "11111111-1111-4111-8111-111111111111",
     "lease_epoch": 3,
+    "capacity_lease_state": "active",
+    "observed_at": "2026-07-28T18:00:00Z",
+    "observation_sequence": 42,
     "pending_slots": 7,
     "active_slots": 40,
     "draining_slots": 0,
-    "terminal_slots": 0
+    "terminal_slots": 0,
+    "payload_sha256": "4248f9a47934b09cad70cd2ec603f5c7f9ee5103d36dfb8f8294b2a318a0a76a"
   }
 ]
 ```
@@ -503,6 +519,8 @@ Its aggregate and each lease expose:
 - active slots;
 - draining slots;
 - cumulative terminal slots;
+- the last accepted observation timestamp, sequence, digest, and policy lease
+  state;
 - committed slots, defined as
   `max(granted, pending + active + draining)`.
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -79,6 +81,41 @@ def _budgets(
     )
 
 
+def _lease_observation(
+    request_id: str,
+    lease_epoch: int,
+    *,
+    sandbox: SandboxId = SandboxId.QIANYI,
+    candidate_sha: str = SHA_A,
+    pool_name: str = "gb10",
+    capacity_lease_state: str = "retiring",
+    observed_at: datetime,
+    observation_sequence: int = 1,
+    pending_slots: int = 0,
+    active_slots: int = 0,
+    draining_slots: int = 0,
+    terminal_slots: int = 0,
+) -> LeaseObservation:
+    payload: dict[str, object] = {
+        "sandbox": sandbox.value,
+        "pool_name": pool_name,
+        "candidate_sha": candidate_sha,
+        "request_id": request_id,
+        "lease_epoch": lease_epoch,
+        "capacity_lease_state": capacity_lease_state,
+        "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+        "observation_sequence": observation_sequence,
+        "pending_slots": pending_slots,
+        "active_slots": active_slots,
+        "draining_slots": draining_slots,
+        "terminal_slots": terminal_slots,
+    }
+    payload["payload_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    return LeaseObservation.from_mapping(payload)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -130,6 +167,73 @@ def test_state_authority_is_owner_only_and_sidecars_are_not_world_readable(
     for path in broker._sqlite_sidecar_paths():
         if path.exists():
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_v1_authority_upgrades_observation_replay_state_in_place(
+    tmp_path: Path,
+) -> None:
+    authority = tmp_path / "authority"
+    authority.mkdir(mode=0o700)
+    state_db = authority / "broker.sqlite3"
+    with sqlite3.connect(state_db) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE broker_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO broker_meta(key, value) VALUES('schema_version', '1');
+            CREATE TABLE capacity_requests (
+                id TEXT PRIMARY KEY,
+                sandbox TEXT NOT NULL,
+                candidate_sha TEXT NOT NULL,
+                pool TEXT NOT NULL,
+                min_slots INTEGER NOT NULL,
+                target_slots INTEGER NOT NULL,
+                ttl_seconds INTEGER NOT NULL,
+                purpose TEXT NOT NULL,
+                preemptible INTEGER NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                terminal_reason TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_granted_seq INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE capacity_leases (
+                request_id TEXT PRIMARY KEY
+                    REFERENCES capacity_requests(id) ON DELETE RESTRICT,
+                lease_epoch INTEGER NOT NULL DEFAULT 0,
+                granted_slots INTEGER NOT NULL DEFAULT 0,
+                pending_slots INTEGER NOT NULL DEFAULT 0,
+                active_slots INTEGER NOT NULL DEFAULT 0,
+                draining_slots INTEGER NOT NULL DEFAULT 0,
+                terminal_slots INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL,
+                last_observed_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            """,
+        )
+    state_db.chmod(0o600)
+
+    SharedCapacityBroker(state_db).initialize()
+
+    with sqlite3.connect(state_db) as connection:
+        version = connection.execute(
+            "SELECT value FROM broker_meta WHERE key = 'schema_version'",
+        ).fetchone()
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(capacity_leases)")
+        }
+    assert version == ("2",)
+    assert {
+        "last_observation_sequence",
+        "last_observation_digest",
+        "last_policy_lease_state",
+    } <= columns
 
 
 def test_transient_sqlite_sidecar_can_disappear_during_validation(
@@ -337,12 +441,12 @@ def test_fair_turn_ages_all_three_sandboxes_through_one_slot(
         report = broker.reconcile(
             budget,
             observations=[
-                LeaseObservation(
-                    request_id=holder_id,
-                    lease_epoch=epoch,
-                    pending_slots=0,
-                    active_slots=0,
-                    draining_slots=0,
+                _lease_observation(
+                    holder_id,
+                    epoch,
+                    sandbox=SandboxId(holder["request"]["sandbox"]),
+                    candidate_sha=holder["request"]["candidate_sha"],
+                    observed_at=clock.now,
                     terminal_slots=1,
                 ),
             ],
@@ -374,12 +478,10 @@ def test_cancel_is_drain_first_and_terminal_only_after_observation(
     report = broker.reconcile(
         budget,
         observations=[
-            LeaseObservation(
-                request_id=request_id,
-                lease_epoch=epoch,
-                pending_slots=0,
-                active_slots=0,
-                draining_slots=0,
+            _lease_observation(
+                request_id,
+                epoch,
+                observed_at=clock.now,
                 terminal_slots=4,
             ),
         ],
@@ -424,14 +526,129 @@ def test_observation_is_epoch_fenced_and_cannot_expand_commitment(
         broker.reconcile(
             _budgets(global_slots=2, pools={"gb10": 2}),
             observations=[
-                LeaseObservation(request_id, epoch - 1, 2, 0, 0, 0),
+                _lease_observation(
+                    request_id,
+                    epoch - 1,
+                    capacity_lease_state="active",
+                    observed_at=clock.now,
+                    pending_slots=2,
+                ),
             ],
         )
     with pytest.raises(BrokerError, match="exceeds"):
         broker.reconcile(
             _budgets(global_slots=2, pools={"gb10": 2}),
             observations=[
-                LeaseObservation(request_id, epoch, 0, 3, 0, 0),
+                _lease_observation(
+                    request_id,
+                    epoch,
+                    capacity_lease_state="active",
+                    observed_at=clock.now,
+                    active_slots=3,
+                ),
+            ],
+        )
+
+
+def test_observation_replay_does_not_refresh_last_observed_at(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    request_id = _request(broker, SandboxId.QIANYI, target_slots=2)
+    report = broker.reconcile(_budgets(global_slots=2, pools={"gb10": 2}))
+    epoch = report["requests"][0]["lease"]["lease_epoch"]  # type: ignore[index]
+    observation = _lease_observation(
+        request_id,
+        epoch,
+        capacity_lease_state="active",
+        observed_at=clock.now,
+        active_slots=2,
+    )
+    first = broker.reconcile(
+        _budgets(global_slots=2, pools={"gb10": 2}),
+        observations=[observation],
+    )
+    first_lease = first["requests"][0]["lease"]  # type: ignore[index]
+
+    clock.advance(seconds=30)
+    replay = broker.reconcile(
+        _budgets(global_slots=2, pools={"gb10": 2}),
+        observations=[observation],
+    )
+    replay_lease = replay["requests"][0]["lease"]  # type: ignore[index]
+
+    assert replay_lease["last_observed_at"] == first_lease["last_observed_at"]
+    assert replay_lease["last_observation_sequence"] == 1
+    assert replay_lease["last_observation_digest"] == observation.payload_sha256
+    lease_events = [
+        event for event in replay["audit"] if event["event_type"] == "lease_observed"
+    ]
+    assert len(lease_events) == 1
+
+
+def test_observation_stale_wrong_binding_and_sequence_rebind_fail_closed(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    request_id = _request(broker, SandboxId.QIANYI, target_slots=2)
+    report = broker.reconcile(_budgets(global_slots=2, pools={"gb10": 2}))
+    epoch = report["requests"][0]["lease"]["lease_epoch"]  # type: ignore[index]
+    accepted = _lease_observation(
+        request_id,
+        epoch,
+        capacity_lease_state="active",
+        observed_at=clock.now,
+        active_slots=2,
+    )
+    broker.reconcile(
+        _budgets(global_slots=2, pools={"gb10": 2}),
+        observations=[accepted],
+    )
+
+    with pytest.raises(BrokerError, match="binding differs"):
+        broker.reconcile(
+            _budgets(global_slots=2, pools={"gb10": 2}),
+            observations=[
+                _lease_observation(
+                    request_id,
+                    epoch,
+                    candidate_sha=SHA_B,
+                    capacity_lease_state="active",
+                    observed_at=clock.now,
+                    observation_sequence=2,
+                    active_slots=2,
+                ),
+            ],
+        )
+    with pytest.raises(BrokerError, match="rebound"):
+        broker.reconcile(
+            _budgets(global_slots=2, pools={"gb10": 2}),
+            observations=[
+                _lease_observation(
+                    request_id,
+                    epoch,
+                    capacity_lease_state="active",
+                    observed_at=clock.now,
+                    active_slots=1,
+                ),
+            ],
+        )
+
+    clock.advance(seconds=61)
+    with pytest.raises(BrokerError, match="stale"):
+        broker.reconcile(
+            _budgets(global_slots=2, pools={"gb10": 2}),
+            observations=[
+                _lease_observation(
+                    request_id,
+                    epoch,
+                    capacity_lease_state="active",
+                    observed_at=clock.now - timedelta(seconds=61),
+                    observation_sequence=2,
+                    active_slots=2,
+                ),
             ],
         )
 

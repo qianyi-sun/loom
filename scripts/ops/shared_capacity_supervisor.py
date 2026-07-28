@@ -23,7 +23,7 @@ import tomllib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -54,13 +54,22 @@ _STAGING_GENERATION_RE = re.compile(
     r"^\.generation-[0-9]{20}-[0-9a-f]{16}\.tmp-[0-9]+$"
 )
 _OBSERVATION_FIELDS = {
+    "sandbox",
+    "pool_name",
+    "candidate_sha",
     "request_id",
     "lease_epoch",
+    "capacity_lease_state",
+    "observed_at",
+    "observation_sequence",
     "pending_slots",
     "active_slots",
     "draining_slots",
     "terminal_slots",
+    "payload_sha256",
 }
+_OBSERVATION_MAX_AGE = timedelta(seconds=60)
+_OBSERVATION_MAX_FUTURE_SKEW = timedelta(seconds=30)
 _MAX_AUDIT_BYTES = 16 * 1024 * 1024
 
 
@@ -428,26 +437,26 @@ def _current_bindings(
     return result
 
 
-def _parse_observation(path: Path) -> dict[str, Any]:
+def _parse_observation(path: Path) -> LeaseObservation:
     payload = _read_json(path, label="adapter observation")
     if not isinstance(payload, list) or len(payload) != 1:
         raise SupervisorError("adapter observation must contain exactly one item")
     observation = payload[0]
     if not isinstance(observation, dict) or set(observation) != _OBSERVATION_FIELDS:
         raise SupervisorError("adapter observation fields do not match the closed schema")
-    request_id = observation.get("request_id")
-    if not isinstance(request_id, str) or _UUID_RE.fullmatch(request_id) is None:
+    if _UUID_RE.fullmatch(str(observation.get("request_id"))) is None:
         raise SupervisorError("adapter observation request_id is invalid")
-    for field in _OBSERVATION_FIELDS - {"request_id"}:
-        value = observation.get(field)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise SupervisorError("adapter observation counters are invalid")
-    return observation
+    try:
+        return LeaseObservation.from_mapping(observation)
+    except BrokerError as exc:
+        raise SupervisorError(f"adapter observation is invalid: {exc}") from exc
 
 
 def _collect_observations(
     config: SupervisorConfig,
     report: Mapping[str, Any],
+    *,
+    now: datetime,
 ) -> tuple[tuple[LeaseObservation, ...], dict[str, dict[str, Any]]]:
     requests, handoffs = _request_maps(report, config)
     current = _current_bindings(requests, handoffs, config)
@@ -458,52 +467,88 @@ def _collect_observations(
         if not path.exists() and not path.is_symlink():
             evidence[instance] = {"status": "missing"}
             continue
-        raw = _parse_observation(path)
-        request_id = str(raw["request_id"])
+        observation = _parse_observation(path)
+        request_id = observation.request_id
         record = requests.get(request_id)
         if record is None:
             raise SupervisorError("adapter observation references an unknown request")
         binding = current[instance]
         if binding is None or request_id != binding["request_id"]:
+            request = record["request"]
             lease = record["lease"]
-            if (
-                record["request"].get("state") == "terminal"
+            terminal_tombstone = (
+                request.get("state") == "terminal"
                 and int(lease.get("committed_slots") or 0) == 0
-            ):
+                and observation.sandbox == request.get("sandbox")
+                and observation.pool_name == request.get("pool")
+                and observation.candidate_sha == request.get("candidate_sha")
+                and observation.lease_epoch == int(lease.get("lease_epoch") or 0)
+                and observation.capacity_lease_state in {"retiring", "retired"}
+                and observation.observation_sequence
+                >= int(lease.get("last_observation_sequence") or 0)
+                and observation.pending_slots == 0
+                and observation.active_slots == 0
+                and observation.draining_slots == 0
+                and observation.terminal_slots >= int(lease.get("terminal_slots") or 0)
+            )
+            if terminal_tombstone:
                 evidence[instance] = {
-                    "status": "stale_terminal_ignored",
+                    "status": "terminal_tombstone_ignored",
                     "request_id": request_id,
-                    "lease_epoch": raw["lease_epoch"],
+                    "lease_epoch": observation.lease_epoch,
+                    "observation_sequence": observation.observation_sequence,
+                    "digest": observation.payload_sha256,
                 }
                 continue
             raise SupervisorError("adapter observation request is not the current binding")
         expected_epoch = int(binding["lease_epoch"])
-        observed_epoch = int(raw["lease_epoch"])
-        if observed_epoch < expected_epoch:
-            evidence[instance] = {
-                "status": "stale_epoch_ignored",
-                "request_id": request_id,
-                "lease_epoch": observed_epoch,
-                "expected_lease_epoch": expected_epoch,
-            }
-            continue
-        if observed_epoch > expected_epoch:
-            raise SupervisorError("adapter observation lease_epoch is ahead of the broker")
-        accepted.append(
-            LeaseObservation(
-                request_id=request_id,
-                lease_epoch=observed_epoch,
-                pending_slots=int(raw["pending_slots"]),
-                active_slots=int(raw["active_slots"]),
-                draining_slots=int(raw["draining_slots"]),
-                terminal_slots=int(raw["terminal_slots"]),
-            ),
+        observed_epoch = observation.lease_epoch
+        if observed_epoch != expected_epoch:
+            raise SupervisorError("adapter observation lease_epoch is not current")
+        expected_state = (
+            {"active"} if bool(binding["enabled"]) else {"retiring", "retired"}
         )
+        if (
+            observation.sandbox != record["request"]["sandbox"]
+            or observation.pool_name != binding["pool_name"]
+            or observation.candidate_sha != binding["candidate_sha"]
+            or observation.capacity_lease_state not in expected_state
+        ):
+            raise SupervisorError("adapter observation binding is not current")
+        observed_at = datetime.fromisoformat(
+            observation.observed_at.replace("Z", "+00:00"),
+        ).astimezone(UTC)
+        if observed_at > now + _OBSERVATION_MAX_FUTURE_SKEW:
+            raise SupervisorError("adapter observation timestamp is in the future")
+        if now - observed_at > _OBSERVATION_MAX_AGE:
+            raise SupervisorError("adapter observation is stale")
+        lease = record["lease"]
+        previous_sequence = lease.get("last_observation_sequence")
+        previous_digest = lease.get("last_observation_digest")
+        if previous_sequence is not None:
+            if observation.observation_sequence < int(previous_sequence):
+                raise SupervisorError("adapter observation sequence regressed")
+            if observation.observation_sequence == int(previous_sequence):
+                if observation.payload_sha256 != previous_digest:
+                    raise SupervisorError(
+                        "adapter observation sequence was rebound to another payload",
+                    )
+                evidence[instance] = {
+                    "status": "duplicate_ignored",
+                    "request_id": request_id,
+                    "lease_epoch": observed_epoch,
+                    "observation_sequence": observation.observation_sequence,
+                    "digest": observation.payload_sha256,
+                }
+                continue
+        accepted.append(observation)
         evidence[instance] = {
             "status": "accepted",
             "request_id": request_id,
             "lease_epoch": observed_epoch,
-            "digest": _digest(raw),
+            "observation_sequence": observation.observation_sequence,
+            "observed_at": observation.observed_at,
+            "digest": observation.payload_sha256,
         }
     return tuple(accepted), evidence
 
@@ -874,6 +919,8 @@ def _publish_handoffs(
             previous_path / "manifest.json",
             label="current handoff manifest",
         )
+        if not isinstance(previous_manifest, dict):
+            raise SupervisorError("current handoff manifest is invalid")
         if (
             previous_manifest.get("report_digest") == report_digest
             and previous_manifest.get("instances") == published
@@ -959,14 +1006,21 @@ def _run_once_unlocked(
     now = (now or datetime.now(UTC)).astimezone(UTC)
     broker = SharedCapacityBroker(config.state_db, clock=lambda: now)
     before = broker.status()
+    before_aggregate = before.get("aggregate")
+    if not isinstance(before_aggregate, dict):
+        raise SupervisorError("broker aggregate report is invalid")
     state = _load_supervisor_state(config.supervisor_state_path)
     if (
         state is not None
         and state["config_digest"] != config.digest
-        and int(before["aggregate"]["committed_slots"]) != 0
+        and int(before_aggregate["committed_slots"]) != 0
     ):
         raise SupervisorError("supervisor config changed while capacity is committed")
-    observations, observation_evidence = _collect_observations(config, before)
+    observations, observation_evidence = _collect_observations(
+        config,
+        before,
+        now=now,
+    )
     report = broker.reconcile(
         BrokerBudgets(
             global_slots=config.global_slot_budget,
