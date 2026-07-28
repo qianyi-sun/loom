@@ -51,10 +51,18 @@ _POLICY_COPY_FIELDS = (
     "force",
     "actuator_config",
 )
+_POLICY_TEMPLATE_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "deploy/developer-sandboxes/shared-capacity-policies"
+)
 
 
 class AdapterError(RuntimeError):
     """The handoff cannot be applied without weakening a safety fence."""
+
+
+class PolicyMissingError(AdapterError):
+    """The sandbox Control Plane has no policy for the configured pool."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +76,7 @@ class AdapterConfig:
     observation_path: Path
     adapter_state_path: Path
     sandbox_state_path: Path
+    max_slots_bound: int
     timeout_seconds: float
 
 
@@ -156,6 +165,7 @@ def load_config(path: Path) -> AdapterConfig:
         "observation_path",
         "adapter_state_path",
         "sandbox_state_path",
+        "max_slots_bound",
         "timeout_seconds",
     }
     if set(payload) != allowed:
@@ -169,6 +179,13 @@ def load_config(path: Path) -> AdapterConfig:
         raise AdapterError("adapter environment is not bound to sandbox")
     if _IDENTIFIER_RE.fullmatch(pool_name) is None:
         raise AdapterError("adapter pool_name is invalid")
+    max_slots_bound = payload.get("max_slots_bound")
+    if (
+        isinstance(max_slots_bound, bool)
+        or not isinstance(max_slots_bound, int)
+        or not 0 <= max_slots_bound <= 10_000
+    ):
+        raise AdapterError("adapter max_slots_bound must be in 0..10000")
     control_plane_url = _required_string(
         payload,
         "control_plane_url",
@@ -220,6 +237,7 @@ def load_config(path: Path) -> AdapterConfig:
             "sandbox_state_path",
             "adapter config",
         ),
+        max_slots_bound=max_slots_bound,
         timeout_seconds=timeout_seconds,
     )
 
@@ -280,8 +298,8 @@ def load_handoff(config: AdapterConfig) -> Handoff:
             raise AdapterError(f"broker handoff {field} must be non-negative")
     if min_slots != 0:
         raise AdapterError("broker handoff min_slots must remain zero")
-    if max_slots > 10_000:
-        raise AdapterError("broker handoff max_slots exceeds the hard bound")
+    if max_slots > config.max_slots_bound:
+        raise AdapterError("broker handoff max_slots exceeds the reviewed pool bound")
     enabled = payload.get("enabled")
     preemptible = payload.get("preemptible")
     if not isinstance(enabled, bool) or not isinstance(preemptible, bool):
@@ -371,6 +389,8 @@ def _http_json(
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 404:
+            raise PolicyMissingError(f"{method} {path} returned HTTP 404") from exc
         raise AdapterError(
             f"{method} {path} failed HTTP {exc.code}: {_redact(detail)}",
         ) from exc
@@ -453,6 +473,184 @@ def _policy_path(config: AdapterConfig) -> str:
     environment = urllib.parse.quote(config.environment, safe="")
     pool_name = urllib.parse.quote(config.pool_name, safe="")
     return f"/admin/worker-pool-autoscaler-policies/{environment}/{pool_name}"
+
+
+def _bootstrap_policy_body(
+    config: AdapterConfig,
+    *,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    path = _POLICY_TEMPLATE_DIR / f"{config.pool_name}.toml"
+    resolved = _secure_regular_file(path, label="autoscaler policy template")
+    try:
+        payload = tomllib.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise AdapterError("autoscaler policy template is invalid") from exc
+    if set(payload) != {
+        "schema_version",
+        "pool_name",
+        "slot_budget",
+        "pending_slot_budget",
+        "job_pids_max",
+        "policy",
+    }:
+        raise AdapterError("autoscaler policy template fields do not match schema")
+    if (
+        payload.get("schema_version") != _SCHEMA_VERSION
+        or payload.get("pool_name") != config.pool_name
+        or payload.get("slot_budget") != config.max_slots_bound
+    ):
+        raise AdapterError("autoscaler policy template target or budget drifted")
+    policy = payload.get("policy")
+    if not isinstance(policy, dict):
+        raise AdapterError("autoscaler policy template policy is invalid")
+    body = json.loads(
+        json.dumps(policy)
+        .replace("${SANDBOX}", config.sandbox)
+        .replace("${CANDIDATE_SHA}", candidate_sha),
+    )
+    actuator_config = body.get("actuator_config")
+    job_pids_max = payload.get("job_pids_max")
+    pending_budget = payload.get("pending_slot_budget")
+    expected_env_file = (
+        f"/shared_work/loom/runtime/sandboxes/{config.sandbox}/"
+        f"{candidate_sha}/worker-{config.pool_name}.env"
+    )
+    if (
+        not isinstance(actuator_config, dict)
+        or isinstance(job_pids_max, bool)
+        or not isinstance(job_pids_max, int)
+        or job_pids_max <= 0
+        or actuator_config.get("job_pids_max") != job_pids_max
+        or actuator_config.get("env_file") != expected_env_file
+        or isinstance(pending_budget, bool)
+        or not isinstance(pending_budget, int)
+        or pending_budget <= 0
+    ):
+        raise AdapterError("autoscaler policy template containment budget drifted")
+    container_pids = actuator_config.get("container_pids")
+    concurrency = actuator_config.get("requested_concurrency")
+    if (
+        isinstance(container_pids, bool)
+        or not isinstance(container_pids, int)
+        or container_pids <= 0
+        or isinstance(concurrency, bool)
+        or not isinstance(concurrency, int)
+        or concurrency <= 0
+        or job_pids_max < container_pids * concurrency
+    ):
+        raise AdapterError("autoscaler policy job PID budget is below concurrency bound")
+    return body
+
+
+def _validate_bootstrap_policy(
+    policy: Mapping[str, Any],
+    *,
+    config: AdapterConfig,
+    candidate_sha: str,
+    expected_body: Mapping[str, Any],
+) -> None:
+    _validate_policy(policy, config=config, candidate_sha=candidate_sha)
+    actuator_config = policy["actuator_config"]
+    expected_actuator_config = expected_body["actuator_config"]
+    assert isinstance(actuator_config, dict)
+    assert isinstance(expected_actuator_config, dict)
+    immutable_fields = (
+        "backend",
+        "cpu_arch",
+        "partition",
+        "allowed_nodes",
+        "env_file",
+        "repo_dir",
+        "requested_cpus",
+        "requested_memory_mib",
+        "requested_concurrency",
+        "max_jobs",
+        "pending_job_cap",
+        "time_limit",
+        "exclusive",
+        "external_runner",
+        "slurm_account",
+        "qos_normal",
+        "container_cpus",
+        "container_memory_mib",
+        "container_pids",
+        "job_pids_max",
+        "candidate_sha",
+        "gpu_tres",
+    )
+    if any(
+        actuator_config.get(field) != expected_actuator_config.get(field)
+        for field in immutable_fields
+    ):
+        raise AdapterError("autoscaler policy immutable bootstrap contract drifted")
+    if (
+        actuator_config.get("exclusive") is not False
+        or actuator_config.get("external_runner") is not True
+        or any(
+            isinstance(actuator_config.get(field), bool)
+            or not isinstance(actuator_config.get(field), (int, float))
+            or actuator_config.get(field) <= 0
+            for field in (
+                "container_cpus",
+                "container_memory_mib",
+                "container_pids",
+                "job_pids_max",
+            )
+        )
+        or actuator_config["job_pids_max"]
+        < actuator_config["container_pids"]
+        * actuator_config["requested_concurrency"]
+        or not actuator_config.get("allowed_nodes")
+        or not actuator_config.get("slurm_account")
+        or not actuator_config.get("qos_normal")
+    ):
+        raise AdapterError("autoscaler policy lacks non-exclusive containment authority")
+
+
+def bootstrap_policy(
+    config: AdapterConfig,
+    *,
+    http_json: HttpJson = _http_json,
+) -> dict[str, Any]:
+    candidate_sha = _load_sandbox_candidate(config)
+    expected = _bootstrap_policy_body(config, candidate_sha=candidate_sha)
+    token = _load_admin_token(config.admin_secret_file)
+    path = _policy_path(config)
+    try:
+        policy = http_json(
+            method="GET",
+            base_url=config.control_plane_url,
+            token=token,
+            path=path,
+            timeout=config.timeout_seconds,
+        )
+        status = "unchanged"
+    except PolicyMissingError:
+        policy = http_json(
+            method="PUT",
+            base_url=config.control_plane_url,
+            token=token,
+            path=path,
+            body=expected,
+            timeout=config.timeout_seconds,
+        )
+        status = "created"
+    _validate_bootstrap_policy(
+        policy,
+        config=config,
+        candidate_sha=candidate_sha,
+        expected_body=expected,
+    )
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "artifact_type": "shared-capacity-policy-bootstrap-result",
+        "status": status,
+        "sandbox": config.sandbox,
+        "environment": config.environment,
+        "pool_name": config.pool_name,
+        "candidate_sha": candidate_sha,
+    }
 
 
 def _validate_policy(
@@ -680,14 +878,15 @@ def run_once(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("command", choices=("run",))
+    parser.add_argument("command", choices=("bootstrap", "run"))
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
-        report = run_once(load_config(args.config))
+        config = load_config(args.config)
+        report = bootstrap_policy(config) if args.command == "bootstrap" else run_once(config)
     except (AdapterError, OSError, UnicodeError, ValueError):
         sys.stderr.write('{"error":"shared-capacity-adapter-failed-safely"}\n')
         return 1

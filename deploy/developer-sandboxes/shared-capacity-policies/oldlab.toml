@@ -1,0 +1,48 @@
+schema_version = 1
+pool_name = "oldlab"
+slot_budget = 20
+pending_slot_budget = 10
+job_pids_max = 32768
+
+[policy]
+actuator = "slurm"
+enabled = false
+disabled_reason = "awaiting_shared_capacity_handoff"
+min_slots = 0
+max_slots = 0
+scale_up_threshold_slots = 1
+scale_down_idle_seconds = 600
+scale_up_cooldown_seconds = 60
+scale_down_cooldown_seconds = 300
+drain_timeout_seconds = 600
+force = false
+
+[policy.actuator_config]
+backend = "docker"
+cpu_arch = "x86_64"
+partition = ""
+allowed_nodes = [
+  "TRT-EAI-OLDLAB-1",
+  "trt-EAI-OLDLAB-2",
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
+env_file = "/shared_work/loom/runtime/sandboxes/${SANDBOX}/${CANDIDATE_SHA}/worker-oldlab.env"
+repo_dir = "/shared_work/loom/candidates/sandboxes/${SANDBOX}/${CANDIDATE_SHA}"
+requested_cpus = 8
+requested_memory_mib = 32000
+requested_concurrency = 4
+max_jobs = 5
+pending_job_cap = 2
+time_limit = "02:00:00"
+exclusive = false
+external_runner = true
+slurm_account = "loom-dev-${SANDBOX}"
+qos_normal = "loom-dev"
+container_cpus = 2
+container_memory_mib = 8000
+container_pids = 4096
+job_pids_max = 32768
+candidate_sha = "${CANDIDATE_SHA}"
+gpu_tres = ""

@@ -1,0 +1,12 @@
+[Unit]
+Description=Continuously reconcile Loom shared sandbox capacity
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Persistent=true
+Unit=loom-shared-capacity-supervisor.service
+
+[Install]
+WantedBy=timers.target
