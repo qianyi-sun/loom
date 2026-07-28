@@ -1,0 +1,118 @@
+schema_version = 1
+shared_group = "sharedwork"
+shared_gid = 2007
+state_root = "/var/lib/loom-developer-domain-runtime"
+installed_program = "/usr/local/libexec/loom-developer-domain-runtime"
+installed_config = "/etc/loom/developer-runtime-domains.toml"
+
+[sandbox_groups.qianyi]
+name = "loom-sandbox-qianyi"
+gid = 31021
+member = "qianyi"
+upstream_control_plane_port = 26080
+upstream_gateway_port = 26100
+upstream_minio_port = 26900
+
+[sandbox_groups.hongjian]
+name = "loom-sandbox-hongjian"
+gid = 31022
+member = "hongjian"
+upstream_control_plane_port = 27080
+upstream_gateway_port = 27100
+upstream_minio_port = 27900
+
+[sandbox_groups.devansh]
+name = "loom-sandbox-devansh"
+gid = 31023
+member = "devansh"
+upstream_control_plane_port = 28080
+upstream_gateway_port = 28100
+upstream_minio_port = 28900
+
+[domains.oldlab]
+worker_env_name = "worker-oldlab.env"
+candidate_root = "/shared_work/loom/candidates/sandboxes"
+runtime_root = "/shared_work/loom/runtime/sandboxes"
+publisher_hostname = "trt-eai-oldlab-1"
+
+[[domains.oldlab.peers]]
+ssh_target = "oldlab-1"
+hostname = "trt-eai-oldlab-1"
+
+[[domains.oldlab.peers]]
+ssh_target = "oldlab-2"
+hostname = "trt-eai-oldlab-2"
+
+[[domains.oldlab.peers]]
+ssh_target = "oldlab-3"
+hostname = "trt-eai-oldlab-3"
+
+[[domains.oldlab.peers]]
+ssh_target = "oldlab-4"
+hostname = "trt-eai-oldlab-4"
+
+[[domains.oldlab.peers]]
+ssh_target = "oldlab-5"
+hostname = "trt-eai-oldlab-5"
+
+[domains.gb10]
+worker_env_name = "worker-gb10.env"
+candidate_root = "/shared_work/loom/candidates/sandboxes"
+runtime_root = "/shared_work/loom/runtime/sandboxes"
+publisher_hostname = "gx10-01c7"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-1"
+hostname = "gx10-01c7"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-2"
+hostname = "gx10-0fca"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-3"
+hostname = "gx10-0f0d"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-4"
+hostname = "gx10-0d93"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-5"
+hostname = "gx10-1036"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-6"
+hostname = "gx10-1000"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-8"
+hostname = "gx10-db22"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-9"
+hostname = "gx10-16f6"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-10"
+hostname = "gx10-0f82"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-11"
+hostname = "gx10-c38b"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-12"
+hostname = "gx10-e45f"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-13"
+hostname = "gx10-fc5d"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-14"
+hostname = "gx10-0a49"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-15"
+hostname = "gx10-0152"
