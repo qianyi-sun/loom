@@ -679,7 +679,8 @@ storage:
 http:
   addr: 0.0.0.0:5000
 EOF
-systemctl enable --now docker-registry
+systemctl enable docker-registry
+systemctl restart docker-registry
 curl --fail --silent --show-error http://127.0.0.1:5000/v2/ >/dev/null
 install -d -m 0700 /run/loom-ci-registry
 install -d -m 0755 /mnt/loom-ci-assets

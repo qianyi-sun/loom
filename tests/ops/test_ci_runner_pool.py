@@ -385,6 +385,9 @@ def test_golden_guest_seeds_images_without_retaining_registry_credentials(
     assert "readonly:" in script
     assert "registry-mirrors" in script
     assert "/etc/buildkit/loom-ci.toml" in script
+    assert script.index("systemctl restart docker-registry") < script.index(
+        "curl --fail --silent --show-error",
+    )
     assert "proxy:" not in script
     assert "secret-token" not in script
 
