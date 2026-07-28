@@ -224,6 +224,7 @@ class PreflightRuntimeSources:
     readonly_authority_source: Callable[[], ReadonlyAuthorityEvidence]
     capacity_source: Callable[[], StagingCapacity]
     backup_authority: BackupAdmissionAuthority
+    database_schema_revision: str
     external_supervisor_predecessor_source: ExternalSupervisorPredecessorSource
     systemd_run: SystemdCommandRunner
     gb10_run: SystemdCommandRunner
@@ -276,6 +277,9 @@ class PreflightRuntimeSources:
             or not self.route.startswith("https://")
             or not self.baseline_probe_route.startswith("https://")
             or not self.manifest_image_names
+            or len(self.database_schema_revision) != 4
+            or not self.database_schema_revision.isascii()
+            or not self.database_schema_revision.isdecimal()
         ):
             raise ValueError("preflight runtime sources are outside staging authority")
 
@@ -638,6 +642,7 @@ class PreflightRuntimeSources:
             "runner.config.sha256": self.config.config_sha256,
             "runner.install.sha256": self.runner_install_digest,
             "schema.revision": authority.schema_revision,
+            "database.schema.revision": self.database_schema_revision,
             "secret-fingerprints": {
                 source.label: source.expected_content_fingerprint
                 for source in self.credential_sources

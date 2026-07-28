@@ -248,7 +248,7 @@ def _external_supervisor_predecessor_source(
         authority = observation.predecessor_authority
         assert authority is not None
         pool_identity = pool_identity_source()
-        bound_schema_revision = context.bindings.get("schema.revision")
+        bound_schema_revision = context.bindings.get("database.schema.revision")
         if (
             not isinstance(bound_schema_revision, str)
             or bound_schema_revision != pool_identity.schema_revision
@@ -547,6 +547,7 @@ def build_installed_deep_preflight_composition(
         rehearsal_factory=rehearsal_factory,
         final_gate_run=commands.final_gate_helper,
         read_mutation_epoch=readonly.mutation_epoch,
+        read_database_schema_revision=lambda: mutation_epoch_evidence().schema_revision,
         now=now,
     )
 
