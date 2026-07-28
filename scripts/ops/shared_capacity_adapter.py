@@ -618,6 +618,7 @@ def _validate_bootstrap_policy(
         "time_limit",
         "exclusive",
         "external_runner",
+        "shared_capacity_managed",
         "slurm_account",
         "qos_normal",
         "container_cpus",
@@ -635,6 +636,7 @@ def _validate_bootstrap_policy(
     if (
         actuator_config.get("exclusive") is not False
         or actuator_config.get("external_runner") is not True
+        or actuator_config.get("shared_capacity_managed") is not True
         or any(
             isinstance(actuator_config.get(field), bool)
             or not isinstance(actuator_config.get(field), (int, float))
