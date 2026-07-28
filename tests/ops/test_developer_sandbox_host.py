@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -528,6 +529,218 @@ def test_failed_upgrade_restores_previous_desired_and_candidate(
 
     assert json.loads(profile.desired_file.read_text(encoding="utf-8")) == previous
     assert events == [f"update:{previous_sha}", "relay", "invalidate", "remove"]
+
+
+def test_rollback_waits_for_the_global_install_serialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    gate = threading.Lock()
+    attempted = threading.Event()
+    entered = threading.Event()
+    failures: list[BaseException] = []
+
+    @contextmanager
+    def install_lock() -> object:
+        attempted.set()
+        with gate:
+            yield
+
+    @contextmanager
+    def activation_lock(_profile: host.Profile) -> object:
+        yield
+
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "verify_nfs_mount", lambda: None)
+    monkeypatch.setattr(host, "verify_state_parent", lambda: None)
+    monkeypatch.setattr(host, "_install_lock", install_lock)
+    monkeypatch.setattr(host, "_activation_lock", activation_lock)
+
+    def transaction_payload(_profile: host.Profile) -> None:
+        entered.set()
+        return None
+
+    monkeypatch.setattr(host, "_transaction_payload", transaction_payload)
+    monkeypatch.setattr(host, "_load_json", lambda *_args: None)
+
+    def run_rollback() -> None:
+        try:
+            host.rollback(profile, "b" * 40)
+        except host.HostConvergeError:
+            return
+        except BaseException as exc:
+            failures.append(exc)
+
+    gate.acquire()
+    worker = threading.Thread(target=run_rollback)
+    worker.start()
+    assert attempted.wait(timeout=1)
+    assert not entered.is_set()
+    gate.release()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert entered.is_set()
+    assert not failures
+
+
+def test_rollback_crash_after_desired_write_recovers_previous_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SimulatedCrash(BaseException):
+        pass
+
+    profile = _temporary_profile(tmp_path)
+    current_sha = "b" * 40
+    target_sha = "c" * 40
+    target_tree = "d" * 40
+    previous = {
+        "schema_version": 1,
+        "sandbox": profile.sandbox,
+        "candidate_sha": current_sha,
+        "previous_sha": target_sha,
+    }
+    replacement = {
+        "schema_version": 1,
+        "sandbox": profile.sandbox,
+        "candidate_sha": target_sha,
+        "previous_sha": current_sha,
+    }
+    monkeypatch.setattr(host, "DESIRED_ROOT", tmp_path / "desired")
+    monkeypatch.setattr(host, "TRANSACTION_ROOT", tmp_path / "transactions")
+    profile.desired_file.parent.mkdir(parents=True)
+    profile.desired_file.write_text(json.dumps(previous), encoding="utf-8")
+    profile.desired_file.chmod(0o600)
+
+    @contextmanager
+    def lock(*_args: object) -> object:
+        yield
+
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "verify_nfs_mount", lambda: None)
+    monkeypatch.setattr(host, "verify_state_parent", lambda: None)
+    monkeypatch.setattr(host, "_install_lock", lock)
+    monkeypatch.setattr(host, "_activation_lock", lock)
+    monkeypatch.setattr(
+        host,
+        "_ensure_root_private_directory",
+        lambda path: path.mkdir(parents=True, exist_ok=True),
+    )
+    monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
+    monkeypatch.setattr(
+        host,
+        "verify_candidate",
+        lambda _profile, path, _sha, _identity: (
+            target_tree if path.name == target_sha else "e" * 40
+        ),
+    )
+    monkeypatch.setattr(host, "_migration_tree", lambda *_args: "same")
+    monkeypatch.setattr(host, "verify_worker_runtime_env", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "verify_combined_receipt",
+        lambda *_args: _receipt(profile, target_sha),
+    )
+    monkeypatch.setattr(host, "_desired_payload", lambda *_args, **_kwargs: replacement)
+    monkeypatch.setattr(host, "_current_relay_sha", lambda _profile: current_sha)
+    write_transaction = host._write_transaction
+
+    def write_then_crash(*args: object, **kwargs: object) -> None:
+        write_transaction(*args, **kwargs)
+        if kwargs["phase"] == "desired-written":
+            raise SimulatedCrash
+
+    monkeypatch.setattr(host, "_write_transaction", write_then_crash)
+
+    with pytest.raises(SimulatedCrash):
+        host.rollback(profile, target_sha)
+
+    assert json.loads(profile.desired_file.read_text(encoding="utf-8")) == replacement
+    transaction = host._transaction_payload(profile)
+    assert transaction is not None
+    assert transaction["operation"] == "rollback"
+    assert transaction["phase"] == "desired-written"
+    events: list[str] = []
+    monkeypatch.setattr(
+        host,
+        "_invoke_lifecycle",
+        lambda _profile, sha, operation: events.append(f"{operation}:{sha}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_restore_relay",
+        lambda _profile, sha, _target: events.append(f"relay:{sha}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_invalidate_receipt",
+        lambda *_args: events.append("unexpected-invalidate"),
+    )
+
+    host._recover_transaction(profile, transaction)
+
+    assert json.loads(profile.desired_file.read_text(encoding="utf-8")) == previous
+    assert events == [f"update:{current_sha}", f"relay:{current_sha}"]
+    assert not host._transaction_file(profile).exists()
+
+
+def test_service_converge_serializes_on_the_activation_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    desired = {"candidate_sha": SHA}
+    locked = False
+    events: list[str] = []
+    transaction = {
+        "operation": "rollback",
+        "candidate_sha": SHA,
+        "candidate_tree": "b" * 40,
+        "phase": "desired-written",
+        "previous_desired": {"candidate_sha": "c" * 40},
+        "previous_relay_sha": "c" * 40,
+    }
+
+    @contextmanager
+    def activation_lock(selected: host.Profile) -> object:
+        nonlocal locked
+        assert selected == profile
+        locked = True
+        try:
+            yield
+        finally:
+            locked = False
+
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "verify_nfs_mount", lambda: None)
+    monkeypatch.setattr(host, "verify_state_parent", lambda: None)
+    monkeypatch.setattr(host, "_desired_for_service", lambda _sandbox: (profile, desired))
+    monkeypatch.setattr(host, "_activation_lock", activation_lock)
+    monkeypatch.setattr(host, "_transaction_payload", lambda _profile: transaction)
+
+    def converge(selected: host.Profile, state: object) -> None:
+        if not locked or selected != profile or state != desired:
+            pytest.fail("service convergence bypassed the activation lock")
+        events.append("converge")
+
+    monkeypatch.setattr(host, "_service_converge_locked", converge)
+    monkeypatch.setattr(
+        host,
+        "_write_transaction",
+        lambda *_args, **kwargs: events.append(f"write:{kwargs['phase']}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_remove_transaction",
+        lambda _profile: events.append("remove"),
+    )
+
+    host.service_converge(profile.sandbox)
+
+    assert not locked
+    assert events == ["converge", "write:committed", "remove"]
 
 
 def test_empty_namespace_first_install_materializes_before_prepare_and_attest(

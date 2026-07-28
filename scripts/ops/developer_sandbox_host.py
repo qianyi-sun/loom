@@ -1359,11 +1359,11 @@ def _validate_desired_binding(
         raise HostConvergeError("sandbox desired rollback binding is invalid")
 
 
-def service_converge(sandbox: str) -> None:
-    _require_live_host()
-    verify_nfs_mount()
-    verify_state_parent()
-    profile, desired = _desired_for_service(sandbox)
+def _service_converge_locked(
+    profile: Profile,
+    desired: Mapping[str, Any],
+) -> None:
+    sandbox = profile.sandbox
     sha = str(desired["candidate_sha"])
     authority = _identity("root", SHARED_GROUP)
     owner = _identity(sandbox, SHARED_GROUP)
@@ -1389,6 +1389,37 @@ def service_converge(sandbox: str) -> None:
         _invoke_lifecycle(profile, sha, "update")
     _invoke_lifecycle(profile, sha, "check")
     verify_listening_ports(profile)
+
+
+def service_converge(sandbox: str) -> None:
+    _require_live_host()
+    verify_nfs_mount()
+    verify_state_parent()
+    profile, _desired = _desired_for_service(sandbox)
+    with _activation_lock(profile):
+        transaction = _transaction_payload(profile)
+        if transaction is not None and transaction["phase"] != "desired-written":
+            _recover_transaction(profile, transaction)
+            transaction = None
+        locked_profile, desired = _desired_for_service(sandbox)
+        if transaction is not None and desired.get("candidate_sha") != transaction.get(
+            "candidate_sha",
+        ):
+            raise HostConvergeError(
+                "sandbox desired state does not match pending activation transaction",
+            )
+        _service_converge_locked(locked_profile, desired)
+        if transaction is not None:
+            _write_transaction(
+                profile,
+                operation=str(transaction["operation"]),
+                sha=str(transaction["candidate_sha"]),
+                tree=str(transaction["candidate_tree"]),
+                phase="committed",
+                previous_desired=transaction["previous_desired"],
+                previous_relay_sha=transaction["previous_relay_sha"],
+            )
+            _remove_transaction(profile)
 
 
 def service_check(sandbox: str) -> None:
@@ -2417,48 +2448,113 @@ def require_migration_compatible_update(
 
 
 def rollback(profile: Profile, target_sha: str) -> None:
-    desired = _load_json(profile.desired_file, "sandbox desired state")
-    if desired is None:
-        raise HostConvergeError("sandbox desired state is absent")
-    current_sha = desired.get("candidate_sha")
-    if target_sha != desired.get("previous_sha") or not isinstance(current_sha, str):
-        raise HostConvergeError("rollback target must equal the recorded previous SHA")
-    authority = _identity("root", SHARED_GROUP)
-    current = profile.candidate_root / current_sha
-    target = profile.candidate_root / target_sha
-    verify_candidate(profile, current, current_sha, authority)
-    target_tree = verify_candidate(profile, target, target_sha, authority)
-    if _migration_tree(current, authority) != _migration_tree(target, authority):
-        raise HostConvergeError(
-            "rollback crosses a migration-tree change; restore a reviewed data backup instead",
-        )
-    verify_worker_runtime_env(
-        profile,
-        target_sha,
-        _identity(profile.sandbox, f"loom-sandbox-{profile.sandbox}"),
-    )
-    receipt = verify_combined_receipt(profile, target_sha, target_tree)
-    replacement = _desired_payload(
-        profile,
-        target_sha,
-        target_tree,
-        previous_sha=current_sha,
-        receipt=receipt,
-    )
-    _atomic_write(
-        profile.desired_file,
-        (json.dumps(replacement, sort_keys=True, separators=(",", ":")) + "\n").encode(),
-        mode=0o600,
-    )
-    try:
-        _run(("systemctl", "start", UNIT_NAME.format(sandbox=profile.sandbox)))
-    except HostConvergeError:
-        _atomic_write(
-            profile.desired_file,
-            (json.dumps(desired, sort_keys=True, separators=(",", ":")) + "\n").encode(),
-            mode=0o600,
-        )
-        raise
+    _require_live_host()
+    verify_nfs_mount()
+    verify_state_parent()
+    with _install_lock():
+        desired: dict[str, Any] | None = None
+        target_tree = ""
+        previous_relay: str | None = None
+        try:
+            with _activation_lock(profile):
+                orphan = _transaction_payload(profile)
+                if orphan is not None:
+                    _recover_transaction(profile, orphan)
+                desired = _load_json(profile.desired_file, "sandbox desired state")
+                if desired is None:
+                    raise HostConvergeError("sandbox desired state is absent")
+                current_sha = desired.get("candidate_sha")
+                if target_sha != desired.get("previous_sha") or not isinstance(
+                    current_sha,
+                    str,
+                ):
+                    raise HostConvergeError(
+                        "rollback target must equal the recorded previous SHA",
+                    )
+                authority = _identity("root", SHARED_GROUP)
+                current = profile.candidate_root / current_sha
+                target = profile.candidate_root / target_sha
+                verify_candidate(profile, current, current_sha, authority)
+                target_tree = verify_candidate(profile, target, target_sha, authority)
+                if _migration_tree(current, authority) != _migration_tree(
+                    target,
+                    authority,
+                ):
+                    raise HostConvergeError(
+                        "rollback crosses a migration-tree change; "
+                        "restore a reviewed data backup instead",
+                    )
+                verify_worker_runtime_env(
+                    profile,
+                    target_sha,
+                    _identity(
+                        profile.sandbox,
+                        f"loom-sandbox-{profile.sandbox}",
+                    ),
+                )
+                receipt = verify_combined_receipt(profile, target_sha, target_tree)
+                replacement = _desired_payload(
+                    profile,
+                    target_sha,
+                    target_tree,
+                    previous_sha=current_sha,
+                    receipt=receipt,
+                )
+                previous_relay = _current_relay_sha(profile)
+                _write_transaction(
+                    profile,
+                    operation="rollback",
+                    sha=target_sha,
+                    tree=target_tree,
+                    phase="preparing",
+                    previous_desired=desired,
+                    previous_relay_sha=previous_relay,
+                )
+                _atomic_write(
+                    profile.desired_file,
+                    (
+                        json.dumps(
+                            replacement,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode(),
+                    mode=0o600,
+                )
+                _write_transaction(
+                    profile,
+                    operation="rollback",
+                    sha=target_sha,
+                    tree=target_tree,
+                    phase="desired-written",
+                    previous_desired=desired,
+                    previous_relay_sha=previous_relay,
+                )
+            _run(("systemctl", "start", UNIT_NAME.format(sandbox=profile.sandbox)))
+            with _activation_lock(profile):
+                _write_transaction(
+                    profile,
+                    operation="rollback",
+                    sha=target_sha,
+                    tree=target_tree,
+                    phase="committed",
+                    previous_desired=desired,
+                    previous_relay_sha=previous_relay,
+                )
+                _remove_transaction(profile)
+        except Exception:
+            with _activation_lock(profile):
+                transaction = _transaction_payload(profile)
+                if transaction is not None:
+                    try:
+                        _recover_transaction(profile, transaction)
+                    except Exception as recovery_exc:
+                        raise HostConvergeError(
+                            f"{profile.sandbox} rollback and previous-candidate "
+                            "recovery both failed",
+                        ) from recovery_exc
+            raise
 
 
 def _nfs_readback_commands(profile: Profile, sha: str) -> list[list[str]]:
@@ -2570,6 +2666,7 @@ def _install_lock() -> Iterator[None]:
 def _write_transaction(
     profile: Profile,
     *,
+    operation: str = "install",
     sha: str,
     tree: str,
     phase: str,
@@ -2583,6 +2680,7 @@ def _write_transaction(
     if (
         isinstance(existing, dict)
         and existing.get("sandbox") == profile.sandbox
+        and existing.get("operation", "install") == operation
         and existing.get("candidate_sha") == sha
         and existing.get("candidate_tree") == tree
     ):
@@ -2595,8 +2693,9 @@ def _write_transaction(
             "transaction expires_at",
         )
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "sandbox": profile.sandbox,
+        "operation": operation,
         "candidate_sha": sha,
         "candidate_tree": tree,
         "phase": phase,
@@ -2617,24 +2716,30 @@ def _transaction_payload(profile: Profile) -> dict[str, Any] | None:
     payload = _load_json(_transaction_file(profile), "sandbox activation transaction")
     if payload is None:
         return None
+    schema_version = payload.get("schema_version")
+    expected_keys = {
+        "schema_version",
+        "sandbox",
+        "candidate_sha",
+        "candidate_tree",
+        "phase",
+        "started_at",
+        "expires_at",
+        "previous_desired",
+        "previous_relay_sha",
+    }
+    if schema_version == 2:
+        expected_keys.add("operation")
     _exact_keys(
         payload,
-        {
-            "schema_version",
-            "sandbox",
-            "candidate_sha",
-            "candidate_tree",
-            "phase",
-            "started_at",
-            "expires_at",
-            "previous_desired",
-            "previous_relay_sha",
-        },
+        expected_keys,
         "sandbox activation transaction",
     )
+    operation = payload.get("operation", "install")
     if (
-        payload["schema_version"] != 1
+        schema_version not in {1, 2}
         or payload["sandbox"] != profile.sandbox
+        or operation not in {"install", "rollback"}
         or SHA_RE.fullmatch(str(payload["candidate_sha"])) is None
         or SHA_RE.fullmatch(str(payload["candidate_tree"])) is None
         or payload["phase"]
@@ -2659,6 +2764,7 @@ def _transaction_payload(profile: Profile) -> dict[str, Any] | None:
         raise HostConvergeError("sandbox activation transaction binding is invalid")
     _parse_attestation_time(payload["started_at"], "transaction started_at")
     _parse_attestation_time(payload["expires_at"], "transaction expires_at")
+    payload["operation"] = operation
     return payload
 
 
@@ -2723,7 +2829,11 @@ def _invalidate_receipt(profile: Profile, sha: str) -> None:
 
 
 def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> None:
+    if transaction.get("phase") == "committed":
+        _remove_transaction(profile)
+        return
     sha = str(transaction["candidate_sha"])
+    operation = str(transaction.get("operation", "install"))
     previous = transaction["previous_desired"]
     previous_relay = transaction["previous_relay_sha"]
     if previous is None:
@@ -2731,11 +2841,11 @@ def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> No
             profile.desired_file.unlink()
             _fsync_directory(profile.desired_file.parent)
         current_state = _sandbox_state_sha(profile)
-        operation = "destroy" if current_state == sha else "prepare-stop"
+        lifecycle_operation = "destroy" if current_state == sha else "prepare-stop"
         try:
-            _invoke_lifecycle(profile, sha, operation)
+            _invoke_lifecycle(profile, sha, lifecycle_operation)
         except HostConvergeError:
-            if operation != "prepare-stop":
+            if lifecycle_operation != "prepare-stop":
                 raise
     else:
         previous_sha = previous.get("candidate_sha")
@@ -2748,7 +2858,8 @@ def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> No
         )
         _invoke_lifecycle(profile, previous_sha, "update")
     _restore_relay(profile, previous_relay, sha)
-    _invalidate_receipt(profile, sha)
+    if operation == "install":
+        _invalidate_receipt(profile, sha)
     _remove_transaction(profile)
 
 
@@ -2806,21 +2917,23 @@ def _install_materialized(
         if len(matching_fingerprints) != len(set(matching_fingerprints)):
             raise HostConvergeError(f"cross-sandbox secret collision detected for {key}")
     for profile, tree, runtime_group in candidates:
-        with _activation_lock(profile):
-            orphan = _transaction_payload(profile)
-            if orphan is not None:
-                _recover_transaction(profile, orphan)
-            previous = _load_json(profile.desired_file, "sandbox desired state")
-            previous_relay = _current_relay_sha(profile)
-            _write_transaction(
-                profile,
-                sha=sha,
-                tree=tree,
-                phase="preparing",
-                previous_desired=previous,
-                previous_relay_sha=previous_relay,
-            )
-            try:
+        previous: dict[str, Any] | None = None
+        previous_relay: str | None = None
+        try:
+            with _activation_lock(profile):
+                orphan = _transaction_payload(profile)
+                if orphan is not None:
+                    _recover_transaction(profile, orphan)
+                previous = _load_json(profile.desired_file, "sandbox desired state")
+                previous_relay = _current_relay_sha(profile)
+                _write_transaction(
+                    profile,
+                    sha=sha,
+                    tree=tree,
+                    phase="preparing",
+                    previous_desired=previous,
+                    previous_relay_sha=previous_relay,
+                )
                 _assert_capacity_units_stopped(profile)
                 _invoke_lifecycle(profile, sha, "prepare")
                 verify_listening_ports(profile)
@@ -2862,9 +2975,10 @@ def _install_materialized(
                     previous_desired=previous,
                     previous_relay_sha=previous_relay,
                 )
-                unit = UNIT_NAME.format(sandbox=profile.sandbox)
-                _run(("systemctl", "enable", unit))
-                _run(("systemctl", "restart", unit))
+            unit = UNIT_NAME.format(sandbox=profile.sandbox)
+            _run(("systemctl", "enable", unit))
+            _run(("systemctl", "restart", unit))
+            with _activation_lock(profile):
                 service_check(profile.sandbox)
                 _write_transaction(
                     profile,
@@ -2875,7 +2989,8 @@ def _install_materialized(
                     previous_relay_sha=previous_relay,
                 )
                 _remove_transaction(profile)
-            except Exception:
+        except Exception:
+            with _activation_lock(profile):
                 transaction = _transaction_payload(profile)
                 if transaction is not None:
                     try:
@@ -2885,7 +3000,7 @@ def _install_materialized(
                             f"{profile.sandbox} activation and previous-candidate "
                             "recovery both failed",
                         ) from recovery_exc
-                raise
+            raise
 
 
 def install(profiles: Sequence[Profile], sha: str) -> None:
