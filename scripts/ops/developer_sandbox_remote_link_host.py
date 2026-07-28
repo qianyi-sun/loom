@@ -9,6 +9,7 @@ prints a key, token, certificate body, or secret-bearing environment.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import http.client
 import json
@@ -21,8 +22,9 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,6 +39,9 @@ SERVER_ROOT = INSTALL_ROOT / "server"
 CLIENT_ROOT = INSTALL_ROOT / "clients"
 ISSUANCE_ROOT = Path("/var/lib/loom/developer-sandbox-links/issuance")
 ATTESTATION_ROOT = Path("/var/lib/loom-developer-sandbox-links/attestations")
+COMBINED_RECEIPT_ROOT = Path("/var/lib/loom-shared-capacity/runtime-attestations")
+TRANSACTION_ROOT = Path("/var/lib/loom-developer-sandbox-links/transactions")
+TRANSACTION_LOCK_ROOT = Path("/run/loom-developer-sandbox-links")
 INSTALLED_RELAY = Path("/usr/local/libexec/loom-developer-sandbox-remote-link")
 INSTALLED_HOST = Path(
     "/usr/local/libexec/loom-developer-sandbox-remote-link-host",
@@ -270,6 +275,7 @@ def _atomic_copy(source: Path, target: Path, *, mode: int) -> None:
         os.chown(temporary, 0, 0)
         os.chmod(temporary, mode)
         os.replace(temporary, target)
+        _fsync_directory(target.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -286,6 +292,7 @@ def _atomic_write(path: Path, content: str, *, mode: int = 0o600) -> None:
         os.chown(temporary, 0, 0)
         os.chmod(temporary, mode)
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -328,6 +335,15 @@ def _atomic_symlink(target_name: str, link: Path) -> None:
     temporary.unlink(missing_ok=True)
     os.symlink(target_name, temporary)
     os.replace(temporary, link)
+    _fsync_directory(link.parent)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _fingerprint(path: Path) -> str:
@@ -338,7 +354,184 @@ def _openssl(*argv: str) -> None:
     _run((OPENSSL_PATH, *argv))
 
 
+@contextmanager
+def _link_transaction(profile: Profile) -> Iterator[None]:
+    _ensure_root_dir(TRANSACTION_LOCK_ROOT)
+    lock_path = TRANSACTION_LOCK_ROOT / f"{profile.sandbox}.lock"
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+        ):
+            raise LinkHostError("remote-link transaction lock metadata is invalid")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _journal_path(profile: Profile) -> Path:
+    return TRANSACTION_ROOT / f"{profile.sandbox}.json"
+
+
+def _read_journal(profile: Profile) -> dict[str, Any] | None:
+    path = _journal_path(profile)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LinkHostError("remote-link activation journal is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise LinkHostError("remote-link activation journal metadata is invalid")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LinkHostError("remote-link activation journal is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "schema_version",
+            "sandbox",
+            "candidate_sha",
+            "previous_sha",
+            "phase",
+        }
+        or payload["schema_version"] != 1
+        or payload["sandbox"] != profile.sandbox
+        or not isinstance(payload["candidate_sha"], str)
+        or SHA_RE.fullmatch(payload["candidate_sha"]) is None
+        or (
+            payload["previous_sha"] is not None
+            and (
+                not isinstance(payload["previous_sha"], str)
+                or SHA_RE.fullmatch(payload["previous_sha"]) is None
+            )
+        )
+        or payload["phase"] not in {"switching", "switched", "restarting"}
+    ):
+        raise LinkHostError("remote-link activation journal binding is invalid")
+    return payload
+
+
+def _write_journal(
+    profile: Profile,
+    candidate_sha: str,
+    previous_sha: str | None,
+    phase: str,
+) -> None:
+    _ensure_root_dir(TRANSACTION_ROOT)
+    _atomic_write(
+        _journal_path(profile),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "sandbox": profile.sandbox,
+                "candidate_sha": candidate_sha,
+                "previous_sha": previous_sha,
+                "phase": phase,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        mode=0o600,
+    )
+
+
+def _remove_journal(profile: Profile) -> None:
+    path = _journal_path(profile)
+    if path.exists():
+        path.unlink()
+        _fsync_directory(path.parent)
+
+
+def _current_server_sha(profile: Profile) -> str | None:
+    current = SERVER_ROOT / profile.sandbox / "current"
+    try:
+        metadata = current.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LinkHostError("sandbox relay current pointer is unavailable") from exc
+    if not stat.S_ISLNK(metadata.st_mode):
+        raise LinkHostError("sandbox relay current pointer is invalid")
+    target = os.readlink(current)
+    prefix = "candidates/"
+    candidate_sha = target.removeprefix(prefix)
+    if target != prefix + candidate_sha or SHA_RE.fullmatch(candidate_sha) is None:
+        raise LinkHostError("sandbox relay current pointer is invalid")
+    return candidate_sha
+
+
+def _unlink_and_fsync(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(metadata.st_mode):
+        raise LinkHostError("activation proof path is a directory")
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
+def _invalidate_activation_proofs(profile: Profile, candidate_sha: str) -> None:
+    _unlink_and_fsync(ATTESTATION_ROOT / profile.sandbox / candidate_sha / "fleet.json")
+    _unlink_and_fsync(
+        COMBINED_RECEIPT_ROOT / profile.sandbox / candidate_sha / "combined.json",
+    )
+
+
+def _restore_activation(profile: Profile, previous_sha: str | None) -> None:
+    current = SERVER_ROOT / profile.sandbox / "current"
+    unit = f"loom-developer-sandbox-link@{profile.sandbox}.service"
+    if previous_sha is None:
+        if current.is_symlink():
+            current.unlink()
+            _fsync_directory(current.parent)
+        _run(("systemctl", "disable", "--now", unit), expected=frozenset({0, 1, 5}))
+        return
+    previous_root = SERVER_ROOT / profile.sandbox / "candidates" / previous_sha
+    _validate_installed_server_config(profile, previous_sha, previous_root)
+    _atomic_symlink(f"candidates/{previous_sha}", current)
+    _run(("systemctl", "restart", unit))
+    check_server(profile, previous_sha)
+
+
+def _recover_activation(profile: Profile) -> None:
+    journal = _read_journal(profile)
+    if journal is None:
+        return
+    _restore_activation(profile, journal["previous_sha"])
+    _remove_journal(profile)
+
+
 def prepare_rotation(profile: Profile, candidate_sha: str) -> Path:
+    with _link_transaction(profile):
+        _recover_activation(profile)
+        _invalidate_activation_proofs(profile, candidate_sha)
+        return _prepare_rotation_locked(profile, candidate_sha)
+
+
+def _prepare_rotation_locked(profile: Profile, candidate_sha: str) -> Path:
     destination = ISSUANCE_ROOT / profile.sandbox / candidate_sha
     if destination.exists():
         raise LinkHostError("candidate issuance directory already exists")
@@ -474,6 +667,13 @@ def _install_programs() -> None:
 
 
 def install_server(profile: Profile, candidate_sha: str, source: Path) -> Path:
+    with _link_transaction(profile):
+        _recover_activation(profile)
+        _invalidate_activation_proofs(profile, candidate_sha)
+        return _install_server_locked(profile, candidate_sha, source)
+
+
+def _install_server_locked(profile: Profile, candidate_sha: str, source: Path) -> Path:
     _run(
         (
             OPENSSL_PATH,
@@ -568,6 +768,29 @@ def install_client(
     minio_access_key_source: Path,
     minio_secret_key_source: Path,
 ) -> Path:
+    with _link_transaction(profile):
+        _recover_activation(profile)
+        _invalidate_activation_proofs(profile, candidate_sha)
+        return _install_client_locked(
+            profile,
+            candidate_sha,
+            node,
+            source,
+            token_source,
+            minio_access_key_source,
+            minio_secret_key_source,
+        )
+
+
+def _install_client_locked(
+    profile: Profile,
+    candidate_sha: str,
+    node: str,
+    source: Path,
+    token_source: Path,
+    minio_access_key_source: Path,
+    minio_secret_key_source: Path,
+) -> Path:
     if node not in ELIGIBLE_NODES:
         raise LinkHostError("client node is not in the closed inventory")
     _run(
@@ -631,21 +854,39 @@ def install_client(
 
 
 def activate_server(profile: Profile, candidate_sha: str) -> None:
+    with _link_transaction(profile):
+        _recover_activation(profile)
+        _invalidate_activation_proofs(profile, candidate_sha)
+        _activate_server_locked(profile, candidate_sha)
+
+
+def _activate_server_locked(profile: Profile, candidate_sha: str) -> None:
     candidate_root = SERVER_ROOT / profile.sandbox / "candidates" / candidate_sha
     if not candidate_root.is_dir():
         raise LinkHostError("server candidate is not installed")
     _validate_installed_server_config(profile, candidate_sha, candidate_root)
     _run((str(INSTALLED_RELAY), "--config", str(candidate_root / "config.toml"), "--check"))
+    previous_sha = _current_server_sha(profile)
+    _write_journal(profile, candidate_sha, previous_sha, "switching")
     _atomic_symlink(f"candidates/{candidate_sha}", SERVER_ROOT / profile.sandbox / "current")
+    _write_journal(profile, candidate_sha, previous_sha, "switched")
     unit = f"loom-developer-sandbox-link@{profile.sandbox}.service"
-    _run(("systemctl", "enable", unit))
-    _run(("systemctl", "restart", unit))
-    active = _run(("systemctl", "is-active", unit)).stdout.strip()
-    if active != "active":
-        raise LinkHostError("sandbox relay did not become active")
-    current = (SERVER_ROOT / profile.sandbox / "current").resolve(strict=True)
-    if current != candidate_root.resolve(strict=True):
-        raise LinkHostError("sandbox relay candidate readback failed")
+    try:
+        _write_journal(profile, candidate_sha, previous_sha, "restarting")
+        _run(("systemctl", "enable", unit))
+        _run(("systemctl", "restart", unit))
+        active = _run(("systemctl", "is-active", unit)).stdout.strip()
+        if active != "active":
+            raise LinkHostError("sandbox relay did not become active")
+        current = (SERVER_ROOT / profile.sandbox / "current").resolve(strict=True)
+        if current != candidate_root.resolve(strict=True):
+            raise LinkHostError("sandbox relay candidate readback failed")
+        check_server(profile, candidate_sha)
+    except Exception:
+        _restore_activation(profile, previous_sha)
+        _remove_journal(profile)
+        raise
+    _remove_journal(profile)
 
 
 def _validate_installed_server_config(
@@ -1113,6 +1354,16 @@ def _parse_utc(value: object, *, label: str) -> datetime:
 
 
 def persist_attestation(
+    profile: Profile,
+    candidate_sha: str,
+    payload: dict[str, Any],
+) -> Path:
+    with _link_transaction(profile):
+        _recover_activation(profile)
+        return _persist_attestation_locked(profile, candidate_sha, payload)
+
+
+def _persist_attestation_locked(
     profile: Profile,
     candidate_sha: str,
     payload: dict[str, Any],

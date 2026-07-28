@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -8,6 +10,11 @@ import pytest
 import scripts.ops.developer_sandbox_remote_link_host as host
 
 SHA = "a" * 40
+
+
+@contextmanager
+def _no_link_transaction(_profile: host.Profile) -> Iterator[None]:
+    yield
 
 
 def _valid_env(profile: host.Profile) -> str:
@@ -195,6 +202,7 @@ def test_prepare_and_install_candidate_credentials_are_exact_and_host_local(
     monkeypatch.setattr(host, "ISSUANCE_ROOT", issuance_root)
     monkeypatch.setattr(host, "CLIENT_ROOT", client_root)
     monkeypatch.setattr(host, "INSTALLED_HOST", installed_host)
+    monkeypatch.setattr(host, "_link_transaction", _no_link_transaction)
     monkeypatch.setattr(host, "_ensure_root_dir", local_private_dir)
     monkeypatch.setattr(host, "_ensure_root_owned_parent", local_parent)
     monkeypatch.setattr(os, "chown", lambda *_: None)
@@ -319,6 +327,7 @@ def test_fleet_attestation_persists_only_complete_fresh_closed_schema(
 ) -> None:
     profile = host.load_profile("qianyi")
     monkeypatch.setattr(host, "ATTESTATION_ROOT", tmp_path / "attestations")
+    monkeypatch.setattr(host, "_link_transaction", _no_link_transaction)
     monkeypatch.setattr(
         host,
         "_ensure_root_dir",
@@ -334,8 +343,11 @@ def test_fleet_attestation_persists_only_complete_fresh_closed_schema(
     assert destination.read_text(encoding="utf-8").count("trt-gb10-7") == 0
 
 
-def test_fleet_attestation_rejects_missing_node_or_stale_payload() -> None:
+def test_fleet_attestation_rejects_missing_node_or_stale_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     profile = host.load_profile("qianyi")
+    monkeypatch.setattr(host, "_link_transaction", _no_link_transaction)
     missing = _valid_attestation(profile)
     missing["nodes"].pop("trt-gb10-15")  # type: ignore[union-attr]
     missing["payload_sha256"] = host._attestation_digest(missing)
@@ -353,3 +365,102 @@ def test_fleet_attestation_rejects_missing_node_or_stale_payload() -> None:
     stale["payload_sha256"] = host._attestation_digest(stale)
     with pytest.raises(host.LinkHostError, match="freshness"):
         host.persist_attestation(profile, SHA, stale)
+
+
+def test_activation_restart_failure_restores_previous_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = host.load_profile("qianyi")
+    server_root = tmp_path / "server"
+    (server_root / profile.sandbox / "candidates" / SHA).mkdir(parents=True)
+    events: list[str] = []
+    monkeypatch.setattr(host, "SERVER_ROOT", server_root)
+    monkeypatch.setattr(host, "_validate_installed_server_config", lambda *_args: None)
+    monkeypatch.setattr(host, "_current_server_sha", lambda _profile: "b" * 40)
+    monkeypatch.setattr(
+        host,
+        "_write_journal",
+        lambda _profile, _sha, _previous, phase: events.append(f"journal:{phase}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_atomic_symlink",
+        lambda target, _link: events.append(f"switch:{target}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_restore_activation",
+        lambda _profile, previous: events.append(f"restore:{previous}"),
+    )
+    monkeypatch.setattr(host, "_remove_journal", lambda _profile: events.append("remove"))
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> object:
+        if argv[:2] == ("systemctl", "restart"):
+            raise host.LinkHostError("injected restart failure")
+        return type("Completed", (), {"stdout": ""})()
+
+    monkeypatch.setattr(host, "_run", run)
+
+    with pytest.raises(host.LinkHostError, match="injected"):
+        host._activate_server_locked(profile, SHA)
+
+    assert events == [
+        "journal:switching",
+        f"switch:candidates/{SHA}",
+        "journal:switched",
+        "journal:restarting",
+        f"restore:{'b' * 40}",
+        "remove",
+    ]
+
+
+def test_activation_orphan_recovery_restores_previous_before_next_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = host.load_profile("qianyi")
+    events: list[str] = []
+    monkeypatch.setattr(
+        host,
+        "_read_journal",
+        lambda _profile: {
+            "candidate_sha": SHA,
+            "previous_sha": "b" * 40,
+            "phase": "switched",
+        },
+    )
+    monkeypatch.setattr(
+        host,
+        "_restore_activation",
+        lambda _profile, previous: events.append(f"restore:{previous}"),
+    )
+    monkeypatch.setattr(host, "_remove_journal", lambda _profile: events.append("remove"))
+
+    host._recover_activation(profile)
+
+    assert events == [f"restore:{'b' * 40}", "remove"]
+
+
+def test_same_sha_mutation_invalidates_fleet_and_combined_proofs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = host.load_profile("qianyi")
+    fleet_root = tmp_path / "fleet"
+    combined_root = tmp_path / "combined"
+    fleet = fleet_root / profile.sandbox / SHA / "fleet.json"
+    combined = combined_root / profile.sandbox / SHA / "combined.json"
+    fleet.parent.mkdir(parents=True)
+    combined.parent.mkdir(parents=True)
+    fleet.write_text("fleet\n", encoding="utf-8")
+    combined.write_text("combined\n", encoding="utf-8")
+    fsynced: list[Path] = []
+    monkeypatch.setattr(host, "ATTESTATION_ROOT", fleet_root)
+    monkeypatch.setattr(host, "COMBINED_RECEIPT_ROOT", combined_root)
+    monkeypatch.setattr(host, "_fsync_directory", fsynced.append)
+
+    host._invalidate_activation_proofs(profile, SHA)
+
+    assert not fleet.exists()
+    assert not combined.exists()
+    assert fsynced == [fleet.parent, combined.parent]
