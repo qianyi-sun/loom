@@ -11,7 +11,7 @@ from pathlib import Path
 
 _TOKEN = "${GIT_SHA}"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_EXPECTED_TOKEN_COUNT = 6
+_EXPECTED_TOKEN_COUNT = 4
 _MAX_TEMPLATE_BYTES = 64 * 1024
 _FORBIDDEN_RUNTIME_PATHS = (
     "/opt/loom-shared-capacity/current",
@@ -36,7 +36,6 @@ def render_service_unit(template: str, *, git_sha: str) -> str:
     required = (
         f"WorkingDirectory={root}/repo\n",
         f"Environment=PATH={root}/venv/bin:/usr/local/bin:/usr/bin:/bin\n",
-        f"ExecStartPre={root}/venv/bin/python -I -B ",
         f"ExecStart={root}/venv/bin/python -I -B ",
         f" {root}/repo/scripts/ops/shared_capacity_adapter.py --config ",
     )
