@@ -1,0 +1,12 @@
+[Unit]
+Description=Continuously reconcile Loom oldlab-5 ephemeral CI runner capacity
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=loom-ci-runner-pool.service
+
+[Install]
+WantedBy=timers.target

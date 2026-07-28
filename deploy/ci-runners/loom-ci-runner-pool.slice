@@ -1,0 +1,10 @@
+[Unit]
+Description=Aggregate resource boundary for Loom oldlab-5 CI runner guests
+
+[Slice]
+CPUAccounting=true
+CPUQuota=2200%
+MemoryAccounting=true
+MemoryMax=80G
+TasksAccounting=true
+TasksMax=8192

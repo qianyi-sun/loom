@@ -1,0 +1,21 @@
+[Unit]
+Description=Reconcile Loom oldlab-5 ephemeral CI runner pool
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists=/etc/loom-ci-runner-pool/profile.toml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+LoadCredential=github-token:/etc/loom-ci-runner-pool/github-token
+EnvironmentFile=/etc/loom-ci-runner-pool/candidate.env
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/loom-ci-runner-pool /var/cache/loom-ci-runner-pool /run/docker.sock
+ExecStart=/usr/local/libexec/loom-ci-runner-pool --profile /etc/loom-ci-runner-pool/profile.toml --candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA} --token-file ${CREDENTIALS_DIRECTORY}/github-token reconcile --execute
+TimeoutStartSec=300

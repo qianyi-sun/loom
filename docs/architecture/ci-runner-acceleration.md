@@ -51,8 +51,8 @@ Do not set `LOOM_CI_ACCELERATOR_RUNS_ON` until all of these are true:
    logging, and absent after registration. A job receives no persistent GitHub,
    SSH, registry, cloud, kubeconfig, or host credentials.
 5. The pool enforces the accepted labels, x86_64 architecture, `umask 022`,
-   Docker/Buildx/Kind capacity, and an aggregate budget no larger than 22 vCPU
-   and 80 GiB for the initial acceptance window.
+   Docker/Buildx/Kind capacity, and a host-level aggregate budget no larger
+   than 22 physical CPUs and 80 GiB for the initial acceptance window.
 6. Health readback proves enough idle one-job runners for the selected matrix,
    and teardown proves that runner registrations, guests, disks, containers,
    volumes, writable caches, and QEMU/binfmt handlers do not persist.
@@ -60,6 +60,122 @@ Do not set `LOOM_CI_ACCELERATOR_RUNS_ON` until all of these are true:
 PR image builds remain read-only and cache-write-free. The `publish` image job
 continues to run on GitHub-hosted infrastructure with its existing trusted
 branch and package-write checks.
+
+## Pool shape and measured resource sensitivity
+
+The initial pool has 11 one-job KVM guests. Each guest has 6 GiB RAM and sees
+8 virtual CPUs so a job can burst when the host has idle capacity. These 88
+visible guest vCPUs are deliberately overcommitted; they are not 88 physical
+CPUs. Every QEMU container is attached to
+`loom-ci-runner-pool.slice`, which caps the entire pool at 22 physical CPUs and
+80 GiB while equal CPU shares prevent one guest from reserving the host.
+
+This shape avoids hard-partitioning oldlab-5 into eleven 2-core machines. A
+cold, isolated `agent-sandbox` multi-architecture build on 2026-07-28 measured
+784 seconds at 2 vCPU/6 GiB and 791 seconds at 8 vCPU/6 GiB. The 0.9% difference
+is noise for this ARM64-emulation-dominated job, and both are well below the
+recorded 1,915-second GitHub-hosted full-job baseline. Other checks such as Go,
+web, and root shards can use more parallel CPU, so the production profile
+retains burstable vCPUs while enforcing the aggregate host boundary.
+
+The reproducible cold comparison is:
+
+```bash
+sudo /usr/local/libexec/loom-ci-runner-pool \
+  --profile /etc/loom-ci-runner-pool/profile.toml \
+  --candidate-sha "$CANDIDATE_SHA" \
+  benchmark-agent-sandbox --vcpus 2 --execute
+
+sudo /usr/local/libexec/loom-ci-runner-pool \
+  --profile /etc/loom-ci-runner-pool/profile.toml \
+  --candidate-sha "$CANDIDATE_SHA" \
+  benchmark-agent-sandbox --vcpus 8 --execute
+```
+
+Each run creates a fresh overlay from the same sealed golden image and has an
+independent Docker daemon and BuildKit cache. It never registers a GitHub
+runner.
+
+## Build and preflight
+
+Build the candidate-bound QEMU controller image from the exact reviewed
+checkout:
+
+```bash
+CANDIDATE_SHA=$(git rev-parse HEAD)
+docker build \
+  --build-arg "LOOM_CANDIDATE_SHA=$CANDIDATE_SHA" \
+  --tag loom-ci-runner-qemu:ubuntu-24.04-v1 \
+  --file deploy/ci-runners/qemu.Dockerfile \
+  .
+```
+
+Install the checked-in profile, controller, slice, service, and timer using
+root-owned files. Do not enable the timer yet. The GitHub administration token
+must be a root-owned mode-0600 file at
+`/etc/loom-ci-runner-pool/github-token`; it must have repository Actions runner
+administration access and no workflow/package/deployment credentials.
+`/etc/loom-ci-runner-pool/candidate.env` contains only:
+
+```text
+LOOM_CI_RUNNER_CANDIDATE_SHA=<full reviewed commit SHA>
+```
+
+Run the secret-free checks and seal the pinned base guest before supplying the
+GitHub token:
+
+```bash
+sudo /usr/local/libexec/loom-ci-runner-pool \
+  --profile /etc/loom-ci-runner-pool/profile.toml \
+  --candidate-sha "$CANDIDATE_SHA" \
+  preflight --execute
+
+sudo /usr/local/libexec/loom-ci-runner-pool \
+  --profile /etc/loom-ci-runner-pool/profile.toml \
+  --candidate-sha "$CANDIDATE_SHA" \
+  prepare-base --execute
+```
+
+`preflight` requires oldlab-5, `/dev/kvm`, Docker with the systemd cgroup
+driver, and a QEMU image whose OCI candidate label matches the requested SHA.
+`prepare-base` verifies the pinned Ubuntu cloud image and Actions runner
+checksums, installs Docker/Buildx in a KVM guest, checks the resulting qcow2,
+and seals a candidate-bound manifest.
+
+## Reconcile, health, and drain
+
+Mutation commands are dry-run unless `--execute` is present. Reconcile creates
+one JIT registration and one disposable guest per empty slot:
+
+```bash
+sudo /usr/local/libexec/loom-ci-runner-pool \
+  --profile /etc/loom-ci-runner-pool/profile.toml \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --token-file /etc/loom-ci-runner-pool/github-token \
+  reconcile --execute
+
+sudo /usr/local/libexec/loom-ci-runner-pool \
+  --profile /etc/loom-ci-runner-pool/profile.toml \
+  --token-file /etc/loom-ci-runner-pool/github-token \
+  status
+```
+
+The JIT configuration is stored only long enough for the runner to become
+online, then unlinked. A completed guest is deleted along with its writable
+overlay and stale GitHub runner record before the slot is replenished.
+
+Rollback routing first. Drain refuses to proceed while
+`LOOM_CI_ACCELERATOR_RUNS_ON` exists and never removes a runner GitHub reports
+as busy:
+
+```bash
+gh variable delete LOOM_CI_ACCELERATOR_RUNS_ON --repo qianyi-sun/loom
+
+sudo /usr/local/libexec/loom-ci-runner-pool \
+  --profile /etc/loom-ci-runner-pool/profile.toml \
+  --token-file /etc/loom-ci-runner-pool/github-token \
+  drain --execute
+```
 
 ## Activation and rollback
 
