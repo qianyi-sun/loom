@@ -86,6 +86,7 @@ from loom_worker.sandbox_singleton import (
     SingletonStartupError,
 )
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
+from loom_worker.step_gateway_client import StepTokenGatewayClient
 from loom_worker.task_image import resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.trial_cache import (
@@ -93,7 +94,10 @@ from loom_worker.trial_cache import (
     evict_stale_cache,
     resolve_trial_image,
 )
-from loom_worker.trial_cancellation_watchdog import run_with_watchdog
+from loom_worker.trial_cancellation_watchdog import (
+    resolve_hard_deadline_sec,
+    run_with_watchdog,
+)
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
@@ -1030,15 +1034,15 @@ async def _spawn_trial(
         # #360 + #378: wrap the runner with the cancellation watchdog so
         # (a) operator-initiated CP cancellations propagate to the
         # in-container subprocess-agent within one poll interval and
-        # (b) trials that hang past a generous multiple of
-        # agent.timeout_sec get force-cancelled instead of running
+        # (b) trials that hang past a generous multiple of the resolved
+        # effective agent timeout get force-cancelled instead of running
         # indefinitely.
-        hard_deadline_sec: float | None = None
-        multiplier = settings.trial_hard_deadline_multiplier
-        if multiplier > 0:
-            hard_deadline_sec = (
-                task_config.agent.timeout_sec * multiplier + settings.trial_hard_deadline_grace_sec
-            )
+        hard_deadline_sec = resolve_hard_deadline_sec(
+            task_config=task_config,
+            trial_config=trial_config,
+            multiplier=settings.trial_hard_deadline_multiplier,
+            grace_sec=settings.trial_hard_deadline_grace_sec,
+        )
         try:
             await run_with_watchdog(
                 runner.run(),
@@ -1473,6 +1477,18 @@ def _default_agent_factory(
             if model is None:
                 raise AgentError(
                     "litellm agent requires task.agent.model to be set",
+                )
+            # The worker token carried by the process-wide HTTP client is
+            # intentionally not valid for model calls.  Bind a fresh
+            # llm:call step JWT to every builtin request instead.  Direct
+            # local-vLLM clients remain unchanged because they do not cross
+            # the Loom Gateway auth boundary.
+            if isinstance(gateway, HttpLLMGatewayClient):
+                gateway = StepTokenGatewayClient(
+                    gateway=gateway,
+                    token_issuer=cp_client,
+                    team_id=team_id,
+                    trial_id=trial_id,
                 )
             # mypy: LiteLLMAgent.model is ModelSpec while the AgentRuntime
             # protocol declares ModelSpec | None; covariant on a mutable

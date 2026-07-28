@@ -603,6 +603,8 @@ def _hf_boundary_evidence(
         },
         "catalog": {
             "runnable_tasks": 100,
+            "artifact_contract_classified_tasks": 100,
+            "apd5_required_artifact_contract_tasks": 1,
             "requires_caps": {"cpu_arch": "any"},
         },
         "runtime_sources": {
@@ -1857,6 +1859,16 @@ def test_hf_boundary_requires_fully_succeeded_matching_canary(drift: str) -> Non
             "runtime_sources.non_internal_sources must be a list",
         ),
         ("string-source-count", "SkillLearnBench must use internal s3:// runtime sources"),
+        (
+            "stale-artifact-contract",
+            "SkillLearnBench manifest must classify every required-artifact "
+            "contract and declare APD-5 required_artifacts",
+        ),
+        (
+            "missing-apd5-contract",
+            "SkillLearnBench manifest must classify every required-artifact "
+            "contract and declare APD-5 required_artifacts",
+        ),
     ],
 )
 def test_hf_boundary_rejects_malformed_catalog_or_source_coverage(
@@ -1876,6 +1888,10 @@ def test_hf_boundary_rejects_malformed_catalog_or_source_coverage(
         artifact["runtime_sources"]["non_internal_sources"] = "hf://external/task"
     elif drift == "string-source-count":
         artifact["runtime_sources"]["total_task_sources"] = "100"
+    elif drift == "stale-artifact-contract":
+        artifact["catalog"]["artifact_contract_classified_tasks"] = 0
+    elif drift == "missing-apd5-contract":
+        artifact["catalog"]["apd5_required_artifact_contract_tasks"] = 0
 
     check = _hf_mirror_boundary_check(
         manifest=manifest,

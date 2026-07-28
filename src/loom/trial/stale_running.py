@@ -45,10 +45,36 @@ def effective_agent_timeout_sec(
     *,
     trial_config: Any,
     task_config: Any,
+    step_config: Any | None = None,
 ) -> float | None:
+    """Resolve the execution budget shared by steps and trial watchdogs.
+
+    A concrete ``step_config`` resolves that step exactly.  Trial-level
+    callers omit it and receive the largest effective step budget, so the
+    watchdog cannot pre-empt a valid step override.
+    """
     trial_config_d = _as_mapping(trial_config)
     task_config_d = _as_mapping(task_config)
     base = _float_or_none(_nested_get(task_config_d, ("agent", "timeout_sec")))
+    if step_config is not None:
+        step_override = _float_or_none(
+            _nested_get(_as_mapping(step_config), ("agent", "timeout_sec")),
+        )
+        if step_override is not None:
+            base = step_override
+    else:
+        step_timeouts = [
+            value
+            for step in task_config_d.get("steps") or []
+            if (
+                value := _float_or_none(
+                    _nested_get(_as_mapping(step), ("agent", "timeout_sec")),
+                )
+            )
+            is not None
+        ]
+        if step_timeouts:
+            base = max([base, *step_timeouts] if base is not None else step_timeouts)
     override = _float_or_none(trial_config_d.get("override_agent_timeout_sec"))
     if override is not None:
         base = override
@@ -168,15 +194,21 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     config = getattr(value, "config", None)
     if isinstance(config, dict):
         return config
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(mode="python")
+        if isinstance(dumped, dict):
+            return dumped
+    attributes = getattr(value, "__dict__", None)
+    if isinstance(attributes, dict):
+        return attributes
     return {}
 
 
-def _nested_get(value: dict[str, Any], path: tuple[str, ...]) -> Any:
+def _nested_get(value: Any, path: tuple[str, ...]) -> Any:
     item: Any = value
     for key in path:
-        if not isinstance(item, dict):
-            return None
-        item = item.get(key)
+        item = item.get(key) if isinstance(item, dict) else getattr(item, key, None)
     return item
 
 

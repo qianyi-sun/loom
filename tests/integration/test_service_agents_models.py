@@ -205,11 +205,14 @@ async def test_agents_includes_builtins_and_adapters(
     assert {"oracle", "litellm"}.issubset(names)
     # A representative adapter from loom-launcher.
     assert "claude-code" in names
+    # Internal launcher canaries are not part of the user-facing API catalog.
+    assert "hello" not in names
     # The legacy "claude-code-inbox" alias was retired (was redundant
     # with the on-demand-install claude-code adapter since #317).
     assert "claude-code-inbox" not in names
     # Oracle should be flagged needs_model=False; everything else True.
     by_name = {a["name"]: a for a in r.json()["items"]}
+    assert all(a["catalog_visibility"] == "displayed" for a in by_name.values())
     assert by_name["oracle"]["needs_model"] is False
     assert by_name["litellm"]["needs_model"] is True
     assert by_name["claude-code"]["needs_model"] is True

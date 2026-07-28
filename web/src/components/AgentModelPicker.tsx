@@ -82,6 +82,7 @@ interface AgentEntry extends AgentReadinessLike {
   supported_providers: string[];
   supported_model_sources: string[];
   readiness_status?: "ready" | "unavailable";
+  catalog_visibility?: "displayed" | "internal";
 }
 
 interface LocalServerEntry {
@@ -237,9 +238,9 @@ export function AgentModelPicker({
 
   const agentList = useMemo(
     () =>
-      [...(agents.data?.items ?? [])].sort((a, b) =>
-        a.name.localeCompare(b.name),
-      ),
+      [...(agents.data?.items ?? [])]
+        .filter((a) => a.catalog_visibility !== "internal")
+        .sort((a, b) => a.name.localeCompare(b.name)),
     [agents.data],
   );
 

@@ -26,7 +26,7 @@ def test_runtime_audit_covers_every_displayed_agent_and_reports_missing_deps() -
     assert {item.name for item in items} == {agent.name for agent in list_agents()}
     by_name = {item.name: item for item in items}
     assert by_name["oracle"].readiness_state == "ready"
-    assert by_name["hello"].readiness_state == "ready"
+    assert "hello" not in by_name
     assert by_name["opencode"].dependency_state == "missing"
     assert by_name["opencode"].blocker_reason == "missing_runtime_dependency"
     assert RuntimeCheck("executable", "opencode") in checks

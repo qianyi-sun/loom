@@ -271,6 +271,45 @@ def test_chat_rejects_valid_token_without_llm_call_scope(
     assert r.json()["detail"] == "not authorized"
 
 
+def test_chat_rejects_worker_token_for_model_call(
+    app,
+    seed_data,
+    postgres_url,
+):  # type: ignore[no-untyped-def]
+    team_id, _ = seed_data
+    worker_token = f"loom_worker_{uuid4().hex}"
+    engine = create_engine(postgres_url)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(worker_token.encode()).digest(),
+                type="worker",
+                scopes=["worker:register", "worker:claim", "worker:report"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
+    engine.dispose()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {worker_token}"},
+            json={
+                "model": "anthropic/claude-opus-4-7",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+            },
+        )
+    assert r.status_code == 401
+    assert r.json()["detail"] == "not authorized"
+
+
 def test_chat_rejects_team_id_mismatch(app, seed_data):  # type: ignore[no-untyped-def]
     """Regression for Bug 1: a client-supplied loom.team_id that doesn't
     match the bearer token's team_id must be rejected. Otherwise team A

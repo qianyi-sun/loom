@@ -1076,6 +1076,8 @@ export const api = {
         service_mode_ready?: boolean;
         readiness_status?: "ready" | "unavailable";
         readiness_message?: string | null;
+        /** User-facing APIs normally return only displayed entries. */
+        catalog_visibility?: "displayed" | "internal";
         runtime_contract?: {
           execution: string;
           capture: string;

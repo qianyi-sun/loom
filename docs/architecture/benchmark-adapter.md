@@ -346,7 +346,11 @@ SkillLearnBench upstream task TOML may declare `[evaluation].required_files`.
 The adapter normalizes those paths relative to `/root` and emits them as
 `steps[0].required_artifacts`. This preserves verifier-required outputs that
 are not covered by the generic extension-based artifact list and makes missing
-required files visible in trial debug evidence.
+required files visible in trial debug evidence. Publication also records
+`required_artifacts_contract=declared|none` on every task. A SkillLearnBench
+row without that explicit classification is a stale pre-contract manifest:
+successful trials from it are invalid/retryable evidence until the benchmark
+is republished and registered through the protected catalog path.
 
 The SkillLearnBench adapter also emits an `oracle_eligible=true|false`
 per-instance tag, derived from `solution/solve.sh` presence in the

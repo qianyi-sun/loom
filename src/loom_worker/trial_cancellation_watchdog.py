@@ -42,6 +42,7 @@ from collections.abc import Coroutine
 from typing import Any, Protocol
 from uuid import UUID
 
+from loom.trial.stale_running import effective_agent_timeout_sec
 from loom.trial.watchdog_cancellation import WatchdogCancellation, WatchdogTriggerReason
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,25 @@ WatchdogTrigger = str | None
 
 class _TrialStateSource(Protocol):
     async def get_trial_state(self, trial_id: UUID) -> str: ...
+
+
+def resolve_hard_deadline_sec(
+    *,
+    task_config: Any,
+    trial_config: Any,
+    multiplier: float,
+    grace_sec: float,
+) -> float | None:
+    """Derive the watchdog budget from the execution timeout resolver."""
+    if multiplier <= 0:
+        return None
+    agent_timeout_sec = effective_agent_timeout_sec(
+        task_config=task_config,
+        trial_config=trial_config,
+    )
+    if agent_timeout_sec is None:
+        return None
+    return agent_timeout_sec * multiplier + grace_sec
 
 
 async def run_with_watchdog(

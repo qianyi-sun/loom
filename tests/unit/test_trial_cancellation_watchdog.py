@@ -11,7 +11,10 @@ from loom.trial.watchdog_cancellation import (
     WatchdogTriggerReason,
     extract_watchdog_cancellation,
 )
-from loom_worker.trial_cancellation_watchdog import run_with_watchdog
+from loom_worker.trial_cancellation_watchdog import (
+    resolve_hard_deadline_sec,
+    run_with_watchdog,
+)
 
 
 class _FakeCPClient:
@@ -39,6 +42,67 @@ class _FlakyCPClient:
         if self.polls <= self.raise_first_n:
             raise RuntimeError("CP transient error")
         return self.state
+
+
+def test_hard_deadline_uses_task_default_and_trial_multiplier() -> None:
+    deadline = resolve_hard_deadline_sec(
+        task_config={
+            "agent": {"timeout_sec": 3000.0},
+            "steps": [{"name": "main"}],
+        },
+        trial_config={"agent_timeout_multiplier": 1.25},
+        multiplier=2.0,
+        grace_sec=300.0,
+    )
+
+    assert deadline == 7800.0
+
+
+def test_hard_deadline_uses_largest_step_override() -> None:
+    deadline = resolve_hard_deadline_sec(
+        task_config={
+            "agent": {"timeout_sec": 1800.0},
+            "steps": [
+                {"name": "short", "agent": {"timeout_sec": 1200.0}},
+                {"name": "long", "agent": {"timeout_sec": 3600.0}},
+            ],
+        },
+        trial_config={"agent_timeout_multiplier": 1.5},
+        multiplier=2.0,
+        grace_sec=300.0,
+    )
+
+    assert deadline == 11100.0
+
+
+def test_hard_deadline_trial_override_wins_and_prevents_3300_cutoff() -> None:
+    deadline = resolve_hard_deadline_sec(
+        task_config={
+            "agent": {"timeout_sec": 900.0},
+            "steps": [{"name": "main", "agent": {"timeout_sec": 3000.0}}],
+        },
+        trial_config={
+            "override_agent_timeout_sec": 9000.0,
+            "agent_timeout_multiplier": 1.0,
+        },
+        multiplier=3.0,
+        grace_sec=600.0,
+    )
+
+    assert deadline == 27600.0
+    assert deadline > 3300.0
+
+
+def test_zero_hard_deadline_multiplier_disables_backstop() -> None:
+    assert (
+        resolve_hard_deadline_sec(
+            task_config={"agent": {"timeout_sec": 1800.0}},
+            trial_config={"override_agent_timeout_sec": 9000.0},
+            multiplier=0.0,
+            grace_sec=600.0,
+        )
+        is None
+    )
 
 
 async def test_completes_normally_when_no_cancel_or_deadline():

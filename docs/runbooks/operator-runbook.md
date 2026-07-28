@@ -4890,6 +4890,8 @@ The generated artifact has this shape:
   },
   "catalog": {
     "runnable_tasks": 100,
+    "artifact_contract_classified_tasks": 100,
+    "apd5_required_artifact_contract_tasks": 1,
     "requires_caps": {"cpu_arch": "any"}
   },
   "runtime_sources": {
@@ -4948,6 +4950,13 @@ The generated artifact has this shape:
   "secret_scan": {"raw_secret_values_present": false}
 }
 ```
+
+`artifact_contract_classified_tasks` must equal `runnable_tasks`, and
+`apd5_required_artifact_contract_tasks` must be exactly `1`. A zero or missing
+value means `PUBLISHED_SHA` points to a SkillLearnBench manifest published
+before the required-artifact contract. Republish from current `dev`, update the
+merged environment-state pin, and rerun protected catalog provisioning; do not
+patch task JSON directly in the database.
 
 Pass the artifact to `loom cluster release-gate` with
 `--hf-mirror-boundary-evidence "$ROLLOUT_DIR/hf-mirror-boundary-evidence-$IMAGE_TAG.json"`.

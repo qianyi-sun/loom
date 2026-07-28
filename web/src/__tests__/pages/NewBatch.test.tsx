@@ -69,6 +69,17 @@ const AGENTS_RESPONSE = {
         install_hint: "Provision executable opencode before enabling agent opencode.",
       },
     },
+    {
+      name: "hello",
+      needs_model: false,
+      kind: "adapter",
+      description: "Internal no-model launcher canary.",
+      supported_providers: [],
+      supported_model_sources: [],
+      service_mode_ready: true,
+      readiness_status: "ready",
+      catalog_visibility: "internal",
+    },
   ],
 };
 
@@ -567,6 +578,9 @@ describe("NewBatch", () => {
       "title",
       expect.stringContaining("executable opencode"),
     );
+    expect(
+      screen.queryByRole("option", { name: /^hello$/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("blocks submit when no task source is picked", async () => {

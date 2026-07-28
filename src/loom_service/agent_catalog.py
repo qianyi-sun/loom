@@ -31,12 +31,13 @@ that should restrict can be overridden in `_ADAPTER_OVERRIDES`).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from loom.models.types import ModelSpec
 
 AgentKind = Literal["builtin", "adapter"]
 ReadinessStatus = Literal["ready", "unavailable"]
+CatalogVisibility = Literal["displayed", "internal"]
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class AgentEntry:
     service_mode_ready: bool = True
     readiness_status: ReadinessStatus = "ready"
     readiness_message: str | None = None
+    catalog_visibility: CatalogVisibility = "displayed"
     # #320: task-shape capabilities the agent needs. Empty = no hard
     # task-shape requirements (works against any task that exposes a
     # workable agent step). Currently only `solution_solve_sh` exists
@@ -131,6 +133,7 @@ class AgentEntry:
             "service_mode_ready": self.service_mode_ready,
             "readiness_status": self.readiness_status,
             "readiness_message": self.readiness_message,
+            "catalog_visibility": self.catalog_visibility,
             "requires_capabilities": sorted(self.requires_capabilities),
         }
 
@@ -233,9 +236,8 @@ _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "swe-agent": (("*",), ("api", "local-server", "hf")),
     "mini-swe-agent": (("*",), ("api", "local-server", "hf")),
     # terminus-2 is a builtin Harbor-embedded runtime (#744); not a launcher adapter.
-    # "hello" is a canary that doesn't actually need an LLM in practice,
-    # but adapters self-declare needs_model — keep permissive.
-    "hello": (("*",), ("api", "local-server", "hf")),
+    # hello is an internal no-model launcher canary, so it has no model support.
+    "hello": ((), ()),
 }
 _DEFAULT_ADAPTER_SUPPORT: tuple[tuple[str, ...], tuple[str, ...]] = (
     ("*",),
@@ -379,11 +381,15 @@ def _adapter_readiness(adapter: Any) -> tuple[bool, ReadinessStatus, str | None]
     )
 
 
-def list_agents() -> list[AgentEntry]:
-    """Return the catalog: builtins + every registered launcher adapter.
+def list_agents(*, include_internal: bool = False) -> list[AgentEntry]:
+    """Return the user-facing catalog, optionally including internal canaries.
 
     Adapters are loaded lazily so a deployment that doesn't ship
     `loom-launcher` (rare, but possible) still gets the builtins.
+
+    Internal launcher fixtures are excluded by default. This default is the
+    shared presentation boundary for GET /agents, CLI runtime audits, catalog
+    provisioning, and compatibility matrices.
     """
     entries: list[AgentEntry] = list(_BUILTIN)
     builtin_names = {e.name for e in _BUILTIN}
@@ -397,27 +403,49 @@ def list_agents() -> list[AgentEntry]:
     for adapter in all_adapters():
         if adapter.name in builtin_names:
             continue
+        visibility = cast(
+            CatalogVisibility,
+            getattr(adapter, "catalog_visibility", "displayed"),
+        )
+        if visibility not in {"displayed", "internal"}:
+            raise ValueError(
+                f"adapter {adapter.name!r} declares invalid "
+                f"catalog_visibility {visibility!r}",
+            )
+        if visibility == "internal" and not include_internal:
+            continue
+        needs_model = bool(getattr(adapter, "needs_model", True))
         providers, sources = _ADAPTER_OVERRIDES.get(
             adapter.name,
             _DEFAULT_ADAPTER_SUPPORT,
         )
+        if not needs_model:
+            providers, sources = (), ()
         ready, readiness_status, readiness_message = _adapter_readiness(adapter)
+        if adapter.name == "hello":
+            description = (
+                "Internal launcher contract canary. Runs echo and makes no "
+                "model call; not available for user batch submission."
+            )
+        else:
+            description = (
+                f"loom-launcher adapter (dialect "
+                f"{getattr(adapter, 'endpoint_dialect', 'unknown')}). "
+                "Drives the agent's CLI inside the sandbox."
+            )
         entries.append(
             AgentEntry(
                 name=adapter.name,
-                needs_model=True,
+                needs_model=needs_model,
                 kind="adapter",
-                description=(
-                    f"loom-launcher adapter (dialect "
-                    f"{getattr(adapter, 'endpoint_dialect', 'unknown')}). "
-                    "Drives the agent's CLI inside the sandbox."
-                ),
+                description=description,
                 supported_providers=providers,
                 supported_model_sources=sources,
                 runtime_contract=_adapter_runtime_contract(adapter),
                 service_mode_ready=ready,
                 readiness_status=readiness_status,
                 readiness_message=readiness_message,
+                catalog_visibility=visibility,
             ),
         )
     return entries
@@ -430,9 +458,9 @@ def known_names() -> frozenset[str]:
     return frozenset(e.name for e in list_agents())
 
 
-def get_agent(name: str) -> AgentEntry | None:
+def get_agent(name: str, *, include_internal: bool = False) -> AgentEntry | None:
     """Look up an entry by name; returns None for unknown agents."""
-    for e in list_agents():
+    for e in list_agents(include_internal=include_internal):
         if e.name == name:
             return e
     return None
@@ -494,6 +522,7 @@ def validate_agent_model_compat(
 __all__ = [
     "AgentEntry",
     "AgentKind",
+    "CatalogVisibility",
     "RuntimeContract",
     "get_agent",
     "known_names",

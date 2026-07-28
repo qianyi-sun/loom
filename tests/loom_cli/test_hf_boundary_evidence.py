@@ -48,6 +48,8 @@ def _source_summary() -> dict[str, object]:
             "total_task_sources": 100,
             "internal_s3_sources": 100,
             "non_internal_sources": 0,
+            "artifact_contract_classified_tasks": 100,
+            "apd5_required_artifact_contract_tasks": 1,
             "sample_s3_source": (
                 "s3://loom-benchmarks/skilllearnbench/"
                 "PRHW__loom-benchmark-skilllearnbench/rev123/task/checksum/"
@@ -124,6 +126,8 @@ def test_compose_uses_task_mirror_provenance_not_adapter_origin() -> None:
     assert evidence["environment"] == "staging"
     assert evidence["benchmark_id"] == "skilllearnbench"
     assert evidence["catalog"]["runnable_tasks"] == 100
+    assert evidence["catalog"]["artifact_contract_classified_tasks"] == 100
+    assert evidence["catalog"]["apd5_required_artifact_contract_tasks"] == 1
     assert evidence["catalog"]["requires_caps"]["cpu_arch"] == "any"
     assert evidence["runtime_sources"]["total_task_sources"] == 100
     assert evidence["runtime_sources"]["internal_s3_sources"] == 100

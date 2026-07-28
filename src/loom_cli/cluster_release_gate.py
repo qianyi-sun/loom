@@ -1751,6 +1751,12 @@ def _hf_mirror_boundary_evidence(
         {
             "environment": artifact.get("environment"),
             "runnable_tasks": catalog_evidence.get("runnable_tasks"),
+            "artifact_contract_classified_tasks": catalog_evidence.get(
+                "artifact_contract_classified_tasks",
+            ),
+            "apd5_required_artifact_contract_tasks": catalog_evidence.get(
+                "apd5_required_artifact_contract_tasks",
+            ),
             "requires_cpu_arch": requires_caps.get("cpu_arch"),
             "total_task_sources": total_sources,
             "internal_s3_sources": internal_sources,
@@ -1931,6 +1937,18 @@ def _hf_mirror_boundary_check(
         issues.append("SkillLearnBench catalog must report runnable tasks")
     if evidence.get("requires_cpu_arch") != "any":
         issues.append("SkillLearnBench requires_caps.cpu_arch must remain any")
+    classified_tasks = evidence.get("artifact_contract_classified_tasks")
+    apd5_contract_tasks = evidence.get("apd5_required_artifact_contract_tasks")
+    if (
+        isinstance(classified_tasks, bool)
+        or not isinstance(classified_tasks, int)
+        or classified_tasks != runnable_tasks
+        or apd5_contract_tasks != 1
+    ):
+        issues.append(
+            "SkillLearnBench manifest must classify every required-artifact "
+            "contract and declare APD-5 required_artifacts",
+        )
     total_sources = evidence.get("total_task_sources")
     internal_sources = evidence.get("internal_s3_sources")
     if evidence.get("runtime_sources_schema_valid") is not True:

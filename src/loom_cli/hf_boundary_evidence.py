@@ -229,6 +229,12 @@ def compose_boundary_evidence(
         "benchmark_id": benchmark_id,
         "catalog": {
             "runnable_tasks": runnable_tasks,
+            "artifact_contract_classified_tasks": _int(
+                source_counts.get("artifact_contract_classified_tasks"),
+            ),
+            "apd5_required_artifact_contract_tasks": _int(
+                source_counts.get("apd5_required_artifact_contract_tasks"),
+            ),
             "requires_caps": {
                 "cpu_arch": str(task_environment.get("cpu_arch") or ""),
             },
@@ -319,6 +325,18 @@ async def collect_source_summary_from_db(
                           COUNT(*) FILTER (
                             WHERE source IS NULL OR source NOT LIKE 's3://%'
                           ) AS non_internal_sources,
+                          COUNT(*) FILTER (
+                            WHERE tags->>'required_artifacts_contract'
+                              IN ('declared', 'none')
+                          ) AS artifact_contract_classified_tasks,
+                          COUNT(*) FILTER (
+                            WHERE id = 'skilllearnbench/anthropic-poster-design/anthropic-poster-design-5'
+                              AND tags->>'required_artifacts_contract' = 'declared'
+                              AND jsonb_path_exists(
+                                config,
+                                '$.steps[*].required_artifacts[*]'
+                              )
+                          ) AS apd5_required_artifact_contract_tasks,
                           MIN(source) FILTER (WHERE source LIKE 's3://%')
                             AS sample_s3_source
                         FROM tasks
