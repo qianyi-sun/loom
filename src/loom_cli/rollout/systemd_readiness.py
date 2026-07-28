@@ -401,12 +401,18 @@ def parse_gb10_host_readiness(
         )
     ):
         return None
+    timer_state = classify_node_agent_timer(decoded["timer"], service=service)
+    if timer_state is NodeAgentTimerState.REPAIRABLE_ELAPSED and (
+        decoded["service"]["ActiveState"] != "inactive"
+        or decoded["service"]["SubState"] != "dead"
+    ):
+        timer_state = NodeAgentTimerState.INVALID
     evidence = GB10HostReadiness(
         boot_id=decoded["boot_id"],
         manager_version=decoded["manager_version"],
         linger_enabled=decoded["linger_enabled"],
         service_ready=node_agent_service_is_prepared(decoded["service"]),
-        timer_state=classify_node_agent_timer(decoded["timer"], service=service),
+        timer_state=timer_state,
         timer_enabled=decoded["timer_enabled"],
     )
     if (

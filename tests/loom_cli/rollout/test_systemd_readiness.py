@@ -115,6 +115,16 @@ def test_parse_elapsed_timer_is_ready_only_for_protected_repair() -> None:
     assert evidence.repairable_timer
     assert not evidence.transient_timer
 
+    payload["service"]["ActiveState"] = "failed"
+    payload["service"]["SubState"] = "failed"
+    unsafe = parse_gb10_host_readiness(
+        json.dumps(payload),
+        service="loom-gb10-node-agent.service",
+    )
+    assert unsafe is not None
+    assert not unsafe.ready
+    assert not unsafe.repairable_timer
+
 
 def test_parse_systemctl_properties_ignores_unstructured_lines() -> None:
     assert parse_systemctl_properties("LoadState=loaded\nnoise\nSubState=waiting\n") == {
