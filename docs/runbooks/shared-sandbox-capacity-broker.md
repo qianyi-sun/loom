@@ -196,6 +196,72 @@ Slurm for the current epoch observations, then run `reconcile`. Do not edit the
 SQLite tables or reduce observed slot counts by hand. A missing or uncertain
 observation keeps capacity committed and fails toward lower utilization.
 
+## Production-pressure drain and retry acceptance
+
+The broker grant ceiling and the Control Plane production-pressure intent are
+separate, composable authorities. A production-pressure signal must first
+fence new claims through
+`POST /admin/worker-pools/<sandbox-environment>/<pool>/prod-pressure`. The
+installed submit-host external autoscaler is then the only process allowed to
+run `scancel`.
+
+For Slurm pools the durable drain contract is:
+
+- pending jobs and running jobs with zero in-flight trials are cancelled on the
+  next external reconcile, without waiting for the preemption grace period;
+- busy non-preemptible jobs remain `draining` until their trials finish, then
+  the next reconcile cancels the now-idle allocation;
+- busy preemptible jobs are not cancelled until the recorded grace period has
+  elapsed;
+- a successful `scancel` does not release broker or Control Plane capacity.
+  The Slurm job must read back terminal first;
+- a successful cancel awaiting terminal read-back is persisted on the
+  `SlurmWorkerJob`. A submit-host restart observes it instead of issuing a
+  duplicate `scancel`;
+- a failed `scancel` leaves the job and worker draining. It is not marked
+  released and its active trials are not marked interrupted;
+- after terminal read-back, an authorized preemption records
+  `failure_reason=prod_capacity_pressure`; the crash detector preserves that
+  attribution when it returns the interrupted trial to `queued` with retry
+  backoff;
+- pressure recovery reactivates only controller-owned draining workers that
+  still have live Slurm jobs. A cancellation already in flight is settled
+  before normal scaling resumes.
+
+`LIVE SANDBOX + SLURM AUTHORITY REQUIRED`
+
+Exercise this only through the exact installed bridge and external autoscaler
+services. Do not run an ambient checkout or call `scancel` manually. Capture
+the secret-free outputs of:
+
+```bash
+systemctl status loom-prod-pressure-worker-control.timer
+systemctl --user status 'loom-autoscaler-*.timer'
+squeue -h -o '%i|%T|%j|%a|%q|%R'
+```
+
+For each `sandbox-{qianyi,hongjian,devansh}` and each reviewed pool, the
+acceptance sequence is:
+
+1. record the current autoscaler status, active Slurm jobs, worker drain states,
+   and in-flight trial counts;
+2. apply a sanitized nonzero pressure snapshot through the installed bridge;
+3. prove claims are fenced before the next actuator tick;
+4. prove pending/idle jobs disappear only after terminal Slurm read-back;
+5. keep one busy non-preemptible job and prove it is not cancelled, finish its
+   trial, then prove the next cycle releases it;
+6. keep one busy preemptible job through the grace boundary, prove terminal
+   read-back and the persistent retry attribution, then prove crash reclaim
+   returns the trial to `queued`;
+7. interrupt/restart the external service between `scancel` and terminal
+   read-back and prove no duplicate cancellation or lost retry attribution;
+8. clear pressure and prove only still-live held workers return to `active`.
+
+The autoscaler decision reason is the operator status surface. It reports
+secret-free counts for `cancelled`, `awaiting_terminal`, `cancel_failed`,
+`held_busy`, and `retryable_trials`. Any nonzero `cancel_failed` count is a
+stop condition; repair the installed Slurm authority and let the timer retry.
+
 ## Evidence retention
 
 Persist the complete JSON output from every accepted request, reconcile,

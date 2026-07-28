@@ -38,6 +38,10 @@ from loom_control_plane.elastic_slurm_worker_controller import (
 )
 from loom_control_plane.slurm_worker_jobs import (
     ACTIVE_STATES,
+    PROD_PRESSURE_CANCEL_IDLE,
+    PROD_PRESSURE_CANCEL_PREEMPT,
+    TERMINAL_STATES,
+    normalize_slurm_state,
     reconcile_slurm_worker_jobs,
     record_slurm_worker_job,
 )
@@ -1544,69 +1548,295 @@ async def _apply_slurm_prod_pressure_drain(
     """Consume the prod-pressure drain intent recorded by the CP handler (#892).
 
     Single-writer: this is the ONLY place a prod-pressure drain scancels
-    ``SlurmWorkerJob``s and flips ``Worker.drain_state``. Returns a summary when
-    a drain intent is active (so the caller skips normal scaling this tick), or
-    ``None`` when there is no active intent. Only ``cancel_retryable``
-    (preemptible + grace elapsed) reclaims jobs now; ``wait`` /
-    ``not_preemptible`` holds -- running jobs finish naturally while the
-    scheduler claim path (which reads the same intent) fences new claims.
+    ``SlurmWorkerJob``s and flips ``Worker.drain_state``.
+
+    Pending jobs and running jobs with zero in-flight trials return capacity
+    immediately. Busy jobs drain naturally; only a preemptible job whose grace
+    period elapsed is cancelled. A successful ``scancel`` is not sufficient to
+    release DB capacity: the actor requires a terminal Slurm read-back first.
+    The durable cancel-request marker makes a submit-host restart idempotent and
+    preserves whether interrupted trials need retry attribution.
     """
     raw = row.prod_pressure_state if isinstance(row.prod_pressure_state, dict) else None
-    if not raw or raw.get("state") != "draining":
-        return None
-    grace_action = str(raw.get("last_grace_action") or "wait")
-    if grace_action != "cancel_retryable":
-        return {
-            "action": "prod_pressure_hold",
-            "grace_action": grace_action,
-            "cancelled_job_ids": [],
-        }
-    config = _slurm_config_from_policy(row)
-    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
-    jobs = (
-        (
+    recovery_settle_only = not raw or raw.get("state") != "draining"
+    cancel_markers = (
+        PROD_PRESSURE_CANCEL_IDLE,
+        PROD_PRESSURE_CANCEL_PREEMPT,
+    )
+    if recovery_settle_only:
+        outstanding_cancel = (
             await session.execute(
-                select(SlurmWorkerJob)
+                select(SlurmWorkerJob.id)
                 .where(
                     SlurmWorkerJob.environment == row.environment,
                     SlurmWorkerJob.pool_name == row.pool_name,
-                    SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                    SlurmWorkerJob.pending_reason.in_(cancel_markers),
                 )
-                .with_for_update(),
+                .limit(1),
             )
-        )
-        .scalars()
-        .all()
+        ).scalar_one_or_none()
+        if outstanding_cancel is not None:
+            # Pressure may clear while Slurm is still acknowledging a prior
+            # cancellation. Finish that durable action before resuming normal
+            # scaling; a worker whose allocation is disappearing must never be
+            # reactivated.
+            raw = {}
+        else:
+            # Pressure recovery reactivates only workers that this controller fenced
+            # and that still have an active Slurm allocation. Reclaimed workers have
+            # no active job and remain drained.
+            active_worker_ids = tuple(
+                worker_id
+                for (worker_id,) in (
+                    await session.execute(
+                        select(SlurmWorkerJob.worker_id).where(
+                            SlurmWorkerJob.environment == row.environment,
+                            SlurmWorkerJob.pool_name == row.pool_name,
+                            SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                            SlurmWorkerJob.worker_id.is_not(None),
+                        ),
+                    )
+                ).all()
+                if worker_id is not None
+            )
+            if active_worker_ids:
+                await session.execute(
+                    update(Worker)
+                    .where(
+                        Worker.id.in_(active_worker_ids),
+                        Worker.drain_owner == "prod-pressure-controller",
+                        Worker.drain_state.in_(("draining", "drained")),
+                    )
+                    .values(
+                        drain_state="active",
+                        drain_requested_at=None,
+                        drain_reason=None,
+                        drain_owner=None,
+                    ),
+                )
+            return None
+
+    control = raw or {}
+    grace_action = (
+        "recovery_settle"
+        if recovery_settle_only
+        else str(control.get("last_grace_action") or "wait")
     )
-    cancelled_job_ids: list[str] = []
-    worker_ids: set[Any] = set()
-    for job in jobs:
-        if job.job_id:
-            await runner.cancel_job(job.job_id)
-            cancelled_job_ids.append(job.job_id)
-        job.state = "cancelled"
-        job.slurm_state = "CANCELLED"
-        job.pending_reason = "cancelled by prod-pressure reclaim"
-        job.finished_at = now
-        job.updated_at = now
-        if job.worker_id is not None:
-            worker_ids.add(job.worker_id)
-    if worker_ids:
-        # Fence the reclaimed workers; scancel kills the job process, so the
-        # crash reclaimer requeues any orphaned in-flight trials.
+    config = _slurm_config_from_policy(row)
+    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+
+    active_stmt = select(SlurmWorkerJob).where(
+        SlurmWorkerJob.environment == row.environment,
+        SlurmWorkerJob.pool_name == row.pool_name,
+        SlurmWorkerJob.state.in_(ACTIVE_STATES),
+    )
+    if recovery_settle_only:
+        active_stmt = active_stmt.where(SlurmWorkerJob.pending_reason.in_(cancel_markers))
+    active_jobs = (await session.execute(active_stmt.with_for_update())).scalars().all()
+
+    started_at: datetime | None = None
+    raw_started_at = control.get("started_at")
+    if isinstance(raw_started_at, str):
+        try:
+            started_at = datetime.fromisoformat(raw_started_at.replace("Z", "+00:00"))
+        except ValueError:
+            started_at = None
+    terminal_stmt = select(SlurmWorkerJob).where(
+        SlurmWorkerJob.environment == row.environment,
+        SlurmWorkerJob.pool_name == row.pool_name,
+        SlurmWorkerJob.state.in_(TERMINAL_STATES),
+        SlurmWorkerJob.worker_id.is_not(None),
+    )
+    if recovery_settle_only:
+        terminal_stmt = terminal_stmt.where(
+            SlurmWorkerJob.pending_reason.in_(cancel_markers),
+        )
+    elif started_at is not None:
+        terminal_stmt = terminal_stmt.where(SlurmWorkerJob.finished_at >= started_at)
+    else:
+        # A malformed legacy intent without a start boundary must not settle
+        # unrelated historical jobs. Durable cancellation markers remain safe.
+        terminal_stmt = terminal_stmt.where(
+            SlurmWorkerJob.pending_reason.in_(cancel_markers),
+        )
+    terminal_jobs = list(
+        (await session.execute(terminal_stmt.with_for_update())).scalars().all(),
+    )
+
+    relevant_worker_ids = {
+        job.worker_id for job in (*active_jobs, *terminal_jobs) if job.worker_id is not None
+    }
+    trials_by_worker: dict[Any, list[Trial]] = {worker_id: [] for worker_id in relevant_worker_ids}
+    if relevant_worker_ids:
+        active_trials = (
+            (
+                await session.execute(
+                    select(Trial)
+                    .where(
+                        Trial.worker_id.in_(relevant_worker_ids),
+                        Trial.state.in_(("claimed", "running")),
+                    )
+                    .with_for_update(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for trial in active_trials:
+            if trial.worker_id is not None:
+                trials_by_worker.setdefault(trial.worker_id, []).append(trial)
+
+    bound_active_worker_ids = {job.worker_id for job in active_jobs if job.worker_id is not None}
+    if bound_active_worker_ids:
         await session.execute(
             update(Worker)
-            .where(Worker.id.in_(worker_ids))
+            .where(
+                Worker.id.in_(bound_active_worker_ids),
+                Worker.drain_state == "active",
+            )
             .values(
-                drain_state="drained",
-                drain_reason="prod-pressure reclaim",
+                drain_state="draining",
+                drain_requested_at=now,
+                drain_reason="production capacity pressure",
                 drain_owner="prod-pressure-controller",
             ),
         )
+
+    cancel_candidates: list[tuple[SlurmWorkerJob, str]] = []
+    awaiting_job_ids: list[str] = []
+    held_busy_job_ids: list[str] = []
+    for job in active_jobs:
+        job_id = str(job.job_id or "")
+        if job.pending_reason in {
+            PROD_PRESSURE_CANCEL_IDLE,
+            PROD_PRESSURE_CANCEL_PREEMPT,
+        }:
+            if job_id:
+                awaiting_job_ids.append(job_id)
+            continue
+        in_flight = trials_by_worker.get(job.worker_id, []) if job.worker_id is not None else []
+        if job.state == "pending" or not in_flight:
+            cancel_candidates.append((job, PROD_PRESSURE_CANCEL_IDLE))
+        elif grace_action == "cancel_retryable":
+            cancel_candidates.append((job, PROD_PRESSURE_CANCEL_PREEMPT))
+        elif job_id:
+            held_busy_job_ids.append(job_id)
+
+    successful_requests: list[SlurmWorkerJob] = []
+    cancel_failed_job_ids: list[str] = []
+    for job, marker in cancel_candidates:
+        if not job.job_id:
+            # A persisted active job without a Slurm ID cannot be released by
+            # this actuator. Keep it draining for a later registry repair.
+            cancel_failed_job_ids.append(str(job.id))
+            continue
+        try:
+            await runner.cancel_job(job.job_id)
+        except Exception:
+            logger.warning(
+                "worker_pool_autoscaler_prod_pressure_scancel_failed",
+                extra={
+                    "environment": row.environment,
+                    "pool_name": row.pool_name,
+                    "job_id": job.job_id,
+                },
+            )
+            cancel_failed_job_ids.append(job.job_id)
+            continue
+        job.pending_reason = marker
+        job.updated_at = now
+        successful_requests.append(job)
+
+    confirmed_job_ids: list[str] = []
+    if successful_requests:
+        requested_ids = tuple(str(job.job_id) for job in successful_requests)
+        try:
+            observations = await runner.query_jobs(requested_ids)
+        except Exception:
+            observations = []
+        observed_by_id = {observation.job_id: observation for observation in observations}
+        for job in successful_requests:
+            assert job.job_id is not None
+            observation = observed_by_id.get(job.job_id)
+            if observation is None:
+                awaiting_job_ids.append(job.job_id)
+                continue
+            observed_state = normalize_slurm_state(observation.slurm_state)
+            job.slurm_state = observation.slurm_state
+            job.last_reconciled_at = observation.observed_at or now
+            job.updated_at = now
+            if observed_state in ACTIVE_STATES:
+                awaiting_job_ids.append(job.job_id)
+                continue
+            job.state = observed_state
+            job.finished_at = job.finished_at or now
+            terminal_jobs.append(job)
+            confirmed_job_ids.append(job.job_id)
+
+    remaining_active_worker_ids = {
+        job.worker_id
+        for job in active_jobs
+        if job.state in ACTIVE_STATES and job.worker_id is not None
+    }
+    settled_worker_ids: set[Any] = set()
+    retryable_trial_ids: set[str] = set()
+    for job in terminal_jobs:
+        worker_id = job.worker_id
+        cancel_marker = job.pending_reason
+        if (
+            cancel_marker == PROD_PRESSURE_CANCEL_PREEMPT
+            and worker_id is not None
+            and worker_id not in remaining_active_worker_ids
+        ):
+            for trial in trials_by_worker.get(worker_id, []):
+                trial.failure_reason = "prod_capacity_pressure"
+                trial.failure_message = (
+                    "preemptible trial interrupted after production capacity "
+                    "pressure grace elapsed; crash reclaim returns it to queued "
+                    "with retry backoff"
+                )
+                retryable_trial_ids.add(str(trial.id))
+        if cancel_marker in {
+            PROD_PRESSURE_CANCEL_IDLE,
+            PROD_PRESSURE_CANCEL_PREEMPT,
+        }:
+            job.pending_reason = (
+                "cancelled by prod-pressure reclaim"
+                if job.state == "cancelled"
+                else "released during prod-pressure reclaim"
+            )
+        if worker_id is None or worker_id in remaining_active_worker_ids:
+            continue
+        settled_worker_ids.add(worker_id)
+
+    if settled_worker_ids:
+        await session.execute(
+            update(Worker)
+            .where(Worker.id.in_(settled_worker_ids))
+            .values(
+                drain_state="drained",
+                drain_reason="prod-pressure reclaim completed",
+                drain_owner="prod-pressure-controller",
+            ),
+        )
+
+    if cancel_failed_job_ids:
+        action = "prod_pressure_cancel_blocked"
+    elif awaiting_job_ids:
+        action = "prod_pressure_cancel_wait"
+    elif confirmed_job_ids or settled_worker_ids:
+        action = "prod_pressure_drain"
+    else:
+        action = "prod_pressure_hold"
     return {
-        "action": "prod_pressure_drain",
+        "action": action,
         "grace_action": grace_action,
-        "cancelled_job_ids": cancelled_job_ids,
+        "cancelled_job_ids": sorted(confirmed_job_ids),
+        "awaiting_terminal_job_ids": sorted(set(awaiting_job_ids)),
+        "cancel_failed_job_ids": sorted(cancel_failed_job_ids),
+        "held_busy_job_ids": sorted(held_busy_job_ids),
+        "settled_worker_count": len(settled_worker_ids),
+        "retryable_trial_count": len(retryable_trial_ids),
     }
 
 
@@ -1876,13 +2106,28 @@ async def reconcile_worker_pool_autoscaler_once(
                 )
                 decision = _base_decision(
                     action=str(prod_pressure_summary["action"]),
-                    reason=f"prod_pressure grace={prod_pressure_summary['grace_action']}",
+                    reason=(
+                        "prod_pressure "
+                        f"grace={prod_pressure_summary['grace_action']} "
+                        f"cancelled={len(prod_pressure_summary['cancelled_job_ids'])} "
+                        "awaiting_terminal="
+                        f"{len(prod_pressure_summary['awaiting_terminal_job_ids'])} "
+                        f"cancel_failed={len(prod_pressure_summary['cancel_failed_job_ids'])} "
+                        f"held_busy={len(prod_pressure_summary['held_busy_job_ids'])} "
+                        f"retryable_trials={prod_pressure_summary['retryable_trial_count']}"
+                    ),
                     policy=_policy_to_config(row),
                     observation=observation,
                     desired_slots=0,
                 )
                 _persist_decision(row, decision, now=now)
-                if actuator_error is not None:
+                if prod_pressure_summary["cancel_failed_job_ids"]:
+                    row.last_error = (
+                        "prod-pressure scancel failed for "
+                        f"{len(prod_pressure_summary['cancel_failed_job_ids'])} job(s); "
+                        "capacity remains draining"
+                    )
+                elif actuator_error is not None:
                     row.last_error = actuator_error
                 decisions.append(decision)
                 continue

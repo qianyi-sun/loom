@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 ACTIVE_STATES = {"pending", "running"}
 TERMINAL_STATES = {"completed", "failed", "cancelled", "stale"}
+PROD_PRESSURE_CANCEL_IDLE = "prod-pressure cancel requested: pending-or-idle"
+PROD_PRESSURE_CANCEL_PREEMPT = "prod-pressure cancel requested: retryable-preemption"
 _SECRET_KEY_PARTS = (
     "TOKEN",
     "SECRET",
@@ -116,7 +118,7 @@ def redact_env(env: dict[str, str] | None) -> dict[str, str]:
     return redacted
 
 
-def _normalize_slurm_state(raw_state: str | None) -> str:
+def normalize_slurm_state(raw_state: str | None) -> str:
     if raw_state is None:
         return "pending"
     token = raw_state.strip().upper().split(maxsplit=1)[0]
@@ -140,6 +142,11 @@ def _normalize_slurm_state(raw_state: str | None) -> str:
     }:
         return "failed"
     return "failed"
+
+
+# Private compatibility alias for existing focused tests and callers.  New
+# cross-module code should use the public spelling above.
+_normalize_slurm_state = normalize_slurm_state
 
 
 def summarize_jobs(rows: list[dict[str, Any]]) -> SlurmWorkerCapacitySummary:
@@ -353,12 +360,21 @@ async def reconcile_slurm_worker_jobs(
                 extra={"job_id": obs.job_id, "slurm_state": obs.slurm_state},
             )
             continue
-        state = _normalize_slurm_state(obs.slurm_state)
+        state = normalize_slurm_state(obs.slurm_state)
         job.slurm_state = obs.slurm_state
         job.state = state
         if obs.nodelist is not None:
             job.nodelist = obs.nodelist
-        job.pending_reason = obs.pending_reason
+        # A successful scancel is not a released-capacity read-back.  Keep the
+        # durable request marker until the prod-pressure reconciler observes a
+        # terminal Slurm state and settles the worker/trial rows.  This also
+        # makes a submit-host restart idempotent: the next tick observes rather
+        # than issuing a duplicate scancel.
+        if job.pending_reason not in {
+            PROD_PRESSURE_CANCEL_IDLE,
+            PROD_PRESSURE_CANCEL_PREEMPT,
+        }:
+            job.pending_reason = obs.pending_reason
         if obs.worker_id is not None:
             job.worker_id = obs.worker_id
         if state == "running" and job.started_at is None:
