@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -44,6 +45,13 @@ def _artifact(
     shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile)
     shutil.copyfile(repository / "scripts/ops/worker_pool_autoscaler_external_once.py", script)
     profile_text = profile.read_text(encoding="utf-8")
+    profile_text = profile_text.replace("enabled = false", "enabled = true", 1)
+    profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
+    profile_text = profile_text.replace(
+        "enabled = false\nactive = false",
+        "enabled = true\nactive = true",
+        1,
+    )
     if timer_on_unit_active_sec != 30:
         enablement = "enabled = true\nactive = true\n"
         profile_text = profile_text.replace(
@@ -83,12 +91,16 @@ active = true
     profile.write_text(profile_text, encoding="utf-8")
     profile.chmod(0o600)
     script.chmod(0o700)
-    return build_external_supervisor_artifact(
-        candidate,
-        candidate_sha="a" * 40,
-        candidate_tree="b" * 40,
-        image_tag="staging-aaaaaaa",
-    )
+    with patch(
+        "loom_cli.environment_state.staging_gb10_external_activation_blockers",
+        return_value=(),
+    ):
+        return build_external_supervisor_artifact(
+            candidate,
+            candidate_sha="a" * 40,
+            candidate_tree="b" * 40,
+            image_tag="staging-aaaaaaa",
+        )
 
 
 class _Control:

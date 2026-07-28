@@ -16,6 +16,7 @@ from loom_cli.environment_state import (
     load_environment_state_profile,
     render_external_slurm_autoscaler_service,
     render_external_slurm_autoscaler_timer,
+    staging_gb10_external_activation_blockers,
 )
 
 
@@ -210,9 +211,7 @@ def test_committed_production_profile_ships_fail_closed() -> None:
     assert gb10["enabled"] is False
     assert gb10["actuator_config"]["exclusive"] is True  # safe without #896
 
-    desired = next(
-        row for row in profile.gb10_desired_states if row["pool_name"] == "gb10"
-    )
+    desired = next(row for row in profile.gb10_desired_states if row["pool_name"] == "gb10")
     assert desired["target_slots"] == 0
     assert all(intent == "stopped" for intent in desired["host_intents"].values())
 
@@ -738,7 +737,12 @@ external_runner = true
 
 def test_diff_environment_state_rejects_active_job_outside_allowed_nodes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "loom_cli.environment_state.staging_gb10_external_activation_blockers",
+        lambda **_kwargs: (),
+    )
     profile_path = tmp_path / "staging.state.toml"
     profile_path.write_text(
         """
@@ -2078,7 +2082,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     } & set(profile.catalog_provisioning["required_env"])
     assert set(profile.external_slurm_runner_prerequisites["pools"]) == {"gb10"}
     assert profile.external_slurm_runner_prerequisites["require_worker_token_parity"] is True
-    assert profile.external_slurm_runner_prerequisites["materialize"] is True
+    assert profile.external_slurm_runner_prerequisites["materialize"] is False
     assert (
         profile.external_slurm_runner_prerequisites["env_template_glob"]
         == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
@@ -2124,7 +2128,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_ships_active_gb10_supervisor() -> None:
+def test_committed_staging_profile_ships_fail_closed_supervisors() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2142,12 +2146,11 @@ def test_committed_staging_profile_ships_active_gb10_supervisor() -> None:
     assert gb10["pool_name"] == "gb10"
     assert gb10["service_name"] == "loom-autoscaler-gb10-staging.service"
     assert gb10["timer_name"] == "loom-autoscaler-gb10-staging.timer"
-    assert gb10["enabled"] is True
-    assert gb10["active"] is True
+    assert gb10["enabled"] is False
+    assert gb10["active"] is False
     assert "15451" in gb10["args"]
 
-    # OLDLAB staging supervisor ships fail-closed until #896: the unit renders but
-    # is not enabled/started, so live staging capacity stays GB10-only.
+    # OLDLAB staging also remains fail-closed until #896.
     oldlab = by_name["oldlab-staging"]
     assert oldlab["pool_name"] == "oldlab"
     assert oldlab["service_name"] == "loom-autoscaler-oldlab-staging.service"
@@ -2155,6 +2158,138 @@ def test_committed_staging_profile_ships_active_gb10_supervisor() -> None:
     assert oldlab["enabled"] is False
     assert oldlab["active"] is False
     assert "15448" in oldlab["args"]
+
+
+def test_staging_profile_loader_rejects_candidate_self_attested_activation(
+    tmp_path: Path,
+) -> None:
+    profile_text = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    profile_path = tmp_path / "staging.toml"
+    profile_path.write_text(
+        profile_text.replace("enabled = false", "enabled = true", 1)
+        + """
+
+[external_slurm_runner_prerequisites.service_identity]
+username = "loom-rollout"
+uid = 995
+gid = 982
+supplementary_groups = ["docker"]
+slurm_account = "loom-staging"
+submit_host = "candidate-controlled.example"
+
+[external_slurm_runner_prerequisites.allocation_attestation]
+candidate_sha = "${GIT_SHA}"
+artifact_path = "/candidate-controlled/attestation.json"
+artifact_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+passed = true
+nodes = ["trt-gb10-1"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EnvironmentStateProfileError,
+        match="external_slurm_acceptance_authority_unavailable",
+    ):
+        load_environment_state_profile(
+            profile_path,
+            variables={
+                "IMAGE_TAG": "staging-test",
+                "ENV_CONFIG_VERSION": "staging-test",
+                "GIT_SHA": "a" * 40,
+            },
+            expected_environment="staging",
+        )
+
+
+@pytest.mark.parametrize(
+    ("policy_enabled", "materialize", "supervisor_enabled"),
+    [
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+    ],
+)
+def test_staging_gb10_external_activation_requires_external_authority(
+    policy_enabled: bool,
+    materialize: bool,
+    supervisor_enabled: bool,
+) -> None:
+    blockers = staging_gb10_external_activation_blockers(
+        environment="staging",
+        autoscaler_policies=[
+            {
+                "pool_name": "gb10",
+                "actuator": "slurm",
+                "enabled": policy_enabled,
+                "disabled_reason": "gated" if not policy_enabled else None,
+                "actuator_config": {
+                    "external_runner": True,
+                    "allowed_nodes": ["trt-gb10-1"],
+                },
+            }
+        ],
+        prerequisites={"pools": ["gb10"], "materialize": materialize},
+        supervisors=[
+            {
+                "pool_name": "gb10",
+                "enabled": supervisor_enabled,
+                "active": supervisor_enabled,
+            }
+        ],
+    )
+
+    assert blockers == ("external_slurm_acceptance_authority_unavailable",)
+
+
+def test_staging_gb10_supervisor_activation_without_policy_requires_external_authority() -> None:
+    blockers = staging_gb10_external_activation_blockers(
+        environment="staging",
+        autoscaler_policies=[],
+        prerequisites={},
+        supervisors=[{"pool_name": "gb10", "enabled": True, "active": True}],
+    )
+
+    assert blockers == ("external_slurm_acceptance_authority_unavailable",)
+
+
+def test_staging_gb10_external_activation_rejects_candidate_self_attestation() -> None:
+    blockers = staging_gb10_external_activation_blockers(
+        environment="staging",
+        autoscaler_policies=[
+            {
+                "pool_name": "gb10",
+                "actuator": "slurm",
+                "enabled": True,
+                "actuator_config": {
+                    "external_runner": True,
+                    "allowed_nodes": ["trt-gb10-1"],
+                },
+            }
+        ],
+        prerequisites={
+            "pools": ["gb10"],
+            "materialize": True,
+            "service_identity": {
+                "username": "loom-rollout",
+                "uid": 995,
+                "gid": 982,
+                "supplementary_groups": ["docker"],
+                "slurm_account": "loom-staging",
+                "submit_host": "gb10-submit.example",
+            },
+            "allocation_attestation": {
+                "candidate_sha": "a" * 40,
+                "artifact_path": "/var/lib/loom/attestations/gb10.json",
+                "artifact_sha256": "b" * 64,
+                "passed": True,
+                "nodes": ["trt-gb10-1"],
+            },
+        },
+        supervisors=[{"pool_name": "gb10", "enabled": True, "active": True}],
+    )
+
+    assert blockers == ("external_slurm_acceptance_authority_unavailable",)
 
 
 def _supervisor_profile_payload(*, second_service: str, second_port: str) -> str:
@@ -2254,12 +2389,8 @@ def test_render_supervisor_service_and_timer_contain_full_execstart() -> None:
     assert "OnUnitActiveSec=30" in timer_unit
 
 
-def test_staging_profile_defines_gated_oldlab_alongside_active_gb10() -> None:
-    # Staging defines both the active GB10 pool and a fail-closed OLDLAB pool.
-    # OLDLAB stays enabled=false (and non-exclusive, since its nodes double-duty
-    # with k3s/MinIO) until #896 lands, so live staging capacity remains GB10-only
-    # while the pool definition is in place. ("GB10 only" as an absolute gate is
-    # retired: staging now carries the gated OLDLAB pool.)
+def test_staging_profile_defines_both_external_pools_fail_closed() -> None:
+    # GB10 stays disabled for #827 and OLDLAB stays disabled for #896.
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2272,7 +2403,8 @@ def test_staging_profile_defines_gated_oldlab_alongside_active_gb10() -> None:
 
     policies = {policy["pool_name"]: policy for policy in profile.autoscaler_policies}
     assert set(policies) == {"gb10", "oldlab"}
-    assert policies["gb10"]["enabled"] is True
+    assert policies["gb10"]["enabled"] is False
+    assert "#827" in policies["gb10"]["disabled_reason"]
     assert policies["oldlab"]["enabled"] is False
     assert policies["oldlab"]["actuator_config"]["exclusive"] is False
 

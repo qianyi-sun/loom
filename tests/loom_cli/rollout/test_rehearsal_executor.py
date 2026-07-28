@@ -21,7 +21,6 @@ from loom_cli.rollout.external_supervisor_readiness import (
 )
 from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
-    build_external_supervisor_artifact,
     staging_working_directory,
 )
 from loom_cli.rollout.production_defaults_readiness import (
@@ -51,6 +50,7 @@ from loom_cli.rollout.rehearsal_release import RehearsalReleaseArtifact
 from loom_cli.rollout.rehearsal_secret_restore import RehearsalSecretArtifact
 from tests.loom_cli.rollout.rehearsal_fixtures import (
     PassingGB10RehearsalTransport,
+    active_external_supervisor_artifact,
     gb10_rehearsal_authority,
     passing_gb10_transport_factory,
 )
@@ -60,12 +60,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 @cache
 def _external_supervisor_artifact() -> ExternalSupervisorArtifact:
-    return build_external_supervisor_artifact(
-        REPO_ROOT,
+    return active_external_supervisor_artifact(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
         image_tag="staging-aaaaaaaa",
-        environment="staging",
     )
 
 
@@ -806,9 +804,7 @@ def _runtime_binding_run(
                             "architecture": "amd64",
                             "os": "linux",
                             "config": {
-                                "Labels": {
-                                    "org.opencontainers.image.revision": plan.candidate_sha
-                                }
+                                "Labels": {"org.opencontainers.image.revision": plan.candidate_sha}
                             },
                         }
                     },

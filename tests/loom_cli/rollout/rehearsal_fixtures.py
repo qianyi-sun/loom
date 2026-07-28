@@ -1,8 +1,61 @@
+import shutil
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+from loom_cli.rollout.external_supervisor_readiness import (
+    ExternalSupervisorArtifact,
+    build_external_supervisor_artifact,
+)
 from loom_cli.rollout.gb10_readiness import ACTIVE_GB10_HOSTS
 from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority, GB10RehearsalEvidence
 from loom_cli.rollout.systemd_readiness import RehearsalSystemdActivation
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def active_external_supervisor_artifact(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    image_tag: str,
+) -> ExternalSupervisorArtifact:
+    """Build an active supervisor fixture isolated from the production gate."""
+
+    with tempfile.TemporaryDirectory(prefix="loom-test-supervisor-") as raw_dir:
+        candidate = Path(raw_dir)
+        profile = candidate / "deploy/environment-state/staging.toml"
+        script = candidate / "scripts/ops/worker_pool_autoscaler_external_once.py"
+        profile.parent.mkdir(parents=True)
+        script.parent.mkdir(parents=True)
+        profile_text = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(
+            encoding="utf-8"
+        )
+        profile_text = profile_text.replace("enabled = false", "enabled = true", 1)
+        profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
+        profile_text = profile_text.replace(
+            "enabled = false\nactive = false",
+            "enabled = true\nactive = true",
+            1,
+        )
+        profile.write_text(profile_text, encoding="utf-8")
+        shutil.copyfile(
+            REPO_ROOT / "scripts/ops/worker_pool_autoscaler_external_once.py",
+            script,
+        )
+        profile.chmod(0o600)
+        script.chmod(0o700)
+        with patch(
+            "loom_cli.environment_state.staging_gb10_external_activation_blockers",
+            return_value=(),
+        ):
+            return build_external_supervisor_artifact(
+                candidate,
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+                image_tag=image_tag,
+                environment="staging",
+            )
 
 
 def gb10_rehearsal_authority() -> GB10RehearsalAuthority:
@@ -42,6 +95,7 @@ def passing_gb10_transport_factory(
 
 __all__ = [
     "PassingGB10RehearsalTransport",
+    "active_external_supervisor_artifact",
     "gb10_rehearsal_authority",
     "passing_gb10_transport_factory",
 ]

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from loom_cli.rollout.external_supervisor_readiness import build_external_supervisor_artifact
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
     ROLLOUT_IMAGES,
@@ -28,7 +27,10 @@ from loom_cli.rollout.rehearsal_action_source import (
     RehearsalSmokeAuthority,
 )
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
-from tests.loom_cli.rollout.rehearsal_fixtures import gb10_rehearsal_authority
+from tests.loom_cli.rollout.rehearsal_fixtures import (
+    active_external_supervisor_artifact,
+    gb10_rehearsal_authority,
+)
 from tests.loom_cli.rollout.test_preflight_artifact_store import _production_defaults
 
 
@@ -156,8 +158,7 @@ def _source(backend: Backend, tmp_path: Path) -> RehearsalActionSource:
 
 
 def _external_supervisor():
-    return build_external_supervisor_artifact(
-        Path(__file__).resolve().parents[3],
+    return active_external_supervisor_artifact(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
         image_tag="staging-aaaaaaa",

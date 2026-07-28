@@ -109,6 +109,8 @@ def _external_worker_summary(
             "control_plane_environment": None,
             "slurm_pools": [],
             "gb10_desired_states": [],
+            "external_slurm_runner_prerequisites": {},
+            "external_slurm_autoscaler_supervisors": [],
         }
 
     raw_bytes = environment_state_path.read_bytes()
@@ -135,6 +137,8 @@ def _external_worker_summary(
             {
                 "pool_name": policy.get("pool_name"),
                 "actuator": policy.get("actuator"),
+                "enabled": policy.get("enabled", False),
+                "disabled_reason": policy.get("disabled_reason"),
                 "external_runner": bool(actuator_config.get("external_runner")),
                 "env_file": actuator_config.get("env_file"),
                 "repo_dir": actuator_config.get("repo_dir"),
@@ -161,6 +165,25 @@ def _external_worker_summary(
             }
         )
 
+    prerequisites: dict[str, Any] = {}
+    raw_prerequisites = resolved.get("external_slurm_runner_prerequisites")
+    if isinstance(raw_prerequisites, dict):
+        for field in ("pools", "materialize"):
+            if field in raw_prerequisites:
+                prerequisites[field] = raw_prerequisites[field]
+
+    supervisors: list[dict[str, Any]] = []
+    for supervisor in resolved.get("external_slurm_autoscaler_supervisors", []):
+        if not isinstance(supervisor, dict):
+            continue
+        supervisors.append(
+            {
+                "pool_name": supervisor.get("pool_name"),
+                "enabled": supervisor.get("enabled", True),
+                "active": supervisor.get("active", True),
+            }
+        )
+
     return {
         "environment_state_file": {
             "path": str(environment_state_path),
@@ -169,6 +192,8 @@ def _external_worker_summary(
         "control_plane_environment": control_plane_environment,
         "slurm_pools": slurm_pools,
         "gb10_desired_states": gb10_desired_states,
+        "external_slurm_runner_prerequisites": prerequisites,
+        "external_slurm_autoscaler_supervisors": supervisors,
     }
 
 

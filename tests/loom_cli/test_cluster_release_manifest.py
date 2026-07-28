@@ -182,11 +182,15 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         {
             "pool_name": "oldlab",
             "actuator": "slurm",
+            "enabled": False,
+            "disabled_reason": None,
             "external_runner": True,
             "env_file": "/secure/staging-oldlab-staging-abc123.env",
             "repo_dir": "/srv/loom-staging-abc123",
         },
     ]
+    assert manifest["external_workers"]["external_slurm_runner_prerequisites"] == {}
+    assert manifest["external_workers"]["external_slurm_autoscaler_supervisors"] == []
     assert manifest["external_workers"]["gb10_desired_states"] == [
         {
             "environment": "staging",

@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
-from loom_cli.environment_state import load_environment_state_profile
 from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_digest
 from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
 from loom_cli.rollout.external_supervisor_readiness import SCRIPT_PATH
@@ -103,6 +102,7 @@ from loom_cli.rollout.readonly_authority import (
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS, RehearsalResult
 from loom_cli.rollout.runtime_readiness import REQUIRED_EXECUTABLES, REQUIRED_IMPORTS
 from loom_cli.rollout.staging_baseline_readiness import BaselineProbeResult
+from tests.loom_cli.rollout.rehearsal_fixtures import active_external_supervisor_artifact
 
 BOOT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
@@ -1181,9 +1181,7 @@ def test_registered_backup_rotation_capacity_reports_retirement_limit() -> None:
     assert result.evidence["blockers"] == {"transient-limit": "reached"}
 
 
-def _run_rotation_capacity_check(
-    check: RegisteredCheck, rotation_digest: str
-) -> CheckExecution:
+def _run_rotation_capacity_check(check: RegisteredCheck, rotation_digest: str) -> CheckExecution:
     dag = PreflightDag(
         (
             _passing_dependency("capacity.high-water"),
@@ -1286,9 +1284,7 @@ def _rolling_backup_state() -> BackupRotationState:
         restore_verified_at=now - timedelta(minutes=10),
         expires_at=now + timedelta(hours=2),
     )
-    state = record_restore_verified(
-        state, payload_id="payload-active0001", lease=lease
-    ).state
+    state = record_restore_verified(state, payload_id="payload-active0001", lease=lease).state
     state = promote_candidate(state, payload_id="payload-active0001").state
     state = begin_candidate(
         state,
@@ -1773,11 +1769,22 @@ def test_registered_migration_plan_rejects_candidate_drift_before_graph_read(
     assert calls == []
 
 
-def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
+def test_registered_systemd_render_uses_exact_static_unit_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     candidate_sha = "1" * 40
     candidate_tree = "2" * 40
     image_tag = "staging-1111111"
+    supervisor_artifact = active_external_supervisor_artifact(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        image_tag=image_tag,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.preflight_registered_checks.build_external_supervisor_artifact",
+        lambda *_args, **_kwargs: supervisor_artifact,
+    )
     check = build_systemd_render_check(
         lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
         candidate_root=repo_root,
@@ -1811,28 +1818,8 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
     assert result.evidence["failed-units"] == {}
     assert result.evidence["supervisor-artifact-digest"] != "0" * 64
     assert result.evidence["supervisor-profile-sha256"] != "0" * 64
-
-    profile = load_environment_state_profile(
-        repo_root / "deploy/environment-state/staging.toml",
-        variables={
-            "ENV_CONFIG_VERSION": candidate_tree,
-            "GIT_SHA": candidate_sha,
-            "IMAGE_TAG": image_tag,
-        },
-        expected_environment="staging",
-    )
-    supervisors = tuple(
-        supervisor
-        for supervisor in profile.external_slurm_autoscaler_supervisors
-        if supervisor["enabled"] or supervisor["active"]
-    )
-    expected_supervisor_units = {
-        str(supervisor[field])
-        for supervisor in supervisors
-        for field in ("service_name", "timer_name")
-    }
-    assert expected_supervisor_units <= set(result.evidence["unit-digests"])
-    assert result.evidence["unit-count"] == 3 + len(expected_supervisor_units)
+    assert set(supervisor_artifact.unit_sha256) <= set(result.evidence["unit-digests"])
+    assert result.evidence["unit-count"] == 3 + len(supervisor_artifact.unit_sha256)
     assert set(result.evidence["supervisor-script-digests"]) == {SCRIPT_PATH}
 
 

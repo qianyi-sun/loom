@@ -330,6 +330,69 @@ def _validate_supervisor_collisions(
         seen_ports.add(port)
 
 
+def staging_gb10_external_activation_blockers(
+    *,
+    environment: object,
+    autoscaler_policies: object,
+    prerequisites: object,
+    supervisors: object,
+) -> tuple[str, ...]:
+    """Return fail-closed blockers for staging's external GB10 Slurm path."""
+
+    if environment != "staging":
+        return ()
+    policy_rows = autoscaler_policies if isinstance(autoscaler_policies, list) else []
+    gb10_policies: list[dict[str, Any]] = []
+    for raw in policy_rows:
+        if not isinstance(raw, dict):
+            continue
+        actuator_config = raw.get("actuator_config")
+        external_runner = (
+            actuator_config.get("external_runner")
+            if isinstance(actuator_config, dict)
+            else raw.get("external_runner")
+        )
+        if (
+            raw.get("pool_name") == "gb10"
+            and raw.get("actuator") == "slurm"
+            and external_runner is True
+        ):
+            gb10_policies.append(raw)
+    blockers: list[str] = []
+    for policy in gb10_policies:
+        enabled = policy.get("enabled")
+        if type(enabled) is not bool:
+            blockers.append("gb10_policy_enabled_invalid")
+        elif enabled is False:
+            disabled_reason = policy.get("disabled_reason")
+            if not isinstance(disabled_reason, str) or not disabled_reason.strip():
+                blockers.append("gb10_policy_disabled_reason_missing")
+
+    prereq = prerequisites if isinstance(prerequisites, dict) else {}
+    pools = prereq.get("pools")
+    materializes_gb10 = prereq.get("materialize") is True and (
+        not isinstance(pools, list) or not pools or "gb10" in pools
+    )
+    supervisor_rows = supervisors if isinstance(supervisors, list) else []
+    gb10_supervisors = [
+        raw for raw in supervisor_rows if isinstance(raw, dict) and raw.get("pool_name") == "gb10"
+    ]
+    supervisor_active = any(
+        raw.get("enabled") is not False or raw.get("active") is not False
+        for raw in gb10_supervisors
+    )
+    activation_requested = (
+        any(policy.get("enabled") is not False for policy in gb10_policies)
+        or materializes_gb10
+        or supervisor_active
+    )
+    if not activation_requested:
+        return tuple(sorted(set(blockers)))
+    blockers.append("external_slurm_acceptance_authority_unavailable")
+
+    return tuple(sorted(set(blockers)))
+
+
 def _normalize_autoscaler_policy(
     item: dict[str, Any],
     *,
@@ -581,6 +644,20 @@ def load_environment_state_profile(
         )
     ]
     _validate_supervisor_collisions(external_slurm_autoscaler_supervisors)
+    external_slurm_runner_prerequisites = _as_dict(
+        external_slurm_runner_prerequisites,
+        "external_slurm_runner_prerequisites",
+    )
+    blockers = staging_gb10_external_activation_blockers(
+        environment=environment,
+        autoscaler_policies=autoscaler_policies,
+        prerequisites=external_slurm_runner_prerequisites,
+        supervisors=external_slurm_autoscaler_supervisors,
+    )
+    if blockers:
+        raise EnvironmentStateProfileError(
+            "staging GB10 external Slurm acceptance is blocked: " + ", ".join(blockers),
+        )
     return EnvironmentStateProfile(
         environment=environment,
         control_plane_environment=control_plane_environment,
@@ -589,10 +666,7 @@ def load_environment_state_profile(
         catalog_provisioning=_as_dict(catalog, "catalog_provisioning"),
         rate_card_sync=_as_dict(rate_card_sync, "rate_card_sync"),
         hosted_provider_pricing_defaults=hosted_provider_pricing_defaults,
-        external_slurm_runner_prerequisites=_as_dict(
-            external_slurm_runner_prerequisites,
-            "external_slurm_runner_prerequisites",
-        ),
+        external_slurm_runner_prerequisites=external_slurm_runner_prerequisites,
         external_slurm_autoscaler_supervisors=(external_slurm_autoscaler_supervisors),
     )
 

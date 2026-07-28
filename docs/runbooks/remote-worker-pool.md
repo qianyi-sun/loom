@@ -1406,12 +1406,13 @@ For GB10, use the same Slurm actuator rather than the legacy `gb10` actuator
 for normal capacity. The backend remains `docker` because each worker runs
 Docker sandboxes, while the autoscaler actuator is `slurm` because capacity is
 requested and released through the GB10 Slurm partition. While #822 excludes
-node 7, the active 14-node, 10-slot policy has a ceiling of 140 slots:
+node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
 
 ```json
 {
   "actuator": "slurm",
-  "enabled": true,
+  "enabled": false,
+  "disabled_reason": "#827: service identity and exact-candidate allocation attestation are not yet proven for every allowed GB10 node",
   "min_slots": 0,
   "max_slots": 140,
   "actuator_config": {
@@ -1447,8 +1448,13 @@ node 7, the active 14-node, 10-slot policy has a ceiling of 140 slots:
 }
 ```
 
-The staging environment-state profile opts into rollout-owned materialization
-for these external runner prerequisites. During `loom cluster rollout`, step 11
+The staging environment-state profile keeps rollout-owned materialization
+disabled with the policy and supervisor for #827. None of those three switches
+may be enabled by candidate-owned environment-state fields. The current loader
+and release gate fail with `external_slurm_acceptance_authority_unavailable`
+until an independently installed authority verifies candidate-bound service
+identity and allocation evidence for every `allowed_nodes` entry. Once that
+external authority exists and accepts a candidate, `loom cluster rollout` step 11
 first syncs the candidate environment-state profile into the rollout root,
 then copies the latest matching staging GB10 env file template when the target
 `env_file` is missing, rewrites only release keys plus the active worker token

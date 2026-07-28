@@ -28,6 +28,18 @@ from tests.loom_cli.rollout.operator.test_protected_external_supervisor_componen
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_external_acceptance_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """These tests cover protected apply mechanics, not activation authority."""
+
+    monkeypatch.setattr(
+        "loom_cli.environment_state.staging_gb10_external_activation_blockers",
+        lambda **_kwargs: (),
+    )
+
+
 class Runner:
     def __init__(self, *, revision: str, epoch: int | None) -> None:
         self.revision = revision
@@ -505,7 +517,17 @@ def test_subprocess_runner_accepts_multiline_argv_but_rejects_empty_and_nul(
     multiline_sql = "\nSELECT jsonb_build_object(\n  'rate_cards', '[]'::jsonb\n);\n"
     assert (
         runner.capture_stdout(
-            ("kubectl", "exec", "statefulset/loom-postgres", "--", "sh", "-ceu", "x", "sh", multiline_sql),
+            (
+                "kubectl",
+                "exec",
+                "statefulset/loom-postgres",
+                "--",
+                "sh",
+                "-ceu",
+                "x",
+                "sh",
+                multiline_sql,
+            ),
             env=runner.environment,
             timeout_seconds=5,
         )

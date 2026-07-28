@@ -24,6 +24,7 @@ from loom_cli.cluster_workload_trust import (
     workload_contract_environment,
     workload_contract_from_mapping,
 )
+from loom_cli.environment_state import staging_gb10_external_activation_blockers
 from loom_cli.gb10_release_gate import gb10_release_target_mismatches
 
 _Outcome = Literal["pass", "fail"]
@@ -795,6 +796,70 @@ def _environment_state_manifest_evidence(manifest: dict[str, Any]) -> dict[str, 
             for desired in gb10_desired_states
         ]
     return evidence
+
+
+def _external_slurm_acceptance_check(
+    manifest: dict[str, Any],
+) -> ReleaseGateCheck | None:
+    external_workers = manifest.get("external_workers")
+    if not isinstance(external_workers, dict):
+        return None
+    slurm_pools = external_workers.get("slurm_pools")
+    if not isinstance(slurm_pools, list):
+        slurm_pools = []
+    has_gb10_external_policy = any(
+        isinstance(pool, dict)
+        and pool.get("pool_name") == "gb10"
+        and pool.get("actuator") == "slurm"
+        and pool.get("external_runner") is True
+        for pool in slurm_pools
+    )
+    release = manifest.get("release")
+    release = release if isinstance(release, dict) else {}
+    blockers = staging_gb10_external_activation_blockers(
+        environment=release.get("environment"),
+        autoscaler_policies=slurm_pools,
+        prerequisites=external_workers.get("external_slurm_runner_prerequisites"),
+        supervisors=external_workers.get("external_slurm_autoscaler_supervisors"),
+    )
+    if not has_gb10_external_policy and not blockers:
+        return None
+    evidence = {
+        "pool_name": "gb10",
+        "policy_enabled": any(
+            isinstance(pool, dict)
+            and pool.get("pool_name") == "gb10"
+            and pool.get("enabled") is True
+            for pool in slurm_pools
+        ),
+        "materialize": (
+            external_workers.get("external_slurm_runner_prerequisites", {}).get("materialize")
+            if isinstance(
+                external_workers.get("external_slurm_runner_prerequisites"),
+                dict,
+            )
+            else None
+        ),
+        "blockers": list(blockers),
+    }
+    if blockers:
+        return ReleaseGateCheck(
+            name="external-slurm-acceptance",
+            outcome="fail",
+            detail="staging GB10 external Slurm activation is not accepted",
+            evidence=evidence,
+            remediation=(
+                "keep policy, materialization, and supervisor disabled until an "
+                "independent installed authority verifies candidate-bound service "
+                "identity and all-node allocation evidence"
+            ),
+        )
+    return ReleaseGateCheck(
+        name="external-slurm-acceptance",
+        outcome="pass",
+        detail="staging GB10 external Slurm remains fail-closed",
+        evidence=evidence,
+    )
 
 
 def _environment_state_check(
@@ -2107,6 +2172,9 @@ def collect_release_gate_report(
     )
     if disabled_k8s_worker_check is not None:
         checks.append(disabled_k8s_worker_check)
+    external_slurm_acceptance_check = _external_slurm_acceptance_check(manifest)
+    if external_slurm_acceptance_check is not None:
+        checks.append(external_slurm_acceptance_check)
     environment_state_check = _environment_state_check(
         manifest=manifest,
         artifact=environment_state_check_artifact,

@@ -7,6 +7,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -99,6 +100,14 @@ def test_plan_authority_rejects_malformed_absent_predecessor(
         ProtectedExternalSupervisorComponent._plan_authority(_absent_plan(**override))
 
 
+def _build_active_artifact(*args, **kwargs) -> ExternalSupervisorArtifact:
+    with patch(
+        "loom_cli.environment_state.staging_gb10_external_activation_blockers",
+        return_value=(),
+    ):
+        return build_external_supervisor_artifact(*args, **kwargs)
+
+
 def _bound_artifact(tmp_path: Path):
     plan = _published_plan(tmp_path)
     candidate_root = tmp_path / "candidate"
@@ -108,13 +117,22 @@ def _bound_artifact(tmp_path: Path):
     script_target.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[4]
     shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile_target)
+    profile_text = profile_target.read_text(encoding="utf-8")
+    profile_text = profile_text.replace("enabled = false", "enabled = true", 1)
+    profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
+    profile_text = profile_text.replace(
+        "enabled = false\nactive = false",
+        "enabled = true\nactive = true",
+        1,
+    )
+    profile_target.write_text(profile_text, encoding="utf-8")
     shutil.copyfile(
         repository / "scripts/ops/worker_pool_autoscaler_external_once.py",
         script_target,
     )
     profile_target.chmod(0o600)
     script_target.chmod(0o700)
-    artifact = build_external_supervisor_artifact(
+    artifact = _build_active_artifact(
         candidate_root,
         candidate_sha=plan.candidate_sha,
         candidate_tree=plan.candidate_tree,
@@ -342,6 +360,7 @@ def test_component_classifies_bound_predecessor_partial_and_exact_states(tmp_pat
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        artifact_builder=_build_active_artifact,
     )
 
     ready = component.classify(plan)
@@ -427,11 +446,14 @@ def test_component_classifies_absent_bootstrap_ready_via_plan_authority(tmp_path
     # re-observe with the plan's absent authority so the bootstrap classifies READY,
     # letting the protected-apply journal reach apply instead of failing as drifted.
     plan, candidate_root, artifact = _bound_absent(tmp_path)
-    transport = _BareRefusingTransport(artifact, _observation(artifact, files="absent", runtime="absent"))
+    transport = _BareRefusingTransport(
+        artifact, _observation(artifact, files="absent", runtime="absent")
+    )
     component = ProtectedExternalSupervisorComponent(
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        artifact_builder=_build_active_artifact,
     )
     assert component.classify(plan).state is ComponentState.READY
 
@@ -440,11 +462,14 @@ def test_component_stays_drifted_when_bare_observe_refuses_non_absent(tmp_path: 
     # A non-absent plan does not retry with an authority: a refusing bare observe
     # stays DRIFTED (the fail-closed default is preserved for canonical/legacy).
     plan, candidate_root, artifact = _bound_artifact(tmp_path)
-    transport = _BareRefusingTransport(artifact, _observation(artifact, files="absent", runtime="absent"))
+    transport = _BareRefusingTransport(
+        artifact, _observation(artifact, files="absent", runtime="absent")
+    )
     component = ProtectedExternalSupervisorComponent(
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        artifact_builder=_build_active_artifact,
     )
     assert component.classify(plan).state is ComponentState.DRIFTED
 
@@ -456,6 +481,7 @@ def test_component_applies_and_reaches_exact(tmp_path: Path) -> None:
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        artifact_builder=_build_active_artifact,
     )
 
     component.apply(plan)
@@ -482,6 +508,7 @@ def test_component_rejects_stale_bytes_failed_state_and_epoch(tmp_path: Path) ->
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        artifact_builder=_build_active_artifact,
     )
     assert component.classify(plan).state is ComponentState.DRIFTED
 
@@ -501,6 +528,7 @@ def test_component_rebuilds_and_rejects_candidate_or_plan_drift(tmp_path: Path) 
             _observation(artifact, files="legacy", runtime="exact"),
         ),
         epoch_guard=lambda value: _epoch(value),
+        artifact_builder=_build_active_artifact,
     )
     with pytest.raises(ValueError, match="transition identity drifted"):
         component.classify(replace(plan, supervisor_artifact_digest="f" * 64))
@@ -1041,7 +1069,7 @@ def test_compensation_journal_blocks_across_candidate_until_same_identity_verifi
             reason="operation-failed",
         )
     )
-    next_artifact = build_external_supervisor_artifact(
+    next_artifact = _build_active_artifact(
         candidate_root,
         candidate_sha="c" * 40,
         candidate_tree="d" * 40,
