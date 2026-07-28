@@ -610,6 +610,7 @@ def _external_supervisor_context() -> CheckContext:
             "external-supervisor.unit-directory": EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
             "runner.config.sha256": "a" * 64,
             "schema.revision": "0066",
+            "database.schema.revision": "0066",
             "service.uid": 1001,
         }
     )
@@ -643,7 +644,7 @@ def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> 
     assert probe.evidence["unit-digests"] == dict(snapshot.unit_sha256)
     assert probe.evidence["transition-clear"] is True
     assert probe.evidence["pool-identity-digest"] == snapshot.pool_identity_digest
-    assert "schema.revision" in check.spec.input_keys
+    assert "database.schema.revision" in check.spec.input_keys
 
 
 def test_registered_external_supervisor_predecessor_accepts_absent_but_rejects_malformed_or_pending() -> (

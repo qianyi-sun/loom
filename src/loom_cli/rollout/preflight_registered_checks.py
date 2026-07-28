@@ -914,7 +914,7 @@ def build_external_supervisor_predecessor_check(
                 "environment",
                 "external-supervisor.unit-directory",
                 "runner.config.sha256",
-                "schema.revision",
+                "database.schema.revision",
                 "service.uid",
             ),
             evidence_schema=(

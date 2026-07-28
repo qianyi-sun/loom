@@ -81,6 +81,7 @@ class InstalledDeepPreflightComposition:
     rehearsal_factory: RehearsalFactory
     final_gate_run: FinalGateCommandRunner
     read_mutation_epoch: Callable[[], int]
+    read_database_schema_revision: Callable[[], str]
     now: Callable[[], datetime]
     importer: ModuleImporter = importlib.import_module
     max_concurrency: int = 8
@@ -123,6 +124,7 @@ class InstalledDeepPreflightComposition:
         rehearsal_actions, rehearsal_identity = self.rehearsal_factory(
             candidate, mutation_epoch, purpose, loaded
         )
+        database_schema_revision = self.read_database_schema_revision()
         return PreflightRuntimeSources(
             config=self.config,
             candidate=candidate,
@@ -140,6 +142,7 @@ class InstalledDeepPreflightComposition:
             readonly_authority_source=self.readonly_authority_source,
             capacity_source=self.capacity_source,
             backup_authority=self.backup_authority_factory(mutation_epoch),
+            database_schema_revision=database_schema_revision,
             external_supervisor_predecessor_source=(self.external_supervisor_predecessor_source),
             systemd_run=self.systemd_run,
             gb10_run=self.gb10_run,

@@ -9,11 +9,14 @@ import pytest
 
 from loom.data_lifecycle import StagingCapacity
 from loom_cli.rollout.external_supervisor_predecessor import (
+    ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPoolIdentity,
     load_predecessor_manifest,
 )
+from loom_cli.rollout.external_supervisor_readiness import build_external_supervisor_artifact
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
 from loom_cli.rollout.operator import installed_deep_preflight_factory
+from loom_cli.rollout.operator import protected_external_supervisor_transport as transport_module
 from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
 from loom_cli.rollout.operator.installed_deep_preflight import InstalledDeepPreflightComposition
 from loom_cli.rollout.operator.installed_preflight_inputs import InstalledPreflightInputs
@@ -145,6 +148,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         ),
         final_gate_run=lambda *_args: command(),
         read_mutation_epoch=lambda: 9,
+        read_database_schema_revision=lambda: "0074",
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
     )
 
@@ -164,6 +168,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         }
     ]
     assert composition.authority().current_mutation_epoch() == 9
+    assert admission.database_schema_revision == "0074"
 
 
 class _LegacyExternalSupervisorStore:
@@ -201,6 +206,23 @@ class _ReadyLegacyExternalSupervisorControl:
             fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
             need_daemon_reload="no",
         )
+
+
+class _CanonicalExternalSupervisorStore:
+    def __init__(self, canonical: ExternalSupervisorCanonicalIdentity) -> None:
+        self.canonical = canonical
+
+    def list_units(self) -> tuple[str, ...]:
+        return tuple(self.canonical.unit_sha256)
+
+    def read_unit(self, name: str) -> bytes:
+        return self.canonical.unit_payloads[name].encode()
+
+    def read_canonical(self) -> ExternalSupervisorCanonicalIdentity:
+        return self.canonical
+
+    def compensation_blockers(self) -> dict[str, str]:
+        return {}
 
 
 class _AbsentExternalSupervisorStore:
@@ -249,7 +271,8 @@ def _git_run(arguments: list[str]):
 def _installed_predecessor_context(
     candidate_root: Path,
     *,
-    schema_revision: str = "0066",
+    backup_schema_revision: str = "0066",
+    database_schema_revision: str = "0066",
 ) -> CheckContext:
     candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"])
     candidate_tree = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"])
@@ -259,7 +282,8 @@ def _installed_predecessor_context(
         {
             "candidate.sha": candidate_sha.stdout.strip(),
             "candidate.tree": candidate_tree.stdout.strip(),
-            "schema.revision": schema_revision,
+            "schema.revision": backup_schema_revision,
+            "database.schema.revision": database_schema_revision,
         }
     )
 
@@ -315,6 +339,66 @@ def test_installed_external_supervisor_predecessor_source_binds_merged_provenanc
     assert dict(snapshot.unit_sha256) == dict(store.manifest.unit_sha256)
     assert snapshot.transition_clear is True
     assert snapshot.runtime_ready is True
+
+
+def test_installed_external_supervisor_predecessor_uses_live_schema_after_migration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
+    candidate_tree = _git_run(
+        ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
+    ).stdout.strip()
+    artifact = build_external_supervisor_artifact(
+        candidate_root,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        image_tag=f"staging-{candidate_sha[:7]}",
+        environment="staging",
+    )
+    canonical = ExternalSupervisorCanonicalIdentity.build(
+        artifact,
+        plan_digest="a" * 64,
+        attestation_digest="b" * 64,
+        transition_group_id="c" * 32,
+        runtime_evidence_digest=transport_module._expected_activation_runtime_digest(artifact),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: _CanonicalExternalSupervisorStore(canonical),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: _ReadyLegacyExternalSupervisorControl(),
+    )
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0074",
+            legacy_count=0,
+            target_count=1,
+        ),
+    )
+
+    snapshot = source(
+        _installed_predecessor_context(
+            candidate_root,
+            backup_schema_revision="0073",
+            database_schema_revision="0074",
+        )
+    )
+
+    assert snapshot.kind == "canonical"
+    assert snapshot.runtime_ready is True
+    assert snapshot.pool_identity_digest == _pool_identity(
+        "0074",
+        legacy_count=0,
+        target_count=1,
+    ).evidence_digest
 
 
 def test_installed_external_supervisor_predecessor_source_declares_safe_directory(
@@ -482,7 +566,13 @@ def test_installed_predecessor_source_rejects_legacy_after_0067(
     )
 
     with pytest.raises(ValueError, match="post-0067 pool identity drifted"):
-        source(_installed_predecessor_context(candidate_root, schema_revision="0067"))
+        source(
+            _installed_predecessor_context(
+                candidate_root,
+                backup_schema_revision="0066",
+                database_schema_revision="0067",
+            )
+        )
 
 
 def test_installed_pool_identity_probe_rejects_missing_or_duplicate_tables() -> None:

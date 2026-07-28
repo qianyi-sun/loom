@@ -152,6 +152,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(
             schema_revision="0066",
             object_inventory_root="3" * 64,
         ),
+        database_schema_revision="0074",
         external_supervisor_predecessor_source=lambda _context: (
             ExternalSupervisorPredecessorSnapshot(
                 kind="legacy-manifest",
@@ -235,6 +236,8 @@ def test_sources_build_complete_exact_registry_without_running_probes(
     }
     assert plan.context.bindings["staging.mutation-epoch"] == 9
     assert plan.context.bindings["backup.source-request"] == "fresh-checkpoint"
+    assert plan.context.bindings["schema.revision"] == "0066"
+    assert plan.context.bindings["database.schema.revision"] == "0074"
     assert plan.context.bindings["candidate.image-tag"] == candidate.image_tag
     assert gb10_concurrency == {
         "build_gb10_candidate_source_check": GB10_CANDIDATE_SOURCE_CONCURRENCY,
