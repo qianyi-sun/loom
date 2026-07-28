@@ -11,9 +11,12 @@ from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_client_and_sudoers_fix_the_broker_command() -> None:
+def test_clients_and_sudoers_fix_broker_commands_and_clean_environment() -> None:
     client = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout").read_text()
-    broker = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout-broker").read_text()
+    compatibility_broker = (
+        REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout-broker"
+    ).read_text()
+    broker = (REPO_ROOT / "deploy/staging-rollout/loom-rollout-broker").read_text()
     sudoers = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout.sudoers").read_text()
     tmpfiles = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout.tmpfiles").read_text()
     sysctl = (REPO_ROOT / "deploy/staging-rollout/loom-staging-rollout.sysctl").read_text()
@@ -21,6 +24,10 @@ def test_client_and_sudoers_fix_the_broker_command() -> None:
     assert "sudo -n -u loom-rollout -- /usr/local/libexec/loom-staging-rollout-broker" in client
     assert "%loom-staging-operators ALL=(loom-rollout) NOPASSWD:NOSETENV:" in sudoers
     assert "/usr/local/libexec/loom-staging-rollout-broker *" in sudoers
+    assert compatibility_broker == (
+        "#!/bin/sh\nset -eu\n\n"
+        'exec /usr/local/libexec/loom-rollout-broker --env staging "$@"\n'
+    )
     assert "/usr/bin/env -i" in broker
     assert broker.index("umask 077") < broker.index("exec /usr/bin/env -i")
     assert 'SUDO_USER="${SUDO_USER}"' in broker
