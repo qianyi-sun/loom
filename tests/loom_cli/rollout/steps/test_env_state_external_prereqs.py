@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+import loom_cli.environment_state as environment_state_module
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
@@ -31,6 +32,19 @@ from loom_cli.rollout.steps.s10_env_state import (
     _wait_for_control_plane,
 )
 from loom_cli.rollout.steps.subprocess_util import SubprocessResult
+
+
+@pytest.fixture(autouse=True)
+def _isolate_external_acceptance_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """These tests cover materialization mechanics, not activation authority."""
+
+    monkeypatch.setattr(
+        environment_state_module,
+        "staging_gb10_external_activation_blockers",
+        lambda **_kwargs: (),
+    )
 
 
 def _write_external_prereq_profile(
@@ -53,6 +67,7 @@ max_slots = 150
 
 [worker_pool_autoscaler_policies.actuator_config]
 external_runner = true
+allowed_nodes = ["trt-gb10-1"]
 env_file = "{env_file}"
 repo_dir = "{repo_dir}"
 requested_concurrency = 10

@@ -12,6 +12,7 @@ from loom_cli.__main__ import main
 from loom_cli.cluster_release_gate import (
     ReleaseGateCheck,
     ReleaseGateReport,
+    _external_slurm_acceptance_check,
     _gb10_worker_check,
     _hf_mirror_boundary_check,
     collect_release_gate_report,
@@ -182,6 +183,78 @@ def _manifest(
     if external_workers is not None:
         manifest["external_workers"] = external_workers
     return manifest
+
+
+def _external_gb10_workers(*, enabled: bool) -> dict[str, Any]:
+    return {
+        "slurm_pools": [
+            {
+                "pool_name": "gb10",
+                "actuator": "slurm",
+                "enabled": enabled,
+                "disabled_reason": None if enabled else "#827 acceptance incomplete",
+                "external_runner": True,
+                "allowed_nodes": ["trt-gb10-1"],
+            }
+        ],
+        "external_slurm_runner_prerequisites": {
+            "pools": ["gb10"],
+            "materialize": False,
+        },
+        "external_slurm_autoscaler_supervisors": [
+            {"pool_name": "gb10", "enabled": False, "active": False}
+        ],
+    }
+
+
+def test_release_gate_passes_for_fail_closed_external_gb10() -> None:
+    check = _external_slurm_acceptance_check(
+        _manifest(external_workers=_external_gb10_workers(enabled=False))
+    )
+
+    assert check is not None
+    assert check.outcome == "pass"
+    assert check.evidence["policy_enabled"] is False
+
+
+def test_release_gate_rejects_candidate_self_attested_external_gb10_activation() -> None:
+    workers = _external_gb10_workers(enabled=True)
+    workers["external_slurm_runner_prerequisites"].update(
+        {
+            "service_identity": {
+                "username": "loom-rollout",
+                "uid": 995,
+                "gid": 982,
+                "supplementary_groups": ["docker"],
+                "slurm_account": "loom-staging",
+                "submit_host": "gb10-submit.example",
+            },
+            "allocation_attestation": {
+                "candidate_sha": "a" * 40,
+                "artifact_path": "/candidate-controlled/attestation.json",
+                "artifact_sha256": "b" * 64,
+                "passed": True,
+                "nodes": ["trt-gb10-1"],
+            },
+        }
+    )
+    check = _external_slurm_acceptance_check(_manifest(external_workers=workers))
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.evidence["blockers"] == ["external_slurm_acceptance_authority_unavailable"]
+
+
+def test_release_gate_rejects_gb10_supervisor_activation_without_policy() -> None:
+    workers = _external_gb10_workers(enabled=False)
+    workers["slurm_pools"] = []
+    workers["external_slurm_autoscaler_supervisors"][0].update({"enabled": True, "active": True})
+
+    check = _external_slurm_acceptance_check(_manifest(external_workers=workers))
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.evidence["blockers"] == ["external_slurm_acceptance_authority_unavailable"]
 
 
 @pytest.mark.parametrize(
@@ -1905,9 +1978,7 @@ def test_release_gate_fails_when_environment_state_reports_excluded_slurm_node()
             "ok": False,
             "drift": [
                 {
-                    "path": (
-                        "slurm_worker_jobs[production/gb10/18186].nodelist"
-                    ),
+                    "path": ("slurm_worker_jobs[production/gb10/18186].nodelist"),
                     "desired": ["trt-gb10-1", "trt-gb10-2"],
                     "live": "trt-gb10-7",
                 },

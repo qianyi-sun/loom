@@ -249,12 +249,15 @@ Supporting layout, shared across environments:
   explicitly configured `/etc/loom/kubeconfig/<environment>.yaml` authority.
 - Health check: `systemctl --user is-active loom-autoscaler-gb10-<env>.timer`.
 
-The staging GB10 supervisor ships `enabled=true` and `active=true`: applying the
-staging profile installs, enables (for boot), and starts the timer. The
-development GB10 supervisor ships `enabled=false` and `active=false`
-(fail-closed): applying the profile writes the unit files but does not enable or
-start the timer, mirroring the pool's own `enabled=false` gate pending #827
-(external-Slurm acceptance) and #896 (container isolation).
+The staging and development GB10 supervisors ship `enabled=false` and
+`active=false`. Applying either profile leaves the timer stopped and disabled,
+mirroring the pool and prerequisite-materialization gates. For staging, #827
+does not allow candidate-owned profile fields to self-authorize activation.
+Any of the three switches fails closed with
+`external_slurm_acceptance_authority_unavailable` until an independently
+installed authority verifies the service identity and exact-candidate,
+all-node allocation evidence. OLDLAB remains independently gated on #896
+(container isolation).
 
 ## Storage Policy
 

@@ -10,10 +10,12 @@
 environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
-# #822: active capacity is 14 hosts / 140 slots; node 7 remains stopped below.
+# #827: external Slurm is fail-closed until the submit-domain service identity
+# and exact-candidate allocation attestation cover every allowed GB10 node.
 pool_name = "gb10"
 actuator = "slurm"
-enabled = true
+enabled = false
+disabled_reason = "#827: service identity and exact-candidate allocation attestation are not yet proven for every allowed GB10 node"
 min_slots = 0
 max_slots = 140
 scale_up_threshold_slots = 1
@@ -169,7 +171,8 @@ pools = ["gb10"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true
-materialize = true
+# #827: do not materialize candidate env/repo inputs for a disabled actuator.
+materialize = false
 env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
 
 # --- External autoscaler supervisor (systemd --user timer) -------------------
@@ -179,8 +182,8 @@ env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker
 # supervisors on the same host collide:
 #   oldlab  dev/staging/prod = 15447 / 15448 / 15449
 #   gb10    dev/staging/prod = 15450 / 15451 / 15452
-# Staging is a live environment, so this ships enabled=true + active=true:
-# applying the profile installs, enables (for boot) and starts the timer.
+# #827: keep the GB10 timer stopped and disabled until the same service identity
+# and allocation attestation required by the policy gate are candidate-bound.
 [[external_slurm_autoscaler_supervisors]]
 name = "gb10-staging"
 pool_name = "gb10"
@@ -203,8 +206,8 @@ args = [
   "--db-connect-timeout-sec", "10",
   "--freshness-sec", "120",
 ]
-enabled = true
-active = true
+enabled = false
+active = false
 
 # OLDLAB staging autoscaler supervisor — GATED enabled=false/active=false until
 # #896 (container isolation) + #827 (external-Slurm acceptance), mirroring the

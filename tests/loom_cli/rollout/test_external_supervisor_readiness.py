@@ -32,6 +32,18 @@ _PYTHON_PATH = staging_python_path(_SHA)
 _SCRIPT_PATH = staging_script_path(_SHA)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_external_acceptance_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """These tests cover artifact mechanics, not activation authority."""
+
+    monkeypatch.setattr(
+        "loom_cli.environment_state.staging_gb10_external_activation_blockers",
+        lambda **_kwargs: (),
+    )
+
+
 @dataclass(frozen=True)
 class _Result:
     returncode: int
