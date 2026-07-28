@@ -35,6 +35,11 @@ the complete acceptance window. Evidence is closed-schema, secret-free,
 timezone-qualified, and collected no later than five minutes after the final
 readback.
 
+The artifact also contains exactly 18 cross-sandbox denials: all six directed
+source-to-foreign-target sandbox pairs multiplied by `worker_identity`,
+`object_store`, and `result_path`. Every row binds the same SHA/tree, lands in
+the declared preflight or baseline phase, and reports `denied=true`.
+
 ## Admission and authority
 
 Before creating a session, record all of the following outside the artifact:
@@ -101,8 +106,8 @@ duplicated, or reordered phase fails.
 
 | Phase | Required action and readback | Hard stop |
 | --- | --- | --- |
-| `preflight` | Read back exact candidate/tree, both domain receipts, six adapter identities, broker/supervisor state, Slurm policy, cgroup guard, topology, and empty acceptance-owned capacity. | Any stale receipt, wrong candidate, missing node, active prior test lease, or nonzero invariant. |
-| `baseline` | Record healthy non-Loom peer jobs, disk free space, cache footprint, and domain I/O counters before Loom pressure. | Peer already failing, disk below the reviewed floor, or an unknown owner on a planned test resource. |
+| `preflight` | Read back exact candidate/tree, both domain receipts, six adapter identities, broker/supervisor state, Slurm policy, cgroup guard, topology, and empty acceptance-owned capacity. Begin the directed cross-sandbox denial matrix. | Any stale receipt, wrong candidate, missing node, active prior test lease, or nonzero invariant. |
+| `baseline` | Complete all 18 cross-sandbox denials. Record healthy non-Loom peer jobs, disk free space, cache footprint, and domain I/O counters before Loom pressure. | Missing/duplicate denial, a same-sandbox row, any allowed foreign access, peer already failing, disk below the reviewed floor, or an unknown owner on a planned test resource. |
 | `large_batch_burst` | Submit at least 100 trials to each pool through an acceptance-owned batch and let each burst use at least two eligible nodes. Record requested/granted/peak slots and per-node trial counts. | `--exclusive`, one-node placement, duplicate trial ID, pool/pending overshoot, or excluded-node use. |
 | `fairness_contention` | Keep equal requests from all three sandboxes eligible in each pool for at least 30 minutes. Retain the raw series and record the phase-closing requested/granted/pending/active/draining/terminal sample for each pair. | A sandbox receives no grant cycle, waits more than 600 seconds for its first grant, total grant skew exceeds 20%, indefinite starvation, replayed observation, or temporary overshoot. |
 | `mixed_non_loom` | Run the acceptance workload with the pre-existing non-Loom Slurm peer. Capture baseline/during/after throughput, latency, running/completed/failed counts, and storage/I/O. | New peer failure, disruption, throughput regression over 20%, ENOSPC/I/O error, or a reviewed cache/I/O limit breach. |
@@ -178,6 +183,7 @@ Build one JSON document following
 `docs/evidence/developer-sandbox-live-acceptance.schema.json`. Important closed
 sets are:
 
+- exactly 18 unique directed cross-sandbox/resource denials;
 - all six sandbox/pool capacity streams and runtime envelopes;
 - exactly one large-batch and one fairness row per pool;
 - exactly one non-Loom peer and one storage/I/O row per pool;
@@ -185,6 +191,15 @@ sets are:
   `submit_host_restart`, and `worker_crash`;
 - zero global overshoot, duplicate, starvation, exclusive-job, cgroup-escape,
   peer-disruption, storage-error, orphan, and retry-attribution counters.
+
+Every capacity sample binds candidate SHA/tree and must land inside the phase
+named by that sample. Runtime envelopes bind SHA/tree and a timestamp inside
+`mixed_non_loom`. Bursts and fairness windows bind SHA/tree and intervals
+inside `large_batch_burst` and `fairness_contention`, respectively. Peer
+baseline/during/after and storage baseline/minimum/after observations land in
+`baseline`, `mixed_non_loom`, and `final_drain`. Each fault interval lands
+inside its corresponding cancel, TTL, submit-host restart, or worker-crash
+phase. A session-wide timestamp is not enough.
 
 Verify offline before copying or publishing:
 
@@ -223,7 +238,11 @@ canonical digest, and marks the session complete. If a crash leaves
 `evidence.json` present before the complete state is committed, rerun the same
 command; exact bytes are verified before the journal advances. A complete
 session rejects a different artifact but safely accepts an identical
-finalization retry.
+finalization retry. For every phase, finalization recomputes the canonical
+phase digest, rebuilds the complete expected checkpoint through the same
+session/candidate/tree/status metadata constructor used at collection time,
+and requires exact object equality with the root-owned journal. Editing only a
+checkpoint's session, phase, candidate, tree, status, or digest fails.
 
 ## Failure and cleanup
 

@@ -86,6 +86,13 @@ CAPACITY_PHASES = (
     "final_drain",
 )
 FAULTS = ("cancel", "ttl_expiry", "submit_host_restart", "worker_crash")
+FAULT_PHASES = {
+    "cancel": "cancel_cleanup",
+    "ttl_expiry": "ttl_cleanup",
+    "submit_host_restart": "submit_host_restart",
+    "worker_crash": "worker_crash",
+}
+CROSS_SANDBOX_RESOURCES = ("worker_identity", "object_store", "result_path")
 CONTAINER_ROLES = ("worker", "trial", "verifier", "sidecar")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -190,6 +197,25 @@ def _node_in_pool(node: str, pool: str) -> bool:
     return node.startswith(prefix)
 
 
+def _inside_window(value: str, window: tuple[datetime, datetime]) -> bool:
+    observed = _timestamp(value)
+    return window[0] <= observed <= window[1]
+
+
+def _interval_inside_window(
+    started: str,
+    finished: str,
+    window: tuple[datetime, datetime],
+) -> bool:
+    interval_start = _timestamp(started)
+    interval_finish = _timestamp(finished)
+    return (
+        interval_start <= interval_finish
+        and window[0] <= interval_start
+        and interval_finish <= window[1]
+    )
+
+
 def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     candidate_sha = evidence["candidate"]["sha"]
@@ -248,6 +274,7 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("state-machine phases are incomplete or out of order")
     previous = started_at
     checkpoint_digests: set[str] = set()
+    phase_windows: dict[str, tuple[datetime, datetime]] = {}
     for phase in phases:
         if phase["candidate_sha"] != candidate_sha or phase["candidate_tree"] != candidate_tree:
             failures.append(f"{phase['phase']} is not bound to the exact candidate")
@@ -262,12 +289,34 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
             failures.append(f"{phase['phase']} timestamps regress")
         if elapsed > phase["deadline_seconds"]:
             failures.append(f"{phase['phase']} exceeded its bounded deadline")
+        phase_windows[phase["phase"]] = (phase_started, phase_finished)
         if phase["checkpoint_sha256"] in checkpoint_digests:
             failures.append("state-machine checkpoint digest is duplicated")
         checkpoint_digests.add(phase["checkpoint_sha256"])
         previous = phase_finished
     if phases and _timestamp(phases[-1]["finished_at"]) > completed_at:
         failures.append("state-machine completion is later than the session")
+
+    negative = evidence["cross_sandbox_negative"]
+    expected_negative = {
+        (source, target, resource)
+        for source in SANDBOXES
+        for target in SANDBOXES
+        if source != target
+        for resource in CROSS_SANDBOX_RESOURCES
+    }
+    actual_negative = _matrix(negative, "source", "target", "resource")
+    if actual_negative != expected_negative or len(negative) != len(expected_negative):
+        failures.append("cross-sandbox negative matrix is incomplete or duplicated")
+    for probe in negative:
+        if probe["source"] == probe["target"]:
+            failures.append("cross-sandbox negative matrix contains a same-sandbox row")
+        if probe["candidate_sha"] != candidate_sha or probe["candidate_tree"] != candidate_tree:
+            failures.append("cross-sandbox negative probe candidate does not match")
+        if not _inside_window(probe["observed_at"], phase_windows[probe["phase"]]):
+            failures.append("cross-sandbox negative probe is outside its phase window")
+        if not probe["denied"]:
+            failures.append("cross-sandbox negative probe unexpectedly succeeded")
 
     samples = evidence["capacity_samples"]
     expected_pairs = {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
@@ -287,15 +336,15 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     )
     last_sequence: dict[tuple[str, str, str], int] = {}
     for sample in samples:
-        if sample["candidate_sha"] != candidate_sha:
-            failures.append("capacity sample candidate SHA does not match")
+        if sample["candidate_sha"] != candidate_sha or sample["candidate_tree"] != candidate_tree:
+            failures.append("capacity sample candidate does not match")
         try:
-            observed_at = _timestamp(sample["observed_at"])
+            _timestamp(sample["observed_at"])
         except ValueError:
             failures.append("capacity sample timestamp is invalid")
             continue
-        if observed_at < started_at or observed_at > completed_at:
-            failures.append("capacity sample is outside the session freshness window")
+        if not _inside_window(sample["observed_at"], phase_windows[sample["phase"]]):
+            failures.append("capacity sample is outside its phase window")
         identity = (
             sample["request_id"],
             sample["lease_epoch"],
@@ -329,8 +378,14 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if {burst["pool"] for burst in bursts} != set(POOLS) or len(bursts) != len(POOLS):
         failures.append("large-batch evidence must contain exactly one burst per pool")
     for burst in bursts:
-        if burst["candidate_sha"] != candidate_sha:
-            failures.append("large-batch burst candidate SHA does not match")
+        if burst["candidate_sha"] != candidate_sha or burst["candidate_tree"] != candidate_tree:
+            failures.append("large-batch burst candidate does not match")
+        if not _interval_inside_window(
+            burst["started_at"],
+            burst["finished_at"],
+            phase_windows[burst["phase"]],
+        ):
+            failures.append(f"{burst['pool']} large batch is outside its phase window")
         if len(set(burst["nodes"])) < 2:
             failures.append(f"{burst['pool']} large batch did not span multiple nodes")
         if any(not _node_in_pool(node, burst["pool"]) for node in burst["nodes"]):
@@ -353,6 +408,18 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if {item["pool"] for item in fairness} != set(POOLS) or len(fairness) != len(POOLS):
         failures.append("fairness evidence must contain exactly one window per pool")
     for window in fairness:
+        if window["candidate_sha"] != candidate_sha or window["candidate_tree"] != candidate_tree:
+            failures.append(f"{window['pool']} fairness candidate does not match")
+        if not _interval_inside_window(
+            window["started_at"],
+            window["finished_at"],
+            phase_windows[window["phase"]],
+        ):
+            failures.append(f"{window['pool']} fairness is outside its phase window")
+        elif (
+            _timestamp(window["finished_at"]) - _timestamp(window["started_at"])
+        ).total_seconds() < window["window_seconds"]:
+            failures.append(f"{window['pool']} fairness interval is shorter than policy")
         participants = window["participants"]
         if {item["sandbox"] for item in participants} != set(SANDBOXES):
             failures.append(f"{window['pool']} fairness omits a sandbox")
@@ -385,8 +452,16 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if _matrix(envelopes, "sandbox", "pool") != expected_pairs:
         failures.append("runtime envelopes do not cover all sandbox/pool pairs")
     for envelope in envelopes:
-        if envelope["candidate_sha"] != candidate_sha:
-            failures.append("runtime envelope candidate SHA does not match")
+        if (
+            envelope["candidate_sha"] != candidate_sha
+            or envelope["candidate_tree"] != candidate_tree
+        ):
+            failures.append("runtime envelope candidate does not match")
+        if not _inside_window(
+            envelope["observed_at"],
+            phase_windows[envelope["phase"]],
+        ):
+            failures.append("runtime envelope is outside the mixed-load phase")
         allocation = envelope["allocation"]
         if envelope["account"] != f"loom-dev-{envelope['sandbox']}":
             failures.append("runtime envelope Slurm account does not match sandbox")
@@ -443,6 +518,8 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if {peer["pool"] for peer in peers} != set(POOLS) or len(peers) != len(POOLS):
         failures.append("non-Loom peer evidence must contain exactly one row per pool")
     for peer in peers:
+        if peer["candidate_sha"] != candidate_sha or peer["candidate_tree"] != candidate_tree:
+            failures.append(f"{peer['pool']} peer candidate does not match")
         baseline = peer["baseline"]
         during = peer["during"]
         after = peer["after"]
@@ -457,10 +534,20 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
             peer_times = []
         if peer_times and (
             peer_times != sorted(peer_times)
-            or peer_times[0] < started_at
-            or peer_times[-1] > completed_at
+            or not _inside_window(
+                baseline["observed_at"],
+                phase_windows["baseline"],
+            )
+            or not _inside_window(
+                during["observed_at"],
+                phase_windows["mixed_non_loom"],
+            )
+            or not _inside_window(
+                after["observed_at"],
+                phase_windows["final_drain"],
+            )
         ):
-            failures.append(f"{peer['pool']} peer checkpoints are stale or reordered")
+            failures.append(f"{peer['pool']} peer checkpoints are outside phase windows")
         if peer["disrupted"] or during["failed_jobs"] > baseline["failed_jobs"]:
             failures.append(f"{peer['pool']} non-Loom peer workload was disrupted")
         if baseline["throughput_per_second"] <= 0:
@@ -476,6 +563,23 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if {item["domain"] for item in storage} != set(POOLS) or len(storage) != len(POOLS):
         failures.append("storage/cache/I/O evidence must cover both domains")
     for item in storage:
+        if item["candidate_sha"] != candidate_sha or item["candidate_tree"] != candidate_tree:
+            failures.append(f"{item['domain']} storage candidate does not match")
+        if not (
+            _inside_window(
+                item["baseline_observed_at"],
+                phase_windows["baseline"],
+            )
+            and _inside_window(
+                item["minimum_observed_at"],
+                phase_windows["mixed_non_loom"],
+            )
+            and _inside_window(
+                item["after_observed_at"],
+                phase_windows["final_drain"],
+            )
+        ):
+            failures.append(f"{item['domain']} storage observations are outside phase windows")
         if item["minimum_free_bytes"] > item["baseline_free_bytes"]:
             failures.append(f"{item['domain']} minimum free space exceeds its baseline")
         if item["minimum_free_bytes"] < item["required_free_bytes"]:
@@ -495,8 +599,10 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if {fault["event"] for fault in faults} != set(FAULTS) or len(faults) != len(FAULTS):
         failures.append("fault recovery evidence is incomplete or duplicated")
     for fault in faults:
-        if fault["candidate_sha"] != candidate_sha:
+        if fault["candidate_sha"] != candidate_sha or fault["candidate_tree"] != candidate_tree:
             failures.append(f"{fault['event']} is not candidate-bound")
+        if fault["phase"] != FAULT_PHASES[fault["event"]]:
+            failures.append(f"{fault['event']} is bound to the wrong phase")
         try:
             injected_at = _timestamp(fault["injected_at"])
             recovered_at = _timestamp(fault["recovered_at"])
@@ -505,8 +611,12 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
             continue
         if (recovered_at - injected_at).total_seconds() > fault["recovery_deadline_seconds"]:
             failures.append(f"{fault['event']} recovery exceeded its deadline")
-        if injected_at < started_at or recovered_at > completed_at:
-            failures.append(f"{fault['event']} recovery is outside the session")
+        if not _interval_inside_window(
+            fault["injected_at"],
+            fault["recovered_at"],
+            phase_windows[fault["phase"]],
+        ):
+            failures.append(f"{fault['event']} recovery is outside its phase")
         retry = fault["retry_attribution"]
         if retry["retryable_trials"] != retry["interrupted_trials"]:
             failures.append(f"{fault['event']} interrupted trials are not fully retryable")
@@ -559,6 +669,7 @@ def acceptance_plan() -> dict[str, Any]:
         "faults": list(FAULTS),
         "requirements": [
             "exact candidate SHA and tree on every phase and runtime record",
+            "all 18 directed cross-sandbox resource probes are denied",
             "large batches span multiple nodes in both pools",
             "all three sandboxes receive fair capacity without overshoot or starvation",
             "non-Loom Slurm peers retain bounded throughput and zero new failures",
@@ -567,6 +678,7 @@ def acceptance_plan() -> dict[str, Any]:
             "disk, cache, read I/O, and write I/O stay within reviewed bounds",
             "cancel, TTL, submit-host restart, and worker crash leave no orphans",
             "interrupted-trial retries retain complete, unique attribution",
+            "every observation and interval falls inside its exact phase window",
         ],
         "stop_rules": [
             "Stop unless the exact candidate is installed and read back on both domains.",
@@ -1056,15 +1168,16 @@ def finalize_session(
                 key: value for key, value in phase_evidence.items() if key != "checkpoint_sha256"
             }
             actual_digest = hashlib.sha256(_canonical_bytes(canonical_phase)).hexdigest()
+            expected_checkpoint = _checkpoint_payload(
+                session_id,
+                canonical_phase,
+                actual_digest,
+            )
             if (
-                not isinstance(checkpoint, dict)
-                or checkpoint.get("phase") != phase
-                or checkpoint.get("evidence_sha256") != actual_digest
+                checkpoint != expected_checkpoint
                 or phase_evidence["checkpoint_sha256"] != actual_digest
             ):
                 raise AcceptanceError("final evidence does not match the checkpoint journal")
-            if checkpoint.get("recorded_at") != phase_evidence["finished_at"]:
-                raise AcceptanceError("checkpoint journal timestamp is outside its phase")
         evidence_digest = hashlib.sha256(_canonical_bytes(evidence)).hexdigest()
         _write_or_verify_secure(_session_dir(session_id) / "evidence.json", evidence)
         if state["status"] == "complete":

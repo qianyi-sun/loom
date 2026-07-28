@@ -10,6 +10,7 @@
     "session",
     "topology",
     "state_machine",
+    "cross_sandbox_negative",
     "capacity_samples",
     "large_batch_bursts",
     "fairness",
@@ -158,6 +159,14 @@
       "maxItems": 10,
       "items": {
         "$ref": "#/$defs/phase"
+      }
+    },
+    "cross_sandbox_negative": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 18,
+      "items": {
+        "$ref": "#/$defs/crossSandboxNegative"
       }
     },
     "capacity_samples": {
@@ -433,6 +442,53 @@
         }
       }
     },
+    "crossSandboxNegative": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "source",
+        "target",
+        "resource",
+        "candidate_sha",
+        "candidate_tree",
+        "observed_at",
+        "denied"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "preflight",
+            "baseline"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "target": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "resource": {
+          "enum": [
+            "worker_identity",
+            "object_store",
+            "result_path"
+          ]
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "denied": {
+          "const": true
+        }
+      }
+    },
     "capacitySample": {
       "type": "object",
       "additionalProperties": false,
@@ -442,6 +498,7 @@
         "sandbox",
         "pool",
         "candidate_sha",
+        "candidate_tree",
         "request_id",
         "lease_epoch",
         "observation_sequence",
@@ -466,6 +523,9 @@
           "$ref": "#/$defs/pool"
         },
         "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
           "$ref": "#/$defs/fullSha"
         },
         "request_id": {
@@ -503,7 +563,11 @@
       "additionalProperties": false,
       "required": [
         "pool",
+        "phase",
         "candidate_sha",
+        "candidate_tree",
+        "started_at",
+        "finished_at",
         "batch_id",
         "trial_count",
         "completed_trials",
@@ -520,8 +584,20 @@
         "pool": {
           "$ref": "#/$defs/pool"
         },
+        "phase": {
+          "const": "large_batch_burst"
+        },
         "candidate_sha": {
           "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/timestamp"
         },
         "batch_id": {
           "type": "string",
@@ -580,6 +656,11 @@
       "additionalProperties": false,
       "required": [
         "pool",
+        "phase",
+        "candidate_sha",
+        "candidate_tree",
+        "started_at",
+        "finished_at",
         "window_seconds",
         "max_grant_wait_seconds",
         "max_grant_skew_ratio",
@@ -588,6 +669,21 @@
       "properties": {
         "pool": {
           "$ref": "#/$defs/pool"
+        },
+        "phase": {
+          "const": "fairness_contention"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/timestamp"
         },
         "window_seconds": {
           "type": "integer",
@@ -673,7 +769,10 @@
       "required": [
         "sandbox",
         "pool",
+        "phase",
         "candidate_sha",
+        "candidate_tree",
+        "observed_at",
         "job_id",
         "node",
         "account",
@@ -688,8 +787,17 @@
         "pool": {
           "$ref": "#/$defs/pool"
         },
+        "phase": {
+          "const": "mixed_non_loom"
+        },
         "candidate_sha": {
           "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
         },
         "job_id": {
           "type": "string",
@@ -869,6 +977,8 @@
       "additionalProperties": false,
       "required": [
         "pool",
+        "candidate_sha",
+        "candidate_tree",
         "job_id",
         "account",
         "baseline",
@@ -880,6 +990,12 @@
       "properties": {
         "pool": {
           "$ref": "#/$defs/pool"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
         },
         "job_id": {
           "type": "string",
@@ -915,6 +1031,11 @@
       "additionalProperties": false,
       "required": [
         "domain",
+        "candidate_sha",
+        "candidate_tree",
+        "baseline_observed_at",
+        "minimum_observed_at",
+        "after_observed_at",
         "baseline_free_bytes",
         "minimum_free_bytes",
         "after_free_bytes",
@@ -931,6 +1052,21 @@
       "properties": {
         "domain": {
           "$ref": "#/$defs/pool"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "baseline_observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "minimum_observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "after_observed_at": {
+          "$ref": "#/$defs/timestamp"
         },
         "baseline_free_bytes": {
           "$ref": "#/$defs/positiveInteger"
@@ -1014,7 +1150,9 @@
       "additionalProperties": false,
       "required": [
         "event",
+        "phase",
         "candidate_sha",
+        "candidate_tree",
         "sandbox",
         "pool",
         "request_id",
@@ -1036,7 +1174,18 @@
             "worker_crash"
           ]
         },
+        "phase": {
+          "enum": [
+            "cancel_cleanup",
+            "ttl_cleanup",
+            "submit_host_restart",
+            "worker_crash"
+          ]
+        },
         "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
           "$ref": "#/$defs/fullSha"
         },
         "sandbox": {
