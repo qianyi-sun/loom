@@ -27,6 +27,7 @@ class FakeSystem:
         self.filesystem = filesystem
         self.group = False
         self.service_user = False
+        self.service_user_requires_convergence = False
         self.operator_members: set[str] = set()
         self.docker = False
         self.key = False
@@ -163,12 +164,16 @@ class FakeSystem:
         return self.group
 
     def ensure_service_user(self) -> bool:
-        changed = not self.service_user
+        changed = not self.service_user or self.service_user_requires_convergence
         self.service_user = True
+        self.service_user_requires_convergence = False
         return changed
 
     def service_user_present(self) -> bool:
-        return self.service_user
+        return self.service_user and not self.service_user_requires_convergence
+
+    def service_user_convergence_needed(self) -> bool:
+        return not self.service_user or self.service_user_requires_convergence
 
     def ensure_operator_membership(self, username: str) -> bool:
         changed = username not in self.operator_members
@@ -964,6 +969,24 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_install_plan_converges_legacy_service_shell_before_strict_readiness(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    maintenance_begins = system.maintenance_begins
+    maintenance_ends = system.maintenance_ends
+    system.service_user_requires_convergence = True
+
+    result = installer.install(TEAM_ID)
+
+    assert f"user:{host.SERVICE_USER}" in result["changed"]
+    assert system.service_user_present() is True
+    assert system.maintenance_begins == maintenance_begins + 1
+    assert system.maintenance_ends == maintenance_ends + 1
+    assert installer.install(TEAM_ID)["changed"] == []
 
 
 def test_install_keeps_legacy_repo_and_venv_frozen_across_candidate_updates(
