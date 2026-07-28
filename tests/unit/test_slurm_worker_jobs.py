@@ -6,24 +6,26 @@ from uuid import uuid4
 from loom_control_plane.slurm_worker_jobs import (
     SlurmWorkerJobObservation,
     _normalize_slurm_state,
+    is_explicit_live_slurm_state,
     redact_env,
     summarize_jobs,
 )
 
 
 def test_redact_env_removes_secret_like_values() -> None:
-    redacted = redact_env({
-        "LOOM_WORKER_TOKEN": "loom_w_secret",
-        "LOOM_WORKER_MINIO_SECRET_KEY": "minio-secret",
-        "LOOM_WORKER_MAX_CONCURRENT": "12",
-        "PATH": "/usr/bin",
-    })
+    redacted = redact_env(
+        {
+            "LOOM_WORKER_TOKEN": "loom_w_secret",
+            "LOOM_WORKER_MINIO_SECRET_KEY": "minio-secret",
+            "LOOM_WORKER_MAX_CONCURRENT": "12",
+            "PATH": "/usr/bin",
+        }
+    )
 
     assert redacted == {
         "LOOM_WORKER_TOKEN": "<redacted>",
         "LOOM_WORKER_AUTH_FINGERPRINT": (
-            f"sha256:{hashlib.sha256(b'loom_w_secret').hexdigest()[:12]} "
-            "len=13"
+            f"sha256:{hashlib.sha256(b'loom_w_secret').hexdigest()[:12]} len=13"
         ),
         "LOOM_WORKER_MINIO_SECRET_KEY": "<redacted>",
         "LOOM_WORKER_MAX_CONCURRENT": "12",
@@ -39,6 +41,11 @@ def test_normalize_slurm_state_keeps_raw_state_separate() -> None:
     assert _normalize_slurm_state("CANCELLED by 123") == "cancelled"
     assert _normalize_slurm_state("TIMEOUT") == "failed"
     assert _normalize_slurm_state("OUT_OF_MEMORY") == "failed"
+    assert _normalize_slurm_state("SUSPENDED") == "running"
+    assert _normalize_slurm_state("FUTURE_STATE") == "running"
+    assert is_explicit_live_slurm_state("RUNNING") is True
+    assert is_explicit_live_slurm_state("SUSPENDED") is True
+    assert is_explicit_live_slurm_state("FUTURE_STATE") is False
 
 
 def test_observation_rejects_secret_environment() -> None:

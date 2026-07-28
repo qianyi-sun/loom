@@ -48,6 +48,7 @@ from loom_control_plane.slurm_worker_jobs import (
 )
 from loom_control_plane.worker_pool_autoscaler import (
     reconcile_worker_pool_autoscaler_once,
+    upsert_autoscaler_policy,
 )
 
 _SLURM_ACTUATOR_CONFIG = {
@@ -63,6 +64,36 @@ _SLURM_ACTUATOR_CONFIG = {
     "pending_job_cap": 1,
     "time_limit": "7-00:00:00",
 }
+_CAPACITY_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
+_CAPACITY_CANDIDATE = "a" * 40
+
+
+def _capacity_lease_state(
+    *,
+    state: str,
+    now: datetime,
+    epoch: int = 3,
+    preemptible: bool = True,
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "state": state,
+        "request_id": _CAPACITY_REQUEST_ID,
+        "lease_epoch": epoch,
+        "candidate_sha": _CAPACITY_CANDIDATE,
+        "preemptible": preemptible,
+        "activated_at": (now - timedelta(seconds=900)).isoformat().replace("+00:00", "Z"),
+    }
+    if state in {"retiring", "retired"}:
+        value.update(
+            {
+                "retire_started_at": now.isoformat().replace("+00:00", "Z"),
+                "retire_reason": "shared_capacity_handoff_disabled",
+            }
+        )
+    if state == "retired":
+        value["retired_at"] = now.isoformat().replace("+00:00", "Z")
+    return value
 
 
 class FakeSlurmRunner(SlurmWorkerCommandRunner):
@@ -76,12 +107,15 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
         self.node_resources: dict[str, SlurmNodeResource] = {}
         self.confirm_cancellations = True
         self.fail_cancel_job_ids: set[str] = set()
+        self.query_error: Exception | None = None
 
     async def query_jobs(
         self,
         job_ids: tuple[str, ...],
     ) -> list[SlurmWorkerJobObservation]:
         self.queried_job_ids.append(job_ids)
+        if self.query_error is not None:
+            raise self.query_error
         if self.confirm_cancellations:
             cancelled = [
                 SlurmWorkerJobObservation(job_id=job_id, slurm_state="CANCELLED")
@@ -1084,6 +1118,471 @@ async def test_actor_recovery_reactivates_only_held_live_worker(
         assert worker is not None
         assert worker.drain_state == "active"
         assert worker.drain_owner is None
+    finally:
+        await engine.dispose()
+
+
+async def test_actor_recovery_does_not_reactivate_unobserved_allocation(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        worker_id, _job_id, _trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state=None,
+            with_in_flight_trial=True,
+        )
+        async with session_factory() as s:
+            worker = await s.get(Worker, worker_id)
+            assert worker is not None
+            worker.drain_state = "draining"
+            worker.drain_owner = "prod-pressure-controller"
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observations = []
+        async with session_factory() as s:
+            await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now + timedelta(seconds=30),
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        async with session_factory() as s:
+            worker = await s.get(Worker, worker_id)
+        assert worker is not None
+        assert worker.drain_state == "draining"
+        assert worker.drain_owner == "prod-pressure-controller"
+    finally:
+        await engine.dispose()
+
+
+async def test_disabled_shared_capacity_cancels_pending_and_retires(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        _worker_id, job_id, _trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state=None,
+        )
+        async with session_factory() as s:
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+            job.state = "pending"
+            job.slurm_state = "PENDING"
+            job.worker_id = None
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            policy.enabled = False
+            policy.max_slots = 0
+            policy.capacity_lease_state = _capacity_lease_state(
+                state="retiring",
+                now=now,
+                preemptible=False,
+            )
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observations = [SlurmWorkerJobObservation(job_id=job_id, slurm_state="PENDING")]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now + timedelta(seconds=30),
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "shared_capacity_retired"
+        assert runner.cancelled_job_ids == [job_id]
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+        assert policy.enabled is False
+        assert policy.capacity_lease_state["state"] == "retired"
+        assert job.state == "cancelled"
+    finally:
+        await engine.dispose()
+
+
+async def test_disabled_nonpreemptible_shared_capacity_holds_busy_job(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        worker_id, job_id, _trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state=None,
+            with_in_flight_trial=True,
+        )
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            policy.enabled = False
+            policy.max_slots = 0
+            policy.capacity_lease_state = _capacity_lease_state(
+                state="retiring",
+                now=now - timedelta(seconds=1200),
+                preemptible=False,
+            )
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observations = [
+            _running_job_observation(
+                job_id=job_id,
+                nodelist="oldlab-1",
+                worker_id=worker_id,
+                now=now,
+            )
+        ]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "shared_capacity_hold"
+        assert runner.cancelled_job_ids == []
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            worker = await s.get(Worker, worker_id)
+        assert policy.capacity_lease_state["state"] == "retiring"
+        assert worker is not None and worker.drain_state == "draining"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("readback", ["omitted", "unknown", "query-error"])
+async def test_shared_capacity_retirement_requires_explicit_terminal_readback(
+    postgres_url: str,
+    readback: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        worker_id, job_id, _trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state=None,
+            with_in_flight_trial=True,
+        )
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            policy.enabled = False
+            policy.max_slots = 0
+            policy.capacity_lease_state = _capacity_lease_state(
+                state="retiring",
+                now=now - timedelta(seconds=1200),
+                preemptible=False,
+            )
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        if readback == "omitted":
+            runner.job_observations = []
+        elif readback == "unknown":
+            runner.job_observations = [
+                SlurmWorkerJobObservation(job_id=job_id, slurm_state="FUTURE_STATE")
+            ]
+        else:
+            runner.query_error = RuntimeError("sacct unavailable")
+
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now + timedelta(seconds=1200),
+                freshness_sec=2400,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "shared_capacity_hold"
+        assert runner.cancelled_job_ids == []
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+            worker = await s.get(Worker, worker_id)
+        assert policy.capacity_lease_state["state"] == "retiring"
+        assert job.state == "running"
+        assert worker is not None and worker.drain_state == "draining"
+    finally:
+        await engine.dispose()
+
+
+async def test_disabled_preemptible_shared_capacity_waits_then_retries(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        worker_id, job_id, trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state=None,
+            with_in_flight_trial=True,
+        )
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            policy.enabled = False
+            policy.max_slots = 0
+            policy.drain_timeout_seconds = 600
+            policy.actuator_config = {
+                **dict(policy.actuator_config or {}),
+                "stale_after_seconds": 1200,
+            }
+            policy.capacity_lease_state = _capacity_lease_state(
+                state="retiring",
+                now=now,
+                preemptible=True,
+            )
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observations = [
+            _running_job_observation(
+                job_id=job_id,
+                nodelist="oldlab-1",
+                worker_id=worker_id,
+                now=now,
+            )
+        ]
+        async with session_factory() as s:
+            first = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now + timedelta(seconds=599),
+                freshness_sec=1200,
+                slurm_runner=runner,
+            )
+            await s.commit()
+        assert first[0].action == "shared_capacity_hold"
+        assert runner.cancelled_job_ids == []
+
+        async with session_factory() as s:
+            second = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now + timedelta(seconds=601),
+                freshness_sec=1200,
+                slurm_runner=runner,
+            )
+            await s.commit()
+        assert second[0].action == "shared_capacity_retired"
+        assert runner.cancelled_job_ids == [job_id]
+        assert trial_id is not None
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            trial = await s.get(Trial, trial_id)
+        assert policy.capacity_lease_state["state"] == "retired"
+        assert trial is not None
+        assert trial.failure_reason == "prod_capacity_pressure"
+    finally:
+        await engine.dispose()
+
+
+async def test_shared_capacity_terminal_marker_settles_trial_before_retirement(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    try:
+        worker_id, _job_id, trial_id = await _seed_running_slurm_worker(
+            session_factory,
+            now=now,
+            prod_pressure_state=None,
+            with_in_flight_trial=True,
+        )
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            policy.enabled = False
+            policy.max_slots = 0
+            policy.capacity_lease_state = _capacity_lease_state(
+                state="retiring",
+                now=now,
+                preemptible=True,
+            )
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+            job.state = "cancelled"
+            job.slurm_state = "CANCELLED"
+            job.pending_reason = PROD_PRESSURE_CANCEL_PREEMPT
+            job.finished_at = now + timedelta(seconds=10)
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now + timedelta(seconds=30),
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "shared_capacity_retired"
+        assert trial_id is not None
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            trial = await s.get(Trial, trial_id)
+            worker = await s.get(Worker, worker_id)
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+        assert policy.capacity_lease_state["state"] == "retired"
+        assert trial is not None
+        assert trial.failure_reason == "prod_capacity_pressure"
+        assert worker is not None and worker.drain_state == "drained"
+        assert job.pending_reason == "cancelled by prod-pressure reclaim"
+    finally:
+        await engine.dispose()
+
+
+async def test_shared_capacity_reenable_waits_for_retirement_and_new_epoch(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    binding = {
+        "schema_version": 1,
+        "request_id": _CAPACITY_REQUEST_ID,
+        "lease_epoch": 3,
+        "candidate_sha": _CAPACITY_CANDIDATE,
+        "preemptible": True,
+    }
+    config = {
+        **_SLURM_ACTUATOR_CONFIG,
+        "candidate_sha": _CAPACITY_CANDIDATE,
+        "external_runner": True,
+        "shared_capacity_managed": True,
+    }
+    try:
+        async with session_factory() as s:
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(
+                        enabled=False,
+                        max_slots=0,
+                        actuator_config=config,
+                        capacity_lease_state=_capacity_lease_state(
+                            state="retiring",
+                            now=now,
+                        ),
+                    )
+                )
+            )
+            await s.commit()
+
+        async with session_factory() as s:
+            with pytest.raises(ValueError, match="retirement is active"):
+                await upsert_autoscaler_policy(
+                    s,
+                    environment="staging",
+                    pool_name="oldlab",
+                    actuator="slurm",
+                    enabled=True,
+                    min_slots=0,
+                    max_slots=6,
+                    scale_up_threshold_slots=1,
+                    scale_down_idle_seconds=600,
+                    scale_up_cooldown_seconds=60,
+                    scale_down_cooldown_seconds=300,
+                    drain_timeout_seconds=600,
+                    actuator_config=config,
+                    shared_capacity_binding={**binding, "lease_epoch": 4},
+                    now=now + timedelta(seconds=30),
+                )
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            policy.capacity_lease_state = _capacity_lease_state(
+                state="retired",
+                now=now,
+            )
+            await s.commit()
+        async with session_factory() as s:
+            with pytest.raises(ValueError, match="newer lease_epoch"):
+                await upsert_autoscaler_policy(
+                    s,
+                    environment="staging",
+                    pool_name="oldlab",
+                    actuator="slurm",
+                    enabled=True,
+                    min_slots=0,
+                    max_slots=6,
+                    scale_up_threshold_slots=1,
+                    scale_down_idle_seconds=600,
+                    scale_up_cooldown_seconds=60,
+                    scale_down_cooldown_seconds=300,
+                    drain_timeout_seconds=600,
+                    actuator_config=config,
+                    shared_capacity_binding=binding,
+                    now=now + timedelta(seconds=60),
+                )
+
+        async with session_factory() as s:
+            policy = await upsert_autoscaler_policy(
+                s,
+                environment="staging",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=6,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config=config,
+                shared_capacity_binding={**binding, "lease_epoch": 4},
+                now=now + timedelta(seconds=90),
+            )
+            await s.commit()
+        assert policy.enabled is True
+        assert policy.capacity_lease_state["state"] == "active"
+        assert policy.capacity_lease_state["lease_epoch"] == 4
+    finally:
+        await engine.dispose()
+
+
+async def test_unrelated_disabled_policy_is_not_reconciled(postgres_url: str) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as s:
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(enabled=False, max_slots=0),
+                )
+            )
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.query_error = AssertionError("disabled policy must be skipped")
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                slurm_runner=runner,
+            )
+
+        assert results == []
+        assert runner.queried_job_ids == []
     finally:
         await engine.dispose()
 

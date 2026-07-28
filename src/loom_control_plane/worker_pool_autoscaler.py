@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,12 +43,17 @@ from loom_control_plane.slurm_worker_jobs import (
     PROD_PRESSURE_CANCEL_IDLE,
     PROD_PRESSURE_CANCEL_PREEMPT,
     TERMINAL_STATES,
+    is_explicit_live_slurm_state,
     normalize_slurm_state,
     reconcile_slurm_worker_jobs,
     record_slurm_worker_job,
 )
 
 logger = logging.getLogger(__name__)
+
+_CAPACITY_LEASE_SCHEMA_VERSION = 1
+_CAPACITY_LEASE_STATES = {"active", "retiring", "retired"}
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True)
@@ -402,6 +409,7 @@ def autoscaler_policy_to_dict(
         "force": row.force,
         "disabled_reason": row.disabled_reason,
         "actuator_config": row.actuator_config,
+        "capacity_lease_state": row.capacity_lease_state,
         "idle_since_at": _dt(row.idle_since_at),
         "last_decision": row.last_decision,
         "last_decision_reason": row.last_decision_reason,
@@ -451,6 +459,216 @@ def _validate_policy_fields(
         raise ValueError("drain_timeout_seconds must be > 0")
 
 
+def _capacity_binding(value: object, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    expected = {
+        "schema_version",
+        "request_id",
+        "lease_epoch",
+        "candidate_sha",
+        "preemptible",
+    }
+    if set(value) != expected or value.get("schema_version") != _CAPACITY_LEASE_SCHEMA_VERSION:
+        raise ValueError(f"{label} fields do not match the closed schema")
+    try:
+        request_id = str(UUID(str(value.get("request_id"))))
+    except ValueError as exc:
+        raise ValueError(f"{label}.request_id must be a UUID") from exc
+    lease_epoch = value.get("lease_epoch")
+    candidate_sha = value.get("candidate_sha")
+    preemptible = value.get("preemptible")
+    if isinstance(lease_epoch, bool) or not isinstance(lease_epoch, int) or lease_epoch < 0:
+        raise ValueError(f"{label}.lease_epoch must be a non-negative integer")
+    if not isinstance(candidate_sha, str) or _SHA_RE.fullmatch(candidate_sha) is None:
+        raise ValueError(f"{label}.candidate_sha must be a full lowercase commit SHA")
+    if not isinstance(preemptible, bool):
+        raise ValueError(f"{label}.preemptible must be a boolean")
+    return {
+        "schema_version": _CAPACITY_LEASE_SCHEMA_VERSION,
+        "request_id": request_id,
+        "lease_epoch": lease_epoch,
+        "candidate_sha": candidate_sha,
+        "preemptible": preemptible,
+    }
+
+
+def _capacity_state(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("capacity_lease_state must be an object")
+    state = value.get("state")
+    if state not in _CAPACITY_LEASE_STATES:
+        raise ValueError("capacity_lease_state.state is invalid")
+    binding = _capacity_binding(
+        {
+            field: value.get(field)
+            for field in (
+                "schema_version",
+                "request_id",
+                "lease_epoch",
+                "candidate_sha",
+                "preemptible",
+            )
+        },
+        label="capacity_lease_state",
+    )
+    required = set(binding) | {"state", "activated_at"}
+    if state == "retiring":
+        required |= {"retire_started_at", "retire_reason"}
+    elif state == "retired":
+        required |= {"retire_started_at", "retire_reason", "retired_at"}
+    if set(value) != required:
+        raise ValueError("capacity_lease_state fields do not match its state")
+    for field in required - set(binding) - {"state", "retire_reason"}:
+        if not isinstance(value.get(field), str) or not value[field]:
+            raise ValueError(f"capacity_lease_state.{field} is invalid")
+    if "retire_reason" in required and (
+        not isinstance(value.get("retire_reason"), str) or not value["retire_reason"]
+    ):
+        raise ValueError("capacity_lease_state.retire_reason is invalid")
+    return dict(value)
+
+
+def _parse_capacity_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _same_capacity_request(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    return str(left["request_id"]) == str(right["request_id"])
+
+
+def _validate_capacity_binding_progression(
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+) -> None:
+    if not _same_capacity_request(current, incoming):
+        if current["state"] != "retired":
+            raise ValueError("shared capacity request cannot change before retirement completes")
+        return
+    current_epoch = int(current["lease_epoch"])
+    incoming_epoch = int(incoming["lease_epoch"])
+    if incoming_epoch < current_epoch:
+        raise ValueError("shared capacity lease_epoch regressed")
+    if (
+        incoming["candidate_sha"] != current["candidate_sha"]
+        or incoming["preemptible"] != current["preemptible"]
+    ):
+        raise ValueError("shared capacity request binding changed")
+
+
+def _next_capacity_lease_state(
+    *,
+    current_value: object,
+    incoming_value: object,
+    enabled: bool,
+    max_slots: int,
+    actuator: str,
+    actuator_config: dict[str, Any],
+    disabled_reason: str | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    current = _capacity_state(current_value)
+    incoming = (
+        _capacity_binding(incoming_value, label="shared_capacity_binding")
+        if incoming_value is not None
+        else None
+    )
+    broker_controlled = actuator == "slurm" and (
+        actuator_config.get("shared_capacity_managed") is True
+    )
+    if current is not None and incoming is None:
+        raise ValueError("shared_capacity_binding is required for a bound policy")
+    if enabled and broker_controlled and incoming is None:
+        raise ValueError("shared-capacity-managed Slurm policy requires binding")
+    if incoming is None:
+        return None
+    configured_candidate = actuator_config.get("candidate_sha")
+    if configured_candidate != incoming["candidate_sha"]:
+        raise ValueError("shared capacity candidate does not match actuator_config")
+    if enabled and max_slots <= 0:
+        raise ValueError("enabled shared capacity must have max_slots > 0")
+    if not enabled and max_slots != 0:
+        raise ValueError("disabled shared capacity must have max_slots = 0")
+
+    timestamp = now.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if current is None:
+        base = {**incoming, "activated_at": timestamp}
+        if enabled:
+            return {**base, "state": "active"}
+        return {
+            **base,
+            "state": "retiring",
+            "retire_started_at": timestamp,
+            "retire_reason": disabled_reason or "shared_capacity_disabled",
+        }
+
+    _validate_capacity_binding_progression(current, incoming)
+    if current["state"] == "retiring":
+        if enabled:
+            raise ValueError("shared capacity cannot re-enable while retirement is active")
+        if incoming != {
+            field: current[field]
+            for field in (
+                "schema_version",
+                "request_id",
+                "lease_epoch",
+                "candidate_sha",
+                "preemptible",
+            )
+        }:
+            raise ValueError("retiring shared capacity binding must remain exact")
+        return current
+    if current["state"] == "retired":
+        if not enabled:
+            if incoming != {
+                field: current[field]
+                for field in (
+                    "schema_version",
+                    "request_id",
+                    "lease_epoch",
+                    "candidate_sha",
+                    "preemptible",
+                )
+            }:
+                raise ValueError("retired shared capacity binding must remain exact")
+            return current
+        if _same_capacity_request(current, incoming) and int(incoming["lease_epoch"]) <= int(
+            current["lease_epoch"]
+        ):
+            raise ValueError("retired shared capacity requires a newer lease_epoch")
+        return {**incoming, "state": "active", "activated_at": timestamp}
+
+    assert current["state"] == "active"
+    if not _same_capacity_request(current, incoming):
+        raise ValueError("active shared capacity request cannot be replaced")
+    if enabled:
+        return {
+            **incoming,
+            "state": "active",
+            "activated_at": current["activated_at"],
+        }
+    return {
+        **incoming,
+        "state": "retiring",
+        "activated_at": current["activated_at"],
+        "retire_started_at": timestamp,
+        "retire_reason": disabled_reason or "shared_capacity_disabled",
+    }
+
+
 async def get_autoscaler_policy(
     session: AsyncSession,
     *,
@@ -486,6 +704,7 @@ async def upsert_autoscaler_policy(
     force: bool = False,
     disabled_reason: str | None = None,
     actuator_config: dict[str, Any] | None = None,
+    shared_capacity_binding: dict[str, object] | None = None,
     now: datetime | None = None,
 ) -> WorkerPoolAutoscalerPolicy:
     environment = _clean_nonempty(environment, "environment")
@@ -502,10 +721,26 @@ async def upsert_autoscaler_policy(
         drain_timeout_seconds=drain_timeout_seconds,
     )
     now = now or datetime.now(UTC)
-    row = await get_autoscaler_policy(
-        session,
-        environment=environment,
-        pool_name=pool_name,
+    row = (
+        await session.execute(
+            select(WorkerPoolAutoscalerPolicy)
+            .where(
+                WorkerPoolAutoscalerPolicy.environment == environment,
+                WorkerPoolAutoscalerPolicy.pool_name == pool_name,
+            )
+            .with_for_update(),
+        )
+    ).scalar_one_or_none()
+    normalized_actuator_config = dict(actuator_config or {})
+    capacity_lease_state = _next_capacity_lease_state(
+        current_value=(row.capacity_lease_state if row is not None else None),
+        incoming_value=shared_capacity_binding,
+        enabled=bool(enabled),
+        max_slots=int(max_slots),
+        actuator=actuator,
+        actuator_config=normalized_actuator_config,
+        disabled_reason=disabled_reason,
+        now=now,
     )
     if row is None:
         row = WorkerPoolAutoscalerPolicy(
@@ -527,7 +762,8 @@ async def upsert_autoscaler_policy(
     row.drain_timeout_seconds = int(drain_timeout_seconds)
     row.force = bool(force)
     row.disabled_reason = disabled_reason
-    row.actuator_config = dict(actuator_config or {})
+    row.actuator_config = normalized_actuator_config
+    row.capacity_lease_state = capacity_lease_state
     row.updated_at = now
     await session.flush()
     return row
@@ -881,9 +1117,9 @@ async def _refresh_slurm_job_registry(
     *,
     runner: SlurmWorkerCommandRunner | None,
     now: datetime,
-) -> str | None:
+) -> tuple[str | None, frozenset[str]]:
     if row.actuator != "slurm":
-        return None
+        return None, frozenset()
     job_ids = tuple(
         str(job_id)
         for (job_id,) in (
@@ -899,16 +1135,27 @@ async def _refresh_slurm_job_registry(
         if job_id is not None
     )
     if not job_ids:
-        return None
+        return None, frozenset()
     config = _slurm_config_from_policy(row)
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
     try:
         observations = await runner.query_jobs(job_ids)
+        observed_job_ids = frozenset(
+            observation.job_id
+            for observation in observations
+            if is_explicit_live_slurm_state(observation.slurm_state)
+        )
         await reconcile_slurm_worker_jobs(
             session,
             observations,
             stale_after_seconds=config.stale_after_seconds,
             now=now,
+            environment=row.environment,
+            pool_name=row.pool_name,
+            require_explicit_terminal=(
+                isinstance(row.capacity_lease_state, dict)
+                and row.capacity_lease_state.get("state") == "retiring"
+            ),
         )
     except Exception as exc:
         logger.warning(
@@ -919,8 +1166,8 @@ async def _refresh_slurm_job_registry(
                 "err": str(exc),
             },
         )
-        return str(exc)
-    return None
+        return str(exc), frozenset()
+    return None, observed_job_ids
 
 
 async def _request_worker_drain(
@@ -1544,6 +1791,7 @@ async def _apply_slurm_prod_pressure_drain(
     *,
     runner: SlurmWorkerCommandRunner | None,
     now: datetime,
+    confirmed_live_job_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Consume the prod-pressure drain intent recorded by the CP handler (#892).
 
@@ -1558,7 +1806,9 @@ async def _apply_slurm_prod_pressure_drain(
     preserves whether interrupted trials need retry attribution.
     """
     raw = row.prod_pressure_state if isinstance(row.prod_pressure_state, dict) else None
-    recovery_settle_only = not raw or raw.get("state") != "draining"
+    capacity_state = _capacity_state(row.capacity_lease_state)
+    capacity_retiring = capacity_state is not None and capacity_state["state"] == "retiring"
+    recovery_settle_only = not capacity_retiring and (not raw or raw.get("state") != "draining")
     cancel_markers = (
         PROD_PRESSURE_CANCEL_IDLE,
         PROD_PRESSURE_CANCEL_PREEMPT,
@@ -1594,6 +1844,7 @@ async def _apply_slurm_prod_pressure_drain(
                             SlurmWorkerJob.pool_name == row.pool_name,
                             SlurmWorkerJob.state.in_(ACTIVE_STATES),
                             SlurmWorkerJob.worker_id.is_not(None),
+                            SlurmWorkerJob.job_id.in_(confirmed_live_job_ids),
                         ),
                     )
                 ).all()
@@ -1616,12 +1867,25 @@ async def _apply_slurm_prod_pressure_drain(
                 )
             return None
 
-    control = raw or {}
-    grace_action = (
-        "recovery_settle"
-        if recovery_settle_only
-        else str(control.get("last_grace_action") or "wait")
-    )
+    if capacity_retiring:
+        assert capacity_state is not None
+        control = capacity_state
+        retire_started_at = _parse_capacity_time(control.get("retire_started_at"))
+        if retire_started_at is None:
+            raise ValueError("capacity retirement start time is invalid")
+        if not bool(control["preemptible"]):
+            grace_action = "not_preemptible"
+        elif now >= retire_started_at + timedelta(seconds=row.drain_timeout_seconds):
+            grace_action = "cancel_retryable"
+        else:
+            grace_action = "wait"
+    else:
+        control = raw or {}
+        grace_action = (
+            "recovery_settle"
+            if recovery_settle_only
+            else str(control.get("last_grace_action") or "wait")
+        )
     config = _slurm_config_from_policy(row)
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
 
@@ -1635,7 +1899,9 @@ async def _apply_slurm_prod_pressure_drain(
     active_jobs = (await session.execute(active_stmt.with_for_update())).scalars().all()
 
     started_at: datetime | None = None
-    raw_started_at = control.get("started_at")
+    raw_started_at = (
+        control.get("retire_started_at") if capacity_retiring else control.get("started_at")
+    )
     if isinstance(raw_started_at, str):
         try:
             started_at = datetime.fromisoformat(raw_started_at.replace("Z", "+00:00"))
@@ -1697,8 +1963,16 @@ async def _apply_slurm_prod_pressure_drain(
             .values(
                 drain_state="draining",
                 drain_requested_at=now,
-                drain_reason="production capacity pressure",
-                drain_owner="prod-pressure-controller",
+                drain_reason=(
+                    "shared capacity lease retirement"
+                    if capacity_retiring
+                    else "production capacity pressure"
+                ),
+                drain_owner=(
+                    "shared-capacity-retirement"
+                    if capacity_retiring
+                    else "prod-pressure-controller"
+                ),
             ),
         )
 
@@ -1791,9 +2065,15 @@ async def _apply_slurm_prod_pressure_drain(
             for trial in trials_by_worker.get(worker_id, []):
                 trial.failure_reason = "prod_capacity_pressure"
                 trial.failure_message = (
-                    "preemptible trial interrupted after production capacity "
-                    "pressure grace elapsed; crash reclaim returns it to queued "
+                    "preemptible trial interrupted after shared capacity lease "
+                    "retirement grace elapsed; crash reclaim returns it to queued "
                     "with retry backoff"
+                    if capacity_retiring
+                    else (
+                        "preemptible trial interrupted after production capacity "
+                        "pressure grace elapsed; crash reclaim returns it to queued "
+                        "with retry backoff"
+                    )
                 )
                 retryable_trial_ids.add(str(trial.id))
         if cancel_marker in {
@@ -1815,21 +2095,48 @@ async def _apply_slurm_prod_pressure_drain(
             .where(Worker.id.in_(settled_worker_ids))
             .values(
                 drain_state="drained",
-                drain_reason="prod-pressure reclaim completed",
-                drain_owner="prod-pressure-controller",
+                drain_reason=(
+                    "shared capacity lease retirement completed"
+                    if capacity_retiring
+                    else "prod-pressure reclaim completed"
+                ),
+                drain_owner=(
+                    "shared-capacity-retirement"
+                    if capacity_retiring
+                    else "prod-pressure-controller"
+                ),
             ),
         )
 
-    if cancel_failed_job_ids:
-        action = "prod_pressure_cancel_blocked"
+    remaining_active_jobs = [job for job in active_jobs if job.state in ACTIVE_STATES]
+    if (
+        capacity_retiring
+        and not remaining_active_jobs
+        and not cancel_failed_job_ids
+        and not awaiting_job_ids
+    ):
+        assert capacity_state is not None
+        row.capacity_lease_state = {
+            **capacity_state,
+            "state": "retired",
+            "retired_at": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        action = "shared_capacity_retired"
+    elif cancel_failed_job_ids:
+        action = (
+            "shared_capacity_cancel_blocked"
+            if capacity_retiring
+            else "prod_pressure_cancel_blocked"
+        )
     elif awaiting_job_ids:
-        action = "prod_pressure_cancel_wait"
+        action = "shared_capacity_cancel_wait" if capacity_retiring else "prod_pressure_cancel_wait"
     elif confirmed_job_ids or settled_worker_ids:
-        action = "prod_pressure_drain"
+        action = "shared_capacity_drain" if capacity_retiring else "prod_pressure_drain"
     else:
-        action = "prod_pressure_hold"
+        action = "shared_capacity_hold" if capacity_retiring else "prod_pressure_hold"
     return {
         "action": action,
+        "cause": "shared_capacity_retirement" if capacity_retiring else "prod_pressure",
         "grace_action": grace_action,
         "cancelled_job_ids": sorted(confirmed_job_ids),
         "awaiting_terminal_job_ids": sorted(set(awaiting_job_ids)),
@@ -2050,7 +2357,6 @@ async def reconcile_worker_pool_autoscaler_once(
     now = now or datetime.now(UTC)
     scoped_environment = _exact_autoscaler_environment(environment)
     stmt = select(WorkerPoolAutoscalerPolicy).where(
-        WorkerPoolAutoscalerPolicy.enabled.is_(True),
         WorkerPoolAutoscalerPolicy.environment == scoped_environment,
     )
     if pool_names:
@@ -2073,6 +2379,14 @@ async def reconcile_worker_pool_autoscaler_once(
     )
     decisions: list[AutoscalerDecision] = []
     for row in policies:
+        capacity_state = _capacity_state(row.capacity_lease_state)
+        capacity_retiring = capacity_state is not None and capacity_state["state"] == "retiring"
+        prod_pressure_draining = (
+            isinstance(row.prod_pressure_state, dict)
+            and row.prod_pressure_state.get("state") == "draining"
+        )
+        if not row.enabled and not capacity_retiring and not prod_pressure_draining:
+            continue
         uses_external_runner = _policy_uses_external_runner(row)
         if uses_external_runner and not include_external_policies:
             continue
@@ -2082,7 +2396,7 @@ async def reconcile_worker_pool_autoscaler_once(
         actuator_blocked_reason: str | None = None
         actuator_blocked_details: dict[str, Any] | None = None
         if row.actuator == "slurm":
-            actuator_error = await _refresh_slurm_job_registry(
+            actuator_error, confirmed_live_job_ids = await _refresh_slurm_job_registry(
                 session,
                 row,
                 runner=slurm_runner,
@@ -2096,6 +2410,7 @@ async def reconcile_worker_pool_autoscaler_once(
                 row,
                 runner=slurm_runner,
                 now=now,
+                confirmed_live_job_ids=confirmed_live_job_ids,
             )
             if prod_pressure_summary is not None:
                 observation = await _load_observation(
@@ -2107,7 +2422,7 @@ async def reconcile_worker_pool_autoscaler_once(
                 decision = _base_decision(
                     action=str(prod_pressure_summary["action"]),
                     reason=(
-                        "prod_pressure "
+                        f"{prod_pressure_summary['cause']} "
                         f"grace={prod_pressure_summary['grace_action']} "
                         f"cancelled={len(prod_pressure_summary['cancelled_job_ids'])} "
                         "awaiting_terminal="

@@ -24,6 +24,22 @@ ACTIVE_STATES = {"pending", "running"}
 TERMINAL_STATES = {"completed", "failed", "cancelled", "stale"}
 PROD_PRESSURE_CANCEL_IDLE = "prod-pressure cancel requested: pending-or-idle"
 PROD_PRESSURE_CANCEL_PREEMPT = "prod-pressure cancel requested: retryable-preemption"
+_EXPLICIT_PENDING_STATES = {
+    "PENDING",
+    "CONFIGURING",
+    "RESIZING",
+    "REQUEUE_FED",
+    "REQUEUE_HOLD",
+    "REQUEUED",
+}
+_EXPLICIT_RUNNING_STATES = {
+    "RUNNING",
+    "COMPLETING",
+    "SIGNALING",
+    "STAGE_OUT",
+    "STOPPED",
+    "SUSPENDED",
+}
 _SECRET_KEY_PARTS = (
     "TOKEN",
     "SECRET",
@@ -122,9 +138,9 @@ def normalize_slurm_state(raw_state: str | None) -> str:
     if raw_state is None:
         return "pending"
     token = raw_state.strip().upper().split(maxsplit=1)[0]
-    if token in {"PENDING", "CONFIGURING", "RESIZING", "REQUEUE_FED"}:
+    if token in _EXPLICIT_PENDING_STATES:
         return "pending"
-    if token in {"RUNNING", "COMPLETING"}:
+    if token in _EXPLICIT_RUNNING_STATES:
         return "running"
     if token == "COMPLETED":
         return "completed"
@@ -141,7 +157,16 @@ def normalize_slurm_state(raw_state: str | None) -> str:
         "TIMEOUT",
     }:
         return "failed"
-    return "failed"
+    # Unknown/new Slurm states are not terminal read-back. Keep capacity
+    # committed until an explicit terminal state is observed.
+    return "running"
+
+
+def is_explicit_live_slurm_state(raw_state: str | None) -> bool:
+    if raw_state is None:
+        return False
+    token = raw_state.strip().upper().split(maxsplit=1)[0]
+    return token in _EXPLICIT_PENDING_STATES | _EXPLICIT_RUNNING_STATES
 
 
 # Private compatibility alias for existing focused tests and callers.  New
@@ -340,7 +365,12 @@ async def reconcile_slurm_worker_jobs(
     *,
     stale_after_seconds: int,
     now: datetime | None = None,
+    environment: str | None = None,
+    pool_name: str | None = None,
+    require_explicit_terminal: bool = False,
 ) -> SlurmWorkerJobReconcileResult:
+    if (environment is None) != (pool_name is None):
+        raise ValueError("environment and pool_name stale scope must be provided together")
     now = now or datetime.now(UTC)
     cutoff = now - timedelta(seconds=stale_after_seconds)
     observed_job_ids = {obs.job_id for obs in observations}
@@ -385,6 +415,11 @@ async def reconcile_slurm_worker_jobs(
         job.updated_at = now
         updated += 1
         if state == "running" and job.worker_id is not None:
+            if require_explicit_terminal:
+                # A shared-capacity retirement owns the allocation until Slurm
+                # explicitly reports a terminal state. Worker heartbeat drift
+                # cannot substitute for scheduler read-back.
+                continue
             worker = (
                 await session.execute(
                     select(Worker).where(Worker.id == job.worker_id),
@@ -434,6 +469,11 @@ async def reconcile_slurm_worker_jobs(
             )
 
     active_stmt = select(SlurmWorkerJob).where(SlurmWorkerJob.state.in_(ACTIVE_STATES))
+    if environment is not None and pool_name is not None:
+        active_stmt = active_stmt.where(
+            SlurmWorkerJob.environment == environment,
+            SlurmWorkerJob.pool_name == pool_name,
+        )
     if observed_job_ids:
         active_stmt = active_stmt.where(
             or_(
@@ -443,6 +483,10 @@ async def reconcile_slurm_worker_jobs(
         )
     stale_candidates = (await session.execute(active_stmt)).scalars().all()
     for job in stale_candidates:
+        if require_explicit_terminal:
+            # An omitted squeue/sacct row is not terminal evidence. Keep the
+            # durable lease retiring and retry observation on a later tick.
+            continue
         last_seen = job.last_reconciled_at or job.submitted_at or job.created_at
         if last_seen is not None and last_seen > cutoff:
             continue

@@ -13,14 +13,13 @@ from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
+CAPACITY_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
+CAPACITY_CANDIDATE = "a" * 40
 
 
 def _write_admin_secret(path: Path) -> None:
     path.write_text(
-        "[admin]\n"
-        f"token = \"{RAW_ADMIN_TOKEN}\"\n"
-        "created_at = \"2026-06-27T00:00:00Z\"\n"
-        "version = 1\n",
+        f'[admin]\ntoken = "{RAW_ADMIN_TOKEN}"\ncreated_at = "2026-06-27T00:00:00Z"\nversion = 1\n',
         encoding="utf-8",
     )
     path.chmod(0o600)
@@ -139,3 +138,50 @@ def test_policy_rejects_max_slots_below_min_slots(app) -> None:
 
     assert response.status_code == 400, response.text
     assert "max_slots" in response.json()["detail"]
+
+
+def test_shared_capacity_binding_round_trips_and_disables_into_retirement(app) -> None:
+    payload = _policy_payload()
+    payload["actuator_config"] = {
+        **dict(payload["actuator_config"]),
+        "candidate_sha": CAPACITY_CANDIDATE,
+        "shared_capacity_managed": True,
+    }
+    binding = {
+        "schema_version": 1,
+        "request_id": CAPACITY_REQUEST_ID,
+        "lease_epoch": 7,
+        "candidate_sha": CAPACITY_CANDIDATE,
+        "preemptible": False,
+    }
+    payload["shared_capacity_binding"] = binding
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+
+    with TestClient(app) as client:
+        active = client.put(
+            "/admin/worker-pool-autoscaler-policies/production/oldlab",
+            headers=headers,
+            json=payload,
+        )
+        assert active.status_code == 200, active.text
+        assert active.json()["capacity_lease_state"] == {
+            **binding,
+            "state": "active",
+            "activated_at": active.json()["capacity_lease_state"]["activated_at"],
+        }
+
+        payload["enabled"] = False
+        payload["min_slots"] = 0
+        payload["max_slots"] = 0
+        payload["disabled_reason"] = "broker lease released"
+        retiring = client.put(
+            "/admin/worker-pool-autoscaler-policies/production/oldlab",
+            headers=headers,
+            json=payload,
+        )
+        assert retiring.status_code == 200, retiring.text
+        state = retiring.json()["capacity_lease_state"]
+        assert state["state"] == "retiring"
+        assert state["request_id"] == CAPACITY_REQUEST_ID
+        assert state["lease_epoch"] == 7
+        assert state["retire_reason"] == "broker lease released"
