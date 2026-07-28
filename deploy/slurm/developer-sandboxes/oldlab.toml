@@ -1,0 +1,62 @@
+schema_version = 1
+cluster = "trt-oldlab"
+controller = "TRT-EAI-OLDLAB-1"
+submit_host = "trt-EAI-OLDLAB-2"
+allowed_nodes = [
+  "TRT-EAI-OLDLAB-1",
+  "trt-EAI-OLDLAB-2",
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
+
+[host_aliases]
+TRT-EAI-OLDLAB-1 = "trt-eai-oldlab-1"
+trt-EAI-OLDLAB-2 = "trt-eai-oldlab-2"
+trt-eai-oldlab-3 = "trt-eai-oldlab-3"
+trt-eai-oldlab-4 = "trt-eai-oldlab-4"
+trt-eai-oldlab-5 = "trt-eai-oldlab-5"
+
+[capacity]
+slot_budget = 20
+pending_slot_budget = 10
+cpus_per_slot = 2
+memory_mib_per_slot = 8000
+gpu_tres_per_slot = 0
+job_pids_max = 32768
+
+[slurm]
+proctrack_type = "proctrack/cgroup"
+task_plugin = "task/cgroup,task/affinity"
+jobacct_gather_type = "jobacct_gather/cgroup"
+accounting_storage_enforce = "associations,limits,qos,safe"
+priority_type = "priority/multifactor"
+priority_weight_fairshare = 10000
+prolog_flags = "Contain"
+
+[cgroup]
+plugin = "autodetect"
+constrain_cores = true
+constrain_ram_space = true
+constrain_swap_space = true
+constrain_devices = true
+enable_controllers = true
+
+[docker]
+cgroup_driver = "cgroupfs"
+
+[accounting]
+parent_account = "loom-dev"
+child_accounts = [
+  "loom-dev-qianyi",
+  "loom-dev-hongjian",
+  "loom-dev-devansh",
+]
+users = ["qianyi", "hongjian", "devansh"]
+fairshare = 1
+qos = "loom-dev"
+qos_priority = 0
+qos_max_wall = "02:00:00"
+qos_max_jobs_per_user = 10
+qos_max_submit_jobs_per_user = 20
+parent_group_tres = ["cpu=40", "mem=160G"]

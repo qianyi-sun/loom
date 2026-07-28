@@ -1,0 +1,80 @@
+schema_version = 1
+cluster = "trt-gb10"
+controller = "trt-gb10-1"
+submit_host = "trt-gb10-1"
+allowed_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+
+[host_aliases]
+trt-gb10-1 = "gx10-01c7"
+trt-gb10-2 = "gx10-0fca"
+trt-gb10-3 = "gx10-0f0d"
+trt-gb10-4 = "gx10-0d93"
+trt-gb10-5 = "gx10-1036"
+trt-gb10-6 = "gx10-1000"
+trt-gb10-8 = "gx10-db22"
+trt-gb10-9 = "gx10-16f6"
+trt-gb10-10 = "gx10-0f82"
+trt-gb10-11 = "gx10-c38b"
+trt-gb10-12 = "gx10-e45f"
+trt-gb10-13 = "gx10-fc5d"
+trt-gb10-14 = "gx10-0a49"
+trt-gb10-15 = "gx10-0152"
+
+[capacity]
+slot_budget = 140
+pending_slot_budget = 30
+cpus_per_slot = 2
+memory_mib_per_slot = 11500
+gpu_tres_per_slot = 0.1
+job_pids_max = 65536
+
+[slurm]
+proctrack_type = "proctrack/cgroup"
+task_plugin = "task/cgroup,task/affinity"
+jobacct_gather_type = "jobacct_gather/cgroup"
+accounting_storage_enforce = "associations,limits,qos,safe"
+priority_type = "priority/multifactor"
+priority_weight_fairshare = 10000
+prolog_flags = "Contain"
+
+[cgroup]
+plugin = "autodetect"
+constrain_cores = true
+constrain_ram_space = true
+constrain_swap_space = true
+constrain_devices = true
+enable_controllers = true
+
+[docker]
+cgroup_driver = "cgroupfs"
+
+[accounting]
+parent_account = "loom-dev"
+child_accounts = [
+  "loom-dev-qianyi",
+  "loom-dev-hongjian",
+  "loom-dev-devansh",
+]
+users = ["qianyi", "hongjian", "devansh"]
+fairshare = 1
+qos = "loom-dev"
+qos_priority = 0
+qos_max_wall = "02:00:00"
+qos_max_jobs_per_user = 14
+qos_max_submit_jobs_per_user = 28
+parent_group_tres = ["cpu=280", "mem=1610G", "gres/gpu=14"]
