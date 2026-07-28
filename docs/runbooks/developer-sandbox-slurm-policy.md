@@ -176,9 +176,12 @@ declared order. Every bounded, non-exclusive `sbatch` carries
 `--nodelist=<allowed_nodes node>`; its `srun` repeats that Slurm `NodeName`.
 Inside the allocation, the observed compute OS hostname must independently
 equal `host_aliases[node]`. The deterministic job name contains the full
-candidate SHA, declared node, and durable attempt number and is bounded to
-Slurm's safe 128-character limit. Random scheduler placement or a single
-successful node is never acceptance.
+candidate SHA, declared node, the first 12 hexadecimal characters of the
+runtime-receipt digest, and the durable attempt number and is bounded to
+Slurm's safe 128-character limit. The receipt digest gives every fresh
+collection window its own job namespace, so accounting history from an older
+window cannot be mistaken for the current attempt. Random scheduler placement
+or a single successful node is never acceptance.
 
 Submission uses immediate parsable output, not `sbatch --wait`. A root-owned,
 single-link mode-`0600` matrix journal and per-node inflight record live below
@@ -186,11 +189,34 @@ a non-symlink root-owned mode-`0700` directory, and every transition is
 atomically written and fsynced. A rerun first recovers every exact inflight or
 attempt-name orphan, including a job that completed between `sbatch` and
 inflight-journal creation. Before any `scancel`, queue/accounting identity must
-match the exact job ID/name, Slurm node, user, account, and cluster. It then
-submits only nodes without completed evidence; completed nodes are not
-repeated. Cancellation, timeout, ambiguous jobs, or terminal readback failure
-stays durable and fail-closed. One failed node invalidates the final artifact;
-it cannot be hidden by passes elsewhere in the matrix.
+match the exact job ID/name, user, account, and cluster. A pending `squeue` row
+may legitimately show `(Resources)` or `(Priority)` instead of an allocated
+NodeName, so exact node identity is required after allocation and in terminal
+accounting. Decorated terminal states such as `CANCELLED by <uid>` are
+normalized before cleanup is finalized. Effective QoS is read from `sacct` and
+compared with the profile; final evidence never substitutes the requested QoS
+for that readback. The probe then submits only nodes without completed
+evidence; completed nodes are not repeated. Cancellation, timeout, ambiguous
+jobs, or terminal readback failure stays durable and fail-closed. One failed
+node invalidates the final artifact; it cannot be hidden by passes elsewhere
+in the matrix.
+
+The matrix is a receipt-generation transaction. It records the receipt's
+collection and expiry timestamps and must finish every node inside that exact
+window. Re-running a completed current generation returns the existing final
+artifact; it does not mint a new top-level timestamp from old node evidence.
+Final readback validates every node's `completed_at` as well as the matrix
+completion time. When the receipt rotates or the generation/evidence becomes
+stale, the converger first recovers every exact inflight job, atomically
+archives both the old matrix and final artifact below the root-only state
+directory, and starts a new all-node matrix. Operators must not delete a
+matrix to renew evidence.
+
+If a job reached `COMPLETED` but its compute result cannot be safely opened or
+validated, recovery preserves the exact result long enough for one replay. An
+unavailable or invalid replay is durably recorded on the node row, the result
+is discarded, and a new generation-scoped attempt is submitted. Recovery
+cannot loop forever on a terminal job whose result was already removed.
 
 The final root-only artifact is closed-world: its node list and host-alias map
 must equal the profile, and every node appears once and only once with its
@@ -217,12 +243,14 @@ following symlinks and binds into the final evidence. The old `id`/`sleep`
 probe is no longer accepted.
 
 The full invalidate, recovery, submission, polling, evidence, and finalize
-transaction holds a persistent root-owned mode-`0600` `flock` keyed by cluster
-and candidate. The final `check` takes that same lock across its inflight
-check, matrix/final artifact opens, and all validation, so it cannot return a
-stale artifact after a concurrent writer begins invalidation. The internal
-unlocked reader exists only to avoid recursively acquiring the lock and must
-not be called as an operator surface.
+transaction first holds the persistent per-cluster administration lock and
+then the root-owned mode-`0600` `flock` keyed by cluster and candidate. Final
+`check` uses the same domain-then-candidate order across file planning,
+effective Slurm/Docker/systemd/accounting readback, inflight checks, and
+matrix/final artifact validation. Apply, rollback, allocation, and readback
+therefore cannot interleave different policy epochs or deadlock through an
+opposite lock order. Internal unlocked readers exist only for callers that
+already hold the domain lock and are not operator surfaces.
 
 Before submission, on every allocation, and again during the final check, the candidate verifier
 walks the safe non-symlink, non-group/world-writable parent chain; opens the

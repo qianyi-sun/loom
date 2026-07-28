@@ -7,6 +7,7 @@ import os
 import stat
 import subprocess
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,6 +17,15 @@ from scripts.ops import developer_sandbox_slurm_policy as policy
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "deploy/slurm/developer-sandboxes/oldlab.toml"
 GB10_PROFILE = REPO_ROOT / "deploy/slurm/developer-sandboxes/gb10.toml"
+TEST_GENERATION_ID = "0" * 12
+
+
+def _generation_window() -> tuple[str, str]:
+    now = datetime.now(UTC)
+    return (
+        (now - timedelta(minutes=1)).isoformat(),
+        (now + timedelta(minutes=10)).isoformat(),
+    )
 
 
 def _root(tmp_path: Path) -> Path:
@@ -1085,7 +1095,12 @@ def _allocation_inflight_payload(
         "user": loaded.users[0],
         "account": loaded.child_accounts[0],
         "job_id": job_id,
-        "job_name": policy._allocation_job_name(candidate, node, 1),
+        "job_name": policy._allocation_job_name(
+            candidate,
+            node,
+            1,
+            generation_id=TEST_GENERATION_ID,
+        ),
         "batch_uid": 501,
         "batch_gid": 20,
         "phase": "submitted",
@@ -1106,6 +1121,7 @@ def _allocation_accounting_row(
         loaded.child_accounts[0],
         loaded.users[0],
         loaded.cluster,
+        loaded.qos,
     ]
 
 
@@ -1400,7 +1416,7 @@ def test_allocation_recovery_archives_terminal_job_without_scancel(
             f"--clusters={loaded.cluster}",
             f"--name={payload['job_name']}",
             "--starttime=now-1day",
-            "--format=JobIDRaw,JobName,State,NodeList,AllocTRES,Account,User,Cluster",
+            "--format=JobIDRaw,JobName,State,NodeList,AllocTRES,Account,User,Cluster,QOS",
         ),
     ]
     assert not path.exists()
@@ -1415,7 +1431,12 @@ def test_unjournaled_foreign_same_name_job_is_never_cancelled(
     loaded = policy.load_profile(PROFILE)
     candidate = "a" * 40
     node = loaded.allowed_nodes[0]
-    job_name = policy._allocation_job_name(candidate, node, 1)
+    job_name = policy._allocation_job_name(
+        candidate,
+        node,
+        1,
+        generation_id=TEST_GENERATION_ID,
+    )
     path = policy._allocation_node_inflight_path(tmp_path, loaded, candidate, node)
     commands: list[tuple[str, ...]] = []
 
@@ -1428,10 +1449,7 @@ def test_unjournaled_foreign_same_name_job_is_never_cancelled(
         command = tuple(argv)
         commands.append(command)
         if command[0] == "squeue":
-            return (
-                f"987|{job_name}|RUNNING|foreign-user|"
-                f"{loaded.child_accounts[0]}|{node}\n"
-            )
+            return f"987|{job_name}|RUNNING|foreign-user|{loaded.child_accounts[0]}|{node}\n"
         pytest.fail(f"foreign job must not reach {command[0]}")
 
     monkeypatch.setattr(policy, "_run", fake_run)
@@ -1456,7 +1474,12 @@ def test_unjournaled_quick_terminal_job_is_recovered_without_resubmission(
     loaded = policy.load_profile(PROFILE)
     candidate = "b" * 40
     node = loaded.allowed_nodes[0]
-    job_name = policy._allocation_job_name(candidate, node, 1)
+    job_name = policy._allocation_job_name(
+        candidate,
+        node,
+        1,
+        generation_id=TEST_GENERATION_ID,
+    )
     path = policy._allocation_node_inflight_path(tmp_path, loaded, candidate, node)
     commands: list[tuple[str, ...]] = []
 
@@ -1473,13 +1496,15 @@ def test_unjournaled_quick_terminal_job_is_recovered_without_resubmission(
         if command[0] == "sacct":
             base = (
                 f"456|{job_name}|COMPLETED|{node}|cpu=1,mem=256M|"
-                f"{loaded.child_accounts[0]}|{loaded.users[0]}|{loaded.cluster}\n"
+                f"{loaded.child_accounts[0]}|{loaded.users[0]}|{loaded.cluster}|"
+                f"{loaded.qos}\n"
             )
             if any(item.startswith("--name=") for item in command):
                 return base
             return base + (
                 f"456.0|srun|COMPLETED|{node}|cpu=1,mem=256M|"
-                f"{loaded.child_accounts[0]}|{loaded.users[0]}|{loaded.cluster}\n"
+                f"{loaded.child_accounts[0]}|{loaded.users[0]}|{loaded.cluster}|"
+                f"{loaded.qos}\n"
             )
         pytest.fail(f"terminal recovery must not reach {command[0]}")
 
@@ -1630,6 +1655,7 @@ def _allocation_matrix_fixture(
     loaded: policy.Profile,
     candidate: str,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    collected_at, expires_at = _generation_window()
     binding: dict[str, object] = {
         "repository": {
             "path": "/candidate",
@@ -1650,6 +1676,8 @@ def _allocation_matrix_fixture(
     runtime_attestation: dict[str, object] = {
         "receipt_path": "/private/combined.json",
         "receipt_sha256": "d" * 64,
+        "receipt_collected_at": collected_at,
+        "receipt_expires_at": expires_at,
         "sandbox": "qianyi",
         "candidate_sha": candidate,
         "candidate_tree": "b" * 40,
@@ -1672,13 +1700,19 @@ def _allocation_matrix_fixture(
         expected_concurrency=1,
     )
     evidence: list[dict[str, object]] = []
+    generation_id = policy._allocation_generation_id(runtime_attestation)
     for index, node in enumerate(loaded.allowed_nodes, start=1):
         job_id = str(100 + index)
         item: dict[str, object] = {
             "node": node,
             "host": loaded.host_aliases[node],
             "job_id": job_id,
-            "job_name": policy._allocation_job_name(candidate, node, 1),
+            "job_name": policy._allocation_job_name(
+                candidate,
+                node,
+                1,
+                generation_id=generation_id,
+            ),
             "state": "COMPLETED",
             "account": loaded.child_accounts[0],
             "qos": loaded.qos,
@@ -1714,10 +1748,15 @@ def _allocation_matrix_fixture(
         matrix["nodes"][node]["evidence"] = item  # type: ignore[index]
         evidence.append(item)
     matrix["phase"] = "completed"
+    completed_at = datetime.now(UTC).isoformat()
+    matrix["completed_at"] = completed_at
     payload: dict[str, object] = {
         "schema_version": 1,
         "artifact_type": "developer-sandbox-slurm-allocation-matrix",
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": completed_at,
+        "generation_id": generation_id,
+        "generation_started_at": collected_at,
+        "generation_expires_at": expires_at,
         "candidate_sha": candidate,
         "candidate_tree": "b" * 40,
         "cluster": loaded.cluster,
@@ -1814,6 +1853,7 @@ def test_allocation_matrix_sbatch_explicitly_targets_every_declared_host() -> No
             expected_pool="gb10",
             expected_concurrency=10,
             result_path=Path(f"/private/results/{node}.json"),
+            generation_id=TEST_GENERATION_ID,
         )
         for node in loaded.allowed_nodes
     ]
@@ -1823,7 +1863,7 @@ def test_allocation_matrix_sbatch_explicitly_targets_every_declared_host() -> No
     for node, command in zip(loaded.allowed_nodes, commands, strict=True):
         assert f"--nodelist={node}" in command
         assert "--oversubscribe" in command
-        assert f"--job-name=loom827-{candidate}-{node.lower()}-a1" in command
+        assert f"--job-name=loom827-{candidate}-{node.lower()}-g{TEST_GENERATION_ID}-a1" in command
         assert f"--nodelist={node}" in command[-1]
         assert "/bin/sleep" not in command[-1]
         assert "allocation-node-check" in command[-1]
@@ -1964,7 +2004,12 @@ def test_allocation_matrix_resume_selects_only_unfinished_nodes() -> None:
         "repository": {"candidate_tree": "5" * 40},
         "worker_env": {"uid": 501, "gid": 20},
     }
-    runtime_attestation = {"receipt_sha256": "4" * 64}
+    collected_at, expires_at = _generation_window()
+    runtime_attestation = {
+        "receipt_sha256": "4" * 64,
+        "receipt_collected_at": collected_at,
+        "receipt_expires_at": expires_at,
+    }
     matrix = policy._new_allocation_matrix(
         loaded,
         candidate_sha=candidate,
@@ -2011,11 +2056,17 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
             "keys": ["LOOM_WORKER_TOKEN_FILE"],
         },
     }
+    collected_at, expires_at = _generation_window()
+    runtime_attestation = {
+        "receipt_sha256": "f" * 64,
+        "receipt_collected_at": collected_at,
+        "receipt_expires_at": expires_at,
+    }
     matrix = policy._new_allocation_matrix(
         loaded,
         candidate_sha=candidate,
         binding=binding,
-        runtime_attestation={"receipt_sha256": "f" * 64},
+        runtime_attestation=runtime_attestation,
         batch_uid=batch_uid,
         batch_gid=batch_gid,
         expected_pool="oldlab",
@@ -2052,7 +2103,12 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
         node_result,
         enforce_root_ownership=False,
     )
-    job_name = policy._allocation_job_name(candidate, node, 1)
+    job_name = policy._allocation_job_name(
+        candidate,
+        node,
+        1,
+        generation_id=policy._allocation_generation_id(runtime_attestation),
+    )
     rows = [
         [
             job_id,
@@ -2063,6 +2119,7 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
             loaded.child_accounts[0],
             loaded.users[0],
             loaded.cluster,
+            loaded.qos,
         ],
         [
             f"{job_id}.0",
@@ -2073,6 +2130,7 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
             loaded.child_accounts[0],
             loaded.users[0],
             loaded.cluster,
+            loaded.qos,
         ],
     ]
 
@@ -2438,3 +2496,299 @@ def test_allocation_readback_waits_for_writer_and_never_returns_invalidated_arti
     assert errors == []
     assert len(results) == 1
     assert results[0]["created_at"] != old_created_at
+
+
+def test_cancelled_by_uid_is_a_terminal_allocation_state() -> None:
+    rows = [
+        [
+            "123",
+            "probe",
+            "CANCELLED by 501",
+            "node-1",
+            "cpu=1",
+            "account",
+            "user",
+            "cluster",
+            "qos",
+        ],
+    ]
+
+    assert policy._base_job_state(rows, "123") == "CANCELLED"
+    assert policy._base_job_state(rows, "123") in policy._TERMINAL_JOB_STATES
+
+
+def test_pending_queue_reason_does_not_impersonate_an_allocated_node() -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "2" * 40
+    payload = _allocation_inflight_payload(loaded, candidate)
+    pending = _allocation_queue_row(loaded, payload, state="PENDING")
+    pending[-1] = "(Resources)"
+
+    policy._validate_probe_queue_row(pending, payload, loaded)
+
+    pending[3] = "foreign-user"
+    with pytest.raises(policy.PolicyError, match="identity drifted"):
+        policy._validate_probe_queue_row(pending, payload, loaded)
+
+
+def test_allocation_accounting_rejects_effective_qos_drift() -> None:
+    loaded = policy.load_profile(PROFILE)
+    payload = _allocation_inflight_payload(loaded, "1" * 40)
+    row = _allocation_accounting_row(loaded, payload, "COMPLETED")
+    row[8] = "foreign-qos"
+
+    with pytest.raises(policy.PolicyError, match="identity drifted"):
+        policy._validate_probe_base_row(row, payload, loaded)
+
+
+def test_final_created_at_cannot_refresh_stale_completed_nodes(tmp_path: Path) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "0" * 40
+    binding, runtime_attestation, payload = _allocation_matrix_fixture(
+        tmp_path,
+        loaded,
+        candidate,
+    )
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, candidate)
+    matrix = policy._load_allocation_state(
+        matrix_path,
+        enforce_root_ownership=False,
+    )
+    assert matrix is not None
+    stale = (datetime.now(UTC) - timedelta(minutes=16)).isoformat()
+    first = loaded.allowed_nodes[0]
+    matrix["nodes"][first]["evidence"]["completed_at"] = stale
+    payload["nodes"][0]["completed_at"] = stale
+    payload["created_at"] = datetime.now(UTC).isoformat()
+    policy._write_allocation_state(
+        matrix_path,
+        matrix,
+        enforce_root_ownership=False,
+    )
+    policy._write_allocation_state(
+        policy._allocation_probe_path(tmp_path, loaded, candidate),
+        payload,
+        enforce_root_ownership=False,
+    )
+
+    with pytest.raises(policy.PolicyError, match=r"generation window|stale"):
+        policy.allocation_probe_readback(
+            tmp_path,
+            loaded,
+            candidate_sha=candidate,
+            candidate_binding=binding,
+            runtime_attestation=runtime_attestation,
+            expected_pool="oldlab",
+            expected_concurrency=1,
+        )
+
+
+def test_receipt_rotation_archives_old_generation_and_resets_all_nodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "f" * 40
+    binding, runtime_attestation, _payload = _allocation_matrix_fixture(
+        tmp_path,
+        loaded,
+        candidate,
+    )
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, candidate)
+    matrix = policy._load_allocation_state(
+        matrix_path,
+        enforce_root_ownership=False,
+    )
+    assert matrix is not None
+    next_collected, next_expires = _generation_window()
+    rotated = {
+        **runtime_attestation,
+        "receipt_sha256": "e" * 64,
+        "receipt_collected_at": next_collected,
+        "receipt_expires_at": next_expires,
+    }
+    assert policy._allocation_matrix_requires_reset(
+        matrix,
+        loaded,
+        runtime_attestation=rotated,
+        now=datetime.now(UTC),
+    )
+    monkeypatch.setattr(policy, "_require_root_private_directory", lambda _path: None)
+    policy._archive_allocation_generation(tmp_path, loaded, candidate, matrix)
+
+    assert not matrix_path.exists()
+    assert not policy._allocation_probe_path(tmp_path, loaded, candidate).exists()
+    assert len(list(matrix_path.parent.glob("*.archived"))) == 2
+    replacement = policy._new_allocation_matrix(
+        loaded,
+        candidate_sha=candidate,
+        binding=binding,
+        runtime_attestation=rotated,
+        batch_uid=501,
+        batch_gid=20,
+        expected_pool="oldlab",
+        expected_concurrency=1,
+    )
+    assert policy._unfinished_allocation_nodes(replacement, loaded) == loaded.allowed_nodes
+    node = loaded.allowed_nodes[0]
+    old_name = policy._allocation_job_name(
+        candidate,
+        node,
+        1,
+        generation_id=str(matrix["generation_id"]),
+    )
+    new_name = policy._allocation_job_name(
+        candidate,
+        node,
+        1,
+        generation_id=str(replacement["generation_id"]),
+    )
+    assert old_name != new_name
+
+
+def test_missing_completed_result_is_durably_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "e" * 40
+    binding, runtime_attestation, _payload = _allocation_matrix_fixture(
+        tmp_path,
+        loaded,
+        candidate,
+    )
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, candidate)
+    matrix = policy._load_allocation_state(
+        matrix_path,
+        enforce_root_ownership=False,
+    )
+    assert matrix is not None
+    node = loaded.allowed_nodes[0]
+    matrix["nodes"][node]["status"] = "failed"
+    matrix["nodes"][node]["evidence"] = None
+    matrix["phase"] = "failed"
+    policy._write_allocation_state(
+        matrix_path,
+        matrix,
+        enforce_root_ownership=False,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_replay_completed_allocation_probe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            policy.PolicyError("allocation node result is unavailable"),
+        ),
+    )
+
+    replayed = policy._replay_completed_or_mark_retry(
+        matrix_path,
+        matrix,
+        loaded,
+        node=node,
+        candidate_sha=candidate,
+        candidate_root=Path("/candidate"),
+        worker_env=Path("/private/worker.env"),
+        binding=binding,
+        batch_uid=501,
+        batch_gid=20,
+        expected_pool="oldlab",
+        expected_concurrency=1,
+        job_id="101",
+        recovered_rows=[],
+        enforce_root_ownership=False,
+    )
+
+    assert replayed is False
+    persisted = policy._load_allocation_state(
+        matrix_path,
+        enforce_root_ownership=False,
+    )
+    assert persisted is not None
+    assert persisted["nodes"][node]["status"] == "pending"
+    assert persisted["nodes"][node]["attempts"] == 1
+    assert node in policy._unfinished_allocation_nodes(persisted, loaded)
+    assert persisted["runtime_attestation"] == runtime_attestation
+
+
+def test_allocation_writer_uses_domain_then_candidate_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "d" * 40
+    events: list[str] = []
+
+    @contextmanager
+    def domain_lock(_root: Path, _profile: policy.Profile):  # type: ignore[no-untyped-def]
+        events.append("domain-enter")
+        yield
+        events.append("domain-exit")
+
+    @contextmanager
+    def candidate_lock(  # type: ignore[no-untyped-def]
+        _root: Path,
+        _profile: policy.Profile,
+        _candidate: str,
+    ):
+        assert events == ["domain-enter"]
+        events.append("candidate-enter")
+        yield
+        events.append("candidate-exit")
+
+    monkeypatch.setattr(policy, "_domain_lock", domain_lock)
+    monkeypatch.setattr(policy, "_allocation_probe_lock", candidate_lock)
+    monkeypatch.setattr(policy.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        policy,
+        "_run_allocation_probe_transaction",
+        lambda *_args, **_kwargs: {"converged": True},
+    )
+
+    policy.run_allocation_probe(
+        Path("/"),
+        loaded,
+        candidate_sha=candidate,
+        candidate_root=Path("/candidate"),
+        worker_env=Path("/private/worker.env"),
+        runtime_receipt=Path("/receipt"),
+        batch_uid=501,
+        batch_gid=20,
+        expected_pool="oldlab",
+        expected_concurrency=1,
+    )
+
+    assert events == [
+        "domain-enter",
+        "candidate-enter",
+        "candidate-exit",
+        "domain-exit",
+    ]
+
+
+def test_public_live_readback_holds_domain_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    events: list[str] = []
+
+    @contextmanager
+    def domain_lock(_root: Path, _profile: policy.Profile):  # type: ignore[no-untyped-def]
+        events.append("domain-enter")
+        yield
+        events.append("domain-exit")
+
+    def unlocked(*_args: object, **_kwargs: object) -> dict[str, object]:
+        assert events == ["domain-enter"]
+        events.append("readback")
+        return {"converged": True}
+
+    monkeypatch.setattr(policy, "_domain_lock", domain_lock)
+    monkeypatch.setattr(policy, "_live_readback_unlocked", unlocked)
+
+    assert policy.live_readback(
+        tmp_path,
+        loaded,
+        candidate_sha="c" * 40,
+        require_probe=False,
+    ) == {"converged": True}
+    assert events == ["domain-enter", "readback", "domain-exit"]
