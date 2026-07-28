@@ -1495,11 +1495,14 @@ class IsolatedRehearsalExecutor:
             )
         except (RuntimeError, ValueError):
             return None, "external-supervisor-command-invalid"
-        if set(validation_commands) != {item.name for item in artifact.supervisors}:
+        active_supervisors = tuple(
+            item for item in artifact.supervisors if item.enabled and item.active
+        )
+        if set(validation_commands) != {item.name for item in active_supervisors}:
             return None, "external-supervisor-command-drift"
 
         validations: list[tuple[ExternalSupervisorIdentity, str, str, tuple[str, ...]]] = []
-        for supervisor in artifact.supervisors:
+        for supervisor in active_supervisors:
             command = validation_commands.get(supervisor.name)
             if not isinstance(command, tuple) or not command:
                 return None, "external-supervisor-command-drift"
@@ -1513,6 +1516,20 @@ class IsolatedRehearsalExecutor:
             validations
         ):
             return None, "external-supervisor-unit-collision"
+        if not validations:
+            return (
+                hashlib.sha256(
+                    _json_bytes(
+                        {
+                            "artifact_sha256": artifact.artifact_digest,
+                            "command_sha256": {},
+                            "namespace": plan.resources.namespace,
+                            "schema_version": 1,
+                        }
+                    )
+                ).hexdigest(),
+                None,
+            )
 
         # The external-supervisor validation port-forwards to
         # service/loom-postgres, but the restore rehearsal only creates the

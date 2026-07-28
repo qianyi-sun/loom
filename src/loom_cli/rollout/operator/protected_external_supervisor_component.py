@@ -117,15 +117,11 @@ class ProtectedExternalSupervisorComponent:
             # before it ever reaches apply. The post-apply re-classify still uses the
             # bare observe above, which resolves the now-established canonical.
             if plan.supervisor_predecessor_kind != "absent":
-                return self._observation(
-                    plan, artifact, epoch, ComponentState.DRIFTED, "0" * 64
-                )
+                return self._observation(plan, artifact, epoch, ComponentState.DRIFTED, "0" * 64)
             try:
                 live = self.transport.observe(artifact, self._plan_authority(plan))
             except (RuntimeError, ValueError):
-                return self._observation(
-                    plan, artifact, epoch, ComponentState.DRIFTED, "0" * 64
-                )
+                return self._observation(plan, artifact, epoch, ComponentState.DRIFTED, "0" * 64)
         state = ComponentState(classify_external_supervisor_live_state(artifact, live))
         if state is ComponentState.EXACT:
             canonical = live.canonical_identity
@@ -289,10 +285,6 @@ class ProtectedExternalSupervisorComponent:
             or dict(artifact.script_sha256) != dict(plan.supervisor_script_digests)
             or dict(artifact.unit_sha256) != expected_dynamic_units
             or calculated_set_digest != plan.systemd_unit_set_digest
-            or any(
-                not supervisor.enabled or not supervisor.active
-                for supervisor in artifact.supervisors
-            )
         ):
             raise ValueError("protected external supervisor artifact drifted from final plan")
         return artifact

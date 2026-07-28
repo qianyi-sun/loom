@@ -102,7 +102,6 @@ from loom_cli.rollout.readonly_authority import (
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS, RehearsalResult
 from loom_cli.rollout.runtime_readiness import REQUIRED_EXECUTABLES, REQUIRED_IMPORTS
 from loom_cli.rollout.staging_baseline_readiness import BaselineProbeResult
-from tests.loom_cli.rollout.rehearsal_fixtures import active_external_supervisor_artifact
 
 BOOT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
@@ -1770,22 +1769,11 @@ def test_registered_migration_plan_rejects_candidate_drift_before_graph_read(
     assert calls == []
 
 
-def test_registered_systemd_render_uses_exact_static_unit_verifier(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     candidate_sha = "1" * 40
     candidate_tree = "2" * 40
     image_tag = "staging-1111111"
-    supervisor_artifact = active_external_supervisor_artifact(
-        candidate_sha=candidate_sha,
-        candidate_tree=candidate_tree,
-        image_tag=image_tag,
-    )
-    monkeypatch.setattr(
-        "loom_cli.rollout.preflight_registered_checks.build_external_supervisor_artifact",
-        lambda *_args, **_kwargs: supervisor_artifact,
-    )
     check = build_systemd_render_check(
         lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
         candidate_root=repo_root,
@@ -1819,8 +1807,11 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier(
     assert result.evidence["failed-units"] == {}
     assert result.evidence["supervisor-artifact-digest"] != "0" * 64
     assert result.evidence["supervisor-profile-sha256"] != "0" * 64
-    assert set(supervisor_artifact.unit_sha256) <= set(result.evidence["unit-digests"])
-    assert result.evidence["unit-count"] == 3 + len(supervisor_artifact.unit_sha256)
+    assert set(result.evidence["supervisor-unit-digests"]) == {
+        "loom-autoscaler-gb10-staging.service",
+        "loom-autoscaler-gb10-staging.timer",
+    }
+    assert result.evidence["unit-count"] == 5
     assert set(result.evidence["supervisor-script-digests"]) == {SCRIPT_PATH}
 
 
