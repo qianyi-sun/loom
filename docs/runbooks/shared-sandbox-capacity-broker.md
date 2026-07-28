@@ -408,6 +408,34 @@ Both services must render from the same immutable candidate SHA. Use
 `systemd-analyze verify` on both rendered services and both checked-in timers
 before installation.
 
+### Shared-capacity retirement mapping
+
+Control-plane
+[`compute_autoscaler_decision`](../../src/loom_control_plane/worker_pool_autoscaler.py)
+materializes disabled broker handoffs as a durable lease retirement, rather
+than treating `enabled=false` as immediate proof that capacity disappeared.
+Adapters that call
+`PUT /admin/worker-pool-autoscaler-policies/{environment}/{pool_name}` must
+preserve the exact request, epoch, candidate, and preemptibility binding:
+
+| Handoff | WPAP lease transition |
+|---------|-----------------------|
+| `enabled=true`, `max_slots=N>0` | `active` with `min_slots=0`, `max_slots=N` (never raise above handoff) |
+| `enabled=false` or `max_slots=0` | `active → retiring`; the external actuator drains pending/active/draining work and commits `retired` only after terminal Slurm readback |
+
+Admin auth uses secret **files** only. Handoffs, observations, and evidence must
+never contain tokens or object-store credentials.
+
+### Adapter / supervisor ownership
+
+The durable per-sandbox handoff adapter and observation/reconcile supervisor
+are part of the single #1023 integration candidate:
+`scripts/ops/shared_capacity_adapter.py`,
+`scripts/ops/shared_capacity_supervisor.py`. This broker remains
+transport- and token-agnostic; adapters own WPAP mutation against each
+sandbox's loopback Control Plane (`sandbox-qianyi|hongjian|devansh`, not
+`development`).
+
 ## Report observed capacity
 
 Prepare a secret-free JSON array:
