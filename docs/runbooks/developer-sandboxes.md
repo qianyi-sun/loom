@@ -21,7 +21,12 @@ and each developer child are converged by the root domain publisher as
 OLDLAB and GB10 NFS domains through
 `developer_sandbox_domain_runtime.py`; identical logical paths do not imply one
 backing filesystem. Developers have read/traverse access but cannot mutate a
-published candidate. The host installer never fetches or publishes source.
+published candidate. The host installer never fetches a branch or remote URL.
+It requires its own checkout to be clean at the requested exact HEAD, creates
+one root-private single-HEAD Git bundle, streams that bundle only to the two
+declared domain publishers, and removes every local and remote staging copy
+after materialization. A failed remote cleanup is a hard failure with a
+root-owned recovery record, not a warning.
 
 On `oldlab-2`, `/srv/loom` and `/srv/loom/developer-sandboxes` are
 `root:sharedwork` mode `2750`. Each developer root and its `cache`, `evidence`,
@@ -67,28 +72,34 @@ uv run --no-sync python scripts/ops/developer_sandbox_host.py install \
 The installer performs these bounded steps:
 
 1. require root and the canonical host name `trt-eai-oldlab-2`;
-2. require `/shared_work` to be the OLDLAB NFS mount, resolve `sharedwork`, the
-   stable `loom-sandbox-<developer>` groups, and the three developer identities,
-   then consume only a pre-published `root:sharedwork` mode-`2750` exact
-   SHA/tree candidate;
-3. converge each local state/cache/evidence/runtime/secrets directory to its
+2. require `/shared_work` to be the OLDLAB NFS mount, resolve `sharedwork` and
+   the three developer identities, acquire the global installer lock, and
+   create a root-owned mode-`0600` single-HEAD bundle from the clean exact
+   checkout;
+3. stream the exact committed domain helper/config to all OLDLAB and GB10
+   peers to converge stable identities, publisher parents, and signing keys;
+   then stream the bundle only to `oldlab-1` and `trt-gb10-1`, where
+   `materialize` atomically creates the domain-local candidate and proves
+   SHA/tree, raw tracked bytes, owner/mode, cleanliness, and one shared inode
+   across every peer without reading fleet proof or writing env/attestation;
+4. converge each local state/cache/evidence/runtime/secrets directory to its
    developer owner and mode `0700`;
-4. create the per-developer `secrets/sandbox.env` and `secrets/admin.toml`
+5. create the per-developer `secrets/sandbox.env` and `secrets/admin.toml`
    once, atomically, as owner-only mode `0600` files; existing valid files are
    never rotated or overwritten;
-5. require the shared-capacity adapters to be stopped and their policies
+6. require the shared-capacity adapters to be stopped and their policies
    absent or terminal, journal a root-owned bounded prepare transaction, and
    temporarily converge only the exact candidate's loopback stack without
    writing desired or lifecycle state;
-6. install the exact relay and all 19 host-local client bundles over encrypted
+7. install the exact relay and all 19 host-local client bundles over encrypted
    administrative transport, then require every route, TLS identity, and
    Control Plane/Gateway/MinIO health check before persisting a fresh fleet
    proof;
-7. run the exact domain helper on every OLDLAB/GB10 peer, republish the
-   secret-free reference env in each domain from a root-private seed, collect
-   both signed domain attestations, and closed-schema verify the fresh combined
-   receipt;
-8. only then atomically write desired state, restart the steady systemd unit,
+8. invoke `attest` on each publisher only after the fresh 19-node fleet proof
+   exists; it republishes the secret-free reference env from a root-private
+   seed, rechecks all domain peers, signs the domain receipt, and the collector
+   closed-schema verifies both domain inputs into one fresh combined receipt;
+9. only then atomically write desired state, restart the steady systemd unit,
    verify exact candidate/tree/runtime/receipt binding, and remove the
    transaction journal. Any failure stops the uncommitted prepare, invalidates
    its proof, restores the prior relay and sandbox candidate when present, and
@@ -109,6 +120,8 @@ The durable locations for one sandbox are therefore:
 | OLDLAB worker env | `/shared_work/loom/runtime/sandboxes/<developer>/<SHA>/worker-oldlab.env` |
 | combined receipt | `/var/lib/loom-shared-capacity/runtime-attestations/<developer>/<SHA>/combined.json` |
 | activation journal | `/var/lib/loom-developer-sandbox-installer/transactions/<developer>.json` |
+| bounded source stage | `/var/lib/loom-developer-sandbox-installer/source/<SHA>/` (removed on exit) |
+| failed remote cleanup record | `/var/lib/loom-developer-sandbox-installer/source/failures/*.json` |
 | installed fixed profile | `/etc/loom/developer-sandboxes/profiles/<developer>.toml` |
 
 Do not copy or reveal the private files during readback. Compare only

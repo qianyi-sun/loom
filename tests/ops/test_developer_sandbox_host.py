@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -440,6 +441,223 @@ def test_failed_upgrade_restores_previous_desired_and_candidate(
 
     assert json.loads(profile.desired_file.read_text(encoding="utf-8")) == previous
     assert events == [f"update:{previous_sha}", "relay", "invalidate", "remove"]
+
+
+def test_empty_namespace_first_install_materializes_before_prepare_and_attest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    source_tree = "b" * 40
+    events: list[str] = []
+    secrets = {
+        "LOOM_DEV_POSTGRES_PASSWORD": "postgres",
+        "LOOM_DEV_MINIO_ROOT_PASSWORD": "minio",
+        "LOOM_CP_STEP_JWT_SIGNING_KEY": "jwt",
+        "LOOM_SECRET_STORE_MASTER_KEY": "master",
+        "LOOM_WORKER_TOKEN": "worker",
+    }
+
+    @contextmanager
+    def lock(*_args: object) -> object:
+        yield
+
+    monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
+    monkeypatch.setattr(
+        host,
+        "_bootstrap_domain_runtime_hosts",
+        lambda *_args: events.append("bootstrap-empty-domain-roots"),
+    )
+    monkeypatch.setattr(host, "verify_developer_docker_access", lambda *_args: None)
+    monkeypatch.setattr(host, "ensure_secret_files", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_materialize_domain_candidates",
+        lambda *_args: events.append("materialize-no-fleet"),
+    )
+    monkeypatch.setattr(host, "verify_candidate_root", lambda *_args: None)
+
+    def verify(*_args: object) -> str:
+        assert events[:2] == ["bootstrap-empty-domain-roots", "materialize-no-fleet"]
+        events.append("verify-19-node-candidate")
+        return source_tree
+
+    monkeypatch.setattr(host, "verify_candidate", verify)
+    monkeypatch.setattr(
+        host,
+        "_install_assets",
+        lambda *_args: events.append("install-exact-assets"),
+    )
+    monkeypatch.setattr(host, "verify_candidate_profile_bytes", lambda *_args: None)
+    monkeypatch.setattr(host, "verify_candidate_consumer", lambda *_args: None)
+    monkeypatch.setattr(host, "require_migration_compatible_update", lambda *_args: None)
+    monkeypatch.setattr(host, "_converge_domain_runtime_hosts", lambda *_args: None)
+    monkeypatch.setattr(host, "_parse_env_file", lambda *_args: secrets)
+    monkeypatch.setattr(host, "_read_admin_token", lambda *_args: "admin")
+    monkeypatch.setattr(host, "_activation_lock", lock)
+    monkeypatch.setattr(host, "_transaction_payload", lambda *_args: None)
+    monkeypatch.setattr(host, "_load_json", lambda *_args: None)
+    monkeypatch.setattr(host, "_current_relay_sha", lambda *_args: None)
+    monkeypatch.setattr(host, "_write_transaction", lambda *args, **kwargs: None)
+    monkeypatch.setattr(host, "_assert_capacity_units_stopped", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_invoke_lifecycle",
+        lambda _profile, _sha, operation: events.append(f"lifecycle:{operation}"),
+    )
+    monkeypatch.setattr(host, "verify_listening_ports", lambda *_args: None)
+    monkeypatch.setattr(host, "assert_capacity_quiescent", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_install_remote_link_fleet",
+        lambda *_args: events.append("fleet-after-prepare"),
+    )
+
+    def attest(*_args: object) -> None:
+        assert "fleet-after-prepare" in events
+        events.append("attest-after-fleet")
+
+    monkeypatch.setattr(host, "_publish_domain_attestations", attest)
+    monkeypatch.setattr(host, "verify_worker_runtime_env", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "verify_combined_receipt",
+        lambda *_args: _receipt(profile, SHA),
+    )
+    monkeypatch.setattr(host, "write_desired", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_run",
+        lambda *_args, **_kwargs: type("Completed", (), {"stdout": "", "returncode": 0})(),
+    )
+    monkeypatch.setattr(host, "service_check", lambda *_args: None)
+    monkeypatch.setattr(host, "_remove_transaction", lambda *_args: None)
+
+    host._install_materialized(
+        (profile,),
+        SHA,
+        tmp_path / "candidate.bundle",
+        source_tree,
+    )
+
+    assert events.index("bootstrap-empty-domain-roots") < events.index(
+        "materialize-no-fleet",
+    )
+    assert events.index("materialize-no-fleet") < events.index("lifecycle:prepare")
+    assert events.index("lifecycle:prepare") < events.index("fleet-after-prepare")
+    assert events.index("fleet-after-prepare") < events.index("attest-after-fleet")
+
+
+def test_materialization_archive_reads_helpers_from_commit_not_mutable_worktree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    script = repo / "scripts/ops/developer_sandbox_domain_runtime.py"
+    config = repo / "deploy/developer-sandboxes/runtime-domains.toml"
+    script.parent.mkdir(parents=True)
+    config.parent.mkdir(parents=True)
+    script.write_text("committed-helper\n", encoding="utf-8")
+    config.write_text("committed-config\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "Host Test")
+    _git(repo, "config", "user.email", "host@example.invalid")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "candidate")
+    sha = _git(repo, "rev-parse", "HEAD")
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    script.write_text("tampered-after-stage\n", encoding="utf-8")
+    config.write_text("tampered-config\n", encoding="utf-8")
+    bundle = tmp_path / "candidate.bundle"
+    bundle.write_bytes(b"bounded-bundle")
+    monkeypatch.setattr(host, "REPO_ROOT", repo)
+
+    archive = host._materialization_archive(bundle, sha, tree)
+    with host.tarfile.open(fileobj=host.io.BytesIO(archive), mode="r") as tar:
+        helper = tar.extractfile("developer_sandbox_domain_runtime.py")
+        runtime_config = tar.extractfile("runtime-domains.toml")
+        assert helper is not None and helper.read() == b"committed-helper\n"
+        assert runtime_config is not None and runtime_config.read() == b"committed-config\n"
+
+
+def test_remote_link_fleet_reads_each_client_from_issuance_clients_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    issuance_root = tmp_path / "issuance"
+    sources: list[Path] = []
+    monkeypatch.setattr(host, "REMOTE_LINK_ISSUANCE_ROOT", issuance_root)
+    monkeypatch.setattr(
+        host,
+        "_parse_env_file",
+        lambda *_args: {
+            "LOOM_WORKER_TOKEN": "worker",
+            "LOOM_DEV_MINIO_ROOT_USER": "access",
+            "LOOM_DEV_MINIO_ROOT_PASSWORD": "secret",
+        },
+    )
+    monkeypatch.setattr(host, "_run_candidate_program", lambda *_args: {})
+    monkeypatch.setattr(host, "_verify_remote_candidate", lambda *_args: None)
+
+    def archive(source: Path, **_kwargs: object) -> bytes:
+        sources.append(source)
+        return b"credentials"
+
+    monkeypatch.setattr(host, "_archive_credentials", archive)
+    monkeypatch.setattr(
+        host,
+        "_ssh",
+        lambda *_args, **_kwargs: type("Completed", (), {"stdout": ""})(),
+    )
+    monkeypatch.setattr(host, "_cleanup_remote_stage", lambda *_args: None)
+
+    host._install_remote_link_fleet(
+        profile,
+        SHA,
+        "b" * 40,
+        _current_identity("root"),
+    )
+
+    assert sources == [
+        issuance_root / profile.sandbox / SHA / "clients" / node
+        for node in host.ELIGIBLE_LINK_NODES
+    ]
+
+
+def test_remote_cleanup_failure_is_persisted_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    monkeypatch.setattr(host, "SOURCE_STAGING_ROOT", tmp_path / "source")
+    monkeypatch.setattr(os, "chown", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_ensure_root_private_directory",
+        lambda path: (path.mkdir(parents=True, exist_ok=True), path.chmod(0o700)),
+    )
+    monkeypatch.setattr(
+        host,
+        "_ssh",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            host.HostConvergeError("remote cleanup failed"),
+        ),
+    )
+
+    with pytest.raises(host.HostConvergeError, match="remote cleanup failed"):
+        host._cleanup_remote_stage(
+            profile,
+            SHA,
+            "oldlab",
+            "oldlab-1",
+            Path("/run/loom-developer-sandbox-installer/source/qianyi"),
+        )
+
+    failure = host._remote_stage_failure_path(profile, SHA, "oldlab", "oldlab-1")
+    payload = json.loads(failure.read_text(encoding="utf-8"))
+    assert payload["status"] == "remote-cleanup-failed"
+    assert stat.S_IMODE(failure.stat().st_mode) == 0o600
 
 
 def test_host_installer_and_profiles_require_the_full_ci_matrix() -> None:

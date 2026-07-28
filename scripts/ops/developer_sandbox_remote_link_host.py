@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import uuid
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -532,9 +533,25 @@ def prepare_rotation(profile: Profile, candidate_sha: str) -> Path:
 
 
 def _prepare_rotation_locked(profile: Profile, candidate_sha: str) -> Path:
-    destination = ISSUANCE_ROOT / profile.sandbox / candidate_sha
-    if destination.exists():
-        raise LinkHostError("candidate issuance directory already exists")
+    final_destination = ISSUANCE_ROOT / profile.sandbox / candidate_sha
+    if final_destination.exists():
+        _validate_existing_issuance(profile, candidate_sha, final_destination)
+        return final_destination
+    _ensure_root_dir(final_destination.parent)
+    prefix = f".incoming-{candidate_sha}-"
+    for orphan in final_destination.parent.glob(f"{prefix}*"):
+        metadata = orphan.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or not orphan.name.startswith(prefix)
+        ):
+            raise LinkHostError("candidate issuance orphan metadata is invalid")
+        shutil.rmtree(orphan)
+        _fsync_directory(orphan.parent)
+    destination = final_destination.parent / f"{prefix}{uuid.uuid4().hex}"
     _ensure_root_dir(destination)
     ca_key = destination / "ca-key.pem"
     ca_cert = destination / "ca.pem"
@@ -656,7 +673,90 @@ def _prepare_rotation_locked(profile: Profile, candidate_sha: str) -> Path:
         _atomic_copy(ca_cert, node_root / "ca.pem", mode=0o644)
         client_csr.unlink()
         client_ext.unlink()
-    return destination
+    _validate_existing_issuance(profile, candidate_sha, destination)
+    os.rename(destination, final_destination)
+    _fsync_directory(final_destination.parent)
+    return final_destination
+
+
+def _validate_issuance_file(path: Path, *, mode: int) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise LinkHostError("candidate issuance file is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != mode
+    ):
+        raise LinkHostError("candidate issuance file metadata is invalid")
+
+
+def _validate_issuance_directory(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise LinkHostError("candidate issuance directory is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise LinkHostError("candidate issuance directory metadata is invalid")
+
+
+def _validate_existing_issuance(
+    profile: Profile,
+    candidate_sha: str,
+    destination: Path,
+) -> None:
+    _validate_issuance_directory(destination)
+    ca = destination / "ca.pem"
+    _validate_issuance_file(destination / "ca-key.pem", mode=0o600)
+    _validate_issuance_file(ca, mode=0o644)
+    server = destination / "server"
+    _validate_issuance_directory(server)
+    _validate_issuance_file(server / "server-key.pem", mode=0o600)
+    _validate_issuance_file(server / "server.pem", mode=0o644)
+    _validate_issuance_file(server / "ca.pem", mode=0o644)
+    _run((OPENSSL_PATH, "verify", "-CAfile", str(ca), str(server / "server.pem")))
+    if _fingerprint(ca) != _fingerprint(server / "ca.pem"):
+        raise LinkHostError("candidate issuance server CA binding is invalid")
+    server_text = _certificate_text(server / "server.pem")
+    if set(re.findall(r"IP Address:([^,\s]+)", server_text)) != {
+        profile.server_address,
+    }:
+        raise LinkHostError("candidate issuance server identity is invalid")
+    clients = destination / "clients"
+    _validate_issuance_directory(clients)
+    try:
+        client_nodes = {path.name for path in clients.iterdir()}
+    except OSError as exc:
+        raise LinkHostError("candidate issuance clients are unavailable") from exc
+    if client_nodes != set(ELIGIBLE_NODES):
+        raise LinkHostError("candidate issuance client inventory is incomplete")
+    for node in ELIGIBLE_NODES:
+        root = clients / node
+        _validate_issuance_directory(root)
+        for name, mode in (
+            ("client-key.pem", 0o600),
+            ("client.pem", 0o644),
+            ("ca.pem", 0o644),
+        ):
+            _validate_issuance_file(root / name, mode=mode)
+        _run((OPENSSL_PATH, "verify", "-CAfile", str(ca), str(root / "client.pem")))
+        if _fingerprint(ca) != _fingerprint(root / "ca.pem"):
+            raise LinkHostError("candidate issuance client CA binding is invalid")
+        text = _certificate_text(root / "client.pem")
+        if (
+            set(re.findall(r"URI:([^,\s]+)", text)) != {profile.client_uri(candidate_sha)}
+            or set(re.findall(r"DNS:([^,\s]+)", text)) != {node}
+        ):
+            raise LinkHostError("candidate issuance client identity is invalid")
 
 
 def _install_programs() -> None:

@@ -368,6 +368,7 @@ def _run(
     *,
     cwd: Path | None = None,
     input_text: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         argv,
@@ -376,10 +377,32 @@ def _run(
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
     if result.returncode != 0:
         raise ConvergenceError(f"command failed safely: {Path(argv[0]).name}")
     return result
+
+
+def _git_run(*argv: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        (
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            *argv,
+        ),
+        env={
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+        },
+    )
 
 
 def _candidate_identity(source_repo: Path, sha: str) -> CandidateIdentity:
@@ -391,17 +414,69 @@ def _candidate_identity(source_repo: Path, sha: str) -> CandidateIdentity:
         raise ConvergenceError("candidate source repository is unavailable") from exc
     if not source.is_dir():
         raise ConvergenceError("candidate source repository is unavailable")
-    resolved = _run(
-        ("git", "-C", str(source), "rev-parse", "--verify", f"{sha}^{{commit}}"),
+    resolved = _git_run(
+        "-C",
+        str(source),
+        "rev-parse",
+        "--verify",
+        f"{sha}^{{commit}}",
     ).stdout.strip()
     if resolved != sha:
         raise ConvergenceError("candidate source does not contain the exact commit")
-    tree = _run(
-        ("git", "-C", str(source), "rev-parse", "--verify", f"{sha}^{{tree}}"),
+    tree = _git_run(
+        "-C",
+        str(source),
+        "rev-parse",
+        "--verify",
+        f"{sha}^{{tree}}",
     ).stdout.strip()
     if _SHA_RE.fullmatch(tree) is None:
         raise ConvergenceError("candidate tree identity is invalid")
     return CandidateIdentity(sha=sha, tree=tree)
+
+
+def _bundle_candidate_identity(
+    source_bundle: Path,
+    sha: str,
+    expected_tree: str,
+) -> CandidateIdentity:
+    if _SHA_RE.fullmatch(sha) is None or _SHA_RE.fullmatch(expected_tree) is None:
+        raise ConvergenceError("candidate bundle identity is invalid")
+    try:
+        metadata = source_bundle.lstat()
+        parent = source_bundle.parent.lstat()
+    except OSError as exc:
+        raise ConvergenceError("candidate source bundle is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or stat.S_ISLNK(parent.st_mode)
+        or not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != 0
+        or parent.st_gid != 0
+        or stat.S_IMODE(parent.st_mode) != 0o700
+    ):
+        raise ConvergenceError("candidate source bundle metadata is invalid")
+    heads = _git_run("bundle", "list-heads", str(source_bundle)).stdout.splitlines()
+    if heads != [f"{sha} HEAD"]:
+        raise ConvergenceError("candidate source bundle does not contain one exact HEAD")
+    with tempfile.TemporaryDirectory() as temporary:
+        checkout = Path(temporary) / "candidate"
+        _git_run(
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            str(source_bundle),
+            str(checkout),
+        )
+        identity = _candidate_identity(checkout, sha)
+    if identity.tree != expected_tree:
+        raise ConvergenceError("candidate source bundle tree does not match")
+    return identity
 
 
 def _secure_seed(path: Path, *, require_root_owner: bool = False) -> Path:
@@ -595,6 +670,7 @@ def _atomic_install(source: Path, target: Path, mode: int) -> None:
         os.chown(temporary, 0, 0)
         os.chmod(temporary, mode)
         os.replace(temporary, target)
+        _fsync_directory(target.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -618,6 +694,7 @@ def _atomic_bytes(
         os.chown(temporary, 0, 0)
         os.chmod(temporary, mode)
         os.replace(temporary, target)
+        _fsync_directory(target.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -720,6 +797,13 @@ def converge_host(config_path: Path, config: RuntimeConfig, domain: Domain) -> d
             )
     _atomic_install(Path(__file__).resolve(), config.installed_program, 0o755)
     _atomic_install(config_path.resolve(strict=True), config.installed_config, 0o644)
+    if _hostname() == domain.publisher_hostname:
+        for path in (
+            domain.candidate_root.parent.parent,
+            domain.candidate_root.parent,
+            domain.candidate_root,
+        ):
+            _ensure_directory(path, gid=config.shared_gid, mode=0o2750)
     report = dict(plan)
     report["mode"] = "applied"
     report["groups"] = {
@@ -882,16 +966,112 @@ def _verify_candidate(path: Path, identity: CandidateIdentity, shared_gid: int) 
                 stat.S_IMODE(item_metadata.st_mode) & 0o022
             ):
                 raise ConvergenceError("published candidate is group/world writable")
-    head = _run(("git", "-C", str(path), "rev-parse", "--verify", "HEAD")).stdout.strip()
-    tree = _run(
-        ("git", "-C", str(path), "rev-parse", "--verify", "HEAD^{tree}"),
+    head = _git_run("-C", str(path), "rev-parse", "--verify", "HEAD").stdout.strip()
+    tree = _git_run(
+        "-C",
+        str(path),
+        "rev-parse",
+        "--verify",
+        "HEAD^{tree}",
     ).stdout.strip()
-    status = _run(
-        ("git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"),
-    ).stdout.strip()
-    if head != identity.sha or tree != identity.tree or status:
+    if head != identity.sha or tree != identity.tree:
         raise ConvergenceError("published candidate exact identity is invalid")
+    _verify_candidate_raw_tree(path)
     return metadata
+
+
+def _verify_candidate_raw_tree(path: Path) -> None:
+    try:
+        git_metadata = (path / ".git").lstat()
+    except OSError as exc:
+        raise ConvergenceError("candidate Git metadata is unavailable") from exc
+    if stat.S_ISLNK(git_metadata.st_mode) or not stat.S_ISDIR(git_metadata.st_mode):
+        raise ConvergenceError("candidate Git metadata is not self-contained")
+    tree_rows = _git_run(
+        "-C",
+        str(path),
+        "ls-tree",
+        "-rz",
+        "--full-tree",
+        "HEAD",
+    ).stdout.split("\0")
+    expected: dict[str, tuple[str, str]] = {}
+    expected_paths: set[str] = set()
+    for row in tree_rows:
+        if not row:
+            continue
+        header, separator, name = row.partition("\t")
+        parts = header.split()
+        if (
+            not separator
+            or len(parts) != 3
+            or parts[1] != "blob"
+            or parts[0] not in {"100644", "100755", "120000"}
+            or _SHA_RE.fullmatch(parts[2]) is None
+            or Path(name).is_absolute()
+            or ".." in Path(name).parts
+            or name in expected
+        ):
+            raise ConvergenceError("candidate commit tree contains an unsupported entry")
+        expected[name] = (parts[0], parts[2])
+        expected_paths.add(name)
+        parent = Path(name).parent
+        while parent != Path("."):
+            expected_paths.add(parent.as_posix())
+            parent = parent.parent
+
+    index_rows = _git_run("-C", str(path), "ls-files", "--stage", "-z").stdout.split("\0")
+    indexed: dict[str, tuple[str, str]] = {}
+    for row in index_rows:
+        if not row:
+            continue
+        header, separator, name = row.partition("\t")
+        parts = header.split()
+        if not separator or len(parts) != 3 or parts[2] != "0":
+            raise ConvergenceError("candidate index contains an unsupported entry")
+        indexed[name] = (parts[0], parts[1])
+    flags = _git_run("-C", str(path), "ls-files", "-v", "-z").stdout.split("\0")
+    if any(row and (len(row) < 3 or row[0] != "H" or row[1] != " ") for row in flags):
+        raise ConvergenceError("candidate index contains hidden worktree flags")
+    if indexed != expected:
+        raise ConvergenceError("candidate index differs from the exact commit tree")
+
+    actual_paths: set[str] = set()
+    for root, directories, files in os.walk(path, topdown=True, followlinks=False):
+        root_path = Path(root)
+        if root_path == path and ".git" in directories:
+            directories.remove(".git")
+        for name in list(directories):
+            item = root_path / name
+            relative = item.relative_to(path).as_posix()
+            actual_paths.add(relative)
+            if item.is_symlink():
+                directories.remove(name)
+        for name in files:
+            actual_paths.add((root_path / name).relative_to(path).as_posix())
+    if actual_paths != expected_paths:
+        raise ConvergenceError("candidate worktree contains extra or missing entries")
+
+    for name, (mode, blob_sha) in expected.items():
+        item = path / name
+        metadata = item.lstat()
+        if mode == "120000":
+            if not stat.S_ISLNK(metadata.st_mode):
+                raise ConvergenceError("candidate symlink differs from commit tree")
+            content = os.fsencode(os.readlink(item))
+        else:
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise ConvergenceError("candidate file differs from commit tree")
+            executable = bool(stat.S_IMODE(metadata.st_mode) & 0o111)
+            if executable != (mode == "100755"):
+                raise ConvergenceError("candidate file mode differs from commit tree")
+            content = item.read_bytes()
+        actual_blob = hashlib.sha1(
+            f"blob {len(content)}\0".encode() + content,
+            usedforsecurity=False,
+        ).hexdigest()
+        if actual_blob != blob_sha:
+            raise ConvergenceError("candidate tracked bytes differ from commit tree")
 
 
 def _publish_candidate(
@@ -908,20 +1088,17 @@ def _publish_candidate(
     temporary = target.parent / f".incoming-{target.name}-{uuid.uuid4().hex}"
     published = True
     try:
-        _run(
-            (
-                "git",
-                "clone",
-                "--quiet",
-                "--no-local",
-                "--no-hardlinks",
-                "--no-checkout",
-                str(source_repo.resolve(strict=True)),
-                str(temporary),
-            ),
+        _git_run(
+            "clone",
+            "--quiet",
+            "--no-local",
+            "--no-hardlinks",
+            "--no-checkout",
+            str(source_repo.resolve(strict=True)),
+            str(temporary),
         )
-        _run(("git", "-C", str(temporary), "checkout", "--quiet", "--detach", identity.sha))
-        _run(("git", "-C", str(temporary), "remote", "remove", "origin"))
+        _git_run("-C", str(temporary), "checkout", "--quiet", "--detach", identity.sha)
+        _git_run("-C", str(temporary), "remote", "remove", "origin")
         _normalize_candidate(temporary, shared_gid)
         try:
             _rename_noreplace(temporary, target)
@@ -935,6 +1112,176 @@ def _publish_candidate(
             shutil.rmtree(temporary)
 
 
+def inspect_candidate_local(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    identity: CandidateIdentity,
+) -> dict[str, object]:
+    _require_root()
+    paths = runtime_paths(domain, sandbox, identity.sha)
+    candidate = _verify_candidate(paths.candidate, identity, config.shared_gid)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "operation": "inspect-candidate",
+        "domain": domain.name,
+        "hostname": _hostname(),
+        "sandbox": sandbox,
+        "candidate_sha": identity.sha,
+        "candidate_tree": identity.tree,
+        "candidate_inode": candidate.st_ino,
+        "candidate_device": candidate.st_dev,
+        "candidate_uid": candidate.st_uid,
+        "candidate_gid": candidate.st_gid,
+        "candidate_mode": f"{stat.S_IMODE(candidate.st_mode):04o}",
+        "candidate_clean": True,
+    }
+
+
+def _peer_candidate_readback(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    identity: CandidateIdentity,
+) -> list[dict[str, object]]:
+    local = _hostname()
+    reports: list[dict[str, object]] = []
+    for peer in domain.peers:
+        if peer.hostname == local:
+            report = inspect_candidate_local(config, domain, sandbox, identity)
+        else:
+            result = _run(
+                (
+                    "ssh",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=10",
+                    peer.ssh_target,
+                    "sudo",
+                    "-n",
+                    str(config.installed_program),
+                    "inspect-candidate",
+                    "--config",
+                    str(config.installed_config),
+                    "--domain",
+                    domain.name,
+                    "--sandbox",
+                    sandbox,
+                    "--candidate-sha",
+                    identity.sha,
+                    "--candidate-tree",
+                    identity.tree,
+                ),
+            )
+            try:
+                report = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                raise ConvergenceError("candidate peer readback returned invalid output") from exc
+        if (
+            report.get("hostname") != peer.hostname
+            or report.get("candidate_uid") != 0
+            or report.get("candidate_gid") != config.shared_gid
+            or report.get("candidate_mode") != "2750"
+            or report.get("candidate_clean") is not True
+            or report.get("candidate_sha") != identity.sha
+            or report.get("candidate_tree") != identity.tree
+        ):
+            raise ConvergenceError("candidate peer readback does not match the publication")
+        reports.append(report)
+    if len({item.get("candidate_inode") for item in reports}) != 1:
+        raise ConvergenceError("NFS candidate peer inode identity is inconsistent")
+    return reports
+
+
+def _materialization_path(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    sha: str,
+) -> Path:
+    return config.state_root / "materializations" / domain.name / sandbox / f"{sha}.json"
+
+
+def converge_materialize(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    source_bundle: Path,
+    identity: CandidateIdentity,
+) -> dict[str, object]:
+    _require_root()
+    if _hostname() != domain.publisher_hostname:
+        raise ConvergenceError("materialize must run on the declared NFS domain publisher")
+    with _transaction_lock(config, domain.name, sandbox, identity.sha):
+        path = _materialization_path(config, domain, sandbox, identity.sha)
+        journal: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "operation": "materialize",
+            "status": "prepared",
+            "domain": domain.name,
+            "sandbox": sandbox,
+            "candidate_sha": identity.sha,
+            "candidate_tree": identity.tree,
+            "candidate_created": False,
+        }
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ConvergenceError("candidate materialization journal is invalid") from exc
+            if (
+                not isinstance(existing, dict)
+                or existing.get("schema_version") != SCHEMA_VERSION
+                or existing.get("operation") != "materialize"
+                or existing.get("domain") != domain.name
+                or existing.get("sandbox") != sandbox
+                or existing.get("candidate_sha") != identity.sha
+                or existing.get("candidate_tree") != identity.tree
+                or existing.get("status") not in {"prepared", "published", "committed"}
+            ):
+                raise ConvergenceError("candidate materialization journal binding is invalid")
+            journal = cast(dict[str, object], existing)
+        else:
+            _write_json(path, journal)
+        paths = runtime_paths(domain, sandbox, identity.sha)
+        if journal["status"] == "prepared":
+            _require_directory(paths.candidate.parent.parent, label="candidate domain root")
+            created = _publish_candidate(
+                source_bundle,
+                paths.candidate,
+                identity,
+                config.shared_gid,
+            )
+            journal["candidate_created"] = created
+            journal["status"] = "published"
+            _write_json(path, journal)
+        else:
+            _verify_candidate(paths.candidate, identity, config.shared_gid)
+        reports = _peer_candidate_readback(config, domain, sandbox, identity)
+        journal["status"] = "committed"
+        journal["peer_hostnames"] = [item["hostname"] for item in reports]
+        journal["candidate_inode"] = reports[0]["candidate_inode"]
+        _write_json(path, journal)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "operation": "materialize",
+            "mode": "applied",
+            "domain": domain.name,
+            "sandbox": sandbox,
+            "candidate_sha": identity.sha,
+            "candidate_tree": identity.tree,
+            "candidate_path": str(paths.candidate),
+            "candidate_created": journal["candidate_created"],
+            "candidate_inode": reports[0]["candidate_inode"],
+            "peer_hostnames": journal["peer_hostnames"],
+            "fleet_attestation": "not-read",
+            "runtime_env": "not-written",
+            "domain_attestation": "not-written",
+            "journal": str(path),
+        }
+
+
 def _atomic_env_write(source: Path, target: Path, group_gid: int) -> None:
     with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as handle:
         temporary = Path(handle.name)
@@ -945,6 +1292,7 @@ def _atomic_env_write(source: Path, target: Path, group_gid: int) -> None:
         os.chown(temporary, 0, group_gid)
         os.chmod(temporary, 0o640)
         os.replace(temporary, target)
+        _fsync_directory(target.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -953,10 +1301,17 @@ def _write_json(path: Path, payload: Mapping[str, object], mode: int = 0o600) ->
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.chown(temporary, 0, 0)
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(temporary, 0, 0)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _create_receipt(
@@ -2322,6 +2677,7 @@ def _rollback_locked(
     if receipt.get("candidate_created") is True and phase != "env-restored":
         _verify_candidate(paths.candidate, identity, config.shared_gid)
     attestation = receipt.get("attestation")
+    attestation_pending = receipt.get("attestation_pending") is True
     manifest_path, signature_path = _attestation_paths(domain.name, sandbox, sha)
     previous_manifest: bytes | None = None
     previous_signature: bytes | None = None
@@ -2371,7 +2727,7 @@ def _rollback_locked(
             receipt.get("previous_attestation_signature_sha256"),
             "previous attestation signature snapshot",
         )
-        if phase is None and (
+        if not attestation_pending and phase is None and (
             not manifest_path.is_file()
             or not signature_path.is_file()
             or hashlib.sha256(manifest_path.read_bytes()).hexdigest()
@@ -2380,7 +2736,11 @@ def _rollback_locked(
             != receipt.get("previous_attestation_signature_sha256")
         ):
             raise ConvergenceError("current attestation changed before rollback")
-    elif phase is None and (manifest_path.exists() or signature_path.exists()):
+    elif (
+        not attestation_pending
+        and phase is None
+        and (manifest_path.exists() or signature_path.exists())
+    ):
         raise ConvergenceError("rollback receipt attestation binding is incomplete")
 
     if phase is None:
@@ -2389,7 +2749,10 @@ def _rollback_locked(
         _write_json(receipt_path, receipt)
         phase = "preflighted"
     if phase == "preflighted":
-        if isinstance(attestation, dict) and receipt.get("attestation_previously_existed") is True:
+        if (
+            (isinstance(attestation, dict) or attestation_pending)
+            and receipt.get("attestation_previously_existed") is True
+        ):
             assert previous_manifest is not None and previous_signature is not None
             _atomic_bytes(
                 manifest_path,
@@ -2403,7 +2766,7 @@ def _rollback_locked(
                 mode=0o644,
                 parent_mode=0o755,
             )
-        elif isinstance(attestation, dict):
+        elif isinstance(attestation, dict) or attestation_pending:
             manifest_path.unlink(missing_ok=True)
             signature_path.unlink(missing_ok=True)
         receipt["rollback_phase"] = "attestation-restored"
@@ -2422,6 +2785,7 @@ def _rollback_locked(
             _verify_candidate(paths.candidate, identity, config.shared_gid)
             shutil.rmtree(paths.candidate)
     receipt["status"] = "rolled-back"
+    receipt["attestation_pending"] = False
     receipt.pop("rollback_phase", None)
     _write_json(receipt_path, receipt)
     return receipt
@@ -2518,6 +2882,7 @@ def _converge_publish_locked(
             receipt["previous_attestation_signature_sha256"] = hashlib.sha256(
                 previous_signature_bytes,
             ).hexdigest()
+        receipt["attestation_pending"] = True
         _write_json(receipt_path, receipt)
         try:
             attestation = _emit_attestation(
@@ -2546,6 +2911,7 @@ def _converge_publish_locked(
                 signature_path.unlink(missing_ok=True)
             raise
         receipt["attestation"] = attestation
+        receipt["attestation_pending"] = False
         _write_json(receipt_path, receipt)
         receipt["status"] = "committed"
         receipt["peer_hostnames"] = [item["hostname"] for item in reports]
@@ -2567,6 +2933,126 @@ def _converge_publish_locked(
         for item in reports
     ]
     return result
+
+
+def attest_plan(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    env_seed: Path,
+    identity: CandidateIdentity,
+) -> dict[str, object]:
+    paths = runtime_paths(domain, sandbox, identity.sha)
+    _verify_candidate(paths.candidate, identity, config.shared_gid)
+    seed = _secure_seed(env_seed)
+    _parse_env_references(seed, sandbox=sandbox, sha=identity.sha)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "operation": "attest",
+        "mode": "plan",
+        "domain": domain.name,
+        "sandbox": sandbox,
+        "candidate_sha": identity.sha,
+        "candidate_tree": identity.tree,
+        "candidate_path": str(paths.candidate),
+        "candidate_action": "verify",
+        "env_path": str(paths.env),
+        "env_action": (
+            "noop"
+            if paths.env.exists() and paths.env.read_bytes() == seed.read_bytes()
+            else ("replace" if paths.env.exists() else "create")
+        ),
+        "fleet_attestation": "required-fresh-before-mutation",
+        "env_values": "redacted",
+    }
+
+
+def _converge_attest_locked(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    env_seed: Path,
+    identity: CandidateIdentity,
+) -> dict[str, object]:
+    _recover_orphaned_transactions(config, domain, sandbox, identity.sha)
+    # Fleet proof is deliberately read before any env or attestation mutation.
+    # This makes the materialize -> relay fleet -> attest dependency explicit.
+    _read_and_verify_fleet(config, sandbox, identity.sha, now=datetime.now(UTC))
+    plan = attest_plan(config, domain, sandbox, env_seed, identity)
+    group = config.sandbox_groups[sandbox]
+    if _group_status(group.name, group.gid, group.member) != "ok":
+        raise ConvergenceError("stable sandbox group is not converged")
+    paths = runtime_paths(domain, sandbox, identity.sha)
+    _ensure_runtime_parents(domain, group.gid, identity.sha, sandbox)
+    receipt_path, receipt = _create_receipt(
+        config,
+        domain,
+        sandbox,
+        identity,
+        paths.env,
+    )
+    try:
+        receipt["candidate_created"] = False
+        receipt["status"] = "mutating"
+        _write_json(receipt_path, receipt)
+        seed = _secure_seed(env_seed, require_root_owner=True)
+        _parse_env_references(seed, sandbox=sandbox, sha=identity.sha)
+        if not paths.env.exists() or paths.env.read_bytes() != seed.read_bytes():
+            _atomic_env_write(seed, paths.env, group.gid)
+        receipt["published_env_sha256"] = hashlib.sha256(paths.env.read_bytes()).hexdigest()
+        _write_json(receipt_path, receipt)
+        reports = _peer_readback(config, domain, sandbox, identity)
+        receipt["attestation_pending"] = True
+        _write_json(receipt_path, receipt)
+        attestation = _emit_attestation(
+            config,
+            domain,
+            sandbox,
+            identity,
+            reports,
+        )
+        receipt["attestation"] = attestation
+        receipt["attestation_pending"] = False
+        receipt["status"] = "committed"
+        receipt["peer_hostnames"] = [item["hostname"] for item in reports]
+        _write_json(receipt_path, receipt)
+    except Exception:
+        _rollback_locked(config, receipt_path, allow_committed=False)
+        raise
+    result = dict(plan)
+    result["mode"] = "applied"
+    result["receipt"] = str(receipt_path)
+    result["attestation"] = attestation
+    result["peer_readback"] = [
+        {
+            "hostname": item["hostname"],
+            "candidate_inode": item["candidate_inode"],
+            "env_inode": item["env_inode"],
+            "env_values": "not-read",
+        }
+        for item in reports
+    ]
+    return result
+
+
+def converge_attest(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    env_seed: Path,
+    identity: CandidateIdentity,
+) -> dict[str, object]:
+    _require_root()
+    if _hostname() != domain.publisher_hostname:
+        raise ConvergenceError("attest must run on the declared NFS domain publisher")
+    with _transaction_lock(config, domain.name, sandbox, identity.sha):
+        return _converge_attest_locked(
+            config,
+            domain,
+            sandbox,
+            env_seed,
+            identity,
+        )
 
 
 def converge_publish(
@@ -2597,7 +3083,10 @@ def _parser() -> argparse.ArgumentParser:
         "command",
         choices=(
             "host-converge",
+            "materialize",
+            "attest",
             "publish",
+            "inspect-candidate",
             "inspect-local",
             "rollback",
             "pin-key",
@@ -2610,6 +3099,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-sha")
     parser.add_argument("--candidate-tree")
     parser.add_argument("--source-repo", type=Path)
+    parser.add_argument("--source-bundle", type=Path)
     parser.add_argument("--worker-env-seed", type=Path)
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--public-key", type=Path)
@@ -2674,17 +3164,93 @@ def main(argv: list[str] | None = None) -> int:
                     raise ConvergenceError(
                         f"{args.command} requires sandbox and exact candidate SHA",
                     )
-                if args.command == "inspect-local":
+                if args.command in {"inspect-candidate", "inspect-local"}:
                     if (
                         args.candidate_tree is None
                         or _SHA_RE.fullmatch(args.candidate_tree) is None
                     ):
-                        raise ConvergenceError("inspect-local requires exact candidate tree")
-                    report = inspect_local(
-                        config,
-                        domain,
-                        args.sandbox,
-                        CandidateIdentity(args.candidate_sha, args.candidate_tree),
+                        raise ConvergenceError(
+                            f"{args.command} requires exact candidate tree",
+                        )
+                    identity = CandidateIdentity(args.candidate_sha, args.candidate_tree)
+                    report = (
+                        inspect_candidate_local(
+                            config,
+                            domain,
+                            args.sandbox,
+                            identity,
+                        )
+                        if args.command == "inspect-candidate"
+                        else inspect_local(
+                            config,
+                            domain,
+                            args.sandbox,
+                            identity,
+                        )
+                    )
+                elif args.command == "materialize":
+                    if (
+                        args.source_bundle is None
+                        or args.candidate_tree is None
+                        or _SHA_RE.fullmatch(args.candidate_tree) is None
+                    ):
+                        raise ConvergenceError(
+                            "materialize requires source bundle and exact candidate tree",
+                        )
+                    identity = _bundle_candidate_identity(
+                        args.source_bundle,
+                        args.candidate_sha,
+                        args.candidate_tree,
+                    )
+                    report = (
+                        converge_materialize(
+                            config,
+                            domain,
+                            args.sandbox,
+                            args.source_bundle,
+                            identity,
+                        )
+                        if args.execute
+                        else {
+                            "schema_version": SCHEMA_VERSION,
+                            "operation": "materialize",
+                            "mode": "plan",
+                            "domain": domain.name,
+                            "sandbox": args.sandbox,
+                            "candidate_sha": identity.sha,
+                            "candidate_tree": identity.tree,
+                            "candidate_path": str(
+                                runtime_paths(domain, args.sandbox, identity.sha).candidate,
+                            ),
+                            "fleet_attestation": "not-read",
+                        }
+                    )
+                elif args.command == "attest":
+                    if (
+                        args.worker_env_seed is None
+                        or args.candidate_tree is None
+                        or _SHA_RE.fullmatch(args.candidate_tree) is None
+                    ):
+                        raise ConvergenceError(
+                            "attest requires worker env seed and exact candidate tree",
+                        )
+                    identity = CandidateIdentity(args.candidate_sha, args.candidate_tree)
+                    report = (
+                        converge_attest(
+                            config,
+                            domain,
+                            args.sandbox,
+                            args.worker_env_seed,
+                            identity,
+                        )
+                        if args.execute
+                        else attest_plan(
+                            config,
+                            domain,
+                            args.sandbox,
+                            args.worker_env_seed,
+                            identity,
+                        )
                     )
                 else:
                     if args.source_repo is None or args.worker_env_seed is None:

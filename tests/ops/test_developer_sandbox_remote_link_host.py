@@ -206,6 +206,7 @@ def test_prepare_and_install_candidate_credentials_are_exact_and_host_local(
     monkeypatch.setattr(host, "_ensure_root_dir", local_private_dir)
     monkeypatch.setattr(host, "_ensure_root_owned_parent", local_parent)
     monkeypatch.setattr(os, "chown", lambda *_: None)
+    monkeypatch.setattr(host, "_validate_existing_issuance", lambda *_args: None)
     profile = host.load_profile("qianyi")
 
     issuance = host.prepare_rotation(profile, SHA)
@@ -243,6 +244,28 @@ def test_prepare_and_install_candidate_credentials_are_exact_and_host_local(
     assert (installed / "client-key.pem").stat().st_mode & 0o777 == 0o600
     assert (installed / "minio-access-key").read_text(encoding="utf-8") == ("candidate-access\n")
     assert "/shared_work" not in str(installed)
+
+
+def test_prepare_rotation_reuses_a_verified_complete_same_sha_issuance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = host.load_profile("qianyi")
+    issuance = tmp_path / profile.sandbox / SHA
+    issuance.mkdir(parents=True)
+    verified: list[Path] = []
+    monkeypatch.setattr(host, "ISSUANCE_ROOT", tmp_path)
+    monkeypatch.setattr(host, "_link_transaction", _no_link_transaction)
+    monkeypatch.setattr(host, "_recover_activation", lambda *_args: None)
+    monkeypatch.setattr(host, "_invalidate_activation_proofs", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_validate_existing_issuance",
+        lambda _profile, _sha, path: verified.append(path),
+    )
+
+    assert host.prepare_rotation(profile, SHA) == issuance
+    assert verified == [issuance]
 
 
 def _valid_attestation(profile: host.Profile) -> dict[str, object]:

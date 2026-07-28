@@ -20,6 +20,7 @@ import os
 import pwd
 import re
 import secrets
+import shutil
 import socket
 import stat
 import subprocess
@@ -52,10 +53,13 @@ DESIRED_ROOT = CONFIG_ROOT / "desired"
 PROFILE_CONFIG_ROOT = CONFIG_ROOT / "profiles"
 TRANSACTION_ROOT = Path("/var/lib/loom-developer-sandbox-installer/transactions")
 TRANSACTION_LOCK_ROOT = Path("/run/loom-developer-sandbox-installer")
+SOURCE_STAGING_ROOT = Path("/var/lib/loom-developer-sandbox-installer/source")
 COMBINED_RECEIPT_ROOT = Path("/var/lib/loom-shared-capacity/runtime-attestations")
 FLEET_ATTESTATION_ROOT = Path("/var/lib/loom-developer-sandbox-links/attestations")
 REMOTE_LINK_ISSUANCE_ROOT = Path("/var/lib/loom/developer-sandbox-links/issuance")
 REMOTE_LINK_SERVER_ROOT = Path("/etc/loom/developer-sandbox-links/server")
+DOMAIN_RUNTIME_PROGRAM = Path("/usr/local/libexec/loom-developer-domain-runtime")
+DOMAIN_RUNTIME_CONFIG = Path("/etc/loom/developer-runtime-domains.toml")
 UNIT_PATH = Path("/etc/systemd/system/loom-developer-sandbox@.service")
 INSTALLED_PROGRAM = Path("/usr/local/libexec/loom-developer-sandbox-host")
 UNIT_NAME = "loom-developer-sandbox@{sandbox}.service"
@@ -620,6 +624,7 @@ def verify_combined_receipt(
     if (
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
         or (metadata.st_uid, metadata.st_gid) != (0, 0)
         or stat.S_IMODE(metadata.st_mode) != 0o600
     ):
@@ -630,6 +635,17 @@ def verify_combined_receipt(
         raise HostConvergeError("combined activation receipt is invalid") from exc
     if not isinstance(payload, dict):
         raise HostConvergeError("combined activation receipt is invalid")
+    canonical = (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+        + b"\n"
+    )
+    if raw != canonical:
+        raise HostConvergeError("combined activation receipt is not canonical")
     _exact_keys(
         payload,
         {
@@ -678,6 +694,7 @@ def verify_combined_receipt(
         or collected_at > now + timedelta(seconds=30)
         or now - collected_at > RECEIPT_FRESHNESS
         or expires_at <= now
+        or expires_at <= collected_at
         or expires_at - collected_at > ATTESTATION_TTL
     ):
         raise HostConvergeError("combined activation receipt is stale or expired")
@@ -695,8 +712,11 @@ def verify_combined_receipt(
         or FINGERPRINT_RE.fullmatch(fleet["payload_sha256"]) is None
         or fleet_generated > now + timedelta(seconds=30)
         or now - fleet_generated > RECEIPT_FRESHNESS
+        or fleet_generated > collected_at + timedelta(seconds=30)
+        or collected_at - fleet_generated > RECEIPT_FRESHNESS
         or fleet_expires <= now
         or fleet_expires - fleet_generated != ATTESTATION_TTL
+        or fleet_expires < expires_at
     ):
         raise HostConvergeError("combined fleet receipt binding is invalid")
     if set(domains) != {"oldlab", "gb10"}:
@@ -732,8 +752,11 @@ def verify_combined_receipt(
             or row["generation"] < 1
             or published > now + timedelta(seconds=30)
             or now - published > RECEIPT_FRESHNESS
+            or published > collected_at + timedelta(seconds=30)
+            or collected_at - published > ATTESTATION_TTL
             or domain_expires <= now
             or domain_expires - published != ATTESTATION_TTL
+            or domain_expires < expires_at
         ):
             raise HostConvergeError("combined receipt domain binding is invalid")
     return ActivationReceipt(
@@ -820,20 +843,25 @@ def write_desired(
     return previous
 
 
-def _install_assets() -> None:
+def _install_assets(source_root: Path) -> None:
     _ensure_root_private_directory(CONFIG_ROOT)
     _ensure_root_private_directory(DESIRED_ROOT)
     _ensure_root_private_directory(PROFILE_CONFIG_ROOT)
     _atomic_write(
         INSTALLED_PROGRAM,
-        Path(__file__).read_bytes(),
+        (source_root / "scripts/ops/developer_sandbox_host.py").read_bytes(),
         mode=0o755,
     )
-    _atomic_write(UNIT_PATH, SOURCE_UNIT.read_bytes(), mode=0o644)
+    profiles_root = source_root / "deploy/developer-sandboxes"
+    _atomic_write(
+        UNIT_PATH,
+        (profiles_root / "loom-developer-sandbox@.service").read_bytes(),
+        mode=0o644,
+    )
     for sandbox in SANDBOXES:
         _atomic_write(
             PROFILE_CONFIG_ROOT / f"{sandbox}.toml",
-            (SOURCE_PROFILES / f"{sandbox}.toml").read_bytes(),
+            (profiles_root / f"{sandbox}.toml").read_bytes(),
             mode=0o600,
         )
     _run(("systemctl", "daemon-reload"))
@@ -1217,49 +1245,47 @@ def _verify_remote_candidate(
     tree: str,
     shared_gid: int,
 ) -> None:
-    candidate = profile.candidate_root / sha
-    prefix = ("sudo", "-n")
-    metadata = _ssh(
-        node,
-        (*prefix, "stat", "-Lc", "%u:%g:%a", str(candidate)),
-    ).stdout.decode().strip()
-    head = _ssh(
-        node,
-        (*prefix, "git", "-C", str(candidate), "rev-parse", "--verify", "HEAD"),
-    ).stdout.decode().strip()
-    remote_tree = _ssh(
-        node,
-        (*prefix, "git", "-C", str(candidate), "rev-parse", "--verify", "HEAD^{tree}"),
-    ).stdout.decode().strip()
-    status = _ssh(
+    domain = next(
+        (name for name, nodes in DOMAIN_PEERS.items() if node in nodes),
+        None,
+    )
+    if domain is None:
+        raise HostConvergeError("remote candidate node is outside the closed inventory")
+    result = _ssh(
         node,
         (
-            *prefix,
-            "git",
-            "-C",
-            str(candidate),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
+            "sudo",
+            "-n",
+            str(DOMAIN_RUNTIME_PROGRAM),
+            "inspect-candidate",
+            "--config",
+            str(DOMAIN_RUNTIME_CONFIG),
+            "--domain",
+            domain,
+            "--sandbox",
+            profile.sandbox,
+            "--candidate-sha",
+            sha,
+            "--candidate-tree",
+            tree,
         ),
-    ).stdout.decode().strip()
-    writable = _ssh(
-        node,
-        (
-            *prefix,
-            "find",
-            str(candidate),
-            "-xdev",
-            "!",
-            "-type",
-            "l",
-            "-perm",
-            "/022",
-            "-print",
-            "-quit",
-        ),
-    ).stdout.decode().strip()
-    if metadata != f"0:{shared_gid}:2750" or head != sha or remote_tree != tree or status or writable:
+    )
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise HostConvergeError("remote candidate verifier returned invalid JSON") from exc
+    if (
+        not isinstance(report, dict)
+        or report.get("operation") != "inspect-candidate"
+        or report.get("domain") != domain
+        or report.get("sandbox") != profile.sandbox
+        or report.get("candidate_sha") != sha
+        or report.get("candidate_tree") != tree
+        or report.get("candidate_uid") != 0
+        or report.get("candidate_gid") != shared_gid
+        or report.get("candidate_mode") != "2750"
+        or report.get("candidate_clean") is not True
+    ):
         raise HostConvergeError(f"{node} candidate identity or metadata is invalid")
 
 
@@ -1294,6 +1320,387 @@ def _archive_credentials(
             info.gid = 0
             archive.addfile(info, io.BytesIO(content))
     return output.getvalue()
+
+
+def _remove_source_stage(path: Path, sha: str) -> None:
+    if path != SOURCE_STAGING_ROOT / sha:
+        raise HostConvergeError("candidate source staging path is invalid")
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise HostConvergeError("candidate source staging metadata is invalid")
+    shutil.rmtree(path)
+    _fsync_directory(path.parent)
+
+
+@contextmanager
+def _candidate_source_stage(sha: str) -> Iterator[tuple[Path, str]]:
+    if SHA_RE.fullmatch(sha) is None:
+        raise HostConvergeError("candidate SHA must be full lowercase 40-hex")
+    authority = _identity("root", SHARED_GROUP)
+    head = _git(REPO_ROOT, "rev-parse", "--verify", "HEAD", identity=authority)
+    tree = _git(REPO_ROOT, "rev-parse", "--verify", "HEAD^{tree}", identity=authority)
+    status = _git(
+        REPO_ROOT,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        identity=authority,
+    )
+    if head != sha or SHA_RE.fullmatch(tree) is None or status:
+        raise HostConvergeError("installer source is not the clean exact candidate")
+    _ensure_root_private_directory(SOURCE_STAGING_ROOT)
+    stage = SOURCE_STAGING_ROOT / sha
+    # A prior process may have died after staging. The root-private, exact-SHA
+    # namespace is disposable and is always rebuilt from the verified checkout.
+    _remove_source_stage(stage, sha)
+    _ensure_root_private_directory(stage)
+    bundle = stage / "candidate.bundle"
+    temporary = stage / ".candidate.bundle.tmp"
+    manifest = stage / "manifest.json"
+    try:
+        _run(
+            (
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-C",
+                str(REPO_ROOT),
+                "bundle",
+                "create",
+                str(temporary),
+                "HEAD",
+            ),
+            env=_clean_git_environment(),
+        )
+        os.chown(temporary, 0, 0)
+        os.chmod(temporary, 0o600)
+        descriptor = os.open(temporary, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, bundle)
+        _fsync_directory(stage)
+        heads = _run(
+            (
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "bundle",
+                "list-heads",
+                str(bundle),
+            ),
+            env=_clean_git_environment(),
+        ).stdout.splitlines()
+        if heads != [f"{sha} HEAD"]:
+            raise HostConvergeError("candidate source bundle is not exact-HEAD bounded")
+        payload = {
+            "schema_version": 1,
+            "status": "staged",
+            "candidate_sha": sha,
+            "candidate_tree": tree,
+            "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _atomic_write(
+            manifest,
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+            mode=0o600,
+        )
+        yield bundle, tree
+    finally:
+        temporary.unlink(missing_ok=True)
+        _remove_source_stage(stage, sha)
+
+
+def _materialization_archive(bundle: Path, sha: str, tree: str) -> bytes:
+    def committed(relative: str) -> bytes:
+        return _run(
+            (
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-C",
+                str(REPO_ROOT),
+                "show",
+                f"{sha}:{relative}",
+            ),
+            env=_clean_git_environment(),
+        ).stdout.encode()
+
+    files = {
+        "candidate.bundle": (bundle.read_bytes(), 0o600),
+        "developer_sandbox_domain_runtime.py": (
+            committed("scripts/ops/developer_sandbox_domain_runtime.py"),
+            0o700,
+        ),
+        "runtime-domains.toml": (
+            committed("deploy/developer-sandboxes/runtime-domains.toml"),
+            0o600,
+        ),
+        "manifest.json": (
+            (
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "candidate_sha": sha,
+                        "candidate_tree": tree,
+                        "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode(),
+            0o600,
+        ),
+    }
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for name, (content, mode) in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = mode
+            info.uid = 0
+            info.gid = 0
+            archive.addfile(info, io.BytesIO(content))
+    return output.getvalue()
+
+
+def _runtime_bootstrap_archive(sha: str) -> bytes:
+    files: dict[str, tuple[bytes, int]] = {}
+    for relative, target, mode in (
+        (
+            "scripts/ops/developer_sandbox_domain_runtime.py",
+            "developer_sandbox_domain_runtime.py",
+            0o700,
+        ),
+        (
+            "deploy/developer-sandboxes/runtime-domains.toml",
+            "runtime-domains.toml",
+            0o600,
+        ),
+    ):
+        content = _run(
+            (
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-C",
+                str(REPO_ROOT),
+                "show",
+                f"{sha}:{relative}",
+            ),
+            env=_clean_git_environment(),
+        ).stdout.encode()
+        files[target] = (content, mode)
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for name, (content, mode) in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = mode
+            info.uid = 0
+            info.gid = 0
+            archive.addfile(info, io.BytesIO(content))
+    return output.getvalue()
+
+
+def _remote_stage_failure_path(
+    profile: Profile,
+    sha: str,
+    domain: str,
+    node: str,
+) -> Path:
+    return SOURCE_STAGING_ROOT / "failures" / (
+        f"{profile.sandbox}-{sha}-{domain}-{node}.json"
+    )
+
+
+def _cleanup_remote_stage(
+    profile: Profile,
+    sha: str,
+    domain: str,
+    node: str,
+    stage: Path,
+) -> None:
+    failure = _remote_stage_failure_path(profile, sha, domain, node)
+    try:
+        _ssh(node, ("sudo", "-n", "rm", "-rf", "--", str(stage)))
+    except HostConvergeError:
+        _ensure_root_private_directory(failure.parent)
+        _atomic_write(
+            failure,
+            (
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "remote-cleanup-failed",
+                        "sandbox": profile.sandbox,
+                        "candidate_sha": sha,
+                        "domain": domain,
+                        "node": node,
+                        "stage": str(stage),
+                        "recorded_at": datetime.now(UTC).isoformat(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode(),
+            mode=0o600,
+        )
+        raise
+    if failure.exists():
+        failure.unlink()
+        _fsync_directory(failure.parent)
+
+
+def _bootstrap_domain_runtime_hosts(profile: Profile, sha: str) -> None:
+    archive = _runtime_bootstrap_archive(sha)
+    for domain, nodes in DOMAIN_PEERS.items():
+        for node in nodes:
+            stage = Path(
+                f"/run/loom-developer-sandbox-installer/bootstrap/"
+                f"{profile.sandbox}/{sha}/{domain}/{node}",
+            )
+            _cleanup_remote_stage(profile, sha, domain, node, stage)
+            try:
+                _ssh(node, ("sudo", "-n", "install", "-d", "-m", "0700", str(stage)))
+                _ssh(
+                    node,
+                    (
+                        "sudo",
+                        "-n",
+                        "tar",
+                        "--extract",
+                        "--file=-",
+                        "--directory",
+                        str(stage),
+                        "--no-same-owner",
+                        "--no-same-permissions",
+                    ),
+                    input_bytes=archive,
+                )
+                for name, mode in (
+                    ("developer_sandbox_domain_runtime.py", "0700"),
+                    ("runtime-domains.toml", "0600"),
+                ):
+                    _ssh(
+                        node,
+                        ("sudo", "-n", "chown", "root:root", str(stage / name)),
+                    )
+                    _ssh(node, ("sudo", "-n", "chmod", mode, str(stage / name)))
+                _ssh(
+                    node,
+                    (
+                        "sudo",
+                        "-n",
+                        "python3",
+                        str(stage / "developer_sandbox_domain_runtime.py"),
+                        "host-converge",
+                        "--config",
+                        str(stage / "runtime-domains.toml"),
+                        "--domain",
+                        domain,
+                        "--execute",
+                    ),
+                )
+            finally:
+                _cleanup_remote_stage(profile, sha, domain, node, stage)
+
+
+def _materialize_domain_candidates(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    bundle: Path,
+) -> None:
+    archive = _materialization_archive(bundle, sha, tree)
+    for domain, publisher in DOMAIN_PUBLISHERS.items():
+        stage = Path(
+            f"/run/loom-developer-sandbox-installer/source/"
+            f"{profile.sandbox}/{sha}/{domain}",
+        )
+        _cleanup_remote_stage(profile, sha, domain, publisher, stage)
+        try:
+            _ssh(publisher, ("sudo", "-n", "install", "-d", "-m", "0700", str(stage)))
+            _ssh(
+                publisher,
+                (
+                    "sudo",
+                    "-n",
+                    "tar",
+                    "--extract",
+                    "--file=-",
+                    "--directory",
+                    str(stage),
+                    "--no-same-owner",
+                    "--no-same-permissions",
+                ),
+                input_bytes=archive,
+            )
+            for name, mode in (
+                ("candidate.bundle", "0600"),
+                ("developer_sandbox_domain_runtime.py", "0700"),
+                ("runtime-domains.toml", "0600"),
+                ("manifest.json", "0600"),
+            ):
+                _ssh(
+                    publisher,
+                    (
+                        "sudo",
+                        "-n",
+                        "chown",
+                        "root:root",
+                        str(stage / name),
+                    ),
+                )
+                _ssh(
+                    publisher,
+                    ("sudo", "-n", "chmod", mode, str(stage / name)),
+                )
+            _ssh(
+                publisher,
+                (
+                    "sudo",
+                    "-n",
+                    "python3",
+                    str(stage / "developer_sandbox_domain_runtime.py"),
+                    "materialize",
+                    "--config",
+                    str(stage / "runtime-domains.toml"),
+                    "--domain",
+                    domain,
+                    "--sandbox",
+                    profile.sandbox,
+                    "--candidate-sha",
+                    sha,
+                    "--candidate-tree",
+                    tree,
+                    "--source-bundle",
+                    str(stage / "candidate.bundle"),
+                    "--execute",
+                ),
+            )
+        finally:
+            _cleanup_remote_stage(profile, sha, domain, publisher, stage)
 
 
 def _install_remote_link_fleet(
@@ -1335,11 +1742,12 @@ def _install_remote_link_fleet(
             f"/run/loom-developer-sandbox-installer/{profile.sandbox}/{sha}/{node}",
         )
         archive = _archive_credentials(
-            issuance / node,
+            issuance / "clients" / node,
             worker_token=values["LOOM_WORKER_TOKEN"],
             minio_access_key=values["LOOM_DEV_MINIO_ROOT_USER"],
             minio_secret_key=values["LOOM_DEV_MINIO_ROOT_PASSWORD"],
         )
+        _cleanup_remote_stage(profile, sha, "credentials", node, inbox)
         try:
             _ssh(node, ("sudo", "-n", "install", "-d", "-m", "0700", str(inbox)))
             _ssh(
@@ -1384,11 +1792,7 @@ def _install_remote_link_fleet(
                 ),
             )
         finally:
-            _ssh(
-                node,
-                ("sudo", "-n", "rm", "-rf", "--", str(inbox)),
-                expected=frozenset(range(256)),
-            )
+            _cleanup_remote_stage(profile, sha, "credentials", node, inbox)
     _run_candidate_program(
         profile,
         sha,
@@ -1431,7 +1835,7 @@ def _worker_env_seed(profile: Profile, sha: str) -> bytes:
     return _render_env(values)
 
 
-def _publish_domain_attestations(
+def _converge_domain_runtime_hosts(
     profile: Profile,
     sha: str,
     tree: str,
@@ -1439,7 +1843,6 @@ def _publish_domain_attestations(
 ) -> None:
     relative_program = "scripts/ops/developer_sandbox_domain_runtime.py"
     config_relative = "deploy/developer-sandboxes/runtime-domains.toml"
-    seed = _worker_env_seed(profile, sha)
     for domain, nodes in DOMAIN_PEERS.items():
         for node in nodes:
             _verify_remote_candidate(profile, node, sha, tree, authority.gid)
@@ -1459,6 +1862,17 @@ def _publish_domain_attestations(
                     "--execute",
                 ),
             )
+
+
+def _publish_domain_attestations(
+    profile: Profile,
+    sha: str,
+    tree: str,
+) -> None:
+    relative_program = "scripts/ops/developer_sandbox_domain_runtime.py"
+    config_relative = "deploy/developer-sandboxes/runtime-domains.toml"
+    seed = _worker_env_seed(profile, sha)
+    for domain in DOMAIN_PEERS:
         publisher = DOMAIN_PUBLISHERS[domain]
         seed_path = Path(
             f"/run/loom-developer-sandbox-installer/{profile.sandbox}-{sha}-{domain}.env",
@@ -1472,6 +1886,13 @@ def _publish_domain_attestations(
             info.gid = 0
             tar.addfile(info, io.BytesIO(seed))
         try:
+            _cleanup_remote_stage(
+                profile,
+                sha,
+                f"{domain}-env",
+                publisher,
+                seed_path,
+            )
             _ssh(
                 publisher,
                 ("sudo", "-n", "install", "-d", "-m", "0700", str(seed_path.parent)),
@@ -1499,7 +1920,7 @@ def _publish_domain_attestations(
                     "-n",
                     "python3",
                     str(candidate / relative_program),
-                    "publish",
+                    "attest",
                     "--config",
                     str(candidate / config_relative),
                     "--domain",
@@ -1508,18 +1929,20 @@ def _publish_domain_attestations(
                     profile.sandbox,
                     "--candidate-sha",
                     sha,
-                    "--source-repo",
-                    str(candidate),
+                    "--candidate-tree",
+                    tree,
                     "--worker-env-seed",
                     str(seed_path),
                     "--execute",
                 ),
             )
         finally:
-            _ssh(
+            _cleanup_remote_stage(
+                profile,
+                sha,
+                f"{domain}-env",
                 publisher,
-                ("sudo", "-n", "rm", "-f", "--", str(seed_path)),
-                expected=frozenset(range(256)),
+                seed_path,
             )
     _run_candidate_program(
         profile,
@@ -1677,9 +2100,24 @@ def verify_candidate_consumer(profile: Profile, sha: str, identity: Identity) ->
 
 
 def verify_candidate_profile_bytes(profile: Profile, sha: str, publisher: Identity) -> None:
-    source = SOURCE_PROFILES / f"{profile.sandbox}.toml"
+    relative = f"deploy/developer-sandboxes/{profile.sandbox}.toml"
     candidate = profile.candidate_root / sha / f"deploy/developer-sandboxes/{profile.sandbox}.toml"
-    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    source = _run(
+        (
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-C",
+            str(REPO_ROOT),
+            "show",
+            f"{sha}:{relative}",
+        ),
+        env=_clean_git_environment(),
+        identity=publisher,
+    )
+    expected = hashlib.sha256(source.stdout.encode()).hexdigest()
     result = _run(("sha256sum", str(candidate)), identity=publisher)
     actual = result.stdout.split(maxsplit=1)[0] if result.stdout else ""
     if actual != expected:
@@ -1838,6 +2276,32 @@ def _activation_lock(profile: Profile) -> Iterator[None]:
         os.close(descriptor)
 
 
+@contextmanager
+def _install_lock() -> Iterator[None]:
+    _ensure_root_private_directory(TRANSACTION_LOCK_ROOT)
+    lock_path = TRANSACTION_LOCK_ROOT / "install.lock"
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        ):
+            raise HostConvergeError("global install lock metadata is invalid")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def _write_transaction(
     profile: Profile,
     *,
@@ -1848,14 +2312,31 @@ def _write_transaction(
     previous_relay_sha: str | None,
 ) -> None:
     now = datetime.now(UTC)
+    existing = _load_json(_transaction_file(profile), "sandbox activation transaction")
+    started_at = now
+    expires_at = now + TRANSACTION_TTL
+    if (
+        isinstance(existing, dict)
+        and existing.get("sandbox") == profile.sandbox
+        and existing.get("candidate_sha") == sha
+        and existing.get("candidate_tree") == tree
+    ):
+        started_at = _parse_attestation_time(
+            existing.get("started_at"),
+            "transaction started_at",
+        )
+        expires_at = _parse_attestation_time(
+            existing.get("expires_at"),
+            "transaction expires_at",
+        )
     payload = {
         "schema_version": 1,
         "sandbox": profile.sandbox,
         "candidate_sha": sha,
         "candidate_tree": tree,
         "phase": phase,
-        "started_at": now.isoformat(),
-        "expires_at": (now + TRANSACTION_TTL).isoformat(),
+        "started_at": started_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
         "previous_desired": dict(previous_desired) if previous_desired is not None else None,
         "previous_relay_sha": previous_relay_sha,
     }
@@ -2006,24 +2487,35 @@ def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> No
     _remove_transaction(profile)
 
 
-def install(profiles: Sequence[Profile], sha: str) -> None:
-    _require_live_host()
+def _install_materialized(
+    profiles: Sequence[Profile],
+    sha: str,
+    source_bundle: Path,
+    source_tree: str,
+) -> None:
     authority = _identity("root", SHARED_GROUP)
-    verify_nfs_mount()
-    verify_state_parent()
-    _install_assets()
+    assets_installed = False
     fingerprints: dict[tuple[str, str], str] = {}
     candidates: list[tuple[Profile, str, Identity]] = []
+    if profiles:
+        _bootstrap_domain_runtime_hosts(profiles[0], sha)
     for profile in profiles:
         owner = _identity(profile.sandbox, SHARED_GROUP)
         runtime_group = _identity(profile.sandbox, f"loom-sandbox-{profile.sandbox}")
         verify_developer_docker_access(owner)
         ensure_secret_files(profile, owner)
+        _materialize_domain_candidates(profile, sha, source_tree, source_bundle)
         verify_candidate_root(profile, authority)
         tree = verify_candidate(profile, profile.candidate_root / sha, sha, authority)
+        if tree != source_tree:
+            raise HostConvergeError("materialized candidate tree differs from source bundle")
+        if not assets_installed:
+            _install_assets(profile.candidate_root / sha)
+            assets_installed = True
         verify_candidate_profile_bytes(profile, sha, authority)
         verify_candidate_consumer(profile, sha, owner)
         require_migration_compatible_update(profile, sha, authority)
+        _converge_domain_runtime_hosts(profile, sha, tree, authority)
         values = _parse_env_file(profile.secrets_env)
         admin = _read_admin_token(profile.admin_secret)
         for key in (
@@ -2085,7 +2577,7 @@ def install(profiles: Sequence[Profile], sha: str) -> None:
                     previous_desired=previous,
                     previous_relay_sha=previous_relay,
                 )
-                _publish_domain_attestations(profile, sha, tree, authority)
+                _publish_domain_attestations(profile, sha, tree)
                 verify_worker_runtime_env(profile, sha, runtime_group)
                 receipt = verify_combined_receipt(profile, sha, tree)
                 _write_transaction(
@@ -2118,17 +2610,31 @@ def install(profiles: Sequence[Profile], sha: str) -> None:
                     previous_relay_sha=previous_relay,
                 )
                 _remove_transaction(profile)
-            except HostConvergeError:
+            except Exception:
                 transaction = _transaction_payload(profile)
                 if transaction is not None:
                     try:
                         _recover_transaction(profile, transaction)
-                    except HostConvergeError as recovery_exc:
+                    except Exception as recovery_exc:
                         raise HostConvergeError(
                             f"{profile.sandbox} activation and previous-candidate "
                             "recovery both failed",
                         ) from recovery_exc
                 raise
+
+
+def install(profiles: Sequence[Profile], sha: str) -> None:
+    _require_live_host()
+    verify_nfs_mount()
+    verify_state_parent()
+    with _install_lock():
+        with _candidate_source_stage(sha) as (source_bundle, source_tree):
+            _install_materialized(
+                profiles,
+                sha,
+                source_bundle,
+                source_tree,
+            )
 
 
 def _select_profiles(all_profiles: Sequence[Profile], sandbox: str) -> tuple[Profile, ...]:

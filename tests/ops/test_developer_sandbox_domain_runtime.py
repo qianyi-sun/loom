@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,6 +112,45 @@ def test_paths_bind_domain_specific_env_to_same_exact_candidate_sha() -> None:
     )
 
 
+def test_host_converge_creates_empty_candidate_namespace_before_materialize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    shared = tmp_path / "shared_work"
+    shared.mkdir()
+    domain = replace(
+        config.domains["oldlab"],
+        candidate_root=shared / "loom/candidates/sandboxes",
+        publisher_hostname="publisher",
+    )
+    config = replace(config, domains={**config.domains, "oldlab": domain})
+    monkeypatch.setattr(runtime, "_require_root", lambda: None)
+    monkeypatch.setattr(runtime, "_hostname", lambda: "publisher")
+    monkeypatch.setattr(
+        runtime,
+        "identity_plan",
+        lambda *_args: {
+            "groups": {sandbox: "ok" for sandbox in runtime.ALLOWED_SANDBOXES},
+        },
+    )
+    monkeypatch.setattr(runtime, "_group_status", lambda *_args: "ok")
+    monkeypatch.setattr(runtime, "_user_has_group", lambda *_args: True)
+    monkeypatch.setattr(runtime, "_atomic_install", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_ensure_attestation_key", lambda *_args: "a" * 64)
+    monkeypatch.setattr(os, "chown", lambda *_args: None)
+
+    runtime.converge_host(_CONFIG, config, domain)
+
+    for path in (
+        shared / "loom",
+        shared / "loom/candidates",
+        shared / "loom/candidates/sandboxes",
+    ):
+        assert path.is_dir()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o2750
+
+
 def test_publish_plan_is_exact_sha_and_secret_safe(tmp_path: Path) -> None:
     config = runtime.load_config(_CONFIG)
     repo, sha = _repository(tmp_path)
@@ -137,6 +179,120 @@ def test_publish_plan_is_exact_sha_and_secret_safe(tmp_path: Path) -> None:
         "oldlab-4",
         "oldlab-5",
     ]
+
+
+def test_raw_candidate_verifier_rejects_skip_worktree_byte_drift(tmp_path: Path) -> None:
+    repo, _sha = _repository(tmp_path)
+    runtime._verify_candidate_raw_tree(repo)
+    _git(repo, "update-index", "--skip-worktree", "README.md")
+    (repo / "README.md").write_text("hidden drift\n", encoding="utf-8")
+
+    with pytest.raises(runtime.ConvergenceError, match="hidden worktree flags"):
+        runtime._verify_candidate_raw_tree(repo)
+
+
+def test_materialize_is_independent_of_fleet_and_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    domain = config.domains["oldlab"]
+    identity = runtime.CandidateIdentity("a" * 40, "b" * 40)
+    candidate = tmp_path / "candidates" / "qianyi" / identity.sha
+    reports = [
+        {
+            "hostname": peer.hostname,
+            "candidate_inode": 41,
+        }
+        for peer in domain.peers
+    ]
+    monkeypatch.setattr(runtime, "_require_root", lambda: None)
+    monkeypatch.setattr(runtime, "_hostname", lambda: domain.publisher_hostname)
+    monkeypatch.setattr(runtime, "_transaction_lock", lambda *_args: _no_lock())
+    monkeypatch.setattr(
+        runtime,
+        "_materialization_path",
+        lambda *_args: tmp_path / "materialization.json",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "runtime_paths",
+        lambda *_args: SimpleNamespace(candidate=candidate, env=tmp_path / "never.env"),
+    )
+    monkeypatch.setattr(runtime, "_require_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_publish_candidate", lambda *_args: True)
+    monkeypatch.setattr(runtime, "_peer_candidate_readback", lambda *_args: reports)
+    monkeypatch.setattr(os, "chown", lambda *_args: None)
+    monkeypatch.setattr(
+        runtime,
+        "_read_and_verify_fleet",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fleet was read")),
+    )
+
+    report = runtime.converge_materialize(
+        config,
+        domain,
+        "qianyi",
+        tmp_path / "candidate.bundle",
+        identity,
+    )
+
+    assert report["fleet_attestation"] == "not-read"
+    assert report["runtime_env"] == "not-written"
+    assert report["domain_attestation"] == "not-written"
+
+
+@contextmanager
+def _no_lock() -> object:
+    yield
+
+
+def test_attest_requires_fresh_fleet_before_any_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    domain = config.domains["oldlab"]
+    identity = runtime.CandidateIdentity("a" * 40, "b" * 40)
+    mutations: list[str] = []
+    monkeypatch.setattr(runtime, "_recover_orphaned_transactions", lambda *_args: None)
+    monkeypatch.setattr(
+        runtime,
+        "_read_and_verify_fleet",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runtime.ConvergenceError("remote-link fleet attestation is unavailable"),
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "attest_plan",
+        lambda *_args: mutations.append("plan") or {},
+    )
+
+    with pytest.raises(runtime.ConvergenceError, match="fleet attestation is unavailable"):
+        runtime._converge_attest_locked(
+            config,
+            domain,
+            "qianyi",
+            Path("/run/worker.env"),
+            identity,
+        )
+
+    assert mutations == []
+
+
+def test_transaction_json_replace_is_fsynced_to_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "state" / "phase.json"
+    fsynced: list[Path] = []
+    monkeypatch.setattr(os, "chown", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_fsync_directory", fsynced.append)
+
+    runtime._write_json(target, {"status": "published"})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"status": "published"}
+    assert fsynced == [target.parent]
 
 
 def test_secret_seed_rejects_group_or_world_access(tmp_path: Path) -> None:
@@ -1034,3 +1190,67 @@ def test_rollback_resumes_after_attestation_restore_crash(
     assert restored == [b"old-env\n"]
     assert result["status"] == "rolled-back"
     assert "rollback_phase" not in result
+
+
+def test_pending_reattest_rollback_restores_prior_attestation_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    sha = "a" * 40
+    old_manifest = b'{"old":true}\n'
+    old_signature = b"b2xkLXNpZw==\n"
+    current_env = tmp_path / "worker.env"
+    current_env.write_bytes(b"new-env\n")
+    manifest = tmp_path / "oldlab.json"
+    signature = tmp_path / "oldlab.sig"
+    manifest.write_bytes(b'{"partial":"new"}\n')
+    signature.write_bytes(b"cGFydGlhbA==\n")
+    receipt = {
+        "schema_version": 1,
+        "status": "mutating",
+        "domain": "oldlab",
+        "sandbox": "qianyi",
+        "candidate_sha": sha,
+        "candidate_tree": "b" * 40,
+        "candidate_created": False,
+        "env_previously_existed": False,
+        "previous_env_sha256": None,
+        "published_env_sha256": runtime.hashlib.sha256(b"new-env\n").hexdigest(),
+        "attestation_previously_existed": True,
+        "previous_attestation_payload_sha256": runtime.hashlib.sha256(
+            old_manifest,
+        ).hexdigest(),
+        "previous_attestation_signature_sha256": runtime.hashlib.sha256(
+            old_signature,
+        ).hexdigest(),
+        "attestation_pending": True,
+    }
+    monkeypatch.setattr(runtime, "_read_rollback_receipt", lambda *_args: receipt)
+    monkeypatch.setattr(
+        runtime,
+        "runtime_paths",
+        lambda *_args: SimpleNamespace(env=current_env, candidate=tmp_path / "candidate"),
+    )
+    monkeypatch.setattr(runtime, "_attestation_paths", lambda *_args: (manifest, signature))
+
+    def snapshot(_path: Path, _digest: object, label: str) -> bytes:
+        return old_signature if "signature" in label else old_manifest
+
+    monkeypatch.setattr(runtime, "_secure_snapshot", snapshot)
+    monkeypatch.setattr(
+        runtime,
+        "_atomic_bytes",
+        lambda target, content, **_kwargs: target.write_bytes(content),
+    )
+    monkeypatch.setattr(runtime, "_write_json", lambda *_args, **_kwargs: None)
+
+    result = runtime._rollback_locked(
+        config,
+        tmp_path / "receipt.json",
+        allow_committed=False,
+    )
+
+    assert manifest.read_bytes() == old_manifest
+    assert signature.read_bytes() == old_signature
+    assert result["status"] == "rolled-back"
