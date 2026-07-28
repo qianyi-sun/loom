@@ -79,6 +79,30 @@ loom-staging-rollout cancel REQUEST_ID --reason "bounded operational reason"
 loom-staging-rollout cleanup-incomplete-backup REQUEST_ID
 ```
 
+The repository also defines the generalized root-installed entry point:
+
+```bash
+loom-rollout --env dev status
+loom-rollout --env staging status
+loom-rollout --env prod status
+```
+
+`--env` accepts only those three short names. The installed candidate maps each
+one to an immutable authority: `loom-{dev,staging,prod}-operators`, the reviewed
+`dev` or `main` ref, its formal environment, namespace, cluster, config,
+candidate-runtime, state/runtime/data, kubeconfig, client, and broker paths.
+The selected root-owned config must match every binding; a group, ref,
+namespace, or path borrowed from another environment fails before rollout
+dependencies are constructed. `loom-staging-rollout` remains a compatibility
+entry point and is exactly `loom-rollout --env staging`.
+
+The staging installer publishes and attests the generic client/broker plus the
+three group-scoped sudoers commands, but it provisions only the existing
+staging config and runtime. It does not create the dev/prod groups, configs,
+directories, candidates, credentials, or services and does not authorize
+their installation or activation. Those remain separate administrator and
+live-rollout actions under #877.
+
 A disconnected terminal does not stop the service unit. Do not run a personal
 systemd unit, hand-edit host checkouts or `.env`, write desired-state rows with
 SQL/curl, invoke per-host `gb10-agent apply`, force a lifecycle/rollout lock,

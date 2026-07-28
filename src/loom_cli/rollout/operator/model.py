@@ -13,6 +13,7 @@ from typing import Literal, cast, get_args
 APPROVED_REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
 APPROVED_FETCH_REF = "refs/heads/dev"
 PINNED_TARGET_REF = "origin/dev"
+PINNED_TARGET_REFS = frozenset({"origin/dev", "origin/main"})
 
 SchemaVersion = Literal[1]
 CandidateSourceMode = Literal["merged-dev", "sealed-cumulative"]
@@ -255,11 +256,12 @@ class CandidateBinding:
     def __post_init__(self) -> None:
         if self.remote_url != APPROVED_REMOTE_URL:
             raise ValueError("remote_url is not approved")
-        if self.target_ref != PINNED_TARGET_REF:
-            raise ValueError(f"target_ref must be {PINNED_TARGET_REF}")
+        if self.target_ref not in PINNED_TARGET_REFS:
+            raise ValueError("target_ref must be origin/dev or origin/main")
         sha = _require_sha(self.resolved_sha, "resolved_sha")
-        if self.image_tag != f"staging-{sha[:7]}":
-            raise ValueError("image_tag must be staging-<resolved_sha[:7]>")
+        allowed_prefixes = ("dev", "staging") if self.target_ref == "origin/dev" else ("prod",)
+        if self.image_tag not in {f"{prefix}-{sha[:7]}" for prefix in allowed_prefixes}:
+            raise ValueError("image_tag does not match the target ref and resolved SHA")
         _require_string(self.fetched_at, "fetched_at")
         if self.source_mode not in {"merged-dev", "sealed-cumulative"}:
             raise ValueError("source_mode is invalid")
@@ -380,11 +382,19 @@ class PreflightRequest:
         _require_sha256(self.preflight_registry_sha256, "preflight_registry_sha256")
         _require_sha256(self.preflight_coverage_sha256, "preflight_coverage_sha256")
         _require_nonnegative_int(self.mutation_epoch, "mutation_epoch")
-        if self.environment != "staging":
-            raise ValueError("preflight request environment must be staging")
+        namespace_by_environment = {
+            "development": "loom-dev",
+            "staging": "loom-staging",
+            "production": "loom-prod",
+        }
+        expected_namespace = namespace_by_environment.get(self.environment)
+        if expected_namespace is None:
+            raise ValueError("preflight request environment is not protected")
         namespace = _require_string(self.namespace, "namespace")
         if namespace != namespace.strip():
             raise ValueError("namespace must not contain surrounding whitespace")
+        if namespace != expected_namespace:
+            raise ValueError("preflight request namespace does not match environment")
         _require_literal(self.command, _REQUEST_COMMANDS, "command", "request command")
         _require_literal(self.status, _REQUEST_STATUSES, "status", "request status")
         _require_schema(self.schema_version)
@@ -679,11 +689,22 @@ class DriverEnvelope:
         _require_nonnegative_int(self.attempt_uid, "attempt_uid")
         if self.remote_url != APPROVED_REMOTE_URL:
             raise ValueError("remote_url is not approved")
-        if self.target_ref != PINNED_TARGET_REF:
-            raise ValueError(f"target_ref must be {PINNED_TARGET_REF}")
+        if self.target_ref not in PINNED_TARGET_REFS:
+            raise ValueError("target_ref must be origin/dev or origin/main")
         sha = _require_sha(self.resolved_sha, "resolved_sha")
-        if self.image_tag != f"staging-{sha[:7]}":
-            raise ValueError("image_tag must be staging-<resolved_sha[:7]>")
+        environment_bindings = {
+            "development": ("dev", "origin/dev", "loom-dev"),
+            "staging": ("staging", "origin/dev", "loom-staging"),
+            "production": ("prod", "origin/main", "loom-prod"),
+        }
+        binding = environment_bindings.get(self.environment)
+        if binding is None:
+            raise ValueError("environment is not a protected rollout environment")
+        prefix, target_ref, namespace = binding
+        if self.target_ref != target_ref:
+            raise ValueError("target_ref does not match environment")
+        if self.image_tag != f"{prefix}-{sha[:7]}":
+            raise ValueError("image_tag does not match environment and resolved SHA")
         if self.source_mode not in {"merged-dev", "sealed-cumulative"}:
             raise ValueError("source_mode is invalid")
         if self.source_mode == "sealed-cumulative":
@@ -707,12 +728,10 @@ class DriverEnvelope:
         _require_sha256(self.preflight_attestation_sha256, "preflight_attestation_sha256")
         _require_sha256(self.preflight_registry_sha256, "preflight_registry_sha256")
         _require_sha256(self.preflight_coverage_sha256, "preflight_coverage_sha256")
-        if self.cluster_name != "loom-staging":
-            raise ValueError("cluster_name must be loom-staging")
-        if self.namespace != "loom-staging":
-            raise ValueError("namespace must be loom-staging")
-        if self.environment != "staging":
-            raise ValueError("environment must be staging")
+        if self.cluster_name != namespace:
+            raise ValueError("cluster_name does not match environment")
+        if self.namespace != namespace:
+            raise ValueError("namespace does not match environment")
         if self.cp_url != "http://127.0.0.1:18081":
             raise ValueError("cp_url must be http://127.0.0.1:18081")
         _require_absolute_path(self.cluster_config_path, "cluster_config_path")

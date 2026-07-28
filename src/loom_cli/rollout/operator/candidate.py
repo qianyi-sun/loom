@@ -15,16 +15,14 @@ from pathlib import Path
 from typing import Protocol
 
 from .config import (
-    CANDIDATE_CLUSTER_CONFIG,
     ConfigError,
     OperatorConfig,
     _read_protected_config,
     candidate_sha_from_runner_repo,
+    environment_authority,
 )
 from .model import (
-    APPROVED_FETCH_REF,
     APPROVED_REMOTE_URL,
-    PINNED_TARGET_REF,
     CandidateBinding,
 )
 
@@ -181,7 +179,11 @@ def _validate_immutable_runtime_tree(runtime_root: Path) -> None:
 
 def _configured_candidate_sha(config: OperatorConfig) -> str:
     try:
-        return candidate_sha_from_runner_repo(config.runner_repo)
+        if config.short_name == "staging":
+            return candidate_sha_from_runner_repo(config.runner_repo)
+        return candidate_sha_from_runner_repo(
+            config.runner_repo, authority=environment_authority(config.short_name)
+        )
     except ConfigError as exc:
         raise CandidateBindingError("candidate runtime path is not exact") from exc
 
@@ -198,7 +200,8 @@ def _validate_installed_runtime(config: OperatorConfig) -> str:
         raise CandidateBindingError("candidate runtime path is unavailable") from exc
     if resolved_repo != config.runner_repo:
         raise CandidateBindingError("candidate runtime path contains a symlink")
-    if config.cluster_config_path != config.runner_repo / CANDIDATE_CLUSTER_CONFIG:
+    authority = environment_authority(config.short_name)
+    if config.cluster_config_path != config.runner_repo / authority.candidate_cluster_config:
         raise CandidateBindingError("candidate cluster config is not bound to its runtime")
     if config.source_mode == "sealed-cumulative" and config.source_commit_sha != expected_sha:
         raise CandidateBindingError("sealed candidate runtime path drifted")
@@ -279,14 +282,15 @@ def bind_fresh_origin_dev(
     """
     if config.remote_url != APPROVED_REMOTE_URL:
         raise CandidateBindingError("config does not contain the approved remote URL")
-    if config.target_ref != APPROVED_FETCH_REF:
+    authority = environment_authority(config.short_name)
+    if config.target_ref != authority.target_ref:
         raise CandidateBindingError("config does not contain the approved target ref")
     resolved_sha = _configured_candidate_sha(config)
     binding = CandidateBinding(
         remote_url=APPROVED_REMOTE_URL,
-        target_ref=PINNED_TARGET_REF,
+        target_ref=authority.pinned_target_ref,
         resolved_sha=resolved_sha,
-        image_tag=f"staging-{resolved_sha[:7]}",
+        image_tag=f"{authority.short_name}-{resolved_sha[:7]}",
         fetched_at=_utc_timestamp(now()),
     )
     # The git tree of the resolved commit is a real, derivable identity that the
@@ -315,11 +319,12 @@ def bind_configured_candidate(
     ):
         raise CandidateBindingError("sealed candidate config binding is incomplete")
 
+    authority = environment_authority(config.short_name)
     binding = CandidateBinding(
         remote_url=APPROVED_REMOTE_URL,
-        target_ref=PINNED_TARGET_REF,
+        target_ref=authority.pinned_target_ref,
         resolved_sha=config.source_commit_sha,
-        image_tag=f"staging-{config.source_commit_sha[:7]}",
+        image_tag=f"{authority.short_name}-{config.source_commit_sha[:7]}",
         fetched_at=_utc_timestamp(now()),
         source_mode="sealed-cumulative",
         resolved_tree=config.source_tree_sha,

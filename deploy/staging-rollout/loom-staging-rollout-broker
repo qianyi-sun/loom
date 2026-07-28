@@ -1,39 +1,4 @@
 #!/bin/sh
 set -eu
-umask 077
 
-case "${SUDO_USER-}" in
-  ""|*[!a-zA-Z0-9_-]*)
-    echo "error: authenticated sudo caller is unavailable" >&2
-    exit 1
-    ;;
-esac
-case "${SUDO_UID-}:${SUDO_GID-}" in
-  *[!0-9:]*|:*|*:|*:*:*)
-    echo "error: authenticated sudo caller ids are unavailable" >&2
-    exit 1
-    ;;
-esac
-
-service_uid=$(/usr/bin/id -u)
-runtime_dir="/run/user/${service_uid}"
-
-exec /usr/bin/env -i \
-  HOME=/var/lib/loom-staging-rollout \
-  USER=loom-rollout \
-  LOGNAME=loom-rollout \
-  PATH=__CANDIDATE_VENV__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  LANG=C.UTF-8 \
-  LC_ALL=C.UTF-8 \
-  PYTHONDONTWRITEBYTECODE=1 \
-  GIT_CONFIG_NOSYSTEM=1 \
-  GIT_CONFIG_GLOBAL=/dev/null \
-  GIT_TERMINAL_PROMPT=0 \
-  XDG_RUNTIME_DIR="${runtime_dir}" \
-  DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/bus" \
-  KUBECONFIG=/var/lib/loom-staging-rollout/kubeconfig \
-  LOOM_STAGING_ROLLOUT_CONFIG=/etc/loom/staging-rollout.toml \
-  SUDO_USER="${SUDO_USER}" \
-  SUDO_UID="${SUDO_UID}" \
-  SUDO_GID="${SUDO_GID}" \
-  __CANDIDATE_VENV__/bin/python -I -B -m loom_cli.rollout.operator.broker "$@"
+exec /usr/local/libexec/loom-rollout-broker --env staging "$@"

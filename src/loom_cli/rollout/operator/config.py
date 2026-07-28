@@ -1,4 +1,4 @@
-"""Strict root-owned configuration for the staging rollout operator."""
+"""Strict root-owned configuration for protected rollout operators."""
 
 from __future__ import annotations
 
@@ -13,24 +13,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from .model import APPROVED_FETCH_REF, APPROVED_REMOTE_URL, SchemaVersion
+from .model import APPROVED_REMOTE_URL, SchemaVersion
 
 APPROVED_SERVICE_USER = "loom-rollout"
-APPROVED_OPERATOR_GROUP = "loom-staging-operators"
-APPROVED_CLUSTER_NAME = "loom-staging"
-APPROVED_NAMESPACE = "loom-staging"
-APPROVED_ENVIRONMENT = "staging"
-APPROVED_CP_URL = "http://127.0.0.1:18081"
 APPROVED_SCOPE = "current-gb10"
 APPROVED_BACKUP_MAX_OBJECTS = 1_000_000
 APPROVED_BACKUP_MAX_ENTRIES = 16_000_000
-CANDIDATE_RUNTIME_ROOT = Path("/opt/loom-staging-runner/candidates")
 CANDIDATE_REPO_NAME = "repo"
-CANDIDATE_CLUSTER_CONFIG = Path("deploy/environments/staging.cluster.toml")
 
 ServiceUser = Literal["loom-rollout"]
-OperatorGroup = Literal["loom-staging-operators"]
-Environment = Literal["staging"]
+EnvironmentShortName = Literal["dev", "staging", "prod"]
+OperatorGroup = Literal[
+    "loom-dev-operators",
+    "loom-staging-operators",
+    "loom-prod-operators",
+]
+Environment = Literal["development", "staging", "production"]
 RolloutScope = Literal["current-gb10"]
 CandidateSourceMode = Literal["merged-dev", "sealed-cumulative"]
 
@@ -76,16 +74,120 @@ class ConfigError(ValueError):
     """Raised when the protected runner configuration fails closed."""
 
 
-def candidate_sha_from_runner_repo(path: Path) -> str:
+@dataclass(frozen=True, slots=True)
+class RolloutEnvironmentAuthority:
+    """Immutable installed bindings selected only by a reviewed short name."""
+
+    short_name: EnvironmentShortName
+    environment: Environment
+    operator_group: OperatorGroup
+    target_ref: str
+    pinned_target_ref: str
+    cluster_name: str
+    namespace: str
+    cp_url: str
+    config_path: Path
+    candidate_runtime_root: Path
+    candidate_cluster_config: Path
+    state_root: Path
+    runtime_root: Path
+    rollout_root: Path
+    kubeconfig_path: Path
+    client_path: Path = Path("/usr/local/bin/loom-rollout")
+    broker_path: Path = Path("/usr/local/libexec/loom-rollout-broker")
+
+
+_ENVIRONMENT_AUTHORITIES: dict[EnvironmentShortName, RolloutEnvironmentAuthority] = {
+    "dev": RolloutEnvironmentAuthority(
+        short_name="dev",
+        environment="development",
+        operator_group="loom-dev-operators",
+        target_ref="refs/heads/dev",
+        pinned_target_ref="origin/dev",
+        cluster_name="loom-dev",
+        namespace="loom-dev",
+        cp_url="http://127.0.0.1:18081",
+        config_path=Path("/etc/loom/dev-rollout.toml"),
+        candidate_runtime_root=Path("/opt/loom-dev-runner/candidates"),
+        candidate_cluster_config=Path("deploy/environments/development.cluster.toml"),
+        state_root=Path("/var/lib/loom-dev-rollout"),
+        runtime_root=Path("/run/loom-dev-rollout"),
+        rollout_root=Path("/data/loom-dev"),
+        kubeconfig_path=Path("/var/lib/loom-dev-rollout/kubeconfig"),
+    ),
+    "staging": RolloutEnvironmentAuthority(
+        short_name="staging",
+        environment="staging",
+        operator_group="loom-staging-operators",
+        target_ref="refs/heads/dev",
+        pinned_target_ref="origin/dev",
+        cluster_name="loom-staging",
+        namespace="loom-staging",
+        cp_url="http://127.0.0.1:18081",
+        config_path=Path("/etc/loom/staging-rollout.toml"),
+        candidate_runtime_root=Path("/opt/loom-staging-runner/candidates"),
+        candidate_cluster_config=Path("deploy/environments/staging.cluster.toml"),
+        state_root=Path("/var/lib/loom-staging-rollout"),
+        runtime_root=Path("/run/loom-staging-rollout"),
+        rollout_root=Path("/data/loom-staging"),
+        kubeconfig_path=Path("/var/lib/loom-staging-rollout/kubeconfig"),
+    ),
+    "prod": RolloutEnvironmentAuthority(
+        short_name="prod",
+        environment="production",
+        operator_group="loom-prod-operators",
+        target_ref="refs/heads/main",
+        pinned_target_ref="origin/main",
+        cluster_name="loom-prod",
+        namespace="loom-prod",
+        cp_url="http://127.0.0.1:18081",
+        config_path=Path("/etc/loom/prod-rollout.toml"),
+        candidate_runtime_root=Path("/opt/loom-prod-runner/candidates"),
+        candidate_cluster_config=Path("deploy/environments/production.cluster.toml"),
+        state_root=Path("/var/lib/loom-prod-rollout"),
+        runtime_root=Path("/run/loom-prod-rollout"),
+        rollout_root=Path("/data/loom-prod"),
+        kubeconfig_path=Path("/var/lib/loom-prod-rollout/kubeconfig"),
+    ),
+}
+
+STAGING_AUTHORITY = _ENVIRONMENT_AUTHORITIES["staging"]
+APPROVED_OPERATOR_GROUP = STAGING_AUTHORITY.operator_group
+APPROVED_CLUSTER_NAME = STAGING_AUTHORITY.cluster_name
+APPROVED_NAMESPACE = STAGING_AUTHORITY.namespace
+APPROVED_ENVIRONMENT = STAGING_AUTHORITY.environment
+APPROVED_CP_URL = STAGING_AUTHORITY.cp_url
+CANDIDATE_RUNTIME_ROOT = STAGING_AUTHORITY.candidate_runtime_root
+CANDIDATE_CLUSTER_CONFIG = STAGING_AUTHORITY.candidate_cluster_config
+
+
+def environment_authority(short_name: str) -> RolloutEnvironmentAuthority:
+    """Resolve one exact authority without aliases or normalization."""
+    try:
+        return _ENVIRONMENT_AUTHORITIES[cast(EnvironmentShortName, short_name)]
+    except KeyError as exc:
+        raise ConfigError("rollout environment must be one of: dev, staging, prod") from exc
+
+
+def candidate_sha_from_runner_repo(
+    path: Path,
+    *,
+    authority: RolloutEnvironmentAuthority | None = None,
+) -> str:
     """Return the full SHA encoded by one installer-published candidate path."""
+    candidate_runtime_root = (
+        CANDIDATE_RUNTIME_ROOT
+        if authority is None
+        else authority.candidate_runtime_root
+    )
     if (
         not path.is_absolute()
         or ".." in path.parts
         or path.name != CANDIDATE_REPO_NAME
-        or path.parent.parent != CANDIDATE_RUNTIME_ROOT
+        or path.parent.parent != candidate_runtime_root
         or _SHA_RE.fullmatch(path.parent.name) is None
     ):
-        raise ConfigError("runner_repo must be /opt/loom-staging-runner/candidates/<full-sha>/repo")
+        raise ConfigError(f"runner_repo must be {candidate_runtime_root}/<full-sha>/repo")
     return path.parent.name
 
 
@@ -266,12 +368,14 @@ class OperatorConfig:
     source_commit_sha: str | None = None
     source_tree_sha: str | None = None
     source_base_sha: str | None = None
+    short_name: EnvironmentShortName = "staging"
 
     @classmethod
     def load(
         cls,
         path: Path,
         *,
+        authority: RolloutEnvironmentAuthority = STAGING_AUTHORITY,
         expected_owner_uid: int | None = None,
         expected_owner_gid: int | None = None,
         expected_mode: int | None = None,
@@ -291,6 +395,8 @@ class OperatorConfig:
                 raise ConfigError("approved service account UID is invalid")
             if account.pw_gid != group_gid or group_gid <= 0:
                 raise ConfigError("approved service account primary group is invalid")
+            if path != authority.config_path:
+                raise ConfigError(f"installed config path must be {authority.config_path}")
             expected_owner_gid = group_gid
             expected_mode = 0o640
         if expected_owner_uid is None:  # pragma: no cover - narrowed above
@@ -350,13 +456,13 @@ class OperatorConfig:
                 raise ConfigError("sealed source SHA/tree/base identities must be distinct")
 
         service_user = _require_literal(raw, "service_user", APPROVED_SERVICE_USER)
-        operator_group = _require_literal(raw, "operator_group", APPROVED_OPERATOR_GROUP)
+        operator_group = _require_literal(raw, "operator_group", authority.operator_group)
         remote_url = _require_literal(raw, "remote_url", APPROVED_REMOTE_URL)
-        target_ref = _require_literal(raw, "target_ref", APPROVED_FETCH_REF)
-        cluster_name = _require_literal(raw, "cluster_name", APPROVED_CLUSTER_NAME)
-        namespace = _require_literal(raw, "namespace", APPROVED_NAMESPACE)
-        environment = _require_literal(raw, "environment", APPROVED_ENVIRONMENT)
-        cp_url = _require_literal(raw, "cp_url", APPROVED_CP_URL)
+        target_ref = _require_literal(raw, "target_ref", authority.target_ref)
+        cluster_name = _require_literal(raw, "cluster_name", authority.cluster_name)
+        namespace = _require_literal(raw, "namespace", authority.namespace)
+        environment = _require_literal(raw, "environment", authority.environment)
+        cp_url = _require_literal(raw, "cp_url", authority.cp_url)
         scope = _require_literal(raw, "scope", APPROVED_SCOPE)
 
         fingerprint = _require_string(raw, "expect_admin_token_fingerprint")
@@ -388,12 +494,23 @@ class OperatorConfig:
             )
 
         runner_repo = _require_absolute_path(raw, "runner_repo")
-        candidate_sha = candidate_sha_from_runner_repo(runner_repo)
+        candidate_sha = candidate_sha_from_runner_repo(runner_repo, authority=authority)
         cluster_config_path = _require_absolute_path(raw, "cluster_config_path")
-        if cluster_config_path != runner_repo / CANDIDATE_CLUSTER_CONFIG:
+        if cluster_config_path != runner_repo / authority.candidate_cluster_config:
             raise ConfigError("cluster_config_path must belong to the exact candidate repo")
         if source_commit_sha is not None and source_commit_sha != candidate_sha:
             raise ConfigError("sealed source commit must match the candidate runtime path")
+
+        protected_paths = {
+            "state_root": authority.state_root,
+            "runtime_root": authority.runtime_root,
+            "rollout_root": authority.rollout_root,
+            "kubeconfig_path": authority.kubeconfig_path,
+        }
+        resolved_paths = {key: _require_absolute_path(raw, key) for key in protected_paths}
+        for key, expected_path in protected_paths.items():
+            if resolved_paths[key] != expected_path:
+                raise ConfigError(f"{key} must be {expected_path}")
 
         return cls(
             schema_version=1,
@@ -402,10 +519,10 @@ class OperatorConfig:
             remote_url=remote_url,
             target_ref=target_ref,
             runner_repo=runner_repo,
-            state_root=_require_absolute_path(raw, "state_root"),
-            runtime_root=_require_absolute_path(raw, "runtime_root"),
-            rollout_root=_require_absolute_path(raw, "rollout_root"),
-            kubeconfig_path=_require_absolute_path(raw, "kubeconfig_path"),
+            state_root=resolved_paths["state_root"],
+            runtime_root=resolved_paths["runtime_root"],
+            rollout_root=resolved_paths["rollout_root"],
+            kubeconfig_path=resolved_paths["kubeconfig_path"],
             cluster_config_path=cluster_config_path,
             admin_token_source=_require_file_source(raw, "admin_token_source"),
             worker_token_source=_require_file_source(raw, "worker_token_source"),
@@ -427,6 +544,7 @@ class OperatorConfig:
             source_commit_sha=source_commit_sha,
             source_tree_sha=source_tree_sha,
             source_base_sha=source_base_sha,
+            short_name=authority.short_name,
         )
 
 
@@ -437,7 +555,11 @@ __all__ = [
     "CANDIDATE_CLUSTER_CONFIG",
     "CANDIDATE_REPO_NAME",
     "CANDIDATE_RUNTIME_ROOT",
+    "STAGING_AUTHORITY",
     "ConfigError",
+    "EnvironmentShortName",
     "OperatorConfig",
+    "RolloutEnvironmentAuthority",
     "candidate_sha_from_runner_repo",
+    "environment_authority",
 ]

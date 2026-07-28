@@ -1,1 +1,4 @@
+%loom-dev-operators ALL=(loom-rollout) NOPASSWD:NOSETENV: /usr/local/libexec/loom-rollout-broker --env dev *
+%loom-staging-operators ALL=(loom-rollout) NOPASSWD:NOSETENV: /usr/local/libexec/loom-rollout-broker --env staging *
+%loom-prod-operators ALL=(loom-rollout) NOPASSWD:NOSETENV: /usr/local/libexec/loom-rollout-broker --env prod *
 %loom-staging-operators ALL=(loom-rollout) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-rollout-broker *

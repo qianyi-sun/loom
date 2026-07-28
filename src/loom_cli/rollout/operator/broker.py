@@ -1,4 +1,4 @@
-"""Authenticated command broker for independent protected staging rollouts."""
+"""Authenticated command broker for independent protected rollouts."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ from .backup_rotation import (
 )
 from .candidate import CandidateBindingError, bind_configured_candidate
 from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
-from .config import OperatorConfig
+from .config import OperatorConfig, environment_authority
 from .envelope import fixed_operator_config_path
 from .final_gate_store import FinalGateExecutionStore, FinalGateStoreError
 from .installed_backup_retention import InstalledBackupRetentionService
@@ -126,8 +126,15 @@ def _cancel_reason(value: str) -> str:
     return value
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="loom-staging-rollout", add_help=True)
+def _parser(*, default_environment: str | None = None) -> argparse.ArgumentParser:
+    parser = _Parser(prog="loom-rollout", add_help=True)
+    parser.add_argument(
+        "--env",
+        choices=("dev", "staging", "prod"),
+        required=default_environment is None,
+        default=default_environment,
+        help="Select the root-installed rollout authority.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     start = commands.add_parser("start")
@@ -270,6 +277,12 @@ def _request(
 ) -> RolloutRequest:
     if not preflight.passed or preflight.attestation is None:
         raise ValueError("rollout request requires a complete preflight attestation")
+    authority = environment_authority(dependencies.config.short_name)
+    if (
+        candidate.target_ref != authority.pinned_target_ref
+        or not candidate.image_tag.startswith(f"{authority.short_name}-")
+    ):
+        raise ValueError("candidate does not match the selected environment authority")
     request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
     rollout_id = validate_safe_identifier(
         dependencies.new_rollout_id(candidate),
@@ -1636,8 +1649,7 @@ def _operator_known_secrets(
     return (*tokens, *catalog_secret_values(config, service_uid=service_uid))
 
 
-def _default_dependencies() -> BrokerDependencies:
-    config = OperatorConfig.load(fixed_operator_config_path())
+def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
     service_account = pwd.getpwnam(config.service_user)
     service_uid = service_account.pw_uid
     child_environment = sanitized_child_environment(config, service_uid=service_uid)
@@ -1801,12 +1813,32 @@ def _main(
 ) -> int:
     deps = dependencies
     try:
-        args = _parser().parse_args(list(argv) if argv is not None else None)
+        args = _parser(
+            default_environment=(
+                dependencies.config.short_name if dependencies is not None else None
+            )
+        ).parse_args(list(argv) if argv is not None else None)
     except (_ArgumentError, SystemExit):
         return 2
     try:
-        deps = dependencies or _default_dependencies()
-        caller = deps.authenticate()
+        authority = environment_authority(args.env)
+        if dependencies is not None:
+            if dependencies.config.short_name != authority.short_name:
+                raise PolicyError("selected environment does not match injected authority")
+            deps = dependencies
+            caller = deps.authenticate()
+        else:
+            config = OperatorConfig.load(
+                fixed_operator_config_path(environment=authority.short_name),
+                authority=authority,
+            )
+            caller = caller_from_sudo(
+                config,
+                os.environ,
+                euid=os.geteuid(),
+                groups=_groups,
+            )
+            deps = _default_dependencies(config)
         if args.command == "preflight":
             return _preflight_only(deps, caller)
         if args.command == "start":

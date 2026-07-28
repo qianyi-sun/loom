@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -153,6 +154,44 @@ def test_caller_rejects_non_member(passwd: None) -> None:
             euid=SERVICE_UID,
             groups=lambda _username: {"docker", "sharedwork"},
         )
+
+
+@pytest.mark.parametrize(
+    ("short_name", "operator_group", "other_group"),
+    [
+        ("dev", "loom-dev-operators", "loom-staging-operators"),
+        ("staging", "loom-staging-operators", "loom-prod-operators"),
+        ("prod", "loom-prod-operators", "loom-dev-operators"),
+    ],
+)
+def test_caller_group_authority_isolated_per_environment(
+    passwd: None,
+    short_name: str,
+    operator_group: str,
+    other_group: str,
+) -> None:
+    config = replace(
+        make_config(),
+        operator_group=operator_group,
+        short_name=short_name,
+    )
+    environ = {"SUDO_USER": "hongjian", "SUDO_UID": "2002"}
+
+    with pytest.raises(policy.PolicyError, match="operator group"):
+        policy.caller_from_sudo(
+            config,
+            environ,
+            euid=SERVICE_UID,
+            groups=lambda _username: {other_group, "docker"},
+        )
+
+    identity = policy.caller_from_sudo(
+        config,
+        environ,
+        euid=SERVICE_UID,
+        groups=lambda _username: {operator_group, other_group},
+    )
+    assert identity == policy.CallerIdentity(username="hongjian", uid=2002)
 
 
 def test_caller_rejects_unapproved_root(passwd: None) -> None:

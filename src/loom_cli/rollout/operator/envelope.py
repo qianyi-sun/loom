@@ -13,16 +13,12 @@ from typing import cast
 from loom_cli.cluster_backup_guard import validate_backup_manifest
 
 from .backup_limits import operator_backup_traversal_limits
-from .config import OperatorConfig
-from .model import (
-    APPROVED_FETCH_REF,
-    PINNED_TARGET_REF,
-    DriverEnvelope,
-    RolloutRequest,
-)
+from .config import OperatorConfig, environment_authority
+from .model import DriverEnvelope, RolloutRequest
 
 DEFAULT_OPERATOR_CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
 OPERATOR_CONFIG_ENV = "LOOM_STAGING_ROLLOUT_CONFIG"
+ROLLOUT_CONFIG_ENV = "LOOM_ROLLOUT_CONFIG"
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _MAX_ENVELOPE_BYTES = 128 * 1024
@@ -33,13 +29,27 @@ class EnvelopeValidationError(ValueError):
     """Raised before rollout evidence or mutation when an envelope is unsafe."""
 
 
-def fixed_operator_config_path(environ: Mapping[str, str] | None = None) -> Path:
-    """Return only the root-installed default or systemd-sanitized fixed path."""
+def fixed_operator_config_path(
+    environ: Mapping[str, str] | None = None,
+    *,
+    environment: str = "staging",
+) -> Path:
+    """Return the one installed config path bound to ``environment``."""
     source = os.environ if environ is None else environ
-    rendered = source.get(OPERATOR_CONFIG_ENV)
-    path = Path(rendered) if rendered else DEFAULT_OPERATOR_CONFIG_PATH
-    if not path.is_absolute() or ".." in path.parts:
-        raise EnvelopeValidationError("operator config path must be an absolute fixed path")
+    try:
+        authority = environment_authority(environment)
+    except ValueError as exc:
+        raise EnvelopeValidationError(str(exc)) from exc
+    generic = source.get(ROLLOUT_CONFIG_ENV)
+    legacy = source.get(OPERATOR_CONFIG_ENV) if environment == "staging" else None
+    if generic and legacy and generic != legacy:
+        raise EnvelopeValidationError("operator config path authorities conflict")
+    rendered = generic or legacy
+    path = Path(rendered) if rendered else authority.config_path
+    if path != authority.config_path:
+        raise EnvelopeValidationError(
+            f"operator config path must be the installed {environment} authority"
+        )
     return path
 
 
@@ -290,8 +300,14 @@ def _validate_config_binding(envelope: DriverEnvelope, config: OperatorConfig) -
     for field_name, expected_value in expected.items():
         if getattr(envelope, field_name) != expected_value:
             raise EnvelopeValidationError(f"driver envelope {field_name} does not match config")
-    if config.target_ref != APPROVED_FETCH_REF or envelope.target_ref != PINNED_TARGET_REF:
-        raise EnvelopeValidationError("driver envelope target ref does not match fixed dev policy")
+    authority = environment_authority(config.short_name)
+    if (
+        config.target_ref != authority.target_ref
+        or envelope.target_ref != authority.pinned_target_ref
+    ):
+        raise EnvelopeValidationError(
+            "driver envelope target ref does not match fixed environment policy"
+        )
     if envelope.runner_config_sha256 != config.config_sha256:
         raise EnvelopeValidationError("driver envelope runner config digest does not match config")
 
