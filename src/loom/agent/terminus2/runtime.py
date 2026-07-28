@@ -90,7 +90,7 @@ def _install_tmux_session_alive_guard(agent: Any) -> None:
             raise AgentError(_TMUX_SESSION_LOST_MID_DISPATCH)
         return result
 
-    session.send_keys = _send_keys_with_alive_check  # type: ignore[method-assign]
+    session.send_keys = _send_keys_with_alive_check
 
 
 async def _publish_harbor_artifacts_to_sandbox(
