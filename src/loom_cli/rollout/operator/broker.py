@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.evidence import new_rollout_id
+from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
@@ -42,6 +43,7 @@ from .candidate import CandidateBindingError, bind_configured_candidate
 from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path
+from .final_gate_store import FinalGateExecutionStore, FinalGateStoreError
 from .installed_backup_retention import InstalledBackupRetentionService
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
 from .installed_lifecycle_capacity import InstalledLifecycleCapacityService
@@ -1183,6 +1185,29 @@ def _protected_apply_progress(
     return last_complete, "protected_component_complete", ()
 
 
+def _final_gate_progress(
+    dependencies: BrokerDependencies,
+    request_id: str,
+    attempt_number: int,
+) -> tuple[str, str, str | None] | None:
+    """Return only normalized final-gate identity and outcome metadata."""
+    journal = FinalGateExecutionStore(
+        dependencies.config.state_root,
+        request_id=request_id,
+        attempt_number=attempt_number,
+        service_uid=os.geteuid(),
+    )
+    executions = journal.read_all()
+    if not executions:
+        return None
+    if set(executions) - set(FINAL_CHECK_IDS):
+        raise RequestStoreError("final gate progress is unsafe")
+    completed = [executions[check_id] for check_id in FINAL_CHECK_IDS if check_id in executions]
+    selected = next((execution for execution in completed if not execution.passed), completed[-1])
+    failure_code = None if selected.passed else selected.failure_code
+    return selected.check_id, selected.outcome.value, failure_code
+
+
 def _request_status(
     dependencies: BrokerDependencies,
     request: PreflightRequest | RolloutRequest,
@@ -1233,6 +1258,20 @@ def _request_status(
             payload["protected_component_status"] = progress_reason
             if failed_hosts:
                 payload["protected_failed_hosts"] = list(failed_hosts)
+        try:
+            final_gate_progress = _final_gate_progress(
+                dependencies,
+                request.request_id,
+                latest.attempt_number,
+            )
+        except (FinalGateStoreError, OSError, RequestStoreError):
+            final_gate_progress = None
+        if final_gate_progress is not None:
+            check_id, outcome, failure_code = final_gate_progress
+            payload["final_gate_check"] = check_id
+            payload["final_gate_outcome"] = outcome
+            if failure_code is not None:
+                payload["final_gate_failure_code"] = failure_code
     return payload
 
 

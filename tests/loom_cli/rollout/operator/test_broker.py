@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import grp
+import hashlib
 import io
+import json
 import os
 import pwd
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -23,6 +25,7 @@ from loom_cli.rollout.operator.backup_rotation import begin_candidate, fail_cand
 from loom_cli.rollout.operator.broker import BrokerDependencies
 from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.config import OperatorConfig
+from loom_cli.rollout.operator.final_gate_store import FinalGateExecutionStore
 from loom_cli.rollout.operator.lifecycle import LifecycleBusyError, ReconciliationResult
 from loom_cli.rollout.operator.model import (
     ActivePointer,
@@ -36,6 +39,12 @@ from loom_cli.rollout.operator.policy import sanitized_child_environment
 from loom_cli.rollout.operator.preflight import PreflightCheck, PreflightReport
 from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
+from loom_cli.rollout.preflight_contract import (
+    CheckExecution,
+    CheckOperation,
+    CheckOutcome,
+    StageCapability,
+)
 from loom_cli.rollout.preflight_pipeline import PreflightPipeline
 from tests.loom_cli.rollout.test_preflight_pipeline import (
     _context as pipeline_context,
@@ -1353,9 +1362,72 @@ def test_status_fails_closed_on_unsafe_protected_progress_metadata(tmp_path: Pat
     assert "protected_component_status" not in payload
 
 
-def _last_json(stream: io.StringIO) -> dict[str, object]:
-    import json
+def test_status_reports_only_normalized_final_gate_failure_metadata(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    attempt = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1"
+    _private_directory(attempt)
+    evidence = MappingProxyType({"ready": False, "evidence-digest": "3" * 64})
+    execution = CheckExecution(
+        check_id="final.convergence",
+        failure_code="final.convergence.failed",
+        tier=4,
+        stage=StageCapability.FINAL_ONLY,
+        operation=CheckOperation.VERIFY,
+        outcome=CheckOutcome.FAIL,
+        input_fingerprint="1" * 64,
+        implementation_digest="2" * 64,
+        evidence=evidence,
+        evidence_hash=hashlib.sha256(
+            json.dumps(dict(evidence), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        started_at=NOW,
+        finished_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
+        remediation="private remediation must not be exposed",
+    )
+    FinalGateExecutionStore(
+        deps.config.state_root,
+        request_id=REQUEST_ID,
+        attempt_number=1,
+    ).publish(execution)
 
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert payload["final_gate_check"] == "final.convergence"
+    assert payload["final_gate_outcome"] == "fail"
+    assert payload["final_gate_failure_code"] == "final.convergence.failed"
+    assert "private remediation" not in deps.stdout.getvalue()
+
+
+def test_status_fails_closed_on_unsafe_final_gate_progress(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    root = (
+        deps.config.state_root
+        / "requests"
+        / REQUEST_ID
+        / "attempts"
+        / "1"
+        / "final-gates"
+    )
+    _private_directory(root)
+    (root / "final.convergence.json").symlink_to(tmp_path)
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert "final_gate_check" not in payload
+    assert "final_gate_outcome" not in payload
+    assert "final_gate_failure_code" not in payload
+
+
+def _last_json(stream: io.StringIO) -> dict[str, object]:
     return json.loads(stream.getvalue().splitlines()[-1])
 
 

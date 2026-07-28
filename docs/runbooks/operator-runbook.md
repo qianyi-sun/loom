@@ -1452,6 +1452,10 @@ terminal record; it is safe diagnostic metadata, not permission to edit the
 request store or bypass the broker. For `gb10-candidate`, a
 `protected_failed_hosts` list contains only validated names from the fixed
 release inventory; it deliberately excludes SSH or remote-command output.
+If normalized final-gate evidence exists before driver state or `driver.log`,
+`status` may also include `final_gate_check`, `final_gate_outcome`, and the
+contract-defined `final_gate_failure_code`. It never returns evidence payloads,
+remediation text, subprocess output, or credential material.
 
 `qianyi`, `hongjian`, and `devansh` are members of
 `loom-staging-operators`. Invoke these broker commands directly as the

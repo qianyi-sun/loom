@@ -67,6 +67,10 @@ per-user journal is unavailable. Unsafe or malformed journal metadata is
 omitted fail-closed. A failed GB10 apply may additionally publish only the
 validated fixed host names in a service-owned failure record; remote stdout,
 stderr, commands, and arbitrary text are never persisted or returned.
+The broker applies the same fail-closed authority checks to the normalized
+final-gate execution journal. It may return only the canonical check ID,
+outcome, and failure code, so an exit before driver state creation remains
+diagnosable without exposing final-gate evidence or subprocess output.
 
 The broker derives the caller from the authenticated sudo context and records
 the initiating and attempt operators. It accepts no caller, repository, ref,
