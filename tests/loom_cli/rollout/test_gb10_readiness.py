@@ -363,6 +363,35 @@ def test_fleet_probe_collects_all_hosts_and_settles_transient_timer() -> None:
     assert sleeps == [0.25]
 
 
+def test_fleet_probe_accepts_exact_elapsed_timer_for_protected_repair() -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    calls = 0
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            _payload("trt-gb10-1", timer_state="elapsed"),
+            "",
+        )
+
+    result = probe_gb10_fleet_readonly(
+        run,
+        (target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        settle_attempts=3,
+        settle_interval_seconds=0,
+    )
+
+    assert result.ready
+    assert result.failed_hosts == ()
+    assert result.transient_hosts == ("trt-gb10-1",)
+    assert calls == 1
+
+
 def test_fleet_probe_returns_every_independent_blocker() -> None:
     targets = tuple(GB10ProbeTarget(host, "loom-gb10-node-agent.service") for host in BOOT_IDS)
 

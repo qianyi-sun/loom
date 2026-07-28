@@ -1007,7 +1007,15 @@ shared NFS checkout probe into a load-induced false blocker while retaining a
 complete 14-host result inside the Tier 0 budget. It validates the manager
 version, linger, boot ID,
 completed oneshot result, enabled timer, and only the documented
-`active/running` to `active/waiting` transient transition. All hosts are
+`active/running` to `active/waiting` transient transition. The exact
+loaded/enabled `active/elapsed` state is also admitted as
+protected-repairable when manager, linger, service result, target unit, and
+daemon-reload evidence all remain exact. This does not make arbitrary timer
+drift healthy: protected GB10 prep must remove only the byte-exact legacy
+`deploy-window.conf`, reject any unknown effective drop-in, start the oneshot,
+restart the candidate timer, and verify `active/waiting`. This narrow bridge
+avoids a preflight deadlock after a host reboot while keeping the mutation
+inside the existing protected component. All hosts are
 reported in one result; the attestation retains per-host boot IDs and evidence
 digests, while raw SSH output and service diagnostics are never published.
 
