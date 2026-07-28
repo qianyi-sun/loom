@@ -300,6 +300,44 @@ def test_interrupted_generation_flip_never_exposes_partial_six_instance_set(
     assert _handoff(config, "qianyi-gb10")["enabled"] is False
 
 
+def test_unchanged_cycle_retains_current_and_previous_generations(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    request_id = _request(
+        config,
+        SandboxId.QIANYI,
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=12,
+        key="qianyi-gb10-retain-rollback",
+    )
+    first = supervisor.run_once(config, now=NOW)
+    SharedCapacityBroker(config.state_db, clock=lambda: NOW).cancel(request_id)
+    second = supervisor.run_once(config, now=NOW)
+    third = supervisor.run_once(config, now=NOW)
+
+    assert third["generation"] == second["generation"]
+    assert third["generation"] != first["generation"]
+    generations = {
+        path.name
+        for path in config.handoff_dir.iterdir()
+        if supervisor._GENERATION_RE.fullmatch(path.name) is not None
+    }
+    assert generations == {first["generation"], second["generation"]}
+
+
+def test_supervisor_rejects_overlapping_invocations(tmp_path: Path) -> None:
+    config, _ = _fixture(tmp_path)
+
+    with supervisor._exclusive_supervisor_lock(config):
+        with pytest.raises(supervisor.SupervisorError, match="already active"):
+            supervisor.run_once(config, now=NOW)
+
+    assert not config.handoff_dir.exists()
+    assert not config.audit_path.exists()
+
+
 def test_malformed_observation_fails_before_reconcile_or_publish(
     tmp_path: Path,
     monkeypatch,

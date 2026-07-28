@@ -11,6 +11,7 @@ broker-produced handoffs.  It never reads a sandbox credential.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -19,7 +20,8 @@ import sqlite3
 import stat
 import sys
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,6 +99,43 @@ class SupervisorConfig:
             "instances": list(self.instances),
         }
         return _digest(payload)
+
+
+@contextmanager
+def _exclusive_supervisor_lock(config: SupervisorConfig) -> Iterator[None]:
+    lock_path = config.supervisor_state_path.with_name(
+        f".{config.supervisor_state_path.name}.lock",
+    )
+    _private_parent(lock_path.parent)
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise SupervisorError("supervisor lock is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise SupervisorError("supervisor lock file is unsafe")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise SupervisorError("supervisor invocation is already active") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _digest(payload: object) -> str:
@@ -793,6 +832,18 @@ def _prune_generations(
     _fsync_directory(config.handoff_dir)
 
 
+def _previous_generation(handoff_dir: Path, current: str) -> str | None:
+    candidates = sorted(
+        (
+            path.name
+            for path in handoff_dir.iterdir()
+            if path.name != current and _GENERATION_RE.fullmatch(path.name) is not None
+        ),
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
 def _publish_handoffs(
     report: Mapping[str, Any],
     config: SupervisorConfig,
@@ -833,8 +884,13 @@ def _publish_handoffs(
                 selected=selected,
                 config=config,
             )
-            _prune_generations(config, current=previous, previous=None)
-            return published, previous, previous
+            retained_previous = _previous_generation(config.handoff_dir, previous)
+            _prune_generations(
+                config,
+                current=previous,
+                previous=retained_previous,
+            )
+            return published, previous, retained_previous
     _materialize_generation(
         generation=generation,
         selected=selected,
@@ -895,7 +951,7 @@ def _append_audit(path: Path, event: Mapping[str, Any]) -> None:
         os.close(descriptor)
 
 
-def run_once(
+def _run_once_unlocked(
     config: SupervisorConfig,
     *,
     now: datetime | None = None,
@@ -976,6 +1032,15 @@ def run_once(
         "aggregate": report["aggregate"],
         "budgets": report["budgets"],
     }
+
+
+def run_once(
+    config: SupervisorConfig,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    with _exclusive_supervisor_lock(config):
+        return _run_once_unlocked(config, now=now)
 
 
 def _parser() -> argparse.ArgumentParser:

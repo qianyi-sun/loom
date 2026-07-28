@@ -200,6 +200,21 @@ def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> N
     assert [call["method"] for call in control_plane.calls] == ["GET", "PUT", "GET"]
 
 
+def test_adapter_rejects_overlapping_invocations(tmp_path: Path) -> None:
+    config, _ = _fixture(tmp_path)
+    control_plane = FakeControlPlane(_policy())
+
+    with adapter._exclusive_adapter_lock(config):
+        with pytest.raises(adapter.AdapterError, match="already active"):
+            adapter.run_once(
+                config,
+                now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+                http_json=control_plane,
+            )
+
+    assert control_plane.calls == []
+
+
 def test_bootstrap_creates_missing_candidate_bound_nonexclusive_policy_once(
     tmp_path: Path,
 ) -> None:
