@@ -215,6 +215,27 @@ def test_adapter_rejects_overlapping_invocations(tmp_path: Path) -> None:
     assert control_plane.calls == []
 
 
+def test_run_cycle_holds_one_lock_across_bootstrap_and_apply(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    control_plane = EmptyControlPlane()
+
+    report = adapter.run_cycle(
+        config,
+        now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+        http_json=control_plane,
+    )
+
+    assert report["status"] == "applied"
+    assert [call["method"] for call in control_plane.calls] == [
+        "GET",
+        "PUT",
+        "GET",
+        "PUT",
+    ]
+
+
 def test_bootstrap_creates_missing_candidate_bound_nonexclusive_policy_once(
     tmp_path: Path,
 ) -> None:
@@ -532,9 +553,9 @@ def test_service_renderer_binds_exact_candidate_and_rejects_drift() -> None:
     rendered = renderer.render_service_unit(template, git_sha=SHA)
 
     assert "${GIT_SHA}" not in rendered
-    assert rendered.count(SHA) == 6
-    assert "ExecStartPre=" in rendered
-    assert " bootstrap" in rendered
+    assert rendered.count(SHA) == 4
+    assert "ExecStartPre=" not in rendered
+    assert " run" in rendered
     assert "ProtectSystem=strict" in rendered
     assert "ReadWritePaths=/var/lib/loom-shared-capacity" in rendered
     with pytest.raises(ValueError, match="40-character"):

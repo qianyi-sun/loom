@@ -967,6 +967,17 @@ def run_once(
         return _run_once_unlocked(config, now=now, http_json=http_json)
 
 
+def run_cycle(
+    config: AdapterConfig,
+    *,
+    now: datetime | None = None,
+    http_json: HttpJson = _http_json,
+) -> dict[str, Any]:
+    with _exclusive_adapter_lock(config):
+        _bootstrap_policy_unlocked(config, http_json=http_json)
+        return _run_once_unlocked(config, now=now, http_json=http_json)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--config", type=Path, required=True)
@@ -978,7 +989,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
         config = load_config(args.config)
-        report = bootstrap_policy(config) if args.command == "bootstrap" else run_once(config)
+        report = (
+            bootstrap_policy(config)
+            if args.command == "bootstrap"
+            else run_cycle(config)
+        )
     except (AdapterError, OSError, UnicodeError, ValueError):
         sys.stderr.write('{"error":"shared-capacity-adapter-failed-safely"}\n')
         return 1

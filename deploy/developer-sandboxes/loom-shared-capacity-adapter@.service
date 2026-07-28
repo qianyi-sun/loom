@@ -17,6 +17,5 @@ ProtectHome=true
 ProtectSystem=strict
 ReadOnlyPaths=/etc/loom/shared-capacity-adapters /etc/loom/developer-sandboxes /srv/loom/developer-sandboxes
 ReadWritePaths=/var/lib/loom-shared-capacity
-ExecStartPre=/opt/loom-shared-capacity/candidates/${GIT_SHA}/venv/bin/python -I -B /opt/loom-shared-capacity/candidates/${GIT_SHA}/repo/scripts/ops/shared_capacity_adapter.py --config /etc/loom/shared-capacity-adapters/%i.toml bootstrap
 ExecStart=/opt/loom-shared-capacity/candidates/${GIT_SHA}/venv/bin/python -I -B /opt/loom-shared-capacity/candidates/${GIT_SHA}/repo/scripts/ops/shared_capacity_adapter.py --config /etc/loom/shared-capacity-adapters/%i.toml run
 TimeoutStartSec=60
