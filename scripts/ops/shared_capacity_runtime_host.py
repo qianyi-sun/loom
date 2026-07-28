@@ -1075,6 +1075,13 @@ def _service_result(unit: str) -> tuple[str, str]:
 
 
 def _run_candidate_python(candidate: Candidate, code: str, *args: str) -> None:
+    expected_arguments = _EMBEDDED_PROGRAM_ARGUMENT_COUNTS.get(code)
+    if expected_arguments is None or len(args) != expected_arguments:
+        raise RuntimeHostError("embedded candidate program argument contract is invalid")
+    try:
+        compile(code, "<shared-capacity-runtime-host-embedded>", "exec")
+    except SyntaxError as exc:
+        raise RuntimeHostError("embedded candidate program is invalid") from exc
     _run(
         (
             str(candidate.venv / "bin/python"),
@@ -1408,6 +1415,13 @@ if not handoff.enabled:
     ):
         raise RuntimeError("disabled activated adapter still has live capacity")
 """
+
+_EMBEDDED_PROGRAM_ARGUMENT_COUNTS = {
+    _BROKER_PREFLIGHT: 2,
+    _ADAPTER_PREFLIGHT: 3,
+    _GENERATION_READBACK: 1,
+    _ACTIVATED_ADAPTER_READBACK: 3,
+}
 
 
 def _activation_preflight(candidate: Candidate) -> None:

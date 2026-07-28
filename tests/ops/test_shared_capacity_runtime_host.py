@@ -398,6 +398,59 @@ def test_activation_preflight_checks_broker_and_all_six_receipts(
     assert "_validate_runtime_attestation" in host._ADAPTER_PREFLIGHT
 
 
+@pytest.mark.parametrize(
+    ("name", "program", "argument_count"),
+    (
+        ("broker-preflight", host._BROKER_PREFLIGHT, 2),
+        ("adapter-preflight", host._ADAPTER_PREFLIGHT, 3),
+        ("generation-readback", host._GENERATION_READBACK, 1),
+        ("activated-adapter-readback", host._ACTIVATED_ADAPTER_READBACK, 3),
+    ),
+)
+def test_embedded_candidate_programs_compile_and_bind_exact_arguments(
+    name: str,
+    program: str,
+    argument_count: int,
+) -> None:
+    compiled = compile(program, f"<{name}>", "exec")
+
+    assert compiled.co_code
+    assert host._EMBEDDED_PROGRAM_ARGUMENT_COUNTS[program] == argument_count
+
+
+def test_embedded_candidate_program_rejects_argument_count_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = host.Candidate(SHA, TREE, Path(f"/opt/candidates/{SHA}/repo"))
+    invoked = False
+
+    def fake_run(*args: object, **kwargs: object) -> None:
+        nonlocal invoked
+        invoked = True
+
+    monkeypatch.setattr(host, "_run", fake_run)
+
+    with pytest.raises(host.RuntimeHostError, match="argument contract"):
+        host._run_candidate_python(
+            candidate,
+            host._ACTIVATED_ADAPTER_READBACK,
+            "config-only",
+        )
+
+    assert invoked is False
+
+
+def test_embedded_candidate_program_rejects_syntax_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = host.Candidate(SHA, TREE, Path(f"/opt/candidates/{SHA}/repo"))
+    broken = "from pathlib import Path\\n)\\n"
+    monkeypatch.setitem(host._EMBEDDED_PROGRAM_ARGUMENT_COUNTS, broken, 0)
+
+    with pytest.raises(host.RuntimeHostError, match="program is invalid"):
+        host._run_candidate_python(candidate, broken)
+
+
 def _zero_broker_preflight() -> tuple[dict[str, object], dict[str, object]]:
     selected: dict[str, object] = {}
     requests: list[dict[str, object]] = []
