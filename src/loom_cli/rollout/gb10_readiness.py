@@ -612,7 +612,7 @@ def _probe_target(
             )
             if evidence is not None:
                 if evidence.ready:
-                    return evidence, observed_transient
+                    return evidence, observed_transient or evidence.repairable_timer
                 if not evidence.transient_timer:
                     return evidence, observed_transient
                 observed_transient = True

@@ -452,6 +452,75 @@ def _node_agent_unit_install_command(host: GB10Host, unit: str) -> str:
     )
 
 
+_LEGACY_NODE_AGENT_TIMER_DROPIN = b"""[Timer]
+OnUnitActiveSec=
+OnUnitActiveSec=7200s
+"""
+
+
+def _node_agent_timer_dropin_cleanup_command(timer: str) -> str:
+    """Remove only the exact legacy deployment-window timer override.
+
+    An arbitrary user drop-in can change the effective candidate unit after the
+    checked-in unit bytes are installed.  The protected prep therefore accepts
+    either no drop-in directory or the one known legacy payload, validates its
+    metadata and content without following symlinks, and removes only that
+    exact file.  Any additional or changed entry fails closed.
+    """
+    if not timer.endswith(".timer") or "/" in timer:
+        raise CandidateToolingError(f"GB10 node-agent timer is invalid: {timer!r}")
+    source = f"""
+import os
+import pathlib
+import stat
+
+directory = pathlib.Path.home() / ".config/systemd/user/{timer}.d"
+legacy = directory / "deploy-window.conf"
+expected = {_LEGACY_NODE_AGENT_TIMER_DROPIN!r}
+
+try:
+    directory_stat = directory.lstat()
+except FileNotFoundError:
+    raise SystemExit(0)
+if not stat.S_ISDIR(directory_stat.st_mode) or stat.S_ISLNK(directory_stat.st_mode):
+    raise SystemExit(1)
+if directory_stat.st_uid != os.getuid() or stat.S_IMODE(directory_stat.st_mode) & 0o002:
+    raise SystemExit(1)
+if {{entry.name for entry in directory.iterdir()}} != {{"deploy-window.conf"}}:
+    raise SystemExit(1)
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(legacy, flags)
+try:
+    before = os.fstat(descriptor)
+    payload = os.read(descriptor, len(expected) + 1)
+    after = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+current = legacy.lstat()
+if (
+    not stat.S_ISREG(before.st_mode)
+    or before.st_uid != os.getuid()
+    or before.st_nlink != 1
+    or stat.S_IMODE(before.st_mode) & 0o002
+    or payload != expected
+    or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+):
+    raise SystemExit(1)
+legacy.unlink()
+directory.rmdir()
+""".strip()
+    return f"python3 -c {shlex.quote(source)}"
+
+
+def _node_agent_timer_dropins_absent_command(timer: str) -> str:
+    if not timer.endswith(".timer") or "/" in timer:
+        raise CandidateToolingError(f"GB10 node-agent timer is invalid: {timer!r}")
+    return f'test ! -e "$HOME/.config/systemd/user/{timer}.d"'
+
+
 def _node_agent_unit_matches_candidate_command(host: GB10Host, unit: str) -> str:
     source = _node_agent_unit_source(host, unit)
     destination = _node_agent_unit_destination(unit)
@@ -642,6 +711,10 @@ def _prep_one_host(
                     ),
                 ),
                 ("node-agent-linger", _node_agent_linger_command()),
+                (
+                    "node-agent-timer-dropin-cleanup",
+                    _node_agent_timer_dropin_cleanup_command(timer),
+                ),
                 (
                     "install-node-agent-service",
                     _node_agent_unit_install_command(host, host.node_agent_service),
@@ -837,6 +910,10 @@ class GB10PrepStep(BaseStep):
                     (
                         "node-agent-timer-unit",
                         _node_agent_unit_matches_candidate_command(host, timer),
+                    ),
+                    (
+                        "node-agent-timer-dropins",
+                        _node_agent_timer_dropins_absent_command(timer),
                     ),
                 ]
                 for label, cmd in unit_checks:

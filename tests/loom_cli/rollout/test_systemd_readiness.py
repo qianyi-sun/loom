@@ -47,6 +47,11 @@ def test_node_agent_predicates_replay_waiting_and_transient_history() -> None:
         classify_node_agent_timer(timer, service="loom-gb10-node-agent.service")
         is NodeAgentTimerState.PREPARED
     )
+    timer["SubState"] = "elapsed"
+    assert (
+        classify_node_agent_timer(timer, service="loom-gb10-node-agent.service")
+        is NodeAgentTimerState.REPAIRABLE_ELAPSED
+    )
 
 
 @pytest.mark.parametrize(
@@ -54,7 +59,7 @@ def test_node_agent_predicates_replay_waiting_and_transient_history() -> None:
     [
         ("LoadState", "not-found"),
         ("ActiveState", "failed"),
-        ("SubState", "elapsed"),
+        ("SubState", "dead"),
         ("Unit", "other.service"),
         ("NeedDaemonReload", "yes"),
     ],
@@ -73,6 +78,42 @@ def test_node_agent_timer_classifier_fails_closed(field: str, value: str) -> Non
         classify_node_agent_timer(properties, service="loom-gb10-node-agent.service")
         is NodeAgentTimerState.INVALID
     )
+
+
+def test_parse_elapsed_timer_is_ready_only_for_protected_repair() -> None:
+    payload = {
+        "schema_version": 1,
+        "boot_id": BOOT_ID,
+        "manager_version": "255.4-1ubuntu8.16",
+        "linger_enabled": True,
+        "service": {
+            "LoadState": "loaded",
+            "Type": "oneshot",
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "NeedDaemonReload": "no",
+        },
+        "timer": {
+            "LoadState": "loaded",
+            "ActiveState": "active",
+            "SubState": "elapsed",
+            "Unit": "loom-gb10-node-agent.service",
+            "NeedDaemonReload": "no",
+        },
+        "timer_enabled": True,
+    }
+
+    evidence = parse_gb10_host_readiness(
+        json.dumps(payload),
+        service="loom-gb10-node-agent.service",
+    )
+
+    assert evidence is not None
+    assert evidence.ready
+    assert evidence.repairable_timer
+    assert not evidence.transient_timer
 
 
 def test_parse_systemctl_properties_ignores_unstructured_lines() -> None:

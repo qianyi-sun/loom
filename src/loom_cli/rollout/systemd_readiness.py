@@ -44,10 +44,11 @@ CommandRunner = Callable[[Sequence[str]], CommandResult]
 
 
 class NodeAgentTimerState(StrEnum):
-    """Only the two documented healthy timer states plus fail-closed invalid."""
+    """Documented healthy, protected-repairable, and fail-closed timer states."""
 
     PREPARED = "prepared"
     TRANSIENT_RUNNING = "transient-running"
+    REPAIRABLE_ELAPSED = "repairable-elapsed"
     INVALID = "invalid"
 
 
@@ -104,13 +105,22 @@ class GB10HostReadiness:
             and _SYSTEMD_VERSION_RE.fullmatch(self.manager_version) is not None
             and self.linger_enabled
             and self.service_ready
-            and self.timer_state is NodeAgentTimerState.PREPARED
+            and self.timer_state
+            in {
+                NodeAgentTimerState.PREPARED,
+                NodeAgentTimerState.REPAIRABLE_ELAPSED,
+            }
             and self.timer_enabled
         )
 
     @property
     def transient_timer(self) -> bool:
         return self.timer_state is NodeAgentTimerState.TRANSIENT_RUNNING
+
+    @property
+    def repairable_timer(self) -> bool:
+        """Whether protected GB10 prep must restart the otherwise exact timer."""
+        return self.timer_state is NodeAgentTimerState.REPAIRABLE_ELAPSED
 
     @property
     def evidence_digest(self) -> str:
@@ -260,7 +270,7 @@ def classify_node_agent_timer(
     *,
     service: str,
 ) -> NodeAgentTimerState:
-    """Recognize waiting and the bounded in-flight oneshot state only."""
+    """Recognize waiting, in-flight, and the exact protected-repairable state."""
     common = (
         properties.get("LoadState") == "loaded"
         and properties.get("ActiveState") == "active"
@@ -271,6 +281,8 @@ def classify_node_agent_timer(
         return NodeAgentTimerState.PREPARED
     if common and properties.get("SubState") == "running":
         return NodeAgentTimerState.TRANSIENT_RUNNING
+    if common and properties.get("SubState") == "elapsed":
+        return NodeAgentTimerState.REPAIRABLE_ELAPSED
     return NodeAgentTimerState.INVALID
 
 

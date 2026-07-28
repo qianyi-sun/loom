@@ -37,8 +37,11 @@ from loom_cli.rollout.steps.candidate_source import (
 )
 from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
 from loom_cli.rollout.steps.s04_gb10_prep import (
+    _LEGACY_NODE_AGENT_TIMER_DROPIN,
     GB10Host,
     GB10PrepStep,
+    _node_agent_timer_dropin_cleanup_command,
+    _node_agent_timer_dropins_absent_command,
     _node_agent_timer_name,
     _prep_one_host,
     _ssh,
@@ -126,6 +129,124 @@ def test_sealed_gb10_prep_fetches_exact_shared_candidate(
         "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-staging-aaaaaaa"
     ) in fetch
     assert fetch.endswith(sha)
+
+
+def test_node_agent_timer_dropin_cleanup_removes_only_exact_legacy_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dropin_dir = (
+        tmp_path
+        / ".config/systemd/user/loom-gb10-node-agent.timer.d"
+    )
+    dropin_dir.mkdir(parents=True)
+    dropin = dropin_dir / "deploy-window.conf"
+    dropin.write_bytes(_LEGACY_NODE_AGENT_TIMER_DROPIN)
+    dropin.chmod(0o664)
+
+    result = subprocess.run(
+        _node_agent_timer_dropin_cleanup_command("loom-gb10-node-agent.timer"),
+        check=False,
+        shell=True,
+        executable="/bin/sh",
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert not dropin_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_setup",
+    ["changed-payload", "extra-entry", "symlink"],
+)
+def test_node_agent_timer_dropin_cleanup_rejects_unknown_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_setup: str,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dropin_dir = (
+        tmp_path
+        / ".config/systemd/user/loom-gb10-node-agent.timer.d"
+    )
+    dropin_dir.mkdir(parents=True)
+    dropin = dropin_dir / "deploy-window.conf"
+    if unsafe_setup == "symlink":
+        target = tmp_path / "target"
+        target.write_bytes(_LEGACY_NODE_AGENT_TIMER_DROPIN)
+        dropin.symlink_to(target)
+    else:
+        dropin.write_bytes(
+            b"[Timer]\nOnUnitActiveSec=30s\n"
+            if unsafe_setup == "changed-payload"
+            else _LEGACY_NODE_AGENT_TIMER_DROPIN
+        )
+    if unsafe_setup == "extra-entry":
+        (dropin_dir / "unknown.conf").write_text("[Timer]\n", encoding="utf-8")
+
+    result = subprocess.run(
+        _node_agent_timer_dropin_cleanup_command("loom-gb10-node-agent.timer"),
+        check=False,
+        shell=True,
+        executable="/bin/sh",
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert dropin_dir.exists()
+
+
+def test_node_agent_timer_dropin_verify_requires_no_effective_overrides() -> None:
+    assert _node_agent_timer_dropins_absent_command(
+        "loom-gb10-node-agent.timer"
+    ) == (
+        'test ! -e "$HOME/.config/systemd/user/'
+        'loom-gb10-node-agent.timer.d"'
+    )
+
+
+def test_gb10_prep_rejects_unknown_dropin_before_unit_or_systemd_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    host = GB10Host(
+        ssh_target="trt-gb10-1",
+        repo_path="/home/qianyi/loom-worker-build-staging",
+        env_file_path="/home/qianyi/loom-worker-staging.env",
+        node_agent_service="loom-gb10-node-agent.service",
+    )
+    commands: list[str] = []
+
+    def fake_ssh(
+        _host: GB10Host,
+        command: str,
+        *,
+        stdin_text: str | None = None,
+    ) -> SubprocessResult:
+        assert stdin_text is None
+        commands.append(command)
+        return SubprocessResult(
+            [],
+            1 if "deploy-window.conf" in command else 0,
+            "",
+            "",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s04_gb10_prep._ssh", fake_ssh)
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+
+    ok, summary = _prep_one_host(ctx, host, host_dir)
+
+    assert not ok
+    assert "node-agent-timer-dropin-cleanup failed" in summary
+    assert not any("install -D" in command for command in commands)
+    assert not any("systemctl --user" in command for command in commands)
 
 
 def test_merged_dev_gb10_prep_keeps_origin_fetch(
@@ -2754,6 +2875,8 @@ def test_gb10_prep_verify_checks_checkout_env_version_and_node_agent(
         "cmp -s /srv/loom-staging/deploy/worker-pools/gb10/loom-gb10-node-agent.timer"
     )
     assert calls[7:] == [
+        'test ! -e "$HOME/.config/systemd/user/'
+        'loom-gb10-node-agent.timer.d"',
         "systemctl --user is-enabled loom-gb10-worker.service",
         "systemctl --user show loom-gb10-worker.service -p ActiveState -p SubState",
         "systemctl --user show loom-gb10-node-agent.service -p LoadState -p Type -p Result -p ExecMainStatus -p ActiveState -p SubState -p NeedDaemonReload",
