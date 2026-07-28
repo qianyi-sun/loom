@@ -284,6 +284,10 @@ When a sealed cumulative source refreshes the service-owned local candidate,
 the fixed local fetch uses an exact `git upload-pack` command whose sole
 `safe.directory` value is the root-owned install source's `.git` directory.
 It does not persist a wildcard or user-controlled Git safety exception.
+The protected GB10 candidate component applies the same rule when a fixed host
+fetches from the immutable shared candidate. Its upload-pack trusts only the
+candidate-bound `.git` directory, so the consumer can read service-owned Git
+objects without changing ownership or writing persistent Git configuration.
 
 The broker preflight verifies the fixed 14 active GB10 nodes can consume the
 shared root as `qianyi` without writing it. The 13 NFS clients must report the

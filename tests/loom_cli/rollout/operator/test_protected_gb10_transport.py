@@ -316,6 +316,26 @@ def test_remote_shared_candidate_git_uses_live_nfs_timeout_budget(tmp_path) -> N
     assert f"timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}" in apply
 
 
+def test_remote_checkout_trusts_only_exact_shared_candidate_upload_pack(tmp_path) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1")
+    apply = _remote_apply_source(
+        _target(),
+        plan,
+        (GB10MutationKind.CHECKOUT,),
+    )
+    shared = (
+        "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/"
+        f"loom-remote-worker-staging-{plan.candidate_sha[:7]}"
+    )
+    upload_pack = f"/usr/bin/git -c safe.directory={shared}/.git upload-pack"
+
+    assert f"upload_pack = {upload_pack!r}" in apply
+    assert '"--no-write-fetch-head", f"--upload-pack={upload_pack}"' in apply
+    assert "safe.directory=*" not in apply
+    assert "config --global" not in apply
+    assert "config --system" not in apply
+
+
 def test_fixed_transport_aggregates_unavailable_hosts_and_rejects_inventory_drift(
     tmp_path,
 ) -> None:
