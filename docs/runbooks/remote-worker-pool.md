@@ -1588,6 +1588,22 @@ from the replayable `--worker-token` source, forces mode `0600`, and prepares
 a clean shared checkout at the target `repo_dir` before the environment-state
 check validates existence, git HEAD, clean status, and token parity.
 
+The #827 acceptance authority uses
+`scripts/ops/developer_sandbox_slurm_policy.py allocation-probe`; despite the
+singular command name it always executes a complete, resumable matrix. Each
+declared node receives its own non-exclusive `sbatch` and `srun` with an
+explicit Slurm `NodeName` from `allowed_nodes`; the compute OS hostname is
+separately checked against `host_aliases[node]`. The command binds the fresh
+combined 19-node runtime receipt and repeats raw candidate/env, Docker,
+allocation-cgroup, and resolved Compose checks inside each allocation. A
+missing, duplicate, foreign, failed, timed out, cancelled, route-drifted,
+receipt-drifted, or cgroup-unbound node prevents publication of the final pass
+artifact. `check` requires that exact complete matrix by default; neither
+`sinfo`, a randomly placed single job, nor the static node-agent fleet is
+acceptable #827 evidence. Recovery validates exact job name/ID, node, user,
+account, and cluster before cancellation. The operator command is documented in
+`docs/runbooks/developer-sandbox-slurm-policy.md`.
+
 A pool listed under `external_slurm_runner_prerequisites.pools` remains in the
 protected supervisor artifact even while its supervisor is fully disabled.
 The rendered timer carries the exact `LoomDesiredState` marker, so a protected

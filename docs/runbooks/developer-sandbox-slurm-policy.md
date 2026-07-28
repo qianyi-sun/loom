@@ -150,8 +150,11 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py allocation-probe \
   --candidate-sha "$EXACT_CANDIDATE_SHA" \
   --candidate-root "$EXACT_CANDIDATE_ROOT" \
   --worker-env "$PRIVATE_WORKER_ENV" \
+  --runtime-receipt "/var/lib/loom-shared-capacity/runtime-attestations/qianyi/$EXACT_CANDIDATE_SHA/combined.json" \
   --batch-uid "$EXPECTED_BATCH_UID" \
   --batch-gid "$EXPECTED_BATCH_GID" \
+  --expected-pool oldlab \
+  --expected-concurrency 1 \
   --execute
 
 sudo python scripts/ops/developer_sandbox_slurm_policy.py check \
@@ -159,35 +162,69 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py check \
   --candidate-sha "$EXACT_CANDIDATE_SHA" \
   --candidate-root "$EXACT_CANDIDATE_ROOT" \
   --worker-env "$PRIVATE_WORKER_ENV" \
+  --runtime-receipt "/var/lib/loom-shared-capacity/runtime-attestations/qianyi/$EXACT_CANDIDATE_SHA/combined.json" \
   --batch-uid "$EXPECTED_BATCH_UID" \
-  --batch-gid "$EXPECTED_BATCH_GID"
+  --batch-gid "$EXPECTED_BATCH_GID" \
+  --expected-pool oldlab \
+  --expected-concurrency 1
 ```
 
-The probe submits one bounded, non-exclusive `sbatch` job and executes one
-`srun` step inside that allocation. Submission uses immediate parsable output,
-not `sbatch --wait`; a root-only mode-`0600` inflight record is persisted below
-a non-symlink root-owned mode-`0700` directory before bounded polling begins.
+The probe is an all-node matrix by default. While holding one persistent
+cluster/candidate lock, it walks the profile's `allowed_nodes` exactly once in
+declared order. Every bounded, non-exclusive `sbatch` carries
+`--oversubscribe` and the exact
+`--nodelist=<allowed_nodes node>`; its `srun` repeats that Slurm `NodeName`.
+Inside the allocation, the observed compute OS hostname must independently
+equal `host_aliases[node]`. The deterministic job name contains the full
+candidate SHA, declared node, and durable attempt number and is bounded to
+Slurm's safe 128-character limit. Random scheduler placement or a single
+successful node is never acceptance.
+
+Submission uses immediate parsable output, not `sbatch --wait`. A root-owned,
+single-link mode-`0600` matrix journal and per-node inflight record live below
+a non-symlink root-owned mode-`0700` directory, and every transition is
+atomically written and fsynced. A rerun first recovers every exact inflight or
+attempt-name orphan, including a job that completed between `sbatch` and
+inflight-journal creation. Before any `scancel`, queue/accounting identity must
+match the exact job ID/name, Slurm node, user, account, and cluster. It then
+submits only nodes without completed evidence; completed nodes are not
+repeated. Cancellation, timeout, ambiguous jobs, or terminal readback failure
+stays durable and fail-closed. One failed node invalidates the final artifact;
+it cannot be hidden by passes elsewhere in the matrix.
+
+The final root-only artifact is closed-world: its node list and host-alias map
+must equal the profile, and every node appears once and only once with its
+exact job/account/QoS, explicit route, TRES/GPU result, completed batch and
+`srun`, and exact cgroup-guard job/node binding. It also binds the candidate
+SHA/tree, submit cluster/controller/host, numeric batch UID/GID, pool,
+concurrency, and candidate/env metadata.
+
+The required combined runtime receipt is root-owned mode `0600`, canonical,
+fresh, candidate-bound, and collected from the existing 19-node domain
+runtime/fleet authority. The matrix validates its digest, selected domain
+generation and manifest signature digest, exact profile host coverage, and
+the fleet's exact 5 OLDLAB plus 14 GB10 closed set. Receipt, manifest,
+signature, or fleet path/digest/generation/host drift fails before submission.
+The receipt is prerequisite evidence, not a substitute for the allocation:
+inside every `srun`, the candidate's own policy program rechecks raw Git tree
+bytes, the exact env device/inode/content digest and effective
+pool/concurrency/candidate values, Docker access/cgroup driver, and secret-safe
+rendering of the worker, sandbox-link, and cgroup-parent Compose layers. The
+candidate cgroup helper must identify the actual `SLURM_JOB_ID` parent, and
+both rendered services must use that exact parent. The compute node writes a
+mode-`0600`, numeric-identity-owned result that the submit side opens without
+following symlinks and binds into the final evidence. The old `id`/`sleep`
+probe is no longer accepted.
+
 The full invalidate, recovery, submission, polling, evidence, and finalize
 transaction holds a persistent root-owned mode-`0600` `flock` keyed by cluster
-and candidate, so concurrent invocations cannot submit or overwrite the same
-inflight identity. A crashed process releases the kernel lock while leaving
-the durable journal for exact recovery by the next lock holder.
-Every timeout, error, or recovery first reads the exact base job from `sacct`.
-An already-terminal job is archived without `scancel`; a non-terminal or
-temporarily unknown job receives `scancel` for that exact cluster/job ID,
-followed by terminal accounting readback. Cancellation or readback failure
-remains durably fail-closed, and the next invocation recovers an interrupted
-inflight or exact deterministic-name orphan before submitting anything new.
+and candidate. The final `check` takes that same lock across its inflight
+check, matrix/final artifact opens, and all validation, so it cannot return a
+stale artifact after a concurrent writer begins invalidation. The internal
+unlocked reader exists only to avoid recursively acquiring the lock and must
+not be called as an operator surface.
 
-The final root-only artifact binds the full candidate SHA/tree,
-cluster/controller/submit-host route, account/QoS, job, allocation node, TRES,
-guard resource readback, expected numeric batch UID/GID, and completion of both
-batch and step. The worker env must be owned by that same UID/GID with exact
-mode `0600`; only its safe metadata, digest, and key names are recorded, never
-its values. GB10 requests and reads back a positive GPU TRES. The final check
-accepts only a fresh artifact for the exact profile, candidate, and identity.
-
-Before submission and again during the final check, the candidate verifier
+Before submission, on every allocation, and again during the final check, the candidate verifier
 walks the safe non-symlink, non-group/world-writable parent chain; opens the
 private env as the same inode with exact mode `0600`; rejects duplicate,
 malformed, or empty env assignments; and compares every repository file's raw

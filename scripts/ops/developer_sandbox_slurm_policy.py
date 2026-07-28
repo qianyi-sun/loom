@@ -9,12 +9,14 @@ requesting service restarts.
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
 import os
 import pwd
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -62,6 +64,11 @@ _ALLOCATION_PROBE_RELATIVE = _STATE_RELATIVE / "allocation-probes"
 _ALLOCATION_PROBE_MAX_AGE = timedelta(minutes=15)
 _ALLOCATION_POLL_SECONDS = 1.0
 _ALLOCATION_TIMEOUT_SECONDS = 180.0
+_COMBINED_RUNTIME_ATTESTATION_ROOT = Path(
+    "/var/lib/loom-shared-capacity/runtime-attestations",
+)
+_DOMAIN_RUNTIME_ATTESTATION_ROOT = Path("/var/lib/loom-developer-domain-attestations")
+_FLEET_ATTESTATION_ROOT = Path("/var/lib/loom-developer-sandbox-links/attestations")
 _TERMINAL_JOB_STATES = frozenset(
     {
         "BOOT_FAIL",
@@ -729,6 +736,213 @@ def strict_candidate_binding(
             expected_gid=expected_batch_gid,
         ),
     }
+
+
+def _read_exact_env_values(
+    path: Path,
+    *,
+    expected_inode: int,
+    expected_sha256: str,
+) -> dict[str, str]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PolicyError("allocation-side worker env is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_ino != expected_inode:
+            raise PolicyError("allocation-side worker env inode drifted")
+        content = bytearray()
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > 1024 * 1024:
+                raise PolicyError("allocation-side worker env is too large")
+        after = os.fstat(descriptor)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise PolicyError("allocation-side worker env changed while it was read")
+    finally:
+        os.close(descriptor)
+    payload = bytes(content)
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise PolicyError("allocation-side worker env content drifted")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PolicyError("allocation-side worker env must be UTF-8") from exc
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or _ENV_KEY_RE.fullmatch(key) is None or not value or key in values:
+            raise PolicyError("allocation-side worker env schema drifted")
+        values[key] = value
+    return values
+
+
+def allocation_node_check(
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    candidate_root: Path,
+    worker_env: Path,
+    expected_tree: str,
+    expected_env_inode: int,
+    expected_env_sha256: str,
+    batch_uid: int,
+    batch_gid: int,
+    expected_host: str,
+    expected_pool: str,
+    expected_concurrency: int,
+    result_path: Path,
+) -> dict[str, Any]:
+    """Run the secret-safe compute-side portion of the #827 matrix."""
+    if os.geteuid() != batch_uid or os.getegid() != batch_gid:
+        raise PolicyError("allocation-side numeric batch identity drifted")
+    host = _canonical_host()
+    if host != expected_host.lower():
+        raise PolicyError("allocation-side node identity drifted")
+    binding = strict_candidate_binding(
+        candidate_root,
+        worker_env,
+        candidate_sha=candidate_sha,
+        expected_batch_uid=batch_uid,
+        expected_batch_gid=batch_gid,
+    )
+    if binding["repository"]["candidate_tree"] != expected_tree:
+        raise PolicyError("allocation-side candidate tree drifted")
+    env_binding = binding["worker_env"]
+    if env_binding["inode"] != expected_env_inode or env_binding["sha256"] != expected_env_sha256:
+        raise PolicyError("allocation-side worker env binding drifted")
+    values = _read_exact_env_values(
+        worker_env,
+        expected_inode=expected_env_inode,
+        expected_sha256=expected_env_sha256,
+    )
+    if (
+        values.get("LOOM_WORKER_CANDIDATE_SHA") != candidate_sha
+        or values.get("LOOM_WORKER_POOL_NAME") != expected_pool
+        or values.get("LOOM_WORKER_MAX_CONCURRENT") != str(expected_concurrency)
+    ):
+        raise PolicyError("allocation-side worker env effective values drifted")
+    docker_driver = _run(("docker", "info", "--format", "{{.CgroupDriver}}"), timeout=30).strip()
+    if docker_driver != profile.docker_cgroup_driver:
+        raise PolicyError("allocation-side Docker cgroup driver drifted")
+    job_id = os.environ.get("SLURM_JOB_ID", "")
+    if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
+        raise PolicyError("allocation-side Slurm job identity is unavailable")
+    cgroup_program = candidate_root / "src/loom_control_plane/slurm_job_cgroup.py"
+    try:
+        cgroup_completed = subprocess.run(
+            (
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                str(cgroup_program),
+                "--job-id",
+                job_id,
+                "--pids-max",
+                str(profile.job_pids_max),
+                "--wait-seconds",
+                "30",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("allocation-side cgroup guard validation failed safely") from exc
+    cgroup_parent = cgroup_completed.stdout.strip()
+    if cgroup_completed.returncode or not cgroup_parent.startswith("/"):
+        raise PolicyError("allocation-side cgroup guard validation failed")
+    base_compose = candidate_root / "deploy/docker-compose.remote-worker.yml"
+    sandbox_compose = candidate_root / "deploy/docker-compose.remote-worker.sandbox-link.yml"
+    cgroup_compose = candidate_root / "deploy/docker-compose.remote-worker.cgroup-parent.yml"
+    compose_environment = {
+        **os.environ,
+        "LOOM_WORKER_CGROUP_PARENT": cgroup_parent,
+        "LOOM_WORKER_SLURM_JOB_ID": job_id,
+        "LOOM_WORKER_COMPOSE_PROJECT": "loom-acceptance",
+        "LOOM_WORKER_RESTART_POLICY": "no",
+    }
+    try:
+        completed = subprocess.run(
+            (
+                "docker",
+                "compose",
+                "--env-file",
+                str(worker_env),
+                "-f",
+                str(base_compose),
+                "-f",
+                str(sandbox_compose),
+                "-f",
+                str(cgroup_compose),
+                "config",
+                "--format",
+                "json",
+            ),
+            cwd=candidate_root,
+            env=compose_environment,
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("allocation-side Docker Compose validation failed safely") from exc
+    if completed.returncode:
+        raise PolicyError("allocation-side Docker Compose validation failed")
+    try:
+        rendered = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("allocation-side Docker Compose output is invalid") from exc
+    services = rendered.get("services") if isinstance(rendered, dict) else None
+    if (
+        not isinstance(services, dict)
+        or not isinstance(services.get("worker"), dict)
+        or not isinstance(services.get("sandbox-link"), dict)
+        or services["worker"].get("cgroup_parent") != cgroup_parent
+        or services["sandbox-link"].get("cgroup_parent") != cgroup_parent
+    ):
+        raise PolicyError("allocation-side Docker Compose cgroup binding drifted")
+    result = {
+        "schema_version": 1,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": expected_tree,
+        "host": host,
+        "env_device": env_binding["device"],
+        "env_inode": expected_env_inode,
+        "env_sha256": expected_env_sha256,
+        "pool": expected_pool,
+        "concurrency": expected_concurrency,
+        "docker_cgroup_driver": docker_driver,
+        "job_id": job_id,
+        "cgroup_parent": cgroup_parent,
+        "cgroup_guard_verified": True,
+        "compose_verified": True,
+    }
+    _prepare_private_directory(
+        result_path.parent,
+        enforce_root_ownership=False,
+        create=False,
+    )
+    _write_allocation_state(
+        result_path,
+        result,
+        enforce_root_ownership=False,
+    )
+    return result
 
 
 def desired_files(
@@ -2233,6 +2447,159 @@ def _allocation_inflight_path(root: Path, profile: Profile, candidate_sha: str) 
     return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.inflight.json"
 
 
+def _allocation_matrix_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
+    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.matrix.json"
+
+
+def _allocation_node_inflight_path(
+    root: Path,
+    profile: Profile,
+    candidate_sha: str,
+    node: str,
+) -> Path:
+    if node not in profile.allowed_nodes:
+        raise PolicyError("allocation matrix node is outside the profile")
+    safe_node = node.lower()
+    if _SAFE_NAME.fullmatch(safe_node) is None:
+        raise PolicyError("allocation matrix node name is unsafe")
+    return (
+        root
+        / _ALLOCATION_PROBE_RELATIVE
+        / profile.cluster
+        / f"{candidate_sha}.{safe_node}.inflight.json"
+    )
+
+
+def _allocation_result_path(
+    worker_env: Path,
+    profile: Profile,
+    candidate_sha: str,
+    node: str,
+) -> Path:
+    if node not in profile.allowed_nodes:
+        raise PolicyError("allocation result node is outside the profile")
+    return (
+        worker_env.parent
+        / ".loom-allocation-probes"
+        / candidate_sha
+        / profile.cluster
+        / f"{node.lower()}.json"
+    )
+
+
+def _prepare_allocation_result_path(
+    path: Path,
+    *,
+    worker_env: Path,
+    batch_uid: int,
+    batch_gid: int,
+) -> None:
+    expected_root = worker_env.parent / ".loom-allocation-probes"
+    try:
+        relative = path.relative_to(expected_root)
+    except ValueError as exc:
+        raise PolicyError("allocation result path escaped its private root") from exc
+    if len(relative.parts) != 3:
+        raise PolicyError("allocation result path escaped its private root")
+    candidate_directory = expected_root / relative.parts[0]
+    for directory in (
+        expected_root,
+        candidate_directory,
+        path.parent,
+    ):
+        try:
+            directory.mkdir(mode=0o700)
+            os.chown(directory, batch_uid, batch_gid)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise PolicyError("allocation result directory could not be prepared") from exc
+        metadata = directory.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != batch_uid
+            or metadata.st_gid != batch_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise PolicyError("allocation result directory is unsafe")
+    path.unlink(missing_ok=True)
+    _fsync_directory(path.parent)
+
+
+def _discard_allocation_result(path: Path) -> None:
+    path.unlink(missing_ok=True)
+    if path.parent.exists():
+        _fsync_directory(path.parent)
+
+
+def _load_allocation_result(
+    path: Path,
+    *,
+    batch_uid: int,
+    batch_gid: int,
+) -> dict[str, Any]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PolicyError("allocation node result is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        linked = path.lstat()
+        if (
+            stat.S_ISLNK(linked.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(linked.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or stat.S_IMODE(linked.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or linked.st_nlink != 1
+            or opened.st_uid != batch_uid
+            or opened.st_gid != batch_gid
+            or linked.st_uid != batch_uid
+            or linked.st_gid != batch_gid
+            or opened.st_dev != linked.st_dev
+            or opened.st_ino != linked.st_ino
+        ):
+            raise PolicyError("allocation node result is unsafe")
+        content = bytearray()
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > 1024 * 1024:
+                raise PolicyError("allocation node result is too large")
+    finally:
+        os.close(descriptor)
+    try:
+        payload = json.loads(bytes(content))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("allocation node result is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or bytes(content) != _canonical_json_bytes(payload) + b"\n"
+    ):
+        raise PolicyError("allocation node result is not canonical")
+    return payload
+
+
+def _allocation_job_name(candidate_sha: str, node: str, attempt: int) -> str:
+    if _CANDIDATE_RE.fullmatch(candidate_sha) is None:
+        raise PolicyError("allocation matrix candidate SHA is invalid")
+    safe_node = node.lower()
+    if _SAFE_NAME.fullmatch(safe_node) is None:
+        raise PolicyError("allocation matrix node name is unsafe")
+    if attempt < 1:
+        raise PolicyError("allocation matrix attempt is invalid")
+    job_name = f"loom827-{candidate_sha}-{safe_node}-a{attempt}"
+    if len(job_name) > 128:
+        raise PolicyError("allocation matrix job name exceeds Slurm's safe limit")
+    return job_name
+
+
 def _allocation_lock_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
     return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.lock"
 
@@ -2287,7 +2654,12 @@ def _write_allocation_state(
         mode=0o600,
     )
     metadata = path.lstat()
-    if enforce_root_ownership and (metadata.st_uid != 0 or metadata.st_gid != 0):
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or (enforce_root_ownership and (metadata.st_uid != 0 or metadata.st_gid != 0))
+    ):
         raise PolicyError("allocation evidence must be root:root")
 
 
@@ -2300,39 +2672,373 @@ def _load_allocation_state(
         return None
     if enforce_root_ownership:
         _require_root_private_directory(path.parent)
-    try:
-        metadata = path.lstat()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PolicyError("allocation inflight journal is unreadable") from exc
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or (enforce_root_ownership and metadata.st_uid != 0)
-        or (enforce_root_ownership and metadata.st_gid != 0)
-        or not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
-    ):
+    payload = _read_private_json_file(
+        path,
+        enforce_root_ownership=enforce_root_ownership,
+        description="allocation state",
+    )
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise PolicyError("allocation inflight journal is unsafe")
     return payload
 
 
+def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+
+
+def _read_attestation_file(
+    path: Path,
+    *,
+    expected_mode: int,
+    enforce_root_ownership: bool,
+) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PolicyError("runtime attestation input is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        linked = path.lstat()
+        expected_uid = 0 if enforce_root_ownership else os.geteuid()
+        expected_gid = 0 if enforce_root_ownership else os.getegid()
+        if (
+            stat.S_ISLNK(linked.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(linked.st_mode)
+            or stat.S_IMODE(opened.st_mode) != expected_mode
+            or stat.S_IMODE(linked.st_mode) != expected_mode
+            or opened.st_nlink != 1
+            or linked.st_nlink != 1
+            or opened.st_uid != expected_uid
+            or linked.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+            or linked.st_gid != expected_gid
+            or opened.st_dev != linked.st_dev
+            or opened.st_ino != linked.st_ino
+        ):
+            raise PolicyError("runtime attestation input is unsafe")
+        content = bytearray()
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > 1024 * 1024:
+                raise PolicyError("runtime attestation input is too large")
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def _load_canonical_attestation_json(
+    path: Path,
+    *,
+    expected_mode: int,
+    enforce_root_ownership: bool,
+) -> dict[str, Any]:
+    raw = _read_attestation_file(
+        path,
+        expected_mode=expected_mode,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("runtime attestation input is invalid JSON") from exc
+    if not isinstance(payload, dict) or raw != _canonical_json_bytes(payload) + b"\n":
+        raise PolicyError("runtime attestation input is not canonical")
+    return payload
+
+
+def _runtime_attestation_binding(
+    receipt_path: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    candidate_root: Path,
+    worker_env: Path,
+    enforce_root_ownership: bool,
+) -> dict[str, Any]:
+    expected_receipt = (
+        _COMBINED_RUNTIME_ATTESTATION_ROOT / profile.users[0] / candidate_sha / "combined.json"
+    )
+    if receipt_path != expected_receipt:
+        raise PolicyError("runtime attestation receipt path drifted")
+    receipt = _load_canonical_attestation_json(
+        receipt_path,
+        expected_mode=0o600,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    expected_top = {
+        "schema_version",
+        "kind",
+        "sandbox",
+        "candidate_sha",
+        "candidate_tree",
+        "collector",
+        "fleet_attestation",
+        "domains",
+        "payload_sha256",
+    }
+    unsigned = dict(receipt)
+    digest = unsigned.pop("payload_sha256", None)
+    collector = receipt.get("collector")
+    now = datetime.now(UTC)
+    if not isinstance(collector, dict):
+        raise PolicyError("runtime attestation collector is invalid")
+    try:
+        collected_at = datetime.fromisoformat(str(collector["collected_at"]))
+        receipt_expires_at = datetime.fromisoformat(str(collector["expires_at"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PolicyError("runtime attestation collector timestamps are invalid") from exc
+    if (
+        set(receipt) != expected_top
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind") != "loom.developer-runtime-combined-activation"
+        or receipt.get("candidate_sha") != candidate_sha
+        or receipt.get("candidate_tree") != candidate_tree
+        or receipt.get("sandbox") != profile.users[0]
+        or set(collector) != {"hostname", "collected_at", "expires_at"}
+        or collector.get("hostname") != "trt-eai-oldlab-2"
+        or collected_at.tzinfo is None
+        or receipt_expires_at.tzinfo is None
+        or not timedelta(0)
+        < receipt_expires_at.astimezone(UTC) - collected_at.astimezone(UTC)
+        <= timedelta(minutes=15)
+        or collected_at.astimezone(UTC) > now + timedelta(seconds=30)
+        or receipt_expires_at.astimezone(UTC) <= now
+        or digest != hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
+    ):
+        raise PolicyError("runtime attestation receipt binding drifted")
+    domains = receipt.get("domains")
+    fleet_reference = receipt.get("fleet_attestation")
+    if (
+        not isinstance(domains, dict)
+        or set(domains) != {"oldlab", "gb10"}
+        or not isinstance(fleet_reference, dict)
+        or set(fleet_reference) != {"path", "payload_sha256", "generated_at", "expires_at"}
+    ):
+        raise PolicyError("runtime attestation receipt is not closed-world")
+    domain_name = {
+        "trt-oldlab": "oldlab",
+        "trt-gb10": "gb10",
+    }.get(profile.cluster)
+    if domain_name is None:
+        raise PolicyError("runtime attestation does not support this Slurm cluster")
+    domain_row = domains.get(domain_name)
+    expected_domain_fields = {
+        "manifest_path",
+        "signature_path",
+        "payload_sha256",
+        "signature_sha256",
+        "key_id",
+        "generation",
+        "published_at",
+        "expires_at",
+    }
+    if any(
+        not isinstance(value, dict)
+        or set(value) != expected_domain_fields
+        or type(value.get("generation")) is not int
+        or value["generation"] < 1
+        or re.fullmatch(r"[0-9a-f]{64}", str(value.get("payload_sha256"))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(value.get("signature_sha256"))) is None
+        for value in domains.values()
+    ):
+        raise PolicyError("runtime domain attestation references are invalid")
+    if (
+        not isinstance(domain_row, dict)
+        or set(domain_row) != expected_domain_fields
+        or type(domain_row.get("generation")) is not int
+        or domain_row["generation"] < 1
+    ):
+        raise PolicyError("runtime domain attestation reference is invalid")
+    manifest_path = Path(str(domain_row["manifest_path"]))
+    signature_path = Path(str(domain_row["signature_path"]))
+    sandbox = receipt.get("sandbox")
+    expected_manifest_parent = _DOMAIN_RUNTIME_ATTESTATION_ROOT / str(sandbox) / candidate_sha
+    if (
+        manifest_path.parent != expected_manifest_parent
+        or manifest_path.name != f"{domain_name}.json"
+        or signature_path.parent != expected_manifest_parent
+        or signature_path.name != f"{domain_name}.sig"
+    ):
+        raise PolicyError("runtime domain attestation path drifted")
+    manifest = _load_canonical_attestation_json(
+        manifest_path,
+        expected_mode=0o644,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    manifest_unsigned = dict(manifest)
+    manifest_digest = manifest_unsigned.pop("payload_sha256", None)
+    if (
+        manifest_digest != domain_row.get("payload_sha256")
+        or manifest_digest != hashlib.sha256(_canonical_json_bytes(manifest_unsigned)).hexdigest()
+    ):
+        raise PolicyError("runtime domain attestation digest drifted")
+    try:
+        signature = base64.b64decode(
+            _read_attestation_file(
+                signature_path,
+                expected_mode=0o644,
+                enforce_root_ownership=enforce_root_ownership,
+            ).strip(),
+            validate=True,
+        )
+    except ValueError as exc:
+        raise PolicyError("runtime domain attestation signature is invalid") from exc
+    publisher = manifest.get("publisher")
+    candidate = manifest.get("candidate")
+    runtime_env = manifest.get("runtime_env")
+    eligible_peers = manifest.get("eligible_peers")
+    expected_hosts = [profile.host_aliases[node] for node in profile.allowed_nodes]
+    if (
+        not isinstance(publisher, dict)
+        or publisher.get("generation") != domain_row.get("generation")
+        or publisher.get("published_at") != domain_row.get("published_at")
+        or publisher.get("expires_at") != domain_row.get("expires_at")
+        or not isinstance(candidate, dict)
+        or candidate.get("sha") != candidate_sha
+        or candidate.get("tree") != candidate_tree
+        or not isinstance(runtime_env, dict)
+        or not isinstance(candidate.get("path"), str)
+        or not isinstance(runtime_env.get("path"), str)
+        or hashlib.sha256(signature).hexdigest() != domain_row.get("signature_sha256")
+        or not isinstance(eligible_peers, list)
+        or [item.get("hostname") for item in eligible_peers if isinstance(item, dict)]
+        != expected_hosts
+        or len(eligible_peers) != len(expected_hosts)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"hostname", "candidate_inode", "env_inode", "result"}
+            or type(item.get("candidate_inode")) is not int
+            or type(item.get("env_inode")) is not int
+            or item.get("result") != "verified"
+            for item in eligible_peers
+        )
+        or len({item["candidate_inode"] for item in eligible_peers}) != 1
+        or len({item["env_inode"] for item in eligible_peers}) != 1
+    ):
+        raise PolicyError("runtime domain attestation host coverage drifted")
+    fleet_path = Path(str(fleet_reference["path"]))
+    expected_fleet_path = _FLEET_ATTESTATION_ROOT / str(sandbox) / candidate_sha / "fleet.json"
+    if fleet_path != expected_fleet_path:
+        raise PolicyError("runtime fleet attestation path drifted")
+    fleet = _load_canonical_attestation_json(
+        fleet_path,
+        expected_mode=0o600,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    fleet_unsigned = dict(fleet)
+    fleet_digest = fleet_unsigned.pop("payload_sha256", None)
+    expected_fleet_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            _canonical_json_bytes(fleet_unsigned),
+        ).hexdigest()
+    )
+    try:
+        fleet_generated_at = datetime.fromisoformat(
+            str(fleet["generated_at"]).replace("Z", "+00:00")
+        )
+        fleet_expires_at = datetime.fromisoformat(str(fleet["expires_at"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError) as exc:
+        raise PolicyError("runtime fleet attestation timestamps are invalid") from exc
+    expected_fleet_nodes = [
+        "oldlab-1",
+        "oldlab-2",
+        "oldlab-3",
+        "oldlab-4",
+        "oldlab-5",
+        "trt-gb10-1",
+        "trt-gb10-2",
+        "trt-gb10-3",
+        "trt-gb10-4",
+        "trt-gb10-5",
+        "trt-gb10-6",
+        "trt-gb10-8",
+        "trt-gb10-9",
+        "trt-gb10-10",
+        "trt-gb10-11",
+        "trt-gb10-12",
+        "trt-gb10-13",
+        "trt-gb10-14",
+        "trt-gb10-15",
+    ]
+    if (
+        fleet_digest != fleet_reference.get("payload_sha256")
+        or fleet_digest != expected_fleet_digest
+        or fleet.get("generated_at") != fleet_reference.get("generated_at")
+        or fleet.get("expires_at") != fleet_reference.get("expires_at")
+        or fleet_generated_at.tzinfo is None
+        or fleet_expires_at.tzinfo is None
+        or fleet_expires_at.astimezone(UTC) <= now
+        or fleet.get("candidate_sha") != candidate_sha
+        or fleet.get("eligible_nodes") != expected_fleet_nodes
+        or not isinstance(fleet.get("nodes"), dict)
+        or set(fleet["nodes"]) != set(expected_fleet_nodes)
+    ):
+        raise PolicyError("runtime fleet attestation coverage drifted")
+    return {
+        "receipt_path": str(receipt_path),
+        "receipt_sha256": digest,
+        "sandbox": sandbox,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "domain": domain_name,
+        "domain_payload_sha256": manifest_digest,
+        "domain_signature_sha256": domain_row["signature_sha256"],
+        "domain_generation": domain_row["generation"],
+        "domain_hosts": expected_hosts,
+        "domain_candidate_path": candidate["path"],
+        "domain_runtime_env_path": runtime_env["path"],
+        "allocation_candidate_path": str(candidate_root),
+        "allocation_worker_env_path": str(worker_env),
+        "fleet_payload_sha256": fleet_digest,
+        "fleet_nodes": expected_fleet_nodes,
+    }
+
+
 def _parse_sacct_rows(raw: str) -> list[list[str]]:
     rows = [line.split("|") for line in raw.splitlines() if line.strip()]
-    if any(len(row) < 6 for row in rows):
+    if any(len(row) < 8 for row in rows):
         raise PolicyError("Slurm allocation probe accounting output is malformed")
     return rows
 
 
-def _probe_accounting_rows(job_id: str) -> list[list[str]]:
+def _probe_accounting_rows(job_id: str, profile: Profile) -> list[list[str]]:
     output = _run(
         (
             "sacct",
             "-nP",
+            f"--clusters={profile.cluster}",
             "-j",
             job_id,
-            "--format=JobIDRaw,JobName,State,NodeList,AllocTRES,Account",
+            "--format=JobIDRaw,JobName,State,NodeList,AllocTRES,Account,User,Cluster",
+        ),
+        timeout=15,
+    )
+    if not output.strip():
+        return []
+    return _parse_sacct_rows(output)
+
+
+def _probe_named_accounting_rows(job_name: str, profile: Profile) -> list[list[str]]:
+    output = _run(
+        (
+            "sacct",
+            "-nP",
+            f"--clusters={profile.cluster}",
+            f"--name={job_name}",
+            "--starttime=now-1day",
+            "--format=JobIDRaw,JobName,State,NodeList,AllocTRES,Account,User,Cluster",
         ),
         timeout=15,
     )
@@ -2350,18 +3056,101 @@ def _base_job_state(rows: Sequence[Sequence[str]], job_id: str) -> str | None:
 
 def _poll_probe_terminal(
     job_id: str,
+    profile: Profile,
     *,
     timeout_seconds: float,
     poll_seconds: float = _ALLOCATION_POLL_SECONDS,
 ) -> list[list[str]]:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        rows = _probe_accounting_rows(job_id)
+        rows = _probe_accounting_rows(job_id, profile)
         state = _base_job_state(rows, job_id)
         if state in _TERMINAL_JOB_STATES:
             return rows
         time.sleep(poll_seconds)
     raise PolicyError("allocation probe did not reach a terminal state before timeout")
+
+
+def _validate_probe_base_row(
+    row: Sequence[str],
+    payload: Mapping[str, Any],
+    profile: Profile,
+) -> None:
+    if (
+        len(row) < 8
+        or row[0] != str(payload.get("job_id", ""))
+        or row[1] != payload.get("job_name")
+        or row[3].lower() != str(payload.get("node", "")).lower()
+        or row[5] != profile.child_accounts[0]
+        or row[6] != profile.users[0]
+        or row[7] != profile.cluster
+    ):
+        raise PolicyError("allocation probe job identity drifted")
+
+
+def _queue_probe_rows(
+    profile: Profile,
+    *,
+    job_name: str | None = None,
+    job_id: str | None = None,
+) -> list[list[str]]:
+    selector: tuple[str, str]
+    if job_id is not None:
+        selector = ("-j", job_id)
+    elif job_name is not None:
+        selector = ("-n", job_name)
+    else:
+        raise PolicyError("allocation queue probe requires an exact selector")
+    output = _run(
+        (
+            "squeue",
+            f"--clusters={profile.cluster}",
+            "-h",
+            *selector,
+            "-o",
+            "%A|%j|%T|%u|%a|%N",
+        ),
+        timeout=15,
+    )
+    rows = [line.split("|") for line in output.splitlines() if line.strip()]
+    if any(len(row) < 6 for row in rows):
+        raise PolicyError("Slurm allocation probe queue output is malformed")
+    return rows
+
+
+def _validate_probe_queue_row(
+    row: Sequence[str],
+    payload: Mapping[str, Any],
+    profile: Profile,
+) -> None:
+    if (
+        len(row) < 6
+        or row[0] != str(payload.get("job_id", ""))
+        or row[1] != payload.get("job_name")
+        or row[3] != profile.users[0]
+        or row[4] != profile.child_accounts[0]
+        or row[5].lower() != str(payload.get("node", "")).lower()
+    ):
+        raise PolicyError("allocation probe queued job identity drifted")
+
+
+def _validate_probe_job_identity(
+    payload: Mapping[str, Any],
+    profile: Profile,
+) -> tuple[list[list[str]], str | None]:
+    job_id = str(payload.get("job_id", ""))
+    rows = _probe_accounting_rows(job_id, profile)
+    base_rows = [row for row in rows if row[0] == job_id]
+    if base_rows:
+        if len(base_rows) != 1:
+            raise PolicyError("allocation probe accounting identity is ambiguous")
+        _validate_probe_base_row(base_rows[0], payload, profile)
+        return rows, _base_job_state(rows, job_id)
+    queued = _queue_probe_rows(profile, job_id=job_id)
+    if len(queued) != 1:
+        raise PolicyError("allocation probe job identity is unavailable or ambiguous")
+    _validate_probe_queue_row(queued[0], payload, profile)
+    return rows, None
 
 
 def _finish_allocation_inflight(
@@ -2391,15 +3180,11 @@ def _cancel_allocation_job(
     profile: Profile,
     *,
     enforce_root_ownership: bool,
-) -> None:
+) -> list[list[str]]:
     job_id = str(payload.get("job_id", ""))
     if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
         raise PolicyError("allocation inflight journal job ID is invalid")
-    try:
-        observed = _probe_accounting_rows(job_id)
-    except PolicyError:
-        observed = []
-    observed_state = _base_job_state(observed, job_id)
+    _observed, observed_state = _validate_probe_job_identity(payload, profile)
     if observed_state in _TERMINAL_JOB_STATES:
         payload["terminal_state"] = observed_state
         _finish_allocation_inflight(
@@ -2408,7 +3193,7 @@ def _cancel_allocation_job(
             "terminal",
             enforce_root_ownership=enforce_root_ownership,
         )
-        return
+        return _observed
     payload["phase"] = "cancel_requested"
     _write_allocation_state(
         path,
@@ -2426,7 +3211,7 @@ def _cancel_allocation_job(
         )
         raise
     try:
-        rows = _poll_probe_terminal(job_id, timeout_seconds=60)
+        rows = _poll_probe_terminal(job_id, profile, timeout_seconds=60)
     except PolicyError:
         payload["phase"] = "cancel_readback_failed"
         _write_allocation_state(
@@ -2445,6 +3230,7 @@ def _cancel_allocation_job(
         "cancelled",
         enforce_root_ownership=enforce_root_ownership,
     )
+    return rows
 
 
 def _poll_allocation_or_cancel(
@@ -2458,6 +3244,7 @@ def _poll_allocation_or_cancel(
     try:
         return _poll_probe_terminal(
             str(payload["job_id"]),
+            profile,
             timeout_seconds=timeout_seconds,
         )
     except Exception:
@@ -2475,10 +3262,12 @@ def _recover_allocation_probe(
     profile: Profile,
     *,
     candidate_sha: str,
+    node: str,
     job_name: str,
     enforce_root_ownership: bool,
-) -> None:
+) -> tuple[str, list[list[str]]] | None:
     recovered_job_id: str | None = None
+    completed_recovery: tuple[str, list[list[str]]] | None = None
     payload = _load_allocation_state(
         path,
         enforce_root_ownership=enforce_root_ownership,
@@ -2489,42 +3278,108 @@ def _recover_allocation_probe(
             or payload.get("cluster") != profile.cluster
             or payload.get("controller") != profile.controller
             or payload.get("submit_host") != profile.submit_host
+            or payload.get("node") != node
+            or payload.get("host") != profile.host_aliases[node]
             or payload.get("job_name") != job_name
+            or payload.get("user") != profile.users[0]
+            or payload.get("account") != profile.child_accounts[0]
         ):
             raise PolicyError("allocation inflight journal binding drifted")
         recovered_job_id = str(payload.get("job_id", ""))
-        _cancel_allocation_job(
+        recovered_rows = _cancel_allocation_job(
             path,
             payload,
             profile,
             enforce_root_ownership=enforce_root_ownership,
         )
-    orphan_rows = [
-        line.split("|")
-        for line in _run(
-            ("squeue", "-h", "-n", job_name, "-o", "%A|%j|%T"),
-            timeout=15,
-        ).splitlines()
-        if line.strip()
-    ]
+        if _base_job_state(recovered_rows, recovered_job_id) == "COMPLETED":
+            completed_recovery = (recovered_job_id, recovered_rows)
+    orphan_rows = _queue_probe_rows(profile, job_name=job_name)
     if recovered_job_id is not None:
         orphan_rows = [row for row in orphan_rows if row[0] != recovered_job_id]
-    if not orphan_rows:
-        return
-    if (
-        len(orphan_rows) != 1
-        or len(orphan_rows[0]) < 3
-        or orphan_rows[0][1] != job_name
-        or re.fullmatch(r"[1-9][0-9]*", orphan_rows[0][0]) is None
-    ):
+    if len(orphan_rows) > 1:
         raise PolicyError("unjournaled allocation probe jobs are ambiguous")
+    if not orphan_rows:
+        accounting_rows = _probe_named_accounting_rows(job_name, profile)
+        base_rows = [
+            row
+            for row in accounting_rows
+            if "." not in row[0] and row[0] != recovered_job_id
+        ]
+        if not base_rows:
+            return completed_recovery
+        if len(base_rows) != 1:
+            raise PolicyError("unjournaled allocation probe history is ambiguous")
+        recovered_job_id = base_rows[0][0]
+        orphan_payload = {
+            "job_id": recovered_job_id,
+            "job_name": job_name,
+            "node": node,
+        }
+        _validate_probe_base_row(base_rows[0], orphan_payload, profile)
+        state = _base_job_state(accounting_rows, recovered_job_id)
+        if state not in _TERMINAL_JOB_STATES:
+            raise PolicyError("unjournaled allocation probe history is not terminal")
+        recovered_rows = _probe_accounting_rows(recovered_job_id, profile)
+        recovered_base_rows = [
+            row for row in recovered_rows if row[0] == recovered_job_id
+        ]
+        if len(recovered_base_rows) != 1:
+            raise PolicyError("unjournaled allocation probe accounting is incomplete")
+        _validate_probe_base_row(recovered_base_rows[0], orphan_payload, profile)
+        recovered_state = _base_job_state(recovered_rows, recovered_job_id)
+        if recovered_state != state:
+            raise PolicyError("unjournaled allocation probe terminal state drifted")
+        recovered = {
+            "schema_version": 1,
+            "candidate_sha": candidate_sha,
+            "cluster": profile.cluster,
+            "controller": profile.controller,
+            "submit_host": profile.submit_host,
+            "node": node,
+            "host": profile.host_aliases[node],
+            "user": profile.users[0],
+            "account": profile.child_accounts[0],
+            "job_id": recovered_job_id,
+            "job_name": job_name,
+            "phase": "recovered_terminal",
+            "created_at": datetime.now(UTC).isoformat(),
+            "terminal_state": state,
+        }
+        _write_allocation_state(
+            path,
+            recovered,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        _finish_allocation_inflight(
+            path,
+            recovered,
+            "terminal",
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        if state == "COMPLETED":
+            return (recovered_job_id, recovered_rows)
+        return completed_recovery
+    recovered_job_id = orphan_rows[0][0]
+    orphan_payload = {
+        "job_id": recovered_job_id,
+        "job_name": job_name,
+        "node": node,
+    }
+    _validate_probe_queue_row(orphan_rows[0], orphan_payload, profile)
+    if re.fullmatch(r"[1-9][0-9]*", recovered_job_id) is None:
+        raise PolicyError("unjournaled allocation probe job ID is invalid")
     recovered = {
         "schema_version": 1,
         "candidate_sha": candidate_sha,
         "cluster": profile.cluster,
         "controller": profile.controller,
         "submit_host": profile.submit_host,
-        "job_id": orphan_rows[0][0],
+        "node": node,
+        "host": profile.host_aliases[node],
+        "user": profile.users[0],
+        "account": profile.child_accounts[0],
+        "job_id": recovered_job_id,
         "job_name": job_name,
         "phase": "recovered_unjournaled",
         "created_at": datetime.now(UTC).isoformat(),
@@ -2534,12 +3389,15 @@ def _recover_allocation_probe(
         recovered,
         enforce_root_ownership=enforce_root_ownership,
     )
-    _cancel_allocation_job(
+    recovered_rows = _cancel_allocation_job(
         path,
         recovered,
         profile,
         enforce_root_ownership=enforce_root_ownership,
     )
+    if _base_job_state(recovered_rows, recovered_job_id) == "COMPLETED":
+        return (recovered_job_id, recovered_rows)
+    return completed_recovery
 
 
 def _positive_gpu_tres(value: str) -> bool:
@@ -2553,6 +3411,402 @@ def _positive_gpu_tres(value: str) -> bool:
     return False
 
 
+def _new_allocation_matrix(
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    binding: Mapping[str, Any],
+    runtime_attestation: Mapping[str, Any],
+    batch_uid: int,
+    batch_gid: int,
+    expected_pool: str,
+    expected_concurrency: int,
+) -> dict[str, Any]:
+    now = datetime.now(UTC).isoformat()
+    return {
+        "schema_version": 1,
+        "artifact_type": "developer-sandbox-slurm-allocation-matrix-journal",
+        "created_at": now,
+        "updated_at": now,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": binding["repository"]["candidate_tree"],
+        "cluster": profile.cluster,
+        "controller": profile.controller,
+        "submit_host": profile.submit_host,
+        "allowed_nodes": list(profile.allowed_nodes),
+        "host_aliases": dict(profile.host_aliases),
+        "batch_uid": batch_uid,
+        "batch_gid": batch_gid,
+        "account": profile.child_accounts[0],
+        "qos": profile.qos,
+        "expected_pool": expected_pool,
+        "expected_concurrency": expected_concurrency,
+        "candidate_binding": dict(binding),
+        "runtime_attestation": dict(runtime_attestation),
+        "nodes": {
+            node: {
+                "node": node,
+                "host": profile.host_aliases[node],
+                "status": "pending",
+                "attempts": 0,
+                "evidence": None,
+            }
+            for node in profile.allowed_nodes
+        },
+        "phase": "running",
+    }
+
+
+def _validate_allocation_matrix(
+    matrix: Mapping[str, Any],
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    binding: Mapping[str, Any],
+    runtime_attestation: Mapping[str, Any],
+    batch_uid: int,
+    batch_gid: int,
+    expected_pool: str,
+    expected_concurrency: int,
+) -> None:
+    nodes = matrix.get("nodes")
+    if (
+        matrix.get("schema_version") != 1
+        or matrix.get("artifact_type") != "developer-sandbox-slurm-allocation-matrix-journal"
+        or matrix.get("candidate_sha") != candidate_sha
+        or matrix.get("candidate_tree") != binding["repository"]["candidate_tree"]
+        or matrix.get("cluster") != profile.cluster
+        or matrix.get("controller") != profile.controller
+        or matrix.get("submit_host") != profile.submit_host
+        or matrix.get("allowed_nodes") != list(profile.allowed_nodes)
+        or matrix.get("host_aliases") != dict(profile.host_aliases)
+        or matrix.get("batch_uid") != batch_uid
+        or matrix.get("batch_gid") != batch_gid
+        or matrix.get("account") != profile.child_accounts[0]
+        or matrix.get("qos") != profile.qos
+        or matrix.get("expected_pool") != expected_pool
+        or matrix.get("expected_concurrency") != expected_concurrency
+        or matrix.get("candidate_binding") != binding
+        or matrix.get("runtime_attestation") != runtime_attestation
+        or not isinstance(nodes, dict)
+        or list(nodes) != list(profile.allowed_nodes)
+    ):
+        raise PolicyError("allocation matrix journal binding drifted")
+    for node in profile.allowed_nodes:
+        row = nodes[node]
+        if (
+            not isinstance(row, dict)
+            or row.get("node") != node
+            or row.get("host") != profile.host_aliases[node]
+            or row.get("status") not in {"pending", "inflight", "completed", "failed"}
+            or type(row.get("attempts")) is not int
+            or row["attempts"] < 0
+        ):
+            raise PolicyError("allocation matrix journal node row drifted")
+
+
+def _validate_allocation_matrix_recovery_binding(
+    matrix: Mapping[str, Any],
+    profile: Profile,
+    *,
+    candidate_sha: str,
+) -> None:
+    nodes = matrix.get("nodes")
+    if (
+        matrix.get("schema_version") != 1
+        or matrix.get("artifact_type") != "developer-sandbox-slurm-allocation-matrix-journal"
+        or matrix.get("candidate_sha") != candidate_sha
+        or matrix.get("cluster") != profile.cluster
+        or matrix.get("controller") != profile.controller
+        or matrix.get("submit_host") != profile.submit_host
+        or matrix.get("allowed_nodes") != list(profile.allowed_nodes)
+        or matrix.get("host_aliases") != dict(profile.host_aliases)
+        or not isinstance(nodes, dict)
+        or list(nodes) != list(profile.allowed_nodes)
+        or any(
+            not isinstance(nodes[node], dict)
+            or nodes[node].get("node") != node
+            or nodes[node].get("host") != profile.host_aliases[node]
+            or nodes[node].get("status")
+            not in {"pending", "inflight", "completed", "failed"}
+            or type(nodes[node].get("attempts")) is not int
+            or nodes[node]["attempts"] < 0
+            for node in profile.allowed_nodes
+        )
+    ):
+        raise PolicyError("allocation matrix recovery binding drifted")
+
+
+def _persist_allocation_matrix(
+    path: Path,
+    matrix: dict[str, Any],
+    *,
+    enforce_root_ownership: bool,
+) -> None:
+    matrix["updated_at"] = datetime.now(UTC).isoformat()
+    _write_allocation_state(
+        path,
+        matrix,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+
+
+def _unfinished_allocation_nodes(
+    matrix: Mapping[str, Any],
+    profile: Profile,
+) -> tuple[str, ...]:
+    nodes = matrix.get("nodes")
+    if not isinstance(nodes, Mapping):
+        raise PolicyError("allocation matrix journal nodes are invalid")
+    return tuple(
+        node
+        for node in profile.allowed_nodes
+        if not isinstance(nodes.get(node), Mapping) or nodes[node].get("status") != "completed"
+    )
+
+
+def _allocation_probe_arguments(
+    profile: Profile,
+    *,
+    node: str,
+    attempt: int,
+    candidate_sha: str,
+    candidate_root: Path,
+    worker_env: Path,
+    binding: Mapping[str, Any],
+    batch_uid: int,
+    batch_gid: int,
+    expected_pool: str,
+    expected_concurrency: int,
+    result_path: Path,
+) -> tuple[str, ...]:
+    host = profile.host_aliases[node]
+    repository = binding["repository"]
+    env_binding = binding["worker_env"]
+    policy_program = candidate_root / "scripts/ops/developer_sandbox_slurm_policy.py"
+    profile_name = "gb10.toml" if profile.cluster == "trt-gb10" else "oldlab.toml"
+    profile_path = candidate_root / "deploy/slurm/developer-sandboxes" / profile_name
+    node_check = (
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        str(policy_program),
+        "allocation-node-check",
+        "--profile",
+        str(profile_path),
+        "--candidate-sha",
+        candidate_sha,
+        "--candidate-root",
+        str(candidate_root),
+        "--worker-env",
+        str(worker_env),
+        "--expected-tree",
+        str(repository["candidate_tree"]),
+        "--expected-env-inode",
+        str(env_binding["inode"]),
+        "--expected-env-sha256",
+        str(env_binding["sha256"]),
+        "--batch-uid",
+        str(batch_uid),
+        "--batch-gid",
+        str(batch_gid),
+        "--expected-host",
+        host,
+        "--expected-pool",
+        expected_pool,
+        "--expected-concurrency",
+        str(expected_concurrency),
+        "--result-path",
+        str(result_path),
+    )
+    wrapped = " ".join(
+        shlex.quote(item)
+        for item in (
+            "/usr/bin/srun",
+            "--nodes=1",
+            "--ntasks=1",
+            f"--nodelist={node}",
+            *node_check,
+        )
+    )
+    arguments = [
+        "sbatch",
+        "--parsable",
+        f"--job-name={_allocation_job_name(candidate_sha, node, attempt)}",
+        f"--uid={profile.users[0]}",
+        f"--account={profile.child_accounts[0]}",
+        f"--qos={profile.qos}",
+        f"--clusters={profile.cluster}",
+        f"--nodelist={node}",
+        "--oversubscribe",
+        "--nodes=1",
+        "--ntasks=1",
+        "--cpus-per-task=1",
+        "--mem=256M",
+        "--time=00:02:00",
+        "--output=/dev/null",
+        "--error=/dev/null",
+        f"--comment=loom-cgroup-v1:pids={profile.job_pids_max}",
+        "--export=NONE",
+    ]
+    if profile.gpu_tres_per_slot > 0:
+        arguments.append("--gres=gpu:1")
+    arguments.append(f"--wrap={wrapped}")
+    return tuple(arguments)
+
+
+def _allocation_node_evidence(
+    profile: Profile,
+    *,
+    node: str,
+    candidate_sha: str,
+    binding: Mapping[str, Any],
+    batch_uid: int,
+    batch_gid: int,
+    expected_pool: str,
+    expected_concurrency: int,
+    job_id: str,
+    job_name: str,
+    rows: Sequence[Sequence[str]],
+    arguments: Sequence[str],
+    node_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    base_rows = [row for row in rows if row[0] == job_id]
+    srun_rows = [row for row in rows if row[0] == f"{job_id}.0"]
+    expected_host = profile.host_aliases[node]
+    if (
+        len(base_rows) != 1
+        or len(srun_rows) != 1
+        or base_rows[0][1] != job_name
+        or base_rows[0][2].split("+", 1)[0] != "COMPLETED"
+        or base_rows[0][3].lower() != node.lower()
+        or base_rows[0][5] != profile.child_accounts[0]
+        or base_rows[0][6] != profile.users[0]
+        or base_rows[0][7] != profile.cluster
+        or srun_rows[0][2].split("+", 1)[0] != "COMPLETED"
+        or srun_rows[0][3].lower() != node.lower()
+        or srun_rows[0][5] != profile.child_accounts[0]
+        or srun_rows[0][6] != profile.users[0]
+        or srun_rows[0][7] != profile.cluster
+    ):
+        raise PolicyError("allocation matrix sbatch/srun readback drifted")
+    alloc_tres = base_rows[0][4]
+    gpu_verified = profile.gpu_tres_per_slot <= 0 or _positive_gpu_tres(alloc_tres)
+    if not gpu_verified:
+        raise PolicyError("allocation matrix GPU TRES readback drifted")
+    expected_compute = {
+        "schema_version": 1,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": binding["repository"]["candidate_tree"],
+        "host": expected_host,
+        "env_device": node_result.get("env_device"),
+        "env_inode": binding["worker_env"]["inode"],
+        "env_sha256": binding["worker_env"]["sha256"],
+        "pool": expected_pool,
+        "concurrency": expected_concurrency,
+        "docker_cgroup_driver": profile.docker_cgroup_driver,
+        "job_id": job_id,
+        "cgroup_parent": node_result.get("cgroup_parent"),
+        "cgroup_guard_verified": True,
+        "compose_verified": True,
+    }
+    if (
+        node_result != expected_compute
+        or not isinstance(node_result.get("env_device"), int)
+        or not isinstance(node_result.get("cgroup_parent"), str)
+        or f"job_{job_id}" not in str(node_result["cgroup_parent"]).split("/")
+    ):
+        raise PolicyError("allocation-side compute result binding drifted")
+    return {
+        "node": node,
+        "host": expected_host,
+        "job_id": job_id,
+        "job_name": job_name,
+        "state": "COMPLETED",
+        "account": profile.child_accounts[0],
+        "qos": profile.qos,
+        "alloc_tres": alloc_tres,
+        "gpu_verified": gpu_verified,
+        "sbatch_verified": True,
+        "srun_verified": True,
+        "nonexclusive": True,
+        "explicit_nodelist": node,
+        "compute_check": dict(node_result),
+        "batch_uid": batch_uid,
+        "batch_gid": batch_gid,
+        "command_sha256": hashlib.sha256("\0".join(arguments).encode()).hexdigest(),
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _replay_completed_allocation_probe(
+    matrix_path: Path,
+    matrix: dict[str, Any],
+    profile: Profile,
+    *,
+    node: str,
+    candidate_sha: str,
+    candidate_root: Path,
+    worker_env: Path,
+    binding: Mapping[str, Any],
+    batch_uid: int,
+    batch_gid: int,
+    expected_pool: str,
+    expected_concurrency: int,
+    job_id: str,
+    recovered_rows: Sequence[Sequence[str]],
+    enforce_root_ownership: bool,
+) -> None:
+    row = matrix["nodes"][node]
+    attempt = row["attempts"]
+    job_name = _allocation_job_name(candidate_sha, node, attempt)
+    result_path = _allocation_result_path(worker_env, profile, candidate_sha, node)
+    arguments = _allocation_probe_arguments(
+        profile,
+        node=node,
+        attempt=attempt,
+        candidate_sha=candidate_sha,
+        candidate_root=candidate_root,
+        worker_env=worker_env,
+        binding=binding,
+        batch_uid=batch_uid,
+        batch_gid=batch_gid,
+        expected_pool=expected_pool,
+        expected_concurrency=expected_concurrency,
+        result_path=result_path,
+    )
+    node_result = _load_allocation_result(
+        result_path,
+        batch_uid=batch_uid,
+        batch_gid=batch_gid,
+    )
+    evidence = _allocation_node_evidence(
+        profile,
+        node=node,
+        candidate_sha=candidate_sha,
+        binding=binding,
+        batch_uid=batch_uid,
+        batch_gid=batch_gid,
+        expected_pool=expected_pool,
+        expected_concurrency=expected_concurrency,
+        job_id=job_id,
+        job_name=job_name,
+        rows=recovered_rows,
+        arguments=arguments,
+        node_result=node_result,
+    )
+    row["status"] = "completed"
+    row["job_id"] = job_id
+    row["job_name"] = job_name
+    row["evidence"] = evidence
+    _persist_allocation_matrix(
+        matrix_path,
+        matrix,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    _discard_allocation_result(result_path)
+
+
 def _run_allocation_probe_transaction(
     root: Path,
     profile: Profile,
@@ -2560,8 +3814,11 @@ def _run_allocation_probe_transaction(
     candidate_sha: str,
     candidate_root: Path,
     worker_env: Path,
+    runtime_receipt: Path,
     batch_uid: int,
     batch_gid: int,
+    expected_pool: str,
+    expected_concurrency: int,
     timeout_seconds: float = _ALLOCATION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     if root != Path("/") or os.geteuid() != 0:
@@ -2570,6 +3827,70 @@ def _run_allocation_probe_transaction(
         raise PolicyError("allocation probe batch UID/GID must be non-negative")
     if not 1 <= timeout_seconds <= 600:
         raise PolicyError("allocation probe timeout must be between 1 and 600 seconds")
+    host = _canonical_host()
+    submit_node = _slurm_node_for_host(profile, host)
+    if submit_node != profile.submit_host:
+        raise PolicyError("allocation probe must run from the profile's exact submit host")
+    live_config = _parse_key_values(_run(("scontrol", "show", "config")))
+    if live_config.get("ClusterName") != profile.cluster:
+        raise PolicyError("allocation probe reached the wrong Slurm cluster")
+    controllers = _split_csv(live_config.get("SlurmctldHost", ""))
+    if controllers and profile.controller.lower() not in {item.lower() for item in controllers}:
+        raise PolicyError("allocation probe reached the wrong Slurm controller")
+    matrix_path = _allocation_matrix_path(root, profile, candidate_sha)
+    _invalidate_allocation_artifact(root, profile, candidate_sha)
+    matrix = _load_allocation_state(matrix_path, enforce_root_ownership=True)
+    if matrix is not None:
+        _validate_allocation_matrix_recovery_binding(
+            matrix,
+            profile,
+            candidate_sha=candidate_sha,
+        )
+        nodes = matrix["nodes"]
+    else:
+        nodes = {}
+    recovered_completed: dict[str, tuple[str, list[list[str]]]] = {}
+    for node in profile.allowed_nodes:
+        inflight_path = _allocation_node_inflight_path(
+            root,
+            profile,
+            candidate_sha,
+            node,
+        )
+        if matrix is None:
+            if inflight_path.exists():
+                raise PolicyError("allocation inflight exists without its matrix journal")
+            continue
+        row = nodes[node]
+        attempt = row["attempts"]
+        if attempt > 0 and (row["status"] != "completed" or inflight_path.exists()):
+            recovered = _recover_allocation_probe(
+                inflight_path,
+                profile,
+                candidate_sha=candidate_sha,
+                node=node,
+                job_name=_allocation_job_name(candidate_sha, node, attempt),
+                enforce_root_ownership=True,
+            )
+            if recovered is not None:
+                recovered_completed[node] = recovered
+            else:
+                _discard_allocation_result(
+                    _allocation_result_path(worker_env, profile, candidate_sha, node),
+                )
+        else:
+            _discard_allocation_result(
+                _allocation_result_path(worker_env, profile, candidate_sha, node),
+            )
+        if row["status"] == "inflight" and node not in recovered_completed:
+            nodes[node]["status"] = "pending"
+            nodes[node]["evidence"] = None
+            _persist_allocation_matrix(
+                matrix_path,
+                matrix,
+                enforce_root_ownership=True,
+            )
+
     verify_source_candidate(candidate_sha)
     try:
         batch_identity = pwd.getpwnam(profile.users[0])
@@ -2584,195 +3905,311 @@ def _run_allocation_probe_transaction(
         expected_batch_uid=batch_uid,
         expected_batch_gid=batch_gid,
     )
-    host = _canonical_host()
-    submit_node = _slurm_node_for_host(profile, host)
-    if submit_node != profile.submit_host:
-        raise PolicyError("allocation probe must run from the profile's exact submit host")
-    live_config = _parse_key_values(_run(("scontrol", "show", "config")))
-    if live_config.get("ClusterName") != profile.cluster:
-        raise PolicyError("allocation probe reached the wrong Slurm cluster")
-    controllers = _split_csv(live_config.get("SlurmctldHost", ""))
-    if controllers and profile.controller.lower() not in {item.lower() for item in controllers}:
-        raise PolicyError("allocation probe reached the wrong Slurm controller")
-
-    job_name = f"loom-policy-{candidate_sha}-probe"
-    inflight_path = _allocation_inflight_path(root, profile, candidate_sha)
-    _invalidate_allocation_artifact(root, profile, candidate_sha)
-    _recover_allocation_probe(
-        inflight_path,
+    if _SAFE_NAME.fullmatch(expected_pool) is None or expected_concurrency < 1:
+        raise PolicyError("allocation matrix pool/concurrency binding is invalid")
+    runtime_attestation = _runtime_attestation_binding(
+        runtime_receipt,
         profile,
         candidate_sha=candidate_sha,
-        job_name=job_name,
+        candidate_tree=binding["repository"]["candidate_tree"],
+        candidate_root=candidate_root,
+        worker_env=worker_env,
         enforce_root_ownership=True,
     )
-    arguments = [
-        "sbatch",
-        "--parsable",
-        f"--job-name={job_name}",
-        f"--uid={profile.users[0]}",
-        f"--account={profile.child_accounts[0]}",
-        f"--qos={profile.qos}",
-        "--nodes=1",
-        "--ntasks=1",
-        "--cpus-per-task=1",
-        "--mem=256M",
-        "--time=00:02:00",
-        f"--comment=loom-cgroup-v1:pids={profile.job_pids_max}",
-        f"--export=LOOM_POLICY_CANDIDATE_SHA={candidate_sha}",
-    ]
-    if profile.gpu_tres_per_slot > 0:
-        arguments.append("--gres=gpu:1")
-    arguments.append(
-        (
-            "--wrap=/usr/bin/srun --nodes=1 --ntasks=1 /bin/sh -c "
-            f'\'test "$(/usr/bin/id -u)" -eq {batch_uid} && '
-            f'test "$(/usr/bin/id -g)" -eq {batch_gid} && /bin/sleep 2\''
-        ),
+    if matrix is None:
+        matrix = _new_allocation_matrix(
+            profile,
+            candidate_sha=candidate_sha,
+            binding=binding,
+            runtime_attestation=runtime_attestation,
+            batch_uid=batch_uid,
+            batch_gid=batch_gid,
+            expected_pool=expected_pool,
+            expected_concurrency=expected_concurrency,
+        )
+        _persist_allocation_matrix(
+            matrix_path,
+            matrix,
+            enforce_root_ownership=True,
+        )
+    _validate_allocation_matrix(
+        matrix,
+        profile,
+        candidate_sha=candidate_sha,
+        binding=binding,
+        runtime_attestation=runtime_attestation,
+        batch_uid=batch_uid,
+        batch_gid=batch_gid,
+        expected_pool=expected_pool,
+        expected_concurrency=expected_concurrency,
     )
-    try:
-        output = _run(tuple(arguments), timeout=30)
-    except Exception:
-        _recover_allocation_probe(
-            inflight_path,
+    nodes = matrix["nodes"]
+    for node, (job_id, recovered_rows) in recovered_completed.items():
+        _replay_completed_allocation_probe(
+            matrix_path,
+            matrix,
             profile,
+            node=node,
             candidate_sha=candidate_sha,
-            job_name=job_name,
+            candidate_root=candidate_root,
+            worker_env=worker_env,
+            binding=binding,
+            batch_uid=batch_uid,
+            batch_gid=batch_gid,
+            expected_pool=expected_pool,
+            expected_concurrency=expected_concurrency,
+            job_id=job_id,
+            recovered_rows=recovered_rows,
             enforce_root_ownership=True,
         )
-        raise
-    job_ids = [
-        match.group(1)
-        for line in output.splitlines()
-        if (match := re.fullmatch(r"([1-9][0-9]*)(?:;[A-Za-z0-9_.-]+)?", line.strip()))
-    ]
-    if len(job_ids) != 1:
-        _recover_allocation_probe(
-            inflight_path,
+    for node in _unfinished_allocation_nodes(matrix, profile):
+        row = nodes[node]
+        inflight_path = _allocation_node_inflight_path(
+            root,
             profile,
-            candidate_sha=candidate_sha,
-            job_name=job_name,
+            candidate_sha,
+            node,
+        )
+        result_path = _allocation_result_path(worker_env, profile, candidate_sha, node)
+        row["attempts"] += 1
+        attempt = row["attempts"]
+        job_name = _allocation_job_name(candidate_sha, node, attempt)
+        row["status"] = "pending"
+        row["evidence"] = None
+        _persist_allocation_matrix(
+            matrix_path,
+            matrix,
             enforce_root_ownership=True,
         )
-        raise PolicyError("allocation probe did not return one unambiguous job ID")
-    job_id = job_ids[0]
-    inflight: dict[str, Any] = {
+        _prepare_allocation_result_path(
+            result_path,
+            worker_env=worker_env,
+            batch_uid=batch_uid,
+            batch_gid=batch_gid,
+        )
+        arguments = _allocation_probe_arguments(
+            profile,
+            node=node,
+            attempt=attempt,
+            candidate_sha=candidate_sha,
+            candidate_root=candidate_root,
+            worker_env=worker_env,
+            binding=binding,
+            batch_uid=batch_uid,
+            batch_gid=batch_gid,
+            expected_pool=expected_pool,
+            expected_concurrency=expected_concurrency,
+            result_path=result_path,
+        )
+        try:
+            output = _run(arguments, timeout=30)
+            job_ids = [
+                match.group(1)
+                for line in output.splitlines()
+                if (
+                    match := re.fullmatch(
+                        r"([1-9][0-9]*)(?:;[A-Za-z0-9_.-]+)?",
+                        line.strip(),
+                    )
+                )
+            ]
+            if len(job_ids) != 1:
+                _recover_allocation_probe(
+                    inflight_path,
+                    profile,
+                    candidate_sha=candidate_sha,
+                    node=node,
+                    job_name=job_name,
+                    enforce_root_ownership=True,
+                )
+                raise PolicyError("allocation matrix did not return one exact job ID")
+            job_id = job_ids[0]
+            inflight = {
+                "schema_version": 1,
+                "created_at": datetime.now(UTC).isoformat(),
+                "candidate_sha": candidate_sha,
+                "cluster": profile.cluster,
+                "controller": profile.controller,
+                "submit_host": profile.submit_host,
+                "node": node,
+                "host": profile.host_aliases[node],
+                "user": profile.users[0],
+                "account": profile.child_accounts[0],
+                "job_id": job_id,
+                "job_name": job_name,
+                "batch_uid": batch_uid,
+                "batch_gid": batch_gid,
+                "phase": "submitted",
+            }
+            try:
+                _write_allocation_state(
+                    inflight_path,
+                    inflight,
+                    enforce_root_ownership=True,
+                )
+            except Exception as journal_exc:
+                _accounting, state = _validate_probe_job_identity(inflight, profile)
+                if state not in _TERMINAL_JOB_STATES:
+                    _run(("scancel", f"--clusters={profile.cluster}", job_id), timeout=30)
+                terminal = _poll_probe_terminal(job_id, profile, timeout_seconds=60)
+                if _base_job_state(terminal, job_id) not in _TERMINAL_JOB_STATES:
+                    raise PolicyError(
+                        "unjournaled allocation matrix job lacks terminal readback",
+                    ) from journal_exc
+                raise
+            row["status"] = "inflight"
+            row["job_id"] = job_id
+            row["job_name"] = job_name
+            _persist_allocation_matrix(
+                matrix_path,
+                matrix,
+                enforce_root_ownership=True,
+            )
+            rows = _poll_allocation_or_cancel(
+                inflight_path,
+                inflight,
+                profile,
+                timeout_seconds=timeout_seconds,
+                enforce_root_ownership=True,
+            )
+            node_result = _load_allocation_result(
+                result_path,
+                batch_uid=batch_uid,
+                batch_gid=batch_gid,
+            )
+            evidence = _allocation_node_evidence(
+                profile,
+                node=node,
+                candidate_sha=candidate_sha,
+                binding=binding,
+                batch_uid=batch_uid,
+                batch_gid=batch_gid,
+                expected_pool=expected_pool,
+                expected_concurrency=expected_concurrency,
+                job_id=job_id,
+                job_name=job_name,
+                rows=rows,
+                arguments=arguments,
+                node_result=node_result,
+            )
+            row["status"] = "completed"
+            row["evidence"] = evidence
+            _persist_allocation_matrix(
+                matrix_path,
+                matrix,
+                enforce_root_ownership=True,
+            )
+            _finish_allocation_inflight(
+                inflight_path,
+                inflight,
+                "completed",
+                enforce_root_ownership=True,
+            )
+            _discard_allocation_result(result_path)
+        except Exception as exc:
+            _invalidate_allocation_artifact(root, profile, candidate_sha)
+            try:
+                if inflight_path.exists():
+                    inflight_payload = _load_allocation_state(
+                        inflight_path,
+                        enforce_root_ownership=True,
+                    )
+                    if inflight_payload is None:
+                        raise PolicyError("allocation matrix inflight state disappeared")
+                    _cancel_allocation_job(
+                        inflight_path,
+                        inflight_payload,
+                        profile,
+                        enforce_root_ownership=True,
+                    )
+                else:
+                    _recover_allocation_probe(
+                        inflight_path,
+                        profile,
+                        candidate_sha=candidate_sha,
+                        node=node,
+                        job_name=job_name,
+                        enforce_root_ownership=True,
+                    )
+                _discard_allocation_result(result_path)
+            except Exception as cleanup_exc:
+                row["status"] = "failed"
+                row["evidence"] = {
+                    "node": node,
+                    "host": profile.host_aliases[node],
+                    "terminal": False,
+                    "failure": str(exc),
+                    "cleanup_failure": str(cleanup_exc),
+                    "failed_at": datetime.now(UTC).isoformat(),
+                }
+                matrix["phase"] = "failed"
+                _persist_allocation_matrix(
+                    matrix_path,
+                    matrix,
+                    enforce_root_ownership=True,
+                )
+                raise PolicyError(
+                    "allocation matrix failed and exact job cleanup is unconfirmed",
+                ) from cleanup_exc
+            row["status"] = "failed"
+            row["evidence"] = {
+                "node": node,
+                "host": profile.host_aliases[node],
+                "terminal": True,
+                "failure": str(exc),
+                "failed_at": datetime.now(UTC).isoformat(),
+            }
+            matrix["phase"] = "failed"
+            _persist_allocation_matrix(
+                matrix_path,
+                matrix,
+                enforce_root_ownership=True,
+            )
+            raise
+
+    completed = [nodes[node]["evidence"] for node in profile.allowed_nodes]
+    if (
+        len(completed) != len(profile.allowed_nodes)
+        or any(nodes[node]["status"] != "completed" for node in profile.allowed_nodes)
+        or [item["node"] for item in completed] != list(profile.allowed_nodes)
+        or len({item["node"] for item in completed}) != len(profile.allowed_nodes)
+    ):
+        raise PolicyError("allocation matrix is not an exact closed-world pass")
+    payload = {
         "schema_version": 1,
+        "artifact_type": "developer-sandbox-slurm-allocation-matrix",
         "created_at": datetime.now(UTC).isoformat(),
         "candidate_sha": candidate_sha,
+        "candidate_tree": binding["repository"]["candidate_tree"],
         "cluster": profile.cluster,
         "controller": profile.controller,
         "submit_host": profile.submit_host,
-        "job_id": job_id,
-        "job_name": job_name,
+        "submitting_host": host,
+        "allowed_nodes": list(profile.allowed_nodes),
+        "host_aliases": dict(profile.host_aliases),
         "batch_uid": batch_uid,
         "batch_gid": batch_gid,
-        "phase": "submitted",
+        "account": profile.child_accounts[0],
+        "qos": profile.qos,
+        "expected_pool": expected_pool,
+        "expected_concurrency": expected_concurrency,
+        "candidate_binding": binding,
+        "runtime_attestation": runtime_attestation,
+        "nodes": completed,
+        "closed_world_verified": True,
     }
-    try:
-        _write_allocation_state(
-            inflight_path,
-            inflight,
-            enforce_root_ownership=True,
-        )
-    except Exception as journal_exc:
-        _run(("scancel", f"--clusters={profile.cluster}", job_id), timeout=30)
-        terminal = _poll_probe_terminal(job_id, timeout_seconds=60)
-        if _base_job_state(terminal, job_id) not in _TERMINAL_JOB_STATES:
-            raise PolicyError(
-                "unjournaled allocation probe lacks terminal readback",
-            ) from journal_exc
-        raise
-    rows = _poll_allocation_or_cancel(
-        inflight_path,
-        inflight,
-        profile,
-        timeout_seconds=timeout_seconds,
+    _write_allocation_state(
+        _allocation_probe_path(root, profile, candidate_sha),
+        payload,
         enforce_root_ownership=True,
     )
-    try:
-        base = next((row for row in rows if row[0] == job_id), None)
-        srun = next((row for row in rows if row[0].startswith(f"{job_id}.0")), None)
-        if (
-            base is None
-            or base[1] != job_name
-            or not base[2].startswith("COMPLETED")
-            or base[5] != profile.child_accounts[0]
-            or srun is None
-            or not srun[2].startswith("COMPLETED")
-        ):
-            raise PolicyError("allocation probe sbatch/srun steps did not complete exactly")
-        allowed = {
-            *(node.lower() for node in profile.allowed_nodes),
-            *profile.host_aliases.values(),
-        }
-        node = base[3].lower()
-        if node not in allowed:
-            raise PolicyError("allocation probe ran outside the reviewed pool")
-        gpu_verified = profile.gpu_tres_per_slot <= 0 or _positive_gpu_tres(base[4])
-        if not gpu_verified:
-            raise PolicyError("allocation probe did not read back a positive GPU TRES")
-
-        guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
-        guard = _wait_for_guard_status(
-            root,
-            candidate_sha=candidate_sha,
-            expected_config_sha256=hashlib.sha256(guard_config.read_bytes()).hexdigest(),
-            require_probe=True,
-        )
-        resource_probe = guard.get("resource_probe")
-        if not isinstance(resource_probe, dict) or resource_probe.get("job_id") != job_id:
-            raise PolicyError("cgroup guard did not attest the exact allocation probe job")
-        payload = {
-            "schema_version": 1,
-            "created_at": datetime.now(UTC).isoformat(),
-            "candidate_sha": candidate_sha,
-            "candidate_tree": binding["repository"]["candidate_tree"],
-            "cluster": profile.cluster,
-            "controller": profile.controller,
-            "submit_host": profile.submit_host,
-            "submitting_host": host,
-            "job_id": job_id,
-            "job_name": job_name,
-            "node": node,
-            "state": "COMPLETED",
-            "account": profile.child_accounts[0],
-            "qos": profile.qos,
-            "alloc_tres": base[4],
-            "gpu_verified": gpu_verified,
-            "sbatch_verified": True,
-            "srun_verified": True,
-            "batch_uid": batch_uid,
-            "batch_gid": batch_gid,
-            "guard_config_sha256": hashlib.sha256(
-                guard_config.read_bytes(),
-            ).hexdigest(),
-            "guard_resource_probe": resource_probe,
-            "candidate_binding": binding,
-            "command_sha256": hashlib.sha256(
-                "\0".join(arguments).encode(),
-            ).hexdigest(),
-        }
-        _write_allocation_state(
-            _allocation_probe_path(root, profile, candidate_sha),
-            payload,
-            enforce_root_ownership=True,
-        )
-        _finish_allocation_inflight(
-            inflight_path,
-            inflight,
-            "completed",
-            enforce_root_ownership=True,
-        )
-        return payload
-    except Exception:
-        _invalidate_allocation_artifact(root, profile, candidate_sha)
-        _cancel_allocation_job(
-            inflight_path,
-            inflight,
-            profile,
-            enforce_root_ownership=True,
-        )
-        raise
+    matrix["phase"] = "completed"
+    _persist_allocation_matrix(
+        matrix_path,
+        matrix,
+        enforce_root_ownership=True,
+    )
+    return payload
 
 
 def run_allocation_probe(
@@ -2782,8 +4219,11 @@ def run_allocation_probe(
     candidate_sha: str,
     candidate_root: Path,
     worker_env: Path,
+    runtime_receipt: Path,
     batch_uid: int,
     batch_gid: int,
+    expected_pool: str,
+    expected_concurrency: int,
     timeout_seconds: float = _ALLOCATION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     if root != Path("/") or os.geteuid() != 0:
@@ -2795,39 +4235,69 @@ def run_allocation_probe(
             candidate_sha=candidate_sha,
             candidate_root=candidate_root,
             worker_env=worker_env,
+            runtime_receipt=runtime_receipt,
             batch_uid=batch_uid,
             batch_gid=batch_gid,
+            expected_pool=expected_pool,
+            expected_concurrency=expected_concurrency,
             timeout_seconds=timeout_seconds,
         )
 
 
-def allocation_probe_readback(
+def _allocation_probe_readback_unlocked(
     root: Path,
     profile: Profile,
     *,
     candidate_sha: str,
     candidate_binding: Mapping[str, Any],
+    runtime_attestation: Mapping[str, Any],
+    expected_pool: str,
+    expected_concurrency: int,
 ) -> dict[str, Any]:
     path = _allocation_probe_path(root, profile, candidate_sha)
-    if _allocation_inflight_path(root, profile, candidate_sha).exists():
+    inflight_paths = [
+        _allocation_inflight_path(root, profile, candidate_sha),
+        *(
+            _allocation_node_inflight_path(root, profile, candidate_sha, node)
+            for node in profile.allowed_nodes
+        ),
+    ]
+    if any(item.exists() for item in inflight_paths):
         raise PolicyError("allocation-side Slurm probe still has an inflight job")
+    matrix = _load_allocation_state(
+        _allocation_matrix_path(root, profile, candidate_sha),
+        enforce_root_ownership=root == Path("/"),
+    )
+    if matrix is None:
+        raise PolicyError("allocation-side Slurm matrix journal is unavailable")
+    worker_env_binding = candidate_binding.get("worker_env")
+    if (
+        not isinstance(worker_env_binding, Mapping)
+        or type(worker_env_binding.get("uid")) is not int
+        or type(worker_env_binding.get("gid")) is not int
+    ):
+        raise PolicyError("allocation-side Slurm candidate binding is invalid")
+    _validate_allocation_matrix(
+        matrix,
+        profile,
+        candidate_sha=candidate_sha,
+        binding=candidate_binding,
+        runtime_attestation=runtime_attestation,
+        batch_uid=worker_env_binding["uid"],
+        batch_gid=worker_env_binding["gid"],
+        expected_pool=expected_pool,
+        expected_concurrency=expected_concurrency,
+    )
+    if matrix.get("phase") != "completed":
+        raise PolicyError("allocation-side Slurm matrix journal is not complete")
     if root == Path("/"):
         _require_root_private_directory(path.parent)
-    try:
-        metadata = path.lstat()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PolicyError("allocation-side Slurm probe evidence is unavailable") from exc
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or (root == Path("/") and metadata.st_uid != 0)
-        or (root == Path("/") and metadata.st_gid != 0)
-        or not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
-    ):
-        raise PolicyError("allocation-side Slurm probe evidence is unsafe")
+    payload = _load_allocation_state(
+        path,
+        enforce_root_ownership=root == Path("/"),
+    )
+    if payload is None:
+        raise PolicyError("allocation-side Slurm probe evidence is unavailable")
     try:
         created = datetime.fromisoformat(str(payload["created_at"]))
     except (KeyError, ValueError) as exc:
@@ -2837,10 +4307,35 @@ def allocation_probe_readback(
     ):
         raise PolicyError("allocation-side Slurm probe evidence is stale")
     repository = candidate_binding.get("repository")
-    worker_env_binding = candidate_binding.get("worker_env")
     evidence_binding = payload.get("candidate_binding")
+    evidence_nodes = payload.get("nodes")
+    expected_top = {
+        "schema_version",
+        "artifact_type",
+        "created_at",
+        "candidate_sha",
+        "candidate_tree",
+        "cluster",
+        "controller",
+        "submit_host",
+        "submitting_host",
+        "allowed_nodes",
+        "host_aliases",
+        "batch_uid",
+        "batch_gid",
+        "account",
+        "qos",
+        "expected_pool",
+        "expected_concurrency",
+        "candidate_binding",
+        "runtime_attestation",
+        "nodes",
+        "closed_world_verified",
+    }
     if (
-        not isinstance(repository, Mapping)
+        set(payload) != expected_top
+        or payload.get("artifact_type") != "developer-sandbox-slurm-allocation-matrix"
+        or not isinstance(repository, Mapping)
         or not isinstance(worker_env_binding, Mapping)
         or not isinstance(evidence_binding, Mapping)
         or payload.get("candidate_sha") != candidate_sha
@@ -2850,29 +4345,108 @@ def allocation_probe_readback(
         or payload.get("cluster") != profile.cluster
         or payload.get("controller") != profile.controller
         or payload.get("submit_host") != profile.submit_host
-        or payload.get("state") != "COMPLETED"
-        or payload.get("sbatch_verified") is not True
-        or payload.get("srun_verified") is not True
-        or payload.get("account") not in profile.child_accounts
+        or payload.get("allowed_nodes") != list(profile.allowed_nodes)
+        or payload.get("host_aliases") != dict(profile.host_aliases)
+        or payload.get("account") != profile.child_accounts[0]
         or payload.get("qos") != profile.qos
+        or payload.get("expected_pool") != expected_pool
+        or payload.get("expected_concurrency") != expected_concurrency
+        or payload.get("runtime_attestation") != runtime_attestation
+        or payload.get("closed_world_verified") is not True
         or type(worker_env_binding.get("uid")) is not int
         or type(worker_env_binding.get("gid")) is not int
         or payload.get("batch_uid") != worker_env_binding.get("uid")
         or payload.get("batch_gid") != worker_env_binding.get("gid")
+        or not isinstance(evidence_nodes, list)
+        or len(evidence_nodes) != len(profile.allowed_nodes)
+        or [item.get("node") for item in evidence_nodes if isinstance(item, dict)]
+        != list(profile.allowed_nodes)
+        or len(
+            {item.get("node") for item in evidence_nodes if isinstance(item, dict)},
+        )
+        != len(profile.allowed_nodes)
+        or [matrix["nodes"][node]["evidence"] for node in profile.allowed_nodes] != evidence_nodes
     ):
         raise PolicyError("allocation-side Slurm probe binding drifted")
-    allowed = {
-        *(node.lower() for node in profile.allowed_nodes),
-        *profile.host_aliases.values(),
-    }
-    if str(payload.get("node", "")).lower() not in allowed:
-        raise PolicyError("allocation-side Slurm probe node drifted")
-    if profile.gpu_tres_per_slot > 0 and (
-        payload.get("gpu_verified") is not True
-        or not _positive_gpu_tres(str(payload.get("alloc_tres", "")))
-    ):
-        raise PolicyError("allocation-side Slurm GPU probe drifted")
+    for node, evidence in zip(profile.allowed_nodes, evidence_nodes, strict=True):
+        matrix_row = matrix["nodes"][node]
+        attempt = matrix_row.get("attempts")
+        compute_check = evidence.get("compute_check") if isinstance(evidence, dict) else None
+        if (
+            not isinstance(evidence, dict)
+            or type(attempt) is not int
+            or attempt < 1
+            or evidence.get("node") != node
+            or evidence.get("host") != profile.host_aliases[node]
+            or evidence.get("job_name")
+            != _allocation_job_name(candidate_sha, node, attempt)
+            or re.fullmatch(r"[1-9][0-9]*", str(evidence.get("job_id", ""))) is None
+            or evidence.get("state") != "COMPLETED"
+            or evidence.get("account") != profile.child_accounts[0]
+            or evidence.get("qos") != profile.qos
+            or evidence.get("batch_uid") != worker_env_binding["uid"]
+            or evidence.get("batch_gid") != worker_env_binding["gid"]
+            or evidence.get("sbatch_verified") is not True
+            or evidence.get("srun_verified") is not True
+            or evidence.get("nonexclusive") is not True
+            or evidence.get("explicit_nodelist") != node
+            or not isinstance(compute_check, dict)
+            or type(compute_check.get("env_device")) is not int
+            or not isinstance(compute_check.get("cgroup_parent"), str)
+            or f"job_{evidence.get('job_id')}"
+            not in str(compute_check.get("cgroup_parent")).split("/")
+            or compute_check
+            != {
+                "schema_version": 1,
+                "candidate_sha": candidate_sha,
+                "candidate_tree": repository["candidate_tree"],
+                "host": profile.host_aliases[node],
+                "env_device": compute_check.get("env_device"),
+                "env_inode": worker_env_binding["inode"],
+                "env_sha256": worker_env_binding["sha256"],
+                "pool": expected_pool,
+                "concurrency": expected_concurrency,
+                "docker_cgroup_driver": profile.docker_cgroup_driver,
+                "job_id": evidence.get("job_id"),
+                "cgroup_parent": compute_check.get("cgroup_parent"),
+                "cgroup_guard_verified": True,
+                "compose_verified": True,
+            }
+        ):
+            raise PolicyError("allocation-side Slurm matrix node drifted")
+        if profile.gpu_tres_per_slot > 0 and (
+            evidence.get("gpu_verified") is not True
+            or not _positive_gpu_tres(str(evidence.get("alloc_tres", "")))
+        ):
+            raise PolicyError("allocation-side Slurm GPU probe drifted")
     return payload
+
+
+def allocation_probe_readback(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    candidate_binding: Mapping[str, Any],
+    runtime_attestation: Mapping[str, Any],
+    expected_pool: str,
+    expected_concurrency: int,
+) -> dict[str, Any]:
+    with _allocation_probe_lock(
+        root,
+        profile,
+        candidate_sha,
+        enforce_root_ownership=root == Path("/"),
+    ):
+        return _allocation_probe_readback_unlocked(
+            root,
+            profile,
+            candidate_sha=candidate_sha,
+            candidate_binding=candidate_binding,
+            runtime_attestation=runtime_attestation,
+            expected_pool=expected_pool,
+            expected_concurrency=expected_concurrency,
+        )
 
 
 def live_readback(
@@ -2884,6 +4458,9 @@ def live_readback(
     check_accounting: bool = True,
     wait_for_guard: bool = False,
     candidate_binding: Mapping[str, Any] | None = None,
+    runtime_attestation: Mapping[str, Any] | None = None,
+    expected_pool: str | None = None,
+    expected_concurrency: int | None = None,
     require_allocation_probe: bool = False,
 ) -> dict[str, Any]:
     desired = desired_files(root, profile, candidate_sha=candidate_sha)
@@ -2932,13 +4509,21 @@ def live_readback(
     )
     accounting = _accounting_readback(profile) if check_accounting else None
     if require_allocation_probe:
-        if candidate_binding is None:
-            raise PolicyError("strict candidate binding is required for allocation readback")
+        if (
+            candidate_binding is None
+            or runtime_attestation is None
+            or expected_pool is None
+            or expected_concurrency is None
+        ):
+            raise PolicyError("strict matrix binding is required for allocation readback")
         allocation = allocation_probe_readback(
             root,
             profile,
             candidate_sha=candidate_sha,
             candidate_binding=candidate_binding,
+            runtime_attestation=runtime_attestation,
+            expected_pool=expected_pool,
+            expected_concurrency=expected_concurrency,
         )
     else:
         allocation = None
@@ -3294,15 +4879,30 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument(
         "command",
-        choices=("plan", "check", "apply", "rollback", "allocation-probe"),
+        choices=(
+            "plan",
+            "check",
+            "apply",
+            "rollback",
+            "allocation-probe",
+            "allocation-node-check",
+        ),
     )
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--root", type=Path, default=Path("/"))
     parser.add_argument("--candidate-sha")
     parser.add_argument("--candidate-root", type=Path)
     parser.add_argument("--worker-env", type=Path)
+    parser.add_argument("--runtime-receipt", type=Path)
     parser.add_argument("--batch-uid", type=int)
     parser.add_argument("--batch-gid", type=int)
+    parser.add_argument("--expected-tree")
+    parser.add_argument("--expected-env-inode", type=int)
+    parser.add_argument("--expected-env-sha256")
+    parser.add_argument("--expected-host")
+    parser.add_argument("--expected-pool")
+    parser.add_argument("--expected-concurrency", type=int)
+    parser.add_argument("--result-path", type=Path)
     parser.add_argument(
         "--allocation-timeout-seconds",
         type=float,
@@ -3319,7 +4919,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         profile = load_profile(args.profile)
         candidate = args.candidate_sha or source_candidate_sha()
-        if args.command == "apply" and args.execute:
+        if args.command == "allocation-node-check":
+            required = {
+                "candidate_root": args.candidate_root,
+                "worker_env": args.worker_env,
+                "expected_tree": args.expected_tree,
+                "expected_env_inode": args.expected_env_inode,
+                "expected_env_sha256": args.expected_env_sha256,
+                "batch_uid": args.batch_uid,
+                "batch_gid": args.batch_gid,
+                "expected_host": args.expected_host,
+                "expected_pool": args.expected_pool,
+                "expected_concurrency": args.expected_concurrency,
+                "result_path": args.result_path,
+            }
+            if any(value is None for value in required.values()):
+                raise PolicyError("allocation-node-check requires every exact binding")
+            result = allocation_node_check(
+                profile,
+                candidate_sha=candidate,
+                candidate_root=args.candidate_root,
+                worker_env=args.worker_env,
+                expected_tree=args.expected_tree,
+                expected_env_inode=args.expected_env_inode,
+                expected_env_sha256=args.expected_env_sha256,
+                batch_uid=args.batch_uid,
+                batch_gid=args.batch_gid,
+                expected_host=args.expected_host,
+                expected_pool=args.expected_pool,
+                expected_concurrency=args.expected_concurrency,
+                result_path=args.result_path,
+            )
+        elif args.command == "apply" and args.execute:
             result = apply(
                 args.root,
                 profile,
@@ -3333,11 +4964,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if (
                 args.candidate_root is None
                 or args.worker_env is None
+                or args.runtime_receipt is None
                 or args.batch_uid is None
                 or args.batch_gid is None
+                or args.expected_pool is None
+                or args.expected_concurrency is None
             ):
                 raise PolicyError(
-                    "allocation-probe requires candidate root, worker env, and batch UID/GID",
+                    "allocation-probe requires candidate, receipt, identity, pool, and concurrency",
                 )
             result = run_allocation_probe(
                 args.root,
@@ -3345,8 +4979,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_sha=candidate,
                 candidate_root=args.candidate_root,
                 worker_env=args.worker_env,
+                runtime_receipt=args.runtime_receipt,
                 batch_uid=args.batch_uid,
                 batch_gid=args.batch_gid,
+                expected_pool=args.expected_pool,
+                expected_concurrency=args.expected_concurrency,
                 timeout_seconds=args.allocation_timeout_seconds,
             )
         else:
@@ -3360,11 +4997,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if (
                         args.candidate_root is None
                         or args.worker_env is None
+                        or args.runtime_receipt is None
                         or args.batch_uid is None
                         or args.batch_gid is None
+                        or args.expected_pool is None
+                        or args.expected_concurrency is None
                     ):
                         raise PolicyError(
-                            "live check requires candidate root, worker env, and batch UID/GID",
+                            "live check requires candidate, receipt, identity, pool, and concurrency",
                         )
                     binding = strict_candidate_binding(
                         args.candidate_root,
@@ -3373,6 +5013,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         expected_batch_uid=args.batch_uid,
                         expected_batch_gid=args.batch_gid,
                     )
+                    runtime_attestation = _runtime_attestation_binding(
+                        args.runtime_receipt,
+                        profile,
+                        candidate_sha=candidate,
+                        candidate_tree=binding["repository"]["candidate_tree"],
+                        candidate_root=args.candidate_root,
+                        worker_env=args.worker_env,
+                        enforce_root_ownership=True,
+                    )
                     result["live_readback"] = live_readback(
                         args.root,
                         profile,
@@ -3380,6 +5029,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         require_probe=True,
                         check_accounting=True,
                         candidate_binding=binding,
+                        runtime_attestation=runtime_attestation,
+                        expected_pool=args.expected_pool,
+                        expected_concurrency=args.expected_concurrency,
                         require_allocation_probe=True,
                     )
                 else:
