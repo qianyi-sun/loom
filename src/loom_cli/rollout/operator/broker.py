@@ -78,6 +78,16 @@ from .systemd import (
 _MAX_CANCEL_REASON = 500
 _MAX_LOG_BYTES = 8 * 1024 * 1024
 _SEALED_CUMULATIVE_COORDINATORS = frozenset({"qianyi", "hongjian"})
+_PROTECTED_APPLY_COMPONENTS = frozenset(
+    {
+        "database-migration",
+        "mutation-epoch-claim",
+        "staging-manifests",
+        "gb10-candidate",
+        "production-defaults",
+        "external-supervisors",
+    }
+)
 
 
 class _ArgumentError(ValueError):
@@ -1071,6 +1081,91 @@ def _latest_request(
     return max(requests, key=lambda item: (item.requested_at, item.request_id), default=None)
 
 
+def _private_progress_file(path: Path, *, service_uid: int) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RequestStoreError("protected apply progress is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != service_uid
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise RequestStoreError("protected apply progress is unsafe")
+    return True
+
+
+def _protected_apply_progress(
+    dependencies: BrokerDependencies,
+    request_id: str,
+    attempt_number: int,
+) -> tuple[str, str] | None:
+    """Return only secret-free component metadata from the protected journal."""
+    root = (
+        dependencies.config.state_root
+        / "requests"
+        / request_id
+        / "attempts"
+        / str(attempt_number)
+        / "protected-apply"
+    )
+    try:
+        metadata = root.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RequestStoreError("protected apply progress is unavailable") from exc
+    service_uid = os.geteuid()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != service_uid
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise RequestStoreError("protected apply progress is unsafe")
+    try:
+        entries = list(os.scandir(root))
+    except OSError as exc:
+        raise RequestStoreError("protected apply progress is unavailable") from exc
+    component_entries: list[tuple[int, str, Path]] = []
+    for entry in entries:
+        if entry.name == "execution.lock":
+            if not _private_progress_file(Path(entry.path), service_uid=service_uid):
+                raise RequestStoreError("protected apply progress is incomplete")
+            continue
+        ordinal_text, separator, component_id = entry.name.partition("-")
+        if (
+            not separator
+            or len(ordinal_text) != 2
+            or not ordinal_text.isascii()
+            or not ordinal_text.isdecimal()
+            or component_id not in _PROTECTED_APPLY_COMPONENTS
+            or entry.is_symlink()
+            or not entry.is_dir(follow_symlinks=False)
+        ):
+            raise RequestStoreError("protected apply progress is unsafe")
+        component_entries.append((int(ordinal_text), component_id, Path(entry.path)))
+    if not component_entries:
+        return None
+    component_entries.sort()
+    if len({ordinal for ordinal, _component, _path in component_entries}) != len(
+        component_entries
+    ):
+        raise RequestStoreError("protected apply progress is unsafe")
+    last_complete: str | None = None
+    for _ordinal, component_id, component_root in component_entries:
+        if not _private_progress_file(component_root / "intent.json", service_uid=service_uid):
+            raise RequestStoreError("protected apply progress is incomplete")
+        if not _private_progress_file(component_root / "terminal.json", service_uid=service_uid):
+            return component_id, "protected_component_incomplete"
+        last_complete = component_id
+    if last_complete is None:
+        return None
+    return last_complete, "protected_component_complete"
+
+
 def _request_status(
     dependencies: BrokerDependencies,
     request: PreflightRequest | RolloutRequest,
@@ -1106,6 +1201,19 @@ def _request_status(
                 limit=_MAX_CANCEL_REASON,
             )
         payload["updated_at"] = latest.occurred_at
+    if latest is not None and latest.attempt_number is not None:
+        try:
+            protected_progress = _protected_apply_progress(
+                dependencies,
+                request.request_id,
+                latest.attempt_number,
+            )
+        except RequestStoreError:
+            protected_progress = None
+        if protected_progress is not None:
+            component_id, progress_reason = protected_progress
+            payload["protected_component"] = component_id
+            payload["protected_component_status"] = progress_reason
     return payload
 
 

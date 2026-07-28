@@ -1276,6 +1276,74 @@ def test_logs_redacts_exact_known_secret(tmp_path: Path) -> None:
     assert "[REDACTED" in deps.stdout.getvalue()
 
 
+def _private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def _private_file(path: Path, payload: str = "{}\n") -> None:
+    path.write_text(payload)
+    path.chmod(0o600)
+
+
+def test_status_reports_incomplete_protected_component_without_reading_payload(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    root = (
+        deps.config.state_root
+        / "requests"
+        / REQUEST_ID
+        / "attempts"
+        / "1"
+        / "protected-apply"
+    )
+    _private_directory(root)
+    _private_file(root / "execution.lock", "")
+    epoch = root / "00-mutation-epoch-claim"
+    _private_directory(epoch)
+    _private_file(epoch / "intent.json")
+    _private_file(epoch / "terminal.json")
+    gb10 = root / "03-gb10-candidate"
+    _private_directory(gb10)
+    _private_file(gb10 / "intent.json", '{"private":"must-not-be-read"}\n')
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert payload["protected_component"] == "gb10-candidate"
+    assert payload["protected_component_status"] == "protected_component_incomplete"
+    assert "must-not-be-read" not in deps.stdout.getvalue()
+
+
+def test_status_fails_closed_on_unsafe_protected_progress_metadata(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    root = (
+        deps.config.state_root
+        / "requests"
+        / REQUEST_ID
+        / "attempts"
+        / "1"
+        / "protected-apply"
+    )
+    _private_directory(root)
+    _private_file(root / "execution.lock", "")
+    unsafe = root / "03-gb10-candidate"
+    unsafe.symlink_to(tmp_path)
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert "protected_component" not in payload
+    assert "protected_component_status" not in payload
+
+
 def _last_json(stream: io.StringIO) -> dict[str, object]:
     import json
 
