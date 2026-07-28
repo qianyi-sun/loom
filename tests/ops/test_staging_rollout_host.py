@@ -836,7 +836,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     )
     assert system.runtime_venvs == {candidate_venv}
     for path in (
-        host.BROKER_PATH,
+        host.ROLLOUT_BROKER_PATH,
         host.REHEARSAL_PATH,
         host.FINAL_GATE_PATH,
         host.CREDENTIAL_REFRESH_PATH,
@@ -846,6 +846,15 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         assert "PYTHONDONTWRITEBYTECODE=1" in wrapper
         assert "__CANDIDATE_VENV__" not in wrapper
         assert str(host.LEGACY_VENV) not in wrapper
+    assert installer.filesystem.path(host.BROKER_PATH).read_text(encoding="utf-8") == (
+        "#!/bin/sh\nset -eu\n\n"
+        'exec /usr/local/libexec/loom-rollout-broker --env staging "$@"\n'
+    )
+    sudoers = installer.filesystem.path(host.SUDOERS_PATH).read_text(encoding="utf-8")
+    assert "--env dev *" in sudoers
+    assert "--env staging *" in sudoers
+    assert "--env prod *" in sudoers
+    assert "/usr/local/libexec/loom-staging-rollout-broker *" in sudoers
     assert str(host.LEGACY_CANDIDATE_REPO) not in rendered
     config_path = installer.filesystem.path(host.CONFIG_PATH)
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
@@ -954,6 +963,8 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert system.lifecycle_lock_entries == 2
     assert system.lifecycle_lock_depth == 0
     assert set(system.source_reads) >= {
+        "deploy/staging-rollout/loom-rollout",
+        "deploy/staging-rollout/loom-rollout-broker",
         "deploy/staging-rollout/loom-staging-rollout",
         "deploy/staging-rollout/loom-staging-rollout-broker",
         "deploy/staging-rollout/loom-staging-rollout-credential-refresh",
@@ -1017,7 +1028,7 @@ def test_install_keeps_legacy_repo_and_venv_frozen_across_candidate_updates(
     rendered = installer.filesystem.path(host.CONFIG_PATH).read_text(encoding="utf-8")
     assert str(host._candidate_repo_path("b" * 40)) in rendered
     assert str(host._candidate_venv_path("b" * 40)) in installer.filesystem.path(
-        host.BROKER_PATH
+        host.ROLLOUT_BROKER_PATH
     ).read_text(encoding="utf-8")
 
 

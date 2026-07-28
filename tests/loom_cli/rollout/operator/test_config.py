@@ -13,6 +13,11 @@ from loom_cli.rollout.operator.config import (
     APPROVED_REMOTE_URL,
     ConfigError,
     OperatorConfig,
+    environment_authority,
+)
+from loom_cli.rollout.operator.envelope import (
+    EnvelopeValidationError,
+    fixed_operator_config_path,
 )
 from loom_cli.rollout.operator.model import (
     BACKUP_PUBLIC_REASONS,
@@ -78,6 +83,114 @@ def _replace_config_value(source: str, key: str, replacement: str) -> str:
     lines = source.splitlines()
     prefix = f"{key} = "
     return "\n".join(replacement if line.startswith(prefix) else line for line in lines) + "\n"
+
+
+def _environment_config(short_name: str) -> str:
+    authority = environment_authority(short_name)
+    replacements = {
+        "operator_group": authority.operator_group,
+        "target_ref": authority.target_ref,
+        "runner_repo": (
+            f"{authority.candidate_runtime_root}/{MERGED_COMMIT}/repo"
+        ),
+        "state_root": str(authority.state_root),
+        "runtime_root": str(authority.runtime_root),
+        "rollout_root": str(authority.rollout_root),
+        "kubeconfig_path": str(authority.kubeconfig_path),
+        "cluster_config_path": str(
+            authority.candidate_runtime_root
+            / MERGED_COMMIT
+            / "repo"
+            / authority.candidate_cluster_config
+        ),
+        "cluster_name": authority.cluster_name,
+        "namespace": authority.namespace,
+        "environment": authority.environment,
+        "cp_url": authority.cp_url,
+    }
+    rendered = VALID_CONFIG
+    for key, value in replacements.items():
+        rendered = _replace_config_value(rendered, key, f'{key} = "{value}"')
+    return rendered
+
+
+@pytest.mark.parametrize("short_name", ["dev", "staging", "prod"])
+def test_environment_authority_loads_only_exact_protected_bindings(
+    tmp_path: Path,
+    short_name: str,
+) -> None:
+    authority = environment_authority(short_name)
+    path = _write_config(tmp_path / f"{short_name}-rollout.toml", _environment_config(short_name))
+
+    config = OperatorConfig.load(
+        path,
+        authority=authority,
+        expected_owner_uid=os.getuid(),
+    )
+
+    assert config.short_name == short_name
+    assert config.operator_group == authority.operator_group
+    assert config.target_ref == authority.target_ref
+    assert config.cluster_name == authority.cluster_name
+    assert config.namespace == authority.namespace
+    assert config.environment == authority.environment
+    assert config.runner_repo.parent.parent == authority.candidate_runtime_root
+    assert config.state_root == authority.state_root
+    assert config.runtime_root == authority.runtime_root
+    assert config.rollout_root == authority.rollout_root
+    assert config.kubeconfig_path == authority.kubeconfig_path
+
+
+@pytest.mark.parametrize(
+    ("short_name", "key", "wrong_value"),
+    [
+        ("dev", "operator_group", "loom-prod-operators"),
+        ("dev", "namespace", "loom-staging"),
+        ("prod", "target_ref", "refs/heads/dev"),
+        ("prod", "state_root", "/var/lib/loom-staging-rollout"),
+        ("prod", "cluster_config_path", "/tmp/production.cluster.toml"),
+    ],
+)
+def test_environment_authority_rejects_cross_environment_binding(
+    tmp_path: Path,
+    short_name: str,
+    key: str,
+    wrong_value: str,
+) -> None:
+    authority = environment_authority(short_name)
+    payload = _replace_config_value(
+        _environment_config(short_name),
+        key,
+        f'{key} = "{wrong_value}"',
+    )
+    path = _write_config(tmp_path / f"{short_name}-rollout.toml", payload)
+
+    with pytest.raises(ConfigError):
+        OperatorConfig.load(
+            path,
+            authority=authority,
+            expected_owner_uid=os.getuid(),
+        )
+
+
+@pytest.mark.parametrize("short_name", ["dev", "staging", "prod"])
+def test_fixed_operator_config_path_is_selected_only_by_short_name(short_name: str) -> None:
+    authority = environment_authority(short_name)
+
+    assert fixed_operator_config_path({}, environment=short_name) == authority.config_path
+    assert (
+        fixed_operator_config_path(
+            {"LOOM_ROLLOUT_CONFIG": str(authority.config_path)},
+            environment=short_name,
+        )
+        == authority.config_path
+    )
+
+    with pytest.raises(EnvelopeValidationError, match="installed"):
+        fixed_operator_config_path(
+            {"LOOM_ROLLOUT_CONFIG": "/etc/loom/staging-rollout.toml"},
+            environment="prod",
+        )
 
 
 def make_driver_envelope(**overrides: object) -> DriverEnvelope:

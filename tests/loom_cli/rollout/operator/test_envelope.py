@@ -1239,6 +1239,10 @@ def test_envelope_mode_constructs_context_without_git_or_evidence_discovery(
         lambda *_args, **_kwargs: config,
     )
     monkeypatch.setattr(
+        "loom_cli.rollout.cli.fixed_operator_config_path",
+        lambda: config.config_path,
+    )
+    monkeypatch.setattr(
         "loom_cli.rollout.cli.resolve_ref_to_sha",
         lambda *_args, **_kwargs: pytest.fail("envelope mode must not resolve Git refs"),
     )
@@ -1301,6 +1305,10 @@ def test_envelope_mode_requires_resume_flag_to_match_envelope(
     monkeypatch.setattr(
         "loom_cli.rollout.cli.OperatorConfig.load",
         lambda *_args, **_kwargs: config,
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.cli.fixed_operator_config_path",
+        lambda: config.config_path,
     )
 
     rc = main(

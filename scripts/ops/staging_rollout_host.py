@@ -91,6 +91,8 @@ LEGACY_GB10_ENV_ROOT = Path("/shared_work/qianyi/loom-worker-capacity")
 RUNTIME_ROOT = Path("/run/loom-staging-rollout")
 MAINTENANCE_MARKER = RUNTIME_ROOT / "maintenance"
 CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
+ROLLOUT_CLIENT_PATH = Path("/usr/local/bin/loom-rollout")
+ROLLOUT_BROKER_PATH = Path("/usr/local/libexec/loom-rollout-broker")
 CLIENT_PATH = Path("/usr/local/bin/loom-staging-rollout")
 BROKER_PATH = Path("/usr/local/libexec/loom-staging-rollout-broker")
 REHEARSAL_PATH = Path("/usr/local/libexec/loom-staging-rollout-rehearsal")
@@ -226,6 +228,8 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "rehearsal-helper",
         "rehearsal-authority",
         "readonly-authority",
+        "rollout-broker",
+        "rollout-client",
         "shared-work2-mount-unit",
         "sysctl",
         "tmpfiles",
@@ -1697,6 +1701,8 @@ class HostSystem:
                     f"deploy/staging-rollout/{name}",
                 )
                 for name in (
+                    "loom-rollout",
+                    "loom-rollout-broker",
                     "loom-staging-rollout",
                     "loom-staging-rollout-broker",
                     "loom-staging-rollout-rehearsal",
@@ -1740,6 +1746,8 @@ class HostSystem:
                     "scripts/ops/staging_rollout_sealed_source.py",
                 )
             )
+            self.runner.run(["bash", "-n", str(directory / "loom-rollout")])
+            self.runner.run(["bash", "-n", str(directory / "loom-rollout-broker")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-broker")])
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-rehearsal")])
@@ -3801,6 +3809,8 @@ class HostSystem:
             ):
                 failures.append(f"data-acl:{path}")
         authority = {
+            ROLLOUT_CLIENT_PATH: "regular file:root:root:755",
+            ROLLOUT_BROKER_PATH: "regular file:root:root:755",
             CLIENT_PATH: "regular file:root:root:755",
             BROKER_PATH: "regular file:root:root:755",
             REHEARSAL_PATH: "regular file:root:root:755",
@@ -4536,6 +4546,8 @@ class HostInstaller:
         )
 
         installed_files = (
+            (ROLLOUT_CLIENT_PATH, self._asset("loom-rollout"), 0o755, "root", "root"),
+            (ROLLOUT_BROKER_PATH, self._asset("loom-rollout-broker"), 0o755, "root", "root"),
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755, "root", "root"),
             (BROKER_PATH, self._asset("loom-staging-rollout-broker"), 0o755, "root", "root"),
             (
@@ -4612,23 +4624,25 @@ class HostInstaller:
         )
         sudoers = self._asset("loom-staging-rollout.sudoers")
         attestation_assets = {
-            "broker": installed_files[1][1],
-            "client": installed_files[0][1],
+            "broker": self._asset("loom-staging-rollout-broker"),
+            "client": self._asset("loom-staging-rollout"),
             "config": config,
-            "credential-refresh-helper": installed_files[10][1],
-            "credential-refresh-service": installed_files[11][1],
-            "credential-refresh-timer": installed_files[12][1],
-            "gb10-known-hosts": installed_files[5][1],
-            "gb10-trust-tool": installed_files[3][1],
+            "credential-refresh-helper": self._asset("loom-staging-rollout-credential-refresh"),
+            "credential-refresh-service": self._asset(CREDENTIAL_REFRESH_SERVICE),
+            "credential-refresh-timer": self._asset(CREDENTIAL_REFRESH_TIMER),
+            "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
+            "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
             "readonly-authority": self._source_file("deploy/k8s/staging-rollout-readonly.yaml"),
             "rehearsal-authority": self._source_file(
                 "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
             ),
-            "rehearsal-helper": installed_files[2][1],
-            "final-gate-helper": installed_files[8][1],
-            "shared-work2-mount-unit": installed_files[6][1],
-            "sysctl": installed_files[9][1],
-            "tmpfiles": installed_files[4][1],
+            "rehearsal-helper": self._asset("loom-staging-rollout-rehearsal"),
+            "final-gate-helper": self._asset("loom-staging-rollout-final-gate"),
+            "rollout-broker": self._asset("loom-rollout-broker"),
+            "rollout-client": self._asset("loom-rollout"),
+            "shared-work2-mount-unit": self._asset(SHARED_WORK2_MOUNT_UNIT),
+            "sysctl": self._asset("loom-staging-rollout.sysctl"),
+            "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
         }
 
         added_operator_memberships = self._record_operator_memberships(previous_record)
@@ -5278,6 +5292,8 @@ class HostInstaller:
         self._validate_acl_ledgers(grants, mask_adjustments, snapshot_adjustments)
         self._bind_existing_source(record)
         expected = (
+            (ROLLOUT_CLIENT_PATH, self._asset("loom-rollout"), 0o755),
+            (ROLLOUT_BROKER_PATH, self._asset("loom-rollout-broker"), 0o755),
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755),
             (BROKER_PATH, self._asset("loom-staging-rollout-broker"), 0o755),
             (REHEARSAL_PATH, self._asset("loom-staging-rollout-rehearsal"), 0o755),
@@ -5368,6 +5384,8 @@ class HostInstaller:
                 ),
                 "rehearsal-helper": self._asset("loom-staging-rollout-rehearsal"),
                 "final-gate-helper": self._asset("loom-staging-rollout-final-gate"),
+                "rollout-broker": self._asset("loom-rollout-broker"),
+                "rollout-client": self._asset("loom-rollout"),
                 "shared-work2-mount-unit": self._asset(SHARED_WORK2_MOUNT_UNIT),
                 "sysctl": self._asset("loom-staging-rollout.sysctl"),
                 "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
@@ -5679,6 +5697,8 @@ class HostInstaller:
         if credential_refresh_unit_present:
             self.system.disable_credential_refresh_timer()
         removable_files = [
+            ROLLOUT_CLIENT_PATH,
+            ROLLOUT_BROKER_PATH,
             CLIENT_PATH,
             BROKER_PATH,
             REHEARSAL_PATH,

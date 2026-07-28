@@ -67,6 +67,8 @@ INSTALL_ASSETS = MappingProxyType(
             0o644,
             False,
         ),
+        "rollout-broker": (Path("/usr/local/libexec/loom-rollout-broker"), 0o755, False),
+        "rollout-client": (Path("/usr/local/bin/loom-rollout"), 0o755, False),
         "shared-work2-mount-unit": (
             Path("/etc/systemd/system/shared_work2.mount"),
             0o644,

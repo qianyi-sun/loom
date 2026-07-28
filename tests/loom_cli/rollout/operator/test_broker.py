@@ -35,7 +35,7 @@ from loom_cli.rollout.operator.model import (
     RequestEvent,
     RolloutRequest,
 )
-from loom_cli.rollout.operator.policy import sanitized_child_environment
+from loom_cli.rollout.operator.policy import PolicyError, sanitized_child_environment
 from loom_cli.rollout.operator.preflight import PreflightCheck, PreflightReport
 from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
@@ -426,6 +426,84 @@ def test_public_surface_rejects_unapproved_arguments(tmp_path: Path, argv: list[
     deps = fakes(tmp_path)
     assert broker_main(argv, dependencies=deps.dependencies) == 2
     assert deps.order == []
+
+
+def test_selected_environment_must_match_authenticated_config_before_action(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    authenticated = False
+
+    def authenticate() -> CallerIdentity:
+        nonlocal authenticated
+        authenticated = True
+        return CallerIdentity("hongjian", 2002)
+
+    deps.dependencies.authenticate = authenticate
+
+    assert (
+        broker_main(
+            ["--env", "prod", "status"],
+            dependencies=deps.dependencies,
+        )
+        == 1
+    )
+    assert authenticated is False
+    assert deps.order == []
+    assert "authorization or validation failed" in deps.stderr.getvalue()
+
+
+def test_explicit_staging_environment_preserves_legacy_broker_behavior(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+
+    assert (
+        broker_main(
+            ["--env", "staging", "status"],
+            dependencies=deps.dependencies,
+        )
+        == 0
+    )
+    assert json.loads(deps.stdout.getvalue())["status"] == "idle"
+
+
+def test_installed_broker_authenticates_before_constructing_rollout_dependencies(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    dependencies_constructed = False
+
+    monkeypatch.setattr(
+        broker_module,
+        "fixed_operator_config_path",
+        lambda *, environment: config.config_path,
+    )
+    monkeypatch.setattr(
+        broker_module.OperatorConfig,
+        "load",
+        lambda *_args, **_kwargs: config,
+    )
+    monkeypatch.setattr(
+        broker_module,
+        "caller_from_sudo",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PolicyError("wrong environment group")
+        ),
+    )
+
+    def construct_dependencies(_config: OperatorConfig) -> BrokerDependencies:
+        nonlocal dependencies_constructed
+        dependencies_constructed = True
+        raise AssertionError("unauthorized callers must not construct rollout dependencies")
+
+    monkeypatch.setattr(broker_module, "_default_dependencies", construct_dependencies)
+
+    assert broker_main(["--env", "staging", "status"]) == 1
+    assert dependencies_constructed is False
+    assert "authorization or validation failed" in capsys.readouterr().err
 
 
 class _ManifestOwnership:

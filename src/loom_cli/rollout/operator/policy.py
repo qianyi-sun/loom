@@ -10,7 +10,6 @@ from .config import OperatorConfig
 from .model import CallerIdentity
 
 _UID_RE = re.compile(r"^(0|[1-9][0-9]*)$")
-_CHILD_HOME = "/var/lib/loom-staging-rollout"
 _CHILD_SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 GroupResolver = Callable[[str], Collection[str]]
@@ -69,8 +68,8 @@ def sanitized_child_environment(
     """Build the complete, non-inheriting environment for broker child processes."""
     runtime_dir = f"/run/user/{service_uid}"
     candidate_venv_bin = config.runner_repo.parent / "venv" / "bin"
-    return {
-        "HOME": _CHILD_HOME,
+    environment = {
+        "HOME": str(config.state_root),
         "USER": config.service_user,
         "LOGNAME": config.service_user,
         "PATH": f"{candidate_venv_bin}:{_CHILD_SYSTEM_PATH}",
@@ -82,8 +81,14 @@ def sanitized_child_environment(
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
-        "LOOM_STAGING_ROLLOUT_CONFIG": str(config.config_path),
     }
+    config_variable = (
+        "LOOM_STAGING_ROLLOUT_CONFIG"
+        if config.short_name == "staging"
+        else "LOOM_ROLLOUT_CONFIG"
+    )
+    environment[config_variable] = str(config.config_path)
+    return environment
 
 
 __all__ = [
