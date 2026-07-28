@@ -14,6 +14,7 @@ argument.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -24,7 +25,8 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,6 +99,52 @@ class Handoff:
 
 
 HttpJson = Callable[..., dict[str, Any]]
+
+
+@contextmanager
+def _exclusive_adapter_lock(config: AdapterConfig) -> Iterator[None]:
+    lock_path = config.adapter_state_path.with_name(
+        f".{config.adapter_state_path.name}.lock",
+    )
+    parent = lock_path.parent
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_metadata = parent.lstat()
+    if (
+        stat.S_ISLNK(parent_metadata.st_mode)
+        or not stat.S_ISDIR(parent_metadata.st_mode)
+        or parent_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+    ):
+        raise AdapterError("adapter lock directory must be owner-only mode 0700")
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise AdapterError("adapter lock is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise AdapterError("adapter lock file is unsafe")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise AdapterError("adapter invocation is already active") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _redact(value: str) -> str:
@@ -608,7 +656,7 @@ def _validate_bootstrap_policy(
         raise AdapterError("autoscaler policy lacks non-exclusive containment authority")
 
 
-def bootstrap_policy(
+def _bootstrap_policy_unlocked(
     config: AdapterConfig,
     *,
     http_json: HttpJson = _http_json,
@@ -651,6 +699,15 @@ def bootstrap_policy(
         "pool_name": config.pool_name,
         "candidate_sha": candidate_sha,
     }
+
+
+def bootstrap_policy(
+    config: AdapterConfig,
+    *,
+    http_json: HttpJson = _http_json,
+) -> dict[str, Any]:
+    with _exclusive_adapter_lock(config):
+        return _bootstrap_policy_unlocked(config, http_json=http_json)
 
 
 def _validate_policy(
@@ -743,19 +800,42 @@ def _atomic_json_write(path: Path, payload: object) -> None:
         raise AdapterError("adapter output directory must be private")
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
-        temporary.write_text(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
+        data = (
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
         )
-        temporary.chmod(0o600)
+        try:
+            os.write(descriptor, data)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         os.replace(temporary, path)
         path.chmod(0o600)
+        directory = os.open(
+            parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if temporary.exists():
             temporary.unlink()
 
 
-def run_once(
+def _run_once_unlocked(
     config: AdapterConfig,
     *,
     now: datetime | None = None,
@@ -873,6 +953,16 @@ def run_once(
         "handoff_missing": handoff_missing,
         "observation": observation,
     }
+
+
+def run_once(
+    config: AdapterConfig,
+    *,
+    now: datetime | None = None,
+    http_json: HttpJson = _http_json,
+) -> dict[str, Any]:
+    with _exclusive_adapter_lock(config):
+        return _run_once_unlocked(config, now=now, http_json=http_json)
 
 
 def _parser() -> argparse.ArgumentParser:
