@@ -16,10 +16,12 @@ cross-profile collision.
 
 Provision the shared candidate namespace on the `/shared_work` NFS source, not
 independently on each client. `/shared_work/loom`, `candidates`, `sandboxes`,
-and each developer child are owned by `loom-rollout:sharedwork` with mode
-`2750`. The resulting device/inode, UID/GID, and mode must read back identically
-from every OLDLAB NFS client. Developers have read/traverse access but cannot
-mutate a published candidate.
+and each developer child are converged by the root domain publisher as
+`root:sharedwork` mode `2750`. Publish the exact SHA/tree independently in the
+OLDLAB and GB10 NFS domains through
+`developer_sandbox_domain_runtime.py`; identical logical paths do not imply one
+backing filesystem. Developers have read/traverse access but cannot mutate a
+published candidate. The host installer never fetches or publishes source.
 
 On `oldlab-2`, `/srv/loom` and `/srv/loom/developer-sandboxes` are
 `root:sharedwork` mode `2750`. Each developer root and its `cache`, `evidence`,
@@ -65,22 +67,32 @@ uv run --no-sync python scripts/ops/developer_sandbox_host.py install \
 The installer performs these bounded steps:
 
 1. require root and the canonical host name `trt-eai-oldlab-2`;
-2. require `/shared_work` to be the NFS mount and resolve the local
-   `loom-rollout`, `sharedwork`, and three developer identities by name, then
-   verify each developer can reach the local Docker daemon through their
-   normal supplementary groups;
-3. fetch the exact commit from the fixed `qianyi-sun/loom` remote into a
-   private temporary directory under each developer's NFS candidate root,
-   verify `HEAD`, commit, tree, and cleanliness, remove every write bit, and
-   atomically rename it to `<candidate_root>/<SHA>`;
-4. converge each local state/cache/evidence/runtime/secrets directory to its
+2. require `/shared_work` to be the OLDLAB NFS mount, resolve `sharedwork`, the
+   stable `loom-sandbox-<developer>` groups, and the three developer identities,
+   then consume only a pre-published `root:sharedwork` mode-`2750` exact
+   SHA/tree candidate;
+3. converge each local state/cache/evidence/runtime/secrets directory to its
    developer owner and mode `0700`;
-5. create the per-developer `secrets/sandbox.env` and `secrets/admin.toml`
+4. create the per-developer `secrets/sandbox.env` and `secrets/admin.toml`
    once, atomically, as owner-only mode `0600` files; existing valid files are
    never rotated or overwritten;
-6. persist the root-only exact desired-state record under
-   `/etc/loom/developer-sandboxes/desired/<developer>.json`, install the fixed
-   host entry and systemd template, and enable/start each unit.
+5. require the shared-capacity adapters to be stopped and their policies
+   absent or terminal, journal a root-owned bounded prepare transaction, and
+   temporarily converge only the exact candidate's loopback stack without
+   writing desired or lifecycle state;
+6. install the exact relay and all 19 host-local client bundles over encrypted
+   administrative transport, then require every route, TLS identity, and
+   Control Plane/Gateway/MinIO health check before persisting a fresh fleet
+   proof;
+7. run the exact domain helper on every OLDLAB/GB10 peer, republish the
+   secret-free reference env in each domain from a root-private seed, collect
+   both signed domain attestations, and closed-schema verify the fresh combined
+   receipt;
+8. only then atomically write desired state, restart the steady systemd unit,
+   verify exact candidate/tree/runtime/receipt binding, and remove the
+   transaction journal. Any failure stops the uncommitted prepare, invalidates
+   its proof, restores the prior relay and sandbox candidate when present, and
+   leaves capacity disabled.
 
 The durable locations for one sandbox are therefore:
 
@@ -94,6 +106,9 @@ The durable locations for one sandbox are therefore:
 | evidence | `/srv/loom/developer-sandboxes/<developer>/evidence` |
 | runtime | `/srv/loom/developer-sandboxes/<developer>/runtime` |
 | desired candidate | `/etc/loom/developer-sandboxes/desired/<developer>.json` |
+| OLDLAB worker env | `/shared_work/loom/runtime/sandboxes/<developer>/<SHA>/worker-oldlab.env` |
+| combined receipt | `/var/lib/loom-shared-capacity/runtime-attestations/<developer>/<SHA>/combined.json` |
+| activation journal | `/var/lib/loom-developer-sandbox-installer/transactions/<developer>.json` |
 | installed fixed profile | `/etc/loom/developer-sandboxes/profiles/<developer>.toml` |
 
 Do not copy or reveal the private files during readback. Compare only

@@ -6,6 +6,7 @@ import stat
 import subprocess
 import sys
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,15 @@ def _current_identity(user: str) -> host.Identity:
     )
 
 
+def _receipt(profile: host.Profile, sha: str) -> host.ActivationReceipt:
+    return host.ActivationReceipt(
+        path=host.combined_receipt_path(profile, sha),
+        payload_sha256="d" * 64,
+        fleet_payload_sha256="sha256:" + "e" * 64,
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+
+
 def _git(candidate: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(candidate), *args],
@@ -53,7 +63,7 @@ def test_plan_covers_all_fixed_paths_ports_and_nfs_readbacks_without_secrets() -
     encoded = json.dumps(plan, sort_keys=True)
 
     assert plan["mutation_authorized"] is False
-    assert plan["remote_url"] == "https://github.com/qianyi-sun/loom.git"
+    assert "remote_url" not in plan
     assert {row["sandbox"] for row in plan["sandboxes"]} == set(host.SANDBOXES)
     assert sum(len(row["ports"]) for row in plan["sandboxes"]) == 30
     assert (
@@ -136,7 +146,7 @@ def test_exact_candidate_verifier_requires_clean_immutable_tree(tmp_path: Path) 
     for root, directories, files in os.walk(immutable):
         for entry in [Path(root), *(Path(root) / name for name in directories + files)]:
             if not entry.is_symlink():
-                entry.chmod(stat.S_IMODE(entry.stat().st_mode) & ~0o222)
+                entry.chmod(0o2750 if entry.is_dir() else 0o640)
 
     tree = host.verify_candidate(
         profile,
@@ -147,8 +157,8 @@ def test_exact_candidate_verifier_requires_clean_immutable_tree(tmp_path: Path) 
 
     assert len(tree) == 40
     readme = immutable / "README.md"
-    readme.chmod(0o640)
-    with pytest.raises(host.HostConvergeError, match="writable entry"):
+    readme.chmod(0o660)
+    with pytest.raises(host.HostConvergeError, match="group/world-writable"):
         host.verify_candidate(
             profile,
             immutable,
@@ -166,8 +176,8 @@ def test_desired_state_records_only_one_safe_rollback_target(
     first = "1" * 40
     second = "2" * 40
 
-    assert host.write_desired(profile, first, "3" * 40) is None
-    previous = host.write_desired(profile, second, "4" * 40)
+    assert host.write_desired(profile, first, "3" * 40, _receipt(profile, first)) is None
+    previous = host.write_desired(profile, second, "4" * 40, _receipt(profile, second))
     desired = json.loads(profile.desired_file.read_text(encoding="utf-8"))
 
     assert previous is not None
@@ -178,17 +188,31 @@ def test_desired_state_records_only_one_safe_rollback_target(
 
 def test_desired_state_binding_rejects_tree_or_secret_path_drift(tmp_path: Path) -> None:
     profile = _temporary_profile(tmp_path)
+    receipt = _receipt(profile, SHA)
     payload = host._desired_payload(
         profile,
         SHA,
         "b" * 40,
         previous_sha="c" * 40,
+        receipt=receipt,
     )
-    host._validate_desired_binding(profile, payload, sha=SHA, tree="b" * 40)
+    host._validate_desired_binding(
+        profile,
+        payload,
+        sha=SHA,
+        tree="b" * 40,
+        receipt=receipt,
+    )
 
     payload["candidate_tree"] = "d" * 40
     with pytest.raises(host.HostConvergeError, match="desired state binding"):
-        host._validate_desired_binding(profile, payload, sha=SHA, tree="b" * 40)
+        host._validate_desired_binding(
+            profile,
+            payload,
+            sha=SHA,
+            tree="b" * 40,
+            receipt=receipt,
+        )
 
 
 def test_update_refuses_migration_tree_change_before_activation(
@@ -199,7 +223,7 @@ def test_update_refuses_migration_tree_change_before_activation(
     profile = _temporary_profile(tmp_path)
     current = "1" * 40
     target = "2" * 40
-    host.write_desired(profile, current, "3" * 40)
+    host.write_desired(profile, current, "3" * 40, _receipt(profile, current))
     monkeypatch.setattr(host, "verify_candidate", lambda *args, **kwargs: "3" * 40)
     monkeypatch.setattr(
         host,
@@ -339,6 +363,83 @@ def test_failed_child_output_is_not_relayed_in_error() -> None:
 
     assert private_value not in str(caught.value)
     assert "exit code 7" in str(caught.value)
+
+
+def test_failed_first_install_removes_desired_and_stops_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    monkeypatch.setattr(host, "DESIRED_ROOT", tmp_path / "desired")
+    profile.desired_file.parent.mkdir(parents=True)
+    profile.desired_file.write_text("{}\n", encoding="utf-8")
+    events: list[str] = []
+    monkeypatch.setattr(host, "_sandbox_state_sha", lambda _profile: None)
+    monkeypatch.setattr(
+        host,
+        "_invoke_lifecycle",
+        lambda _profile, sha, operation: events.append(f"{operation}:{sha}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_restore_relay",
+        lambda _profile, previous, sha: events.append(f"relay:{previous}:{sha}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_invalidate_receipt",
+        lambda _profile, sha: events.append(f"invalidate:{sha}"),
+    )
+    monkeypatch.setattr(host, "_remove_transaction", lambda _profile: events.append("remove"))
+
+    host._recover_transaction(
+        profile,
+        {
+            "candidate_sha": SHA,
+            "previous_desired": None,
+            "previous_relay_sha": None,
+        },
+    )
+
+    assert not profile.desired_file.exists()
+    assert events == [
+        f"prepare-stop:{SHA}",
+        f"relay:None:{SHA}",
+        f"invalidate:{SHA}",
+        "remove",
+    ]
+
+
+def test_failed_upgrade_restores_previous_desired_and_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    monkeypatch.setattr(host, "DESIRED_ROOT", tmp_path / "desired")
+    profile.desired_file.parent.mkdir(parents=True)
+    previous_sha = "b" * 40
+    previous = {"schema_version": 1, "sandbox": profile.sandbox, "candidate_sha": previous_sha}
+    events: list[str] = []
+    monkeypatch.setattr(
+        host,
+        "_invoke_lifecycle",
+        lambda _profile, sha, operation: events.append(f"{operation}:{sha}"),
+    )
+    monkeypatch.setattr(host, "_restore_relay", lambda *_args: events.append("relay"))
+    monkeypatch.setattr(host, "_invalidate_receipt", lambda *_args: events.append("invalidate"))
+    monkeypatch.setattr(host, "_remove_transaction", lambda _profile: events.append("remove"))
+
+    host._recover_transaction(
+        profile,
+        {
+            "candidate_sha": SHA,
+            "previous_desired": previous,
+            "previous_relay_sha": previous_sha,
+        },
+    )
+
+    assert json.loads(profile.desired_file.read_text(encoding="utf-8")) == previous
+    assert events == [f"update:{previous_sha}", "relay", "invalidate", "remove"]
 
 
 def test_host_installer_and_profiles_require_the_full_ci_matrix() -> None:

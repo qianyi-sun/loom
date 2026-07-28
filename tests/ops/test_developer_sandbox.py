@@ -271,6 +271,55 @@ def test_destroy_preserves_volumes_unless_explicit(tmp_path: Path) -> None:
     assert "--volumes" in deleting[-1].argv
 
 
+def test_prepare_bootstrap_starts_loopback_stack_without_committing_state(
+    tmp_path: Path,
+) -> None:
+    profiles_dir, candidates = _write_profiles(tmp_path)
+    source = _candidate(candidates)
+    secrets, admin = _write_secret_files(tmp_path)
+    runner = FakeRunner()
+
+    result = sandbox.operate(
+        "prepare",
+        profile_path=profiles_dir / "qianyi.toml",
+        source_repo=source,
+        candidate_sha=SHA,
+        secrets_env=secrets,
+        admin_secret_file=admin,
+        execute=True,
+        delete_volumes=False,
+        runner=runner,
+        canonical_hostname=lambda: "trt-eai-oldlab-2",
+    )
+
+    assert result["status"] == "succeeded"
+    assert not (tmp_path / "developer-sandboxes/qianyi/sandbox-state.json").exists()
+    assert any("--force-recreate" in call[0] for call in runner.calls)
+
+
+def test_prepare_stop_is_valid_without_committed_state(tmp_path: Path) -> None:
+    profiles_dir, candidates = _write_profiles(tmp_path)
+    source = _candidate(candidates)
+    secrets, admin = _write_secret_files(tmp_path)
+    runner = FakeRunner()
+
+    result = sandbox.operate(
+        "prepare-stop",
+        profile_path=profiles_dir / "qianyi.toml",
+        source_repo=source,
+        candidate_sha=SHA,
+        secrets_env=secrets,
+        admin_secret_file=admin,
+        execute=True,
+        delete_volumes=False,
+        runner=runner,
+        canonical_hostname=lambda: "trt-eai-oldlab-2",
+    )
+
+    assert result["status"] == "succeeded"
+    assert any("down" in call[0] and "--volumes" not in call[0] for call in runner.calls)
+
+
 def test_dirty_candidate_is_rejected(tmp_path: Path) -> None:
     source = tmp_path / "repo"
     source.mkdir()

@@ -368,7 +368,10 @@ def load_profile(path: Path) -> SandboxProfile:
 def load_profiles(profiles_dir: Path) -> tuple[SandboxProfile, ...]:
     if not profiles_dir.is_dir():
         raise SandboxProfileError(f"profiles directory not found: {profiles_dir}")
-    profiles = tuple(load_profile(path) for path in sorted(profiles_dir.glob("*.toml")))
+    profiles = tuple(
+        load_profile(profiles_dir / f"{sandbox}.toml")
+        for sandbox in ALLOWED_SANDBOXES
+    )
     names = tuple(profile.sandbox for profile in profiles)
     if set(names) != set(ALLOWED_SANDBOXES) or len(names) != len(ALLOWED_SANDBOXES):
         raise SandboxProfileError(
@@ -571,7 +574,7 @@ def build_commands(
 ) -> tuple[SandboxCommand, ...]:
     prefix = _compose_prefix(profile, binding, secrets_env)
     config = SandboxCommand((*prefix, "config", "--quiet"), "validate Compose config")
-    if operation in {"create", "update"}:
+    if operation in {"create", "update", "prepare"}:
         dependency_up = SandboxCommand(
             (*prefix, "up", "-d", "postgres", "minio"),
             "start stateful dependencies",
@@ -593,7 +596,7 @@ def build_commands(
             "apply database migrations",
         )
         up_args = [*prefix, "up", "-d", "--build", "--remove-orphans"]
-        if operation == "update":
+        if operation in {"update", "prepare"}:
             up_args.append("--force-recreate")
         return (
             config,
@@ -609,11 +612,16 @@ def build_commands(
                 "inspect sandbox services",
             ),
         )
-    if operation == "destroy":
+    if operation in {"destroy", "prepare-stop"}:
         args = [*prefix, "down", "--remove-orphans"]
-        if delete_volumes:
+        if operation == "destroy" and delete_volumes:
             args.append("--volumes")
-        return (config, SandboxCommand(tuple(args), "destroy sandbox stack"))
+        purpose = (
+            "destroy sandbox stack"
+            if operation == "destroy"
+            else "stop uncommitted prepared sandbox stack"
+        )
+        return (config, SandboxCommand(tuple(args), purpose))
     raise SandboxOperationError(f"unsupported operation: {operation}")
 
 
@@ -810,7 +818,7 @@ def operate(
         candidate_sha,
         expected_source_repo=(
             profile.candidate_root / candidate_sha
-            if operation in {"create", "update"}
+            if operation in {"create", "update", "prepare"}
             else None
         ),
         runner=runner,
@@ -850,7 +858,7 @@ def operate(
             "execution host must have canonical hostname "
             f"{profile.canonical_hostname!r}, got {actual_host!r}",
         )
-    if operation in {"create", "update"}:
+    if operation in {"create", "update", "prepare"}:
         for root in (
             profile.state_root,
             profile.cache_root,
@@ -874,6 +882,12 @@ def operate(
         _validate_runtime_status(results[-1])
     elif operation == "destroy":
         _remove_state(profile)
+    elif operation in {"prepare", "prepare-stop"}:
+        # A root-owned host transaction uses these operations only to make the
+        # loopback stack available long enough to prove the remote-link fleet.
+        # The steady candidate state remains untouched until the host
+        # installer validates and commits the combined activation receipt.
+        pass
     else:
         _write_success_records(
             operation,
@@ -897,12 +911,12 @@ def _parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan", help="Render a mutation-free operation plan")
     plan.add_argument(
         "--operation",
-        choices=("create", "update", "check", "destroy"),
+        choices=("create", "update", "prepare", "prepare-stop", "check", "destroy"),
         required=True,
     )
     _add_common_arguments(plan)
     plan.add_argument("--delete-volumes", action="store_true")
-    for operation in ("create", "update", "check", "destroy"):
+    for operation in ("create", "update", "prepare", "prepare-stop", "check", "destroy"):
         command = subparsers.add_parser(operation)
         _add_common_arguments(command)
         command.add_argument(

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import grp
 import hashlib
+import io
 import json
 import os
 import pwd
@@ -22,13 +24,16 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import tomllib
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -36,20 +41,39 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_PROFILES = REPO_ROOT / "deploy/developer-sandboxes"
 SOURCE_UNIT = SOURCE_PROFILES / "loom-developer-sandbox@.service"
 
-REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
 SANDBOXES = ("qianyi", "hongjian", "devansh")
 EXPECTED_HOSTNAME = "trt-eai-oldlab-2"
-PUBLISH_USER = "loom-rollout"
 SHARED_GROUP = "sharedwork"
 NFS_ROOT = Path("/shared_work/loom/candidates/sandboxes")
+NFS_RUNTIME_ROOT = Path("/shared_work/loom/runtime/sandboxes")
 STATE_PARENT = Path("/srv/loom/developer-sandboxes")
 CONFIG_ROOT = Path("/etc/loom/developer-sandboxes")
 DESIRED_ROOT = CONFIG_ROOT / "desired"
 PROFILE_CONFIG_ROOT = CONFIG_ROOT / "profiles"
+TRANSACTION_ROOT = Path("/var/lib/loom-developer-sandbox-installer/transactions")
+TRANSACTION_LOCK_ROOT = Path("/run/loom-developer-sandbox-installer")
+COMBINED_RECEIPT_ROOT = Path("/var/lib/loom-shared-capacity/runtime-attestations")
+FLEET_ATTESTATION_ROOT = Path("/var/lib/loom-developer-sandbox-links/attestations")
+REMOTE_LINK_ISSUANCE_ROOT = Path("/var/lib/loom/developer-sandbox-links/issuance")
+REMOTE_LINK_SERVER_ROOT = Path("/etc/loom/developer-sandbox-links/server")
 UNIT_PATH = Path("/etc/systemd/system/loom-developer-sandbox@.service")
 INSTALLED_PROGRAM = Path("/usr/local/libexec/loom-developer-sandbox-host")
 UNIT_NAME = "loom-developer-sandbox@{sandbox}.service"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+TRANSACTION_TTL = timedelta(minutes=30)
+RECEIPT_FRESHNESS = timedelta(seconds=60)
+ATTESTATION_TTL = timedelta(minutes=15)
+DOMAIN_PEERS = {
+    "oldlab": ("oldlab-1", "oldlab-2", "oldlab-3", "oldlab-4", "oldlab-5"),
+    "gb10": tuple(
+        f"trt-gb10-{index}"
+        for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
+    ),
+}
+DOMAIN_PUBLISHERS = {"oldlab": "oldlab-1", "gb10": "trt-gb10-1"}
+ELIGIBLE_LINK_NODES = DOMAIN_PEERS["oldlab"] + DOMAIN_PEERS["gb10"]
 
 SECRET_KEYS = (
     "LOOM_DEV_POSTGRES_USER",
@@ -98,6 +122,9 @@ class Profile:
     def desired_file(self) -> Path:
         return DESIRED_ROOT / f"{self.sandbox}.json"
 
+    def worker_runtime_env(self, sha: str) -> Path:
+        return NFS_RUNTIME_ROOT / self.sandbox / sha / "worker-oldlab.env"
+
 
 @dataclass(frozen=True, slots=True)
 class Identity:
@@ -105,6 +132,14 @@ class Identity:
     group: str
     uid: int
     gid: int
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationReceipt:
+    path: Path
+    payload_sha256: str
+    fleet_payload_sha256: str
+    expires_at: datetime
 
 
 def _load_profile(path: Path) -> Profile:
@@ -262,9 +297,18 @@ def _atomic_write(
         os.chmod(path, mode)
         if identity is not None:
             os.chown(path, identity.uid, identity.gid)
+        _fsync_directory(path.parent)
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _ensure_root_private_directory(path: Path) -> None:
@@ -428,186 +472,276 @@ def verify_candidate(
     profile: Profile,
     path: Path,
     sha: str,
-    identity: Identity,
+    authority: Identity,
 ) -> str:
     if path != profile.candidate_root / sha or SHA_RE.fullmatch(sha) is None:
         raise HostConvergeError("candidate path is not exact-SHA bound")
     directory = _run(
         ("test", "-d", str(path)),
-        identity=identity,
+        identity=authority,
         expected={0, 1},
     )
     symlink = _run(
         ("test", "-L", str(path)),
-        identity=identity,
+        identity=authority,
         expected={0, 1},
     )
     if directory.returncode != 0 or symlink.returncode == 0:
         raise HostConvergeError("candidate directory is unavailable")
-    if _git(path, "rev-parse", "--verify", "HEAD", identity=identity) != sha:
+    if _git(path, "rev-parse", "--verify", "HEAD", identity=authority) != sha:
         raise HostConvergeError("candidate HEAD does not match requested SHA")
-    if _git(path, "rev-parse", "--verify", f"{sha}^{{commit}}", identity=identity) != sha:
+    if _git(path, "rev-parse", "--verify", f"{sha}^{{commit}}", identity=authority) != sha:
         raise HostConvergeError("candidate commit does not resolve exactly")
     if _git(
         path,
         "status",
         "--porcelain=v1",
         "--untracked-files=all",
-        identity=identity,
+        identity=authority,
     ):
         raise HostConvergeError("candidate checkout is not clean")
-    tree = _git(path, "rev-parse", "--verify", "HEAD^{tree}", identity=identity)
+    tree = _git(path, "rev-parse", "--verify", "HEAD^{tree}", identity=authority)
     if SHA_RE.fullmatch(tree) is None:
         raise HostConvergeError("candidate tree is invalid")
-    if os.geteuid() == identity.uid and os.getgid() == identity.gid:
-        for root, directories, files in os.walk(path):
-            entries = [Path(root), *(Path(root) / name for name in directories + files)]
-            for entry in entries:
-                metadata = entry.lstat()
-                if stat.S_ISLNK(metadata.st_mode):
-                    continue
-                if metadata.st_mode & 0o222:
-                    raise HostConvergeError("candidate contains a writable entry")
-                if (metadata.st_uid, metadata.st_gid) != (identity.uid, identity.gid):
-                    raise HostConvergeError("candidate ownership is invalid")
-    else:
-        writable = _run(
-            (
-                "find",
-                str(path),
-                "-xdev",
-                "!",
-                "-type",
-                "l",
-                "-perm",
-                "/222",
-                "-print",
-                "-quit",
-            ),
-            identity=identity,
-        )
-        if writable.stdout.strip():
-            raise HostConvergeError("candidate contains a writable entry")
-        wrong_owner = _run(
-            (
-                "find",
-                str(path),
-                "-xdev",
-                "!",
-                "-type",
-                "l",
-                "(",
-                "!",
-                "-user",
-                identity.user,
-                "-o",
-                "!",
-                "-group",
-                identity.group,
-                ")",
-                "-print",
-                "-quit",
-            ),
-            identity=identity,
-        )
-        if wrong_owner.stdout.strip():
-            raise HostConvergeError("candidate ownership is invalid")
+    root_metadata = path.lstat()
+    if (
+        root_metadata.st_uid != authority.uid
+        or root_metadata.st_gid != authority.gid
+        or stat.S_IMODE(root_metadata.st_mode) != 0o2750
+    ):
+        raise HostConvergeError("candidate root metadata is invalid")
+    for root, directories, files in os.walk(path, followlinks=False):
+        for entry in (
+            Path(root),
+            *(Path(root) / name for name in (*directories, *files)),
+        ):
+            metadata = entry.lstat()
+            if (metadata.st_uid, metadata.st_gid) != (authority.uid, authority.gid):
+                raise HostConvergeError("candidate ownership is invalid")
+            if not stat.S_ISLNK(metadata.st_mode) and metadata.st_mode & 0o022:
+                raise HostConvergeError("candidate contains a group/world-writable entry")
     return tree
 
 
-def verify_candidate_root(profile: Profile, publisher: Identity) -> None:
+def verify_candidate_root(profile: Profile, authority: Identity) -> None:
     directory = _run(
         ("test", "-d", str(profile.candidate_root)),
-        identity=publisher,
+        identity=authority,
         expected={0, 1},
     )
     symlink = _run(
         ("test", "-L", str(profile.candidate_root)),
-        identity=publisher,
+        identity=authority,
         expected={0, 1},
     )
     metadata = _run(
         ("stat", "-Lc", "%u:%g:%a", str(profile.candidate_root)),
-        identity=publisher,
+        identity=authority,
     ).stdout.strip()
     if (
         directory.returncode != 0
         or symlink.returncode == 0
-        or metadata != f"{publisher.uid}:{publisher.gid}:2750"
+        or metadata != f"0:{authority.gid}:2750"
     ):
         raise HostConvergeError("candidate root owner or mode is invalid")
 
 
-def publish_candidate(profile: Profile, sha: str, publisher: Identity) -> str:
-    if SHA_RE.fullmatch(sha) is None:
-        raise HostConvergeError("candidate SHA must be full lowercase 40-hex")
-    if profile.candidate_root != NFS_ROOT / profile.sandbox:
-        raise HostConvergeError("candidate root escaped the fixed NFS namespace")
-    _run(
-        ("install", "-d", "-m", "2750", str(profile.candidate_root)),
-        identity=publisher,
-    )
-    verify_candidate_root(profile, publisher)
-    candidate = profile.candidate_root / sha
-    if _path_exists_as(candidate, publisher):
-        return verify_candidate(profile, candidate, sha, publisher)
+def _exact_keys(payload: Mapping[str, Any], expected: set[str], label: str) -> None:
+    if set(payload) != expected:
+        raise HostConvergeError(f"{label} does not match the closed schema")
 
-    temporary = profile.candidate_root / f".publish-{sha}-{os.getpid()}"
-    if _path_exists_as(temporary, publisher):
-        raise HostConvergeError("candidate publication temporary path already exists")
+
+def _parse_attestation_time(value: object, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise HostConvergeError(f"{label} is invalid")
     try:
-        _run(
-            (
-                "git",
-                "-c",
-                "protocol.file.allow=never",
-                "clone",
-                "--no-checkout",
-                "--filter=blob:none",
-                REMOTE_URL,
-                str(temporary),
-            ),
-            env=_clean_git_environment(),
-            identity=publisher,
-        )
-        _run(
-            ("git", "-C", str(temporary), "fetch", "--no-tags", "origin", sha),
-            env=_clean_git_environment(),
-            identity=publisher,
-        )
-        _run(
-            ("git", "-C", str(temporary), "checkout", "--detach", sha),
-            env=_clean_git_environment(),
-            identity=publisher,
-        )
-        if _git(temporary, "rev-parse", "--verify", "HEAD", identity=publisher) != sha:
-            raise HostConvergeError("published candidate did not bind exact SHA")
-        if _git(
-            temporary,
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            identity=publisher,
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HostConvergeError(f"{label} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise HostConvergeError(f"{label} must include timezone")
+    return parsed.astimezone(UTC)
+
+
+def combined_receipt_path(profile: Profile, sha: str) -> Path:
+    return COMBINED_RECEIPT_ROOT / profile.sandbox / sha / "combined.json"
+
+
+def verify_worker_runtime_env(
+    profile: Profile,
+    sha: str,
+    sandbox_group: Identity,
+) -> None:
+    path = profile.worker_runtime_env(sha)
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise HostConvergeError("OLDLAB worker runtime env is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, sandbox_group.gid)
+        or stat.S_IMODE(metadata.st_mode) != 0o640
+    ):
+        raise HostConvergeError("OLDLAB worker runtime env metadata is invalid")
+    values = _parse_env_file(path)
+    bundle_root = f"/etc/loom/developer-sandbox-links/clients/{profile.sandbox}/{sha}"
+    expected = {
+        "LOOM_WORKER_CONTROL_PLANE_URL": "http://sandbox-link:8080",
+        "LOOM_WORKER_GATEWAY_URL": "http://sandbox-link:9100",
+        "LOOM_WORKER_MINIO_ENDPOINT": "http://sandbox-link:9000",
+        "LOOM_WORKER_SANDBOX_IDENTITY": profile.sandbox,
+        "LOOM_WORKER_CANDIDATE_SHA": sha,
+        "LOOM_WORKER_TOKEN_FILE_HOST": f"{bundle_root}/worker-token",
+        "LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST": f"{bundle_root}/minio-access-key",
+        "LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST": f"{bundle_root}/minio-secret-key",
+        "LOOM_WORKER_CP_TLS_CA_FILE_HOST": f"{bundle_root}/ca.pem",
+        "LOOM_WORKER_CP_TLS_CERT_FILE_HOST": f"{bundle_root}/client.pem",
+        "LOOM_WORKER_CP_TLS_KEY_FILE_HOST": f"{bundle_root}/client-key.pem",
+    }
+    if values != expected:
+        raise HostConvergeError("OLDLAB worker runtime env binding is invalid")
+
+
+def verify_combined_receipt(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    *,
+    now: datetime | None = None,
+) -> ActivationReceipt:
+    now = (now or datetime.now(UTC)).astimezone(UTC)
+    path = combined_receipt_path(profile, sha)
+    try:
+        metadata = path.lstat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise HostConvergeError("combined activation receipt is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise HostConvergeError("combined activation receipt metadata is invalid")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HostConvergeError("combined activation receipt is invalid") from exc
+    if not isinstance(payload, dict):
+        raise HostConvergeError("combined activation receipt is invalid")
+    _exact_keys(
+        payload,
+        {
+            "schema_version",
+            "kind",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "collector",
+            "fleet_attestation",
+            "domains",
+            "payload_sha256",
+        },
+        "combined activation receipt",
+    )
+    digest = payload["payload_sha256"]
+    unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode(),
+    ).hexdigest()
+    if (
+        payload["schema_version"] != 1
+        or payload["kind"] != "loom.developer-runtime-combined-activation"
+        or payload["sandbox"] != profile.sandbox
+        or payload["candidate_sha"] != sha
+        or payload["candidate_tree"] != tree
+        or not isinstance(digest, str)
+        or digest != expected_digest
+    ):
+        raise HostConvergeError("combined activation receipt identity or digest is invalid")
+    collector = payload["collector"]
+    fleet = payload["fleet_attestation"]
+    domains = payload["domains"]
+    if not all(isinstance(item, dict) for item in (collector, fleet, domains)):
+        raise HostConvergeError("combined activation receipt sections are invalid")
+    _exact_keys(collector, {"hostname", "collected_at", "expires_at"}, "collector")
+    collected_at = _parse_attestation_time(collector["collected_at"], "collected_at")
+    expires_at = _parse_attestation_time(collector["expires_at"], "expires_at")
+    if (
+        collector["hostname"] != EXPECTED_HOSTNAME
+        or collected_at > now + timedelta(seconds=30)
+        or now - collected_at > RECEIPT_FRESHNESS
+        or expires_at <= now
+        or expires_at - collected_at > ATTESTATION_TTL
+    ):
+        raise HostConvergeError("combined activation receipt is stale or expired")
+    _exact_keys(
+        fleet,
+        {"path", "payload_sha256", "generated_at", "expires_at"},
+        "fleet receipt reference",
+    )
+    fleet_generated = _parse_attestation_time(fleet["generated_at"], "fleet generated_at")
+    fleet_expires = _parse_attestation_time(fleet["expires_at"], "fleet expires_at")
+    if (
+        fleet["path"]
+        != str(FLEET_ATTESTATION_ROOT / profile.sandbox / sha / "fleet.json")
+        or not isinstance(fleet["payload_sha256"], str)
+        or FINGERPRINT_RE.fullmatch(fleet["payload_sha256"]) is None
+        or fleet_generated > now + timedelta(seconds=30)
+        or now - fleet_generated > RECEIPT_FRESHNESS
+        or fleet_expires <= now
+        or fleet_expires - fleet_generated != ATTESTATION_TTL
+    ):
+        raise HostConvergeError("combined fleet receipt binding is invalid")
+    if set(domains) != {"oldlab", "gb10"}:
+        raise HostConvergeError("combined receipt domain set is incomplete")
+    domain_keys = {
+        "manifest_path",
+        "signature_path",
+        "payload_sha256",
+        "signature_sha256",
+        "key_id",
+        "generation",
+        "published_at",
+        "expires_at",
+    }
+    for domain in ("oldlab", "gb10"):
+        row = domains[domain]
+        if not isinstance(row, dict):
+            raise HostConvergeError("combined receipt domain input is invalid")
+        _exact_keys(row, domain_keys, "combined receipt domain input")
+        base = f"/var/lib/loom-developer-domain-attestations/{profile.sandbox}/{sha}"
+        published = _parse_attestation_time(row["published_at"], "domain published_at")
+        domain_expires = _parse_attestation_time(row["expires_at"], "domain expires_at")
+        if (
+            row["manifest_path"] != f"{base}/{domain}.json"
+            or row["signature_path"] != f"{base}/{domain}.sig"
+            or not isinstance(row["payload_sha256"], str)
+            or DIGEST_RE.fullmatch(row["payload_sha256"]) is None
+            or not isinstance(row["signature_sha256"], str)
+            or DIGEST_RE.fullmatch(row["signature_sha256"]) is None
+            or not isinstance(row["key_id"], str)
+            or DIGEST_RE.fullmatch(row["key_id"]) is None
+            or type(row["generation"]) is not int
+            or row["generation"] < 1
+            or published > now + timedelta(seconds=30)
+            or now - published > RECEIPT_FRESHNESS
+            or domain_expires <= now
+            or domain_expires - published != ATTESTATION_TTL
         ):
-            raise HostConvergeError("published candidate is not clean")
-        _run(
-            (
-                "chmod",
-                "-R",
-                "u=rX,g=rX,o=,a-w",
-                str(temporary),
-            ),
-            identity=publisher,
-        )
-        _run(
-            ("mv", "--no-target-directory", str(temporary), str(candidate)),
-            identity=publisher,
-        )
-    finally:
-        if _path_exists_as(temporary, publisher):
-            _run(("chmod", "-R", "u+w", str(temporary)), identity=publisher)
-            _run(("rm", "-rf", "--", str(temporary)), identity=publisher)
-    return verify_candidate(profile, candidate, sha, publisher)
+            raise HostConvergeError("combined receipt domain binding is invalid")
+    return ActivationReceipt(
+        path=path,
+        payload_sha256=digest,
+        fleet_payload_sha256=fleet["payload_sha256"],
+        expires_at=expires_at,
+    )
 
 
 def _desired_payload(
@@ -616,6 +750,7 @@ def _desired_payload(
     tree: str,
     *,
     previous_sha: str | None,
+    receipt: ActivationReceipt,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -624,6 +759,11 @@ def _desired_payload(
         "candidate_tree": tree,
         "candidate_path": str(profile.candidate_root / sha),
         "previous_sha": previous_sha,
+        "worker_runtime_env": str(profile.worker_runtime_env(sha)),
+        "combined_receipt": str(receipt.path),
+        "combined_receipt_sha256": receipt.payload_sha256,
+        "fleet_attestation_sha256": receipt.fleet_payload_sha256,
+        "receipt_expires_at": receipt.expires_at.isoformat(),
         "secrets_env": str(profile.secrets_env),
         "admin_secret_file": str(profile.admin_secret),
     }
@@ -651,7 +791,12 @@ def _load_json(path: Path, label: str) -> dict[str, Any] | None:
     return payload
 
 
-def write_desired(profile: Profile, sha: str, tree: str) -> dict[str, Any] | None:
+def write_desired(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    receipt: ActivationReceipt,
+) -> dict[str, Any] | None:
     previous = _load_json(profile.desired_file, "sandbox desired state")
     previous_sha = None
     if previous is not None:
@@ -665,6 +810,7 @@ def write_desired(profile: Profile, sha: str, tree: str) -> dict[str, Any] | Non
         sha,
         tree,
         previous_sha=previous_sha,
+        receipt=receipt,
     )
     _atomic_write(
         profile.desired_file,
@@ -895,6 +1041,7 @@ def _validate_desired_binding(
     *,
     sha: str,
     tree: str,
+    receipt: ActivationReceipt,
 ) -> None:
     expected = {
         "schema_version": 1,
@@ -902,6 +1049,11 @@ def _validate_desired_binding(
         "candidate_sha": sha,
         "candidate_tree": tree,
         "candidate_path": str(profile.candidate_root / sha),
+        "worker_runtime_env": str(profile.worker_runtime_env(sha)),
+        "combined_receipt": str(receipt.path),
+        "combined_receipt_sha256": receipt.payload_sha256,
+        "fleet_attestation_sha256": receipt.fleet_payload_sha256,
+        "receipt_expires_at": receipt.expires_at.isoformat(),
         "secrets_env": str(profile.secrets_env),
         "admin_secret_file": str(profile.admin_secret),
     }
@@ -920,11 +1072,20 @@ def service_converge(sandbox: str) -> None:
     verify_state_parent()
     profile, desired = _desired_for_service(sandbox)
     sha = str(desired["candidate_sha"])
-    publisher = _identity(PUBLISH_USER, SHARED_GROUP)
+    authority = _identity("root", SHARED_GROUP)
     owner = _identity(sandbox, SHARED_GROUP)
-    verify_candidate_root(profile, publisher)
-    tree = verify_candidate(profile, profile.candidate_root / sha, sha, publisher)
-    _validate_desired_binding(profile, desired, sha=sha, tree=tree)
+    runtime_group = _identity(sandbox, f"loom-sandbox-{sandbox}")
+    verify_candidate_root(profile, authority)
+    tree = verify_candidate(profile, profile.candidate_root / sha, sha, authority)
+    verify_worker_runtime_env(profile, sha, runtime_group)
+    receipt = verify_combined_receipt(profile, sha, tree)
+    _validate_desired_binding(
+        profile,
+        desired,
+        sha=sha,
+        tree=tree,
+        receipt=receipt,
+    )
     ensure_secret_files(profile, owner)
     current = _sandbox_state_sha(profile)
     if current is None:
@@ -943,14 +1104,23 @@ def service_check(sandbox: str) -> None:
     verify_state_parent()
     profile, desired = _desired_for_service(sandbox)
     sha = str(desired["candidate_sha"])
-    verify_candidate_root(profile, _identity(PUBLISH_USER, SHARED_GROUP))
+    authority = _identity("root", SHARED_GROUP)
+    verify_candidate_root(profile, authority)
     tree = verify_candidate(
         profile,
         profile.candidate_root / sha,
         sha,
-        _identity(PUBLISH_USER, SHARED_GROUP),
+        authority,
     )
-    _validate_desired_binding(profile, desired, sha=sha, tree=tree)
+    verify_worker_runtime_env(profile, sha, _identity(sandbox, f"loom-sandbox-{sandbox}"))
+    receipt = verify_combined_receipt(profile, sha, tree)
+    _validate_desired_binding(
+        profile,
+        desired,
+        sha=sha,
+        tree=tree,
+        receipt=receipt,
+    )
     verify_secret_files(profile, _identity(sandbox, SHARED_GROUP))
     _invoke_lifecycle(profile, sha, "check")
     verify_listening_ports(profile)
@@ -981,6 +1151,450 @@ def verify_listening_ports(profile: Profile) -> None:
         )
 
 
+def _candidate_program(profile: Profile, sha: str, relative: str) -> Path:
+    path = profile.candidate_root / sha / relative
+    if not path.is_file() or path.is_symlink():
+        raise HostConvergeError("exact candidate operation asset is unavailable")
+    return path
+
+
+def _run_candidate_program(
+    profile: Profile,
+    sha: str,
+    relative: str,
+    *arguments: str,
+) -> dict[str, Any]:
+    completed = _run(
+        (
+            sys.executable,
+            str(_candidate_program(profile, sha, relative)),
+            *arguments,
+        ),
+        env=_candidate_environment(profile, profile.candidate_root / sha),
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise HostConvergeError("exact candidate helper returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HostConvergeError("exact candidate helper returned invalid JSON")
+    return payload
+
+
+def _ssh(
+    node: str,
+    argv: Sequence[str],
+    *,
+    input_bytes: bytes | None = None,
+    expected: set[int] | frozenset[int] = frozenset({0}),
+) -> subprocess.CompletedProcess[bytes]:
+    completed = subprocess.run(
+        (
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            node,
+            *argv,
+        ),
+        input=input_bytes,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode not in expected:
+        raise HostConvergeError(
+            f"remote {Path(argv[0]).name if argv else 'command'} failed safely "
+            f"on {node} with exit code {completed.returncode}",
+        )
+    return completed
+
+
+def _verify_remote_candidate(
+    profile: Profile,
+    node: str,
+    sha: str,
+    tree: str,
+    shared_gid: int,
+) -> None:
+    candidate = profile.candidate_root / sha
+    prefix = ("sudo", "-n")
+    metadata = _ssh(
+        node,
+        (*prefix, "stat", "-Lc", "%u:%g:%a", str(candidate)),
+    ).stdout.decode().strip()
+    head = _ssh(
+        node,
+        (*prefix, "git", "-C", str(candidate), "rev-parse", "--verify", "HEAD"),
+    ).stdout.decode().strip()
+    remote_tree = _ssh(
+        node,
+        (*prefix, "git", "-C", str(candidate), "rev-parse", "--verify", "HEAD^{tree}"),
+    ).stdout.decode().strip()
+    status = _ssh(
+        node,
+        (
+            *prefix,
+            "git",
+            "-C",
+            str(candidate),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ),
+    ).stdout.decode().strip()
+    writable = _ssh(
+        node,
+        (
+            *prefix,
+            "find",
+            str(candidate),
+            "-xdev",
+            "!",
+            "-type",
+            "l",
+            "-perm",
+            "/022",
+            "-print",
+            "-quit",
+        ),
+    ).stdout.decode().strip()
+    if metadata != f"0:{shared_gid}:2750" or head != sha or remote_tree != tree or status or writable:
+        raise HostConvergeError(f"{node} candidate identity or metadata is invalid")
+
+
+def _archive_credentials(
+    source: Path,
+    *,
+    worker_token: str,
+    minio_access_key: str,
+    minio_secret_key: str,
+) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for name in ("ca.pem", "client.pem", "client-key.pem"):
+            path = source / name
+            content = path.read_bytes()
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = 0o600 if name == "client-key.pem" else 0o644
+            info.uid = 0
+            info.gid = 0
+            archive.addfile(info, io.BytesIO(content))
+        for name, value in (
+            ("worker-token", worker_token),
+            ("minio-access-key", minio_access_key),
+            ("minio-secret-key", minio_secret_key),
+        ):
+            content = (value + "\n").encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = 0o600
+            info.uid = 0
+            info.gid = 0
+            archive.addfile(info, io.BytesIO(content))
+    return output.getvalue()
+
+
+def _install_remote_link_fleet(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    authority: Identity,
+) -> None:
+    values = _parse_env_file(profile.secrets_env)
+    program = "scripts/ops/developer_sandbox_remote_link_host.py"
+    _run_candidate_program(
+        profile,
+        sha,
+        program,
+        "prepare-rotation",
+        "--sandbox",
+        profile.sandbox,
+        "--candidate-sha",
+        sha,
+        "--execute",
+    )
+    issuance = REMOTE_LINK_ISSUANCE_ROOT / profile.sandbox / sha
+    _run_candidate_program(
+        profile,
+        sha,
+        program,
+        "install-server",
+        "--sandbox",
+        profile.sandbox,
+        "--candidate-sha",
+        sha,
+        "--credential-source",
+        str(issuance / "server"),
+        "--execute",
+    )
+    for node in ELIGIBLE_LINK_NODES:
+        _verify_remote_candidate(profile, node, sha, tree, authority.gid)
+        inbox = Path(
+            f"/run/loom-developer-sandbox-installer/{profile.sandbox}/{sha}/{node}",
+        )
+        archive = _archive_credentials(
+            issuance / node,
+            worker_token=values["LOOM_WORKER_TOKEN"],
+            minio_access_key=values["LOOM_DEV_MINIO_ROOT_USER"],
+            minio_secret_key=values["LOOM_DEV_MINIO_ROOT_PASSWORD"],
+        )
+        try:
+            _ssh(node, ("sudo", "-n", "install", "-d", "-m", "0700", str(inbox)))
+            _ssh(
+                node,
+                (
+                    "sudo",
+                    "-n",
+                    "tar",
+                    "--extract",
+                    "--file=-",
+                    "--directory",
+                    str(inbox),
+                    "--no-same-owner",
+                    "--no-same-permissions",
+                ),
+                input_bytes=archive,
+            )
+            remote_program = profile.candidate_root / sha / program
+            _ssh(
+                node,
+                (
+                    "sudo",
+                    "-n",
+                    "python3",
+                    str(remote_program),
+                    "install-client",
+                    "--sandbox",
+                    profile.sandbox,
+                    "--candidate-sha",
+                    sha,
+                    "--node",
+                    node,
+                    "--credential-source",
+                    str(inbox),
+                    "--worker-token-file",
+                    str(inbox / "worker-token"),
+                    "--minio-access-key-file",
+                    str(inbox / "minio-access-key"),
+                    "--minio-secret-key-file",
+                    str(inbox / "minio-secret-key"),
+                    "--execute",
+                ),
+            )
+        finally:
+            _ssh(
+                node,
+                ("sudo", "-n", "rm", "-rf", "--", str(inbox)),
+                expected=frozenset(range(256)),
+            )
+    _run_candidate_program(
+        profile,
+        sha,
+        program,
+        "activate-server",
+        "--sandbox",
+        profile.sandbox,
+        "--candidate-sha",
+        sha,
+        "--execute",
+    )
+    _run_candidate_program(
+        profile,
+        sha,
+        program,
+        "fleet-check",
+        "--sandbox",
+        profile.sandbox,
+        "--candidate-sha",
+        sha,
+        "--execute",
+    )
+
+
+def _worker_env_seed(profile: Profile, sha: str) -> bytes:
+    bundle = f"/etc/loom/developer-sandbox-links/clients/{profile.sandbox}/{sha}"
+    values = {
+        "LOOM_WORKER_CONTROL_PLANE_URL": "http://sandbox-link:8080",
+        "LOOM_WORKER_GATEWAY_URL": "http://sandbox-link:9100",
+        "LOOM_WORKER_MINIO_ENDPOINT": "http://sandbox-link:9000",
+        "LOOM_WORKER_SANDBOX_IDENTITY": profile.sandbox,
+        "LOOM_WORKER_CANDIDATE_SHA": sha,
+        "LOOM_WORKER_TOKEN_FILE_HOST": f"{bundle}/worker-token",
+        "LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST": f"{bundle}/minio-access-key",
+        "LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST": f"{bundle}/minio-secret-key",
+        "LOOM_WORKER_CP_TLS_CA_FILE_HOST": f"{bundle}/ca.pem",
+        "LOOM_WORKER_CP_TLS_CERT_FILE_HOST": f"{bundle}/client.pem",
+        "LOOM_WORKER_CP_TLS_KEY_FILE_HOST": f"{bundle}/client-key.pem",
+    }
+    return _render_env(values)
+
+
+def _publish_domain_attestations(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    authority: Identity,
+) -> None:
+    relative_program = "scripts/ops/developer_sandbox_domain_runtime.py"
+    config_relative = "deploy/developer-sandboxes/runtime-domains.toml"
+    seed = _worker_env_seed(profile, sha)
+    for domain, nodes in DOMAIN_PEERS.items():
+        for node in nodes:
+            _verify_remote_candidate(profile, node, sha, tree, authority.gid)
+            candidate = profile.candidate_root / sha
+            _ssh(
+                node,
+                (
+                    "sudo",
+                    "-n",
+                    "python3",
+                    str(candidate / relative_program),
+                    "host-converge",
+                    "--config",
+                    str(candidate / config_relative),
+                    "--domain",
+                    domain,
+                    "--execute",
+                ),
+            )
+        publisher = DOMAIN_PUBLISHERS[domain]
+        seed_path = Path(
+            f"/run/loom-developer-sandbox-installer/{profile.sandbox}-{sha}-{domain}.env",
+        )
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            info = tarfile.TarInfo(seed_path.name)
+            info.size = len(seed)
+            info.mode = 0o600
+            info.uid = 0
+            info.gid = 0
+            tar.addfile(info, io.BytesIO(seed))
+        try:
+            _ssh(
+                publisher,
+                ("sudo", "-n", "install", "-d", "-m", "0700", str(seed_path.parent)),
+            )
+            _ssh(
+                publisher,
+                (
+                    "sudo",
+                    "-n",
+                    "tar",
+                    "--extract",
+                    "--file=-",
+                    "--directory",
+                    str(seed_path.parent),
+                    "--no-same-owner",
+                    "--no-same-permissions",
+                ),
+                input_bytes=archive.getvalue(),
+            )
+            candidate = profile.candidate_root / sha
+            _ssh(
+                publisher,
+                (
+                    "sudo",
+                    "-n",
+                    "python3",
+                    str(candidate / relative_program),
+                    "publish",
+                    "--config",
+                    str(candidate / config_relative),
+                    "--domain",
+                    domain,
+                    "--sandbox",
+                    profile.sandbox,
+                    "--candidate-sha",
+                    sha,
+                    "--source-repo",
+                    str(candidate),
+                    "--worker-env-seed",
+                    str(seed_path),
+                    "--execute",
+                ),
+            )
+        finally:
+            _ssh(
+                publisher,
+                ("sudo", "-n", "rm", "-f", "--", str(seed_path)),
+                expected=frozenset(range(256)),
+            )
+    _run_candidate_program(
+        profile,
+        sha,
+        relative_program,
+        "collect",
+        "--config",
+        str(profile.candidate_root / sha / config_relative),
+        "--sandbox",
+        profile.sandbox,
+        "--candidate-sha",
+        sha,
+        "--execute",
+    )
+
+
+def _read_policy(profile: Profile, pool: str) -> dict[str, Any] | None:
+    token = _read_admin_token(profile.admin_secret)
+    environment = f"sandbox-{profile.sandbox}"
+    url = (
+        f"http://127.0.0.1:{profile.ports['control_plane']}"
+        f"/admin/worker-pool-autoscaler-policies/{environment}/{pool}"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise HostConvergeError("capacity policy readback failed safely") from exc
+    except urllib.error.URLError as exc:
+        raise HostConvergeError("capacity policy readback is unavailable") from exc
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise HostConvergeError("capacity policy readback is invalid") from exc
+    if not isinstance(payload, dict):
+        raise HostConvergeError("capacity policy readback is invalid")
+    return payload
+
+
+def _assert_capacity_units_stopped(profile: Profile) -> None:
+    for instance in (f"{profile.sandbox}-gb10", f"{profile.sandbox}-oldlab"):
+        for suffix in ("timer", "service"):
+            unit = f"loom-shared-capacity-adapter@{instance}.{suffix}"
+            active = _run(("systemctl", "is-active", unit), expected={0, 3, 4})
+            if active.returncode == 0:
+                raise HostConvergeError("shared capacity adapter is active during prepare")
+        enabled = _run(
+            ("systemctl", "is-enabled", f"loom-shared-capacity-adapter@{instance}.timer"),
+            expected={0, 1, 3, 4},
+        )
+        if enabled.returncode == 0:
+            raise HostConvergeError("shared capacity adapter timer is enabled during prepare")
+
+
+def assert_capacity_quiescent(profile: Profile) -> None:
+    _assert_capacity_units_stopped(profile)
+    for pool in ("gb10", "oldlab"):
+        policy = _read_policy(profile, pool)
+        if policy is None:
+            continue
+        lease = policy.get("capacity_lease_state")
+        lease_state = lease.get("state") if isinstance(lease, dict) else None
+        if policy.get("enabled") is not False or policy.get("max_slots") != 0:
+            raise HostConvergeError("shared capacity policy is not drained")
+        if lease_state not in {None, "retired"}:
+            raise HostConvergeError("shared capacity lease is still nonterminal")
+
+
 def verify_nfs_mount() -> None:
     result = _run(("findmnt", "-n", "-o", "FSTYPE,TARGET", "-T", str(NFS_ROOT)))
     fields = result.stdout.split()
@@ -989,7 +1603,7 @@ def verify_nfs_mount() -> None:
 
 
 def verify_state_parent() -> None:
-    shared = _identity(PUBLISH_USER, SHARED_GROUP)
+    shared = _identity("root", SHARED_GROUP)
     try:
         metadata = STATE_PARENT.lstat()
     except OSError as exc:
@@ -1106,20 +1720,27 @@ def rollback(profile: Profile, target_sha: str) -> None:
     current_sha = desired.get("candidate_sha")
     if target_sha != desired.get("previous_sha") or not isinstance(current_sha, str):
         raise HostConvergeError("rollback target must equal the recorded previous SHA")
-    publisher = _identity(PUBLISH_USER, SHARED_GROUP)
+    authority = _identity("root", SHARED_GROUP)
     current = profile.candidate_root / current_sha
     target = profile.candidate_root / target_sha
-    verify_candidate(profile, current, current_sha, publisher)
-    target_tree = verify_candidate(profile, target, target_sha, publisher)
-    if _migration_tree(current, publisher) != _migration_tree(target, publisher):
+    verify_candidate(profile, current, current_sha, authority)
+    target_tree = verify_candidate(profile, target, target_sha, authority)
+    if _migration_tree(current, authority) != _migration_tree(target, authority):
         raise HostConvergeError(
             "rollback crosses a migration-tree change; restore a reviewed data backup instead",
         )
+    verify_worker_runtime_env(
+        profile,
+        target_sha,
+        _identity(profile.sandbox, f"loom-sandbox-{profile.sandbox}"),
+    )
+    receipt = verify_combined_receipt(profile, target_sha, target_tree)
     replacement = _desired_payload(
         profile,
         target_sha,
         target_tree,
         previous_sha=current_sha,
+        receipt=receipt,
     )
     _atomic_write(
         profile.desired_file,
@@ -1156,8 +1777,10 @@ def plan_document(profiles: Sequence[Profile], sha: str, operation: str) -> dict
                 "sandbox": profile.sandbox,
                 "compose_project": profile.compose_project,
                 "candidate": str(profile.candidate_root / sha),
-                "candidate_owner": f"{PUBLISH_USER}:{SHARED_GROUP}",
-                "candidate_writable": False,
+                "candidate_owner": f"root:{SHARED_GROUP}",
+                "candidate_group_world_writable": False,
+                "worker_runtime_env": str(profile.worker_runtime_env(sha)),
+                "combined_receipt": str(combined_receipt_path(profile, sha)),
                 "state_root": str(profile.state_root),
                 "private_owner": f"{profile.sandbox}:{SHARED_GROUP}",
                 "private_mode": "0700",
@@ -1175,7 +1798,6 @@ def plan_document(profiles: Sequence[Profile], sha: str, operation: str) -> dict
         "operation": operation,
         "mutation_authorized": False,
         "host": EXPECTED_HOSTNAME,
-        "remote_url": REMOTE_URL,
         "candidate_sha": sha,
         "sandboxes": rows,
         "rollback": {
@@ -1186,22 +1808,222 @@ def plan_document(profiles: Sequence[Profile], sha: str, operation: str) -> dict
     }
 
 
+def _transaction_file(profile: Profile) -> Path:
+    return TRANSACTION_ROOT / f"{profile.sandbox}.json"
+
+
+@contextmanager
+def _activation_lock(profile: Profile) -> Iterator[None]:
+    _ensure_root_private_directory(TRANSACTION_LOCK_ROOT)
+    lock_path = TRANSACTION_LOCK_ROOT / f"{profile.sandbox}.lock"
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        ):
+            raise HostConvergeError("sandbox activation lock metadata is invalid")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _write_transaction(
+    profile: Profile,
+    *,
+    sha: str,
+    tree: str,
+    phase: str,
+    previous_desired: Mapping[str, Any] | None,
+    previous_relay_sha: str | None,
+) -> None:
+    now = datetime.now(UTC)
+    payload = {
+        "schema_version": 1,
+        "sandbox": profile.sandbox,
+        "candidate_sha": sha,
+        "candidate_tree": tree,
+        "phase": phase,
+        "started_at": now.isoformat(),
+        "expires_at": (now + TRANSACTION_TTL).isoformat(),
+        "previous_desired": dict(previous_desired) if previous_desired is not None else None,
+        "previous_relay_sha": previous_relay_sha,
+    }
+    _ensure_root_private_directory(TRANSACTION_ROOT)
+    _atomic_write(
+        _transaction_file(profile),
+        (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        mode=0o600,
+    )
+
+
+def _transaction_payload(profile: Profile) -> dict[str, Any] | None:
+    payload = _load_json(_transaction_file(profile), "sandbox activation transaction")
+    if payload is None:
+        return None
+    _exact_keys(
+        payload,
+        {
+            "schema_version",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "phase",
+            "started_at",
+            "expires_at",
+            "previous_desired",
+            "previous_relay_sha",
+        },
+        "sandbox activation transaction",
+    )
+    if (
+        payload["schema_version"] != 1
+        or payload["sandbox"] != profile.sandbox
+        or SHA_RE.fullmatch(str(payload["candidate_sha"])) is None
+        or SHA_RE.fullmatch(str(payload["candidate_tree"])) is None
+        or payload["phase"]
+        not in {
+            "prepared",
+            "preparing",
+            "link-installed",
+            "fleet-proved",
+            "domains-proved",
+            "desired-written",
+            "committed",
+        }
+        or (
+            payload["previous_desired"] is not None
+            and not isinstance(payload["previous_desired"], dict)
+        )
+        or (
+            payload["previous_relay_sha"] is not None
+            and SHA_RE.fullmatch(str(payload["previous_relay_sha"])) is None
+        )
+    ):
+        raise HostConvergeError("sandbox activation transaction binding is invalid")
+    _parse_attestation_time(payload["started_at"], "transaction started_at")
+    _parse_attestation_time(payload["expires_at"], "transaction expires_at")
+    return payload
+
+
+def _remove_transaction(profile: Profile) -> None:
+    path = _transaction_file(profile)
+    if path.exists():
+        path.unlink()
+        _fsync_directory(path.parent)
+
+
+def _current_relay_sha(profile: Profile) -> str | None:
+    current = REMOTE_LINK_SERVER_ROOT / profile.sandbox / "current"
+    try:
+        metadata = current.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HostConvergeError("sandbox relay current pointer is unavailable") from exc
+    if not stat.S_ISLNK(metadata.st_mode):
+        raise HostConvergeError("sandbox relay current pointer is invalid")
+    target = os.readlink(current)
+    prefix = "candidates/"
+    sha = target.removeprefix(prefix)
+    if target != prefix + sha or SHA_RE.fullmatch(sha) is None:
+        raise HostConvergeError("sandbox relay current pointer is invalid")
+    return sha
+
+
+def _restore_relay(profile: Profile, target_sha: str | None, transaction_sha: str) -> None:
+    program = "scripts/ops/developer_sandbox_remote_link_host.py"
+    if target_sha is not None:
+        _run_candidate_program(
+            profile,
+            target_sha,
+            program,
+            "rollback-server",
+            "--sandbox",
+            profile.sandbox,
+            "--candidate-sha",
+            target_sha,
+            "--execute",
+        )
+        return
+    unit = f"loom-developer-sandbox-link@{profile.sandbox}.service"
+    _run(("systemctl", "disable", "--now", unit), expected={0, 1, 5})
+    current = REMOTE_LINK_SERVER_ROOT / profile.sandbox / "current"
+    if current.is_symlink():
+        current.unlink()
+        _fsync_directory(current.parent)
+
+
+def _invalidate_receipt(profile: Profile, sha: str) -> None:
+    path = combined_receipt_path(profile, sha)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(metadata.st_mode):
+        raise HostConvergeError("combined activation receipt path is a directory")
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
+def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> None:
+    sha = str(transaction["candidate_sha"])
+    previous = transaction["previous_desired"]
+    previous_relay = transaction["previous_relay_sha"]
+    if previous is None:
+        if profile.desired_file.exists():
+            profile.desired_file.unlink()
+            _fsync_directory(profile.desired_file.parent)
+        current_state = _sandbox_state_sha(profile)
+        operation = "destroy" if current_state == sha else "prepare-stop"
+        try:
+            _invoke_lifecycle(profile, sha, operation)
+        except HostConvergeError:
+            if operation != "prepare-stop":
+                raise
+    else:
+        previous_sha = previous.get("candidate_sha")
+        if not isinstance(previous_sha, str) or SHA_RE.fullmatch(previous_sha) is None:
+            raise HostConvergeError("previous desired state in transaction is invalid")
+        _atomic_write(
+            profile.desired_file,
+            (json.dumps(previous, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+            mode=0o600,
+        )
+        _invoke_lifecycle(profile, previous_sha, "update")
+    _restore_relay(profile, previous_relay, sha)
+    _invalidate_receipt(profile, sha)
+    _remove_transaction(profile)
+
+
 def install(profiles: Sequence[Profile], sha: str) -> None:
     _require_live_host()
-    publisher = _identity(PUBLISH_USER, SHARED_GROUP)
+    authority = _identity("root", SHARED_GROUP)
     verify_nfs_mount()
     verify_state_parent()
     _install_assets()
     fingerprints: dict[tuple[str, str], str] = {}
-    candidates: list[tuple[Profile, str]] = []
+    candidates: list[tuple[Profile, str, Identity]] = []
     for profile in profiles:
         owner = _identity(profile.sandbox, SHARED_GROUP)
+        runtime_group = _identity(profile.sandbox, f"loom-sandbox-{profile.sandbox}")
         verify_developer_docker_access(owner)
         ensure_secret_files(profile, owner)
-        tree = publish_candidate(profile, sha, publisher)
-        verify_candidate_profile_bytes(profile, sha, publisher)
+        verify_candidate_root(profile, authority)
+        tree = verify_candidate(profile, profile.candidate_root / sha, sha, authority)
+        verify_candidate_profile_bytes(profile, sha, authority)
         verify_candidate_consumer(profile, sha, owner)
-        require_migration_compatible_update(profile, sha, publisher)
+        require_migration_compatible_update(profile, sha, authority)
         values = _parse_env_file(profile.secrets_env)
         admin = _read_admin_token(profile.admin_secret)
         for key in (
@@ -1217,36 +2039,96 @@ def install(profiles: Sequence[Profile], sha: str) -> None:
         fingerprints[(profile.sandbox, "admin")] = hashlib.sha256(
             admin.encode(),
         ).hexdigest()
-        candidates.append((profile, tree))
+        candidates.append((profile, tree, runtime_group))
     for key in {key for _, key in fingerprints}:
-        values = [
+        matching_fingerprints = [
             fingerprint
             for (sandbox, candidate_key), fingerprint in fingerprints.items()
             if candidate_key == key
         ]
-        if len(values) != len(set(values)):
+        if len(matching_fingerprints) != len(set(matching_fingerprints)):
             raise HostConvergeError(f"cross-sandbox secret collision detected for {key}")
-    prepared = [(profile, write_desired(profile, sha, tree)) for profile, tree in candidates]
-    for profile, previous in prepared:
-        unit = UNIT_NAME.format(sandbox=profile.sandbox)
-        try:
-            _run(("systemctl", "enable", unit))
-            _run(("systemctl", "start", unit))
-        except HostConvergeError:
-            if previous is not None:
-                _atomic_write(
-                    profile.desired_file,
-                    (json.dumps(previous, sort_keys=True, separators=(",", ":")) + "\n").encode(),
-                    mode=0o600,
+    for profile, tree, runtime_group in candidates:
+        with _activation_lock(profile):
+            orphan = _transaction_payload(profile)
+            if orphan is not None:
+                _recover_transaction(profile, orphan)
+            previous = _load_json(profile.desired_file, "sandbox desired state")
+            previous_relay = _current_relay_sha(profile)
+            _write_transaction(
+                profile,
+                sha=sha,
+                tree=tree,
+                phase="preparing",
+                previous_desired=previous,
+                previous_relay_sha=previous_relay,
+            )
+            try:
+                _assert_capacity_units_stopped(profile)
+                _invoke_lifecycle(profile, sha, "prepare")
+                verify_listening_ports(profile)
+                assert_capacity_quiescent(profile)
+                _write_transaction(
+                    profile,
+                    sha=sha,
+                    tree=tree,
+                    phase="prepared",
+                    previous_desired=previous,
+                    previous_relay_sha=previous_relay,
                 )
-                try:
-                    _run(("systemctl", "reset-failed", unit))
-                    _run(("systemctl", "start", unit))
-                except HostConvergeError as recovery_exc:
-                    raise HostConvergeError(
-                        f"{profile.sandbox} activation and previous-candidate recovery both failed",
-                    ) from recovery_exc
-            raise
+                _install_remote_link_fleet(profile, sha, tree, authority)
+                _write_transaction(
+                    profile,
+                    sha=sha,
+                    tree=tree,
+                    phase="fleet-proved",
+                    previous_desired=previous,
+                    previous_relay_sha=previous_relay,
+                )
+                _publish_domain_attestations(profile, sha, tree, authority)
+                verify_worker_runtime_env(profile, sha, runtime_group)
+                receipt = verify_combined_receipt(profile, sha, tree)
+                _write_transaction(
+                    profile,
+                    sha=sha,
+                    tree=tree,
+                    phase="domains-proved",
+                    previous_desired=previous,
+                    previous_relay_sha=previous_relay,
+                )
+                write_desired(profile, sha, tree, receipt)
+                _write_transaction(
+                    profile,
+                    sha=sha,
+                    tree=tree,
+                    phase="desired-written",
+                    previous_desired=previous,
+                    previous_relay_sha=previous_relay,
+                )
+                unit = UNIT_NAME.format(sandbox=profile.sandbox)
+                _run(("systemctl", "enable", unit))
+                _run(("systemctl", "restart", unit))
+                service_check(profile.sandbox)
+                _write_transaction(
+                    profile,
+                    sha=sha,
+                    tree=tree,
+                    phase="committed",
+                    previous_desired=previous,
+                    previous_relay_sha=previous_relay,
+                )
+                _remove_transaction(profile)
+            except HostConvergeError:
+                transaction = _transaction_payload(profile)
+                if transaction is not None:
+                    try:
+                        _recover_transaction(profile, transaction)
+                    except HostConvergeError as recovery_exc:
+                        raise HostConvergeError(
+                            f"{profile.sandbox} activation and previous-candidate "
+                            "recovery both failed",
+                        ) from recovery_exc
+                raise
 
 
 def _select_profiles(all_profiles: Sequence[Profile], sandbox: str) -> tuple[Profile, ...]:
