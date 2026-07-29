@@ -23,6 +23,7 @@ from pathlib import Path
 from types import MappingProxyType
 from uuid import uuid4
 
+from .failure_diagnostics import unclassified_failure_diagnostic
 from .final_gate_plan import FinalGatePlan
 from .model import validate_safe_identifier
 
@@ -389,16 +390,69 @@ class ProtectedApplyJournal:
                         failed_hosts=exc.failed_hosts,
                     )
                     self._publish_or_match(component_root / "failure.json", failure.to_dict())
+                else:
+                    # Every other component previously published no failure
+                    # record at all, leaving its cause a masked dead-end
+                    # (#1081). Record a coded, secret-safe reason (#1085 p1).
+                    self._publish_failure_diagnostic(
+                        component_root,
+                        component,
+                        ordinal,
+                        failure_code="apply-failed",
+                        diagnostic=unclassified_failure_diagnostic(
+                            exc, activity=component.component_id
+                        ),
+                    )
                 raise
             applied = True
         after = component.classify(plan)
         if after.state is not ComponentState.EXACT:
+            self._publish_failure_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                failure_code="did-not-converge",
+                diagnostic=f"component classified {after.state.value} after apply",
+            )
             raise ProtectedApplyJournalError(
                 f"protected component {component.component_id} did not converge exactly"
             )
         terminal = ComponentTerminal.build(intent, after, applied=applied)
         self._publish_or_match(terminal_path, terminal.to_dict())
         return terminal
+
+    def _publish_failure_diagnostic(
+        self,
+        component_root: Path,
+        component: ProtectedApplyComponent,
+        ordinal: int,
+        *,
+        failure_code: str,
+        diagnostic: str,
+    ) -> None:
+        """Record *why* a component failed — durably, coded, and secret-safe.
+
+        A failing component otherwise publishes no terminal (terminals are
+        written only after exact convergence), so its cause was previously
+        unrecoverable — a masked dead-end (#1081, #1085 phase 1). This writes a
+        coded reason plus a secret-safe diagnostic (exception type + raise-site
+        only; never the message — the #1077 lesson) beside the intent.
+
+        Strictly best-effort: it must never mask the real failure. Any error
+        writing it — including a write-once mismatch on a differing retry — is
+        swallowed so the original exception still propagates unchanged.
+        """
+        record = {
+            "schema_version": 1,
+            "component_id": component.component_id,
+            "ordinal": ordinal,
+            "failure_code": failure_code,
+            "diagnostic": diagnostic,
+        }
+        try:
+            self._publish_or_match(component_root / "failure-diagnostic.json", record)
+        except Exception:
+            pass
 
     def _ensure(self) -> None:
         _require_directory(self.attempt_root, uid=self.service_uid)
@@ -609,9 +663,7 @@ def read_component_failure(path: Path, *, service_uid: int) -> ComponentFailure:
             raise ValueError("failure record must be an object")
         return ComponentFailure.from_dict(value)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ProtectedApplyJournalError(
-            "protected component failure record is invalid"
-        ) from exc
+        raise ProtectedApplyJournalError("protected component failure record is invalid") from exc
 
 
 __all__ = [

@@ -198,3 +198,69 @@ def test_protected_apply_journal_rejects_unsafe_record_authority(tmp_path: Path)
 
     with pytest.raises(ProtectedApplyJournalError, match="file authority is unsafe"):
         journal.execute(_plan(tmp_path), (component,))
+
+
+def test_records_secret_safe_failure_diagnostic_when_a_component_apply_raises(
+    tmp_path: Path,
+) -> None:
+    # #1085 phase 1b: a non-gb10 component whose apply raises previously left
+    # only intent.json (masked dead-end, #1081). It now records a coded,
+    # secret-safe reason — type + raise-site, never the message.
+    journal = _journal(tmp_path)
+
+    def classify(_plan):
+        return ComponentObservation(
+            state=ComponentState.READY, evidence_digest="1" * 64, observed_epoch=7
+        )
+
+    def apply(_plan):
+        raise ValueError("secret-bearing detail must never be recorded")
+
+    component = ProtectedApplyComponent(
+        component_id="environment-state",
+        implementation_digest="2" * 64,
+        input_fingerprint="3" * 64,
+        classify=classify,
+        apply=apply,
+    )
+
+    with pytest.raises(ValueError, match="secret-bearing"):  # real failure still propagates
+        journal.execute(_plan(tmp_path), (component,))
+
+    root = tmp_path / "state/requests/req-alpha/attempts/1/protected-apply/00-environment-state"
+    record = json.loads((root / "failure-diagnostic.json").read_text())
+    assert record["component_id"] == "environment-state"
+    assert record["failure_code"] == "apply-failed"
+    assert record["diagnostic"].startswith("unclassified environment-state failure: ValueError at ")
+    assert "secret-bearing" not in (root / "failure-diagnostic.json").read_text()
+    assert not (root / "terminal.json").exists()
+
+
+def test_records_failure_diagnostic_when_a_component_does_not_converge(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+
+    def classify(_plan):  # READY before and after apply → never reaches EXACT
+        return ComponentObservation(
+            state=ComponentState.READY, evidence_digest="4" * 64, observed_epoch=7
+        )
+
+    def apply(_plan):  # applies but does not converge
+        return None
+
+    component = ProtectedApplyComponent(
+        component_id="external-supervisors",
+        implementation_digest="5" * 64,
+        input_fingerprint="6" * 64,
+        classify=classify,
+        apply=apply,
+    )
+
+    with pytest.raises(ProtectedApplyJournalError, match="did not converge"):
+        journal.execute(_plan(tmp_path), (component,))
+
+    root = tmp_path / "state/requests/req-alpha/attempts/1/protected-apply/00-external-supervisors"
+    record = json.loads((root / "failure-diagnostic.json").read_text())
+    assert record["failure_code"] == "did-not-converge"
+    assert record["diagnostic"] == "component classified ready after apply"
