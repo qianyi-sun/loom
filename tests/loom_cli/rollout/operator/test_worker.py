@@ -663,9 +663,14 @@ def test_backup_worker_unclassified_failure_pinpoints_raise_site(tmp_path: Path)
     rendered = stderr.getvalue()
     # Secret-safe: class + raise-site code location surface; the message does not.
     assert "private-token" not in rendered
-    assert "unclassified backup failure: RuntimeError" in rendered
     assert "test_worker.py" in rendered
     assert "in fail_backup" in rendered
+    # The emitted diagnostic is a single well-formed JSON record whose fields
+    # never carry the exception message.
+    payload = json.loads(rendered.strip().splitlines()[-1])
+    assert payload["failure_code"] == "backup_failed"
+    assert payload["diagnostic"].startswith("unclassified backup failure: RuntimeError")
+    assert "private-token" not in json.dumps(payload)
     # The durable public reason stays the safe generic fallback.
     event = store.read_events(REQUEST_ID)[-1]
     assert event.event == "backup_failed"
