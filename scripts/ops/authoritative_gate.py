@@ -2548,6 +2548,38 @@ def _handle_workflow_run(
                 head_sha=head_sha,
             )
         except PullAuthorityError as exc:
+            # The PR can merge between the live snapshot above and the
+            # commit-association read inside `_ensure_unique_pull_authority`.
+            # In that case GitHub legitimately removes the PR from the open
+            # association set. Re-enter with the now-merged snapshot so the
+            # post-merge path preserves the already-authoritative terminal
+            # result instead of revoking it as an ambiguous open authority.
+            #
+            # Only an empty association is eligible: a different or additional
+            # open same-head PR remains a real authority conflict and must
+            # continue to fail closed.
+            if not exc.associated:
+                fresh_pull = client.get_pull_request(pull_number)
+                fresh_head = fresh_pull.get("head")
+                fresh_head_sha = (
+                    _string(fresh_head.get("sha")) if isinstance(fresh_head, Mapping) else ""
+                )
+                if fresh_head_sha == head_sha and _pull_is_merged(fresh_pull):
+                    existing = _existing_custom_check(client, head_sha, spec)
+                    existing_generation = _state_generation(existing)
+                    existing_owner = (
+                        int(existing_generation.pull)
+                        if existing_generation is not None and existing_generation.pull.isdigit()
+                        else None
+                    )
+                    if _check_is_terminal(existing) and existing_owner == pull_number:
+                        existing_conclusion = _string(existing.get("conclusion"))
+                        return PublishResult(
+                            existing_conclusion
+                            if existing_conclusion in {"success", "failure"}
+                            else "current"
+                        )
+                    return _handle_workflow_run(event, client, context)
             _revoke_for_pull_authority_error(
                 client,
                 spec=spec,
