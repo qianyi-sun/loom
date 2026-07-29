@@ -130,6 +130,24 @@ _TEXTUAL_INVALID_BEARER_RE = re.compile(
 _CREDENTIAL_SCOPE_MESSAGE = "Loom gateway rejected a credential without llm:call scope (HTTP 401)."
 _STEP_JWT_INVALID_MESSAGE = "Loom gateway rejected an invalid or expired step token (HTTP 401)."
 
+# Terminus2 / Harbor tmux lifecycle (#1068): mid-run server loss vs setup duplicate.
+_TMUX_NO_SERVER_RE = re.compile(
+    r"no server running"
+    r"|tmux session/server lost mid-dispatch",
+    re.IGNORECASE,
+)
+_TMUX_NO_SERVER_MESSAGE = (
+    "Terminus2 tmux server disappeared mid-dispatch."
+)
+_TMUX_DUPLICATE_SESSION_RE = re.compile(
+    r"duplicate session"
+    r"|Failed to start tmux session",
+    re.IGNORECASE,
+)
+_TMUX_DUPLICATE_SESSION_MESSAGE = (
+    "Terminus2 tmux session already exists at setup."
+)
+
 
 def _redact_body(raw: str) -> str:
     """Strip internal URLs, collapse whitespace, and truncate to 200 chars."""
@@ -149,19 +167,31 @@ def _redact_failure_excerpt(raw: str) -> str:
 
 
 def classify_failure_message(message: str) -> tuple[FailureReason, str | None] | None:
-    """Classify text-only transport failures from subprocess agent adapters.
+    """Classify text-only failures from agent adapters / Harbor stderr.
 
     Some SDK/CLI agents collapse HTTP transport exceptions into stderr text,
     for example ``Server disconnected without sending a response.``. By the
     time Loom sees the failure it is no longer an ``httpx`` exception, but it is
     still a provider/gateway transport boundary failure and should not be
     grouped with model/agent logic errors.
+
+    Terminus2 also surfaces Harbor tmux lifecycle failures as plain
+    ``RuntimeError`` strings (#1068). Mid-run ``no server running`` is distinct
+    from setup-time ``duplicate session``.
     """
 
     if "401" in message and _TEXTUAL_CREDENTIAL_SCOPE_RE.search(message):
         return FailureReason.GATEWAY_ERROR, _CREDENTIAL_SCOPE_MESSAGE
     if "401" in message and _TEXTUAL_INVALID_BEARER_RE.search(message):
         return FailureReason.GATEWAY_ERROR, _STEP_JWT_INVALID_MESSAGE
+
+    # Mid-run server loss before setup duplicate: a "failed to send keys"
+    # message can also mention session names, but "no server running" is the
+    # #1068 signature and must not be labeled as duplicate-session.
+    if _TMUX_NO_SERVER_RE.search(message):
+        return FailureReason.AGENT_ERROR, _TMUX_NO_SERVER_MESSAGE
+    if _TMUX_DUPLICATE_SESSION_RE.search(message):
+        return FailureReason.AGENT_ERROR, _TMUX_DUPLICATE_SESSION_MESSAGE
 
     if not _TEXTUAL_PROVIDER_TRANSPORT_RE.search(message):
         return None

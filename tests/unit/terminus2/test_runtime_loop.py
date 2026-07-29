@@ -13,9 +13,11 @@ import pytest
 from loom.agent.terminus2.runtime import (
     LoomTerminus2Runtime,
     _harbor_model_name,
+    _install_tmux_session_alive_guard,
     _openai_gateway_base,
 )
 from loom.driver.fake import FakeDriver
+from loom.errors import AgentError
 from loom.models.types import ModelSpec
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
@@ -302,7 +304,7 @@ async def test_runtime_cleanup_leaves_process_env_unchanged_on_failure(
         min_part_bytes=0,
     )
 
-    with pytest.raises(RuntimeError, match="harbor boom"):
+    with pytest.raises(AgentError, match="harbor boom"):
         async with writer:
             await runtime.run(
                 instruction="x",
@@ -316,3 +318,123 @@ async def test_runtime_cleanup_leaves_process_env_unchanged_on_failure(
     assert os.environ.get("OPENAI_API_KEY") == prior_api_key
     assert os.environ.get("OPENAI_BASE_URL") == prior_base
     await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_wraps_tmux_no_server_runtime_error_as_agent_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    err = (
+        "loom-trial-main: failed to send non-blocking keys: "
+        "command=\"tmux send-keys -t terminus-2 -- 'chmod +x /tmp/x\\n'\", "
+        "return_code=1, stderr='no server running on /tmp/tmux-0/default\\n', "
+        "stdout=''"
+    )
+
+    class _FailingTerminus2:
+        def __init__(self, logs_dir, **kwargs: object) -> None:
+            self._logs_dir = logs_dir
+
+        async def setup(self, env: object) -> None:
+            return None
+
+        async def run(
+            self,
+            instruction: str,
+            env: object,
+            context: object,
+        ) -> None:
+            traj = self._logs_dir / "trajectory.json"
+            traj.write_text(json.dumps({"steps": []}), encoding="utf-8")
+            raise RuntimeError(err)
+
+    class _FakeContext:
+        pass
+
+    monkeypatch.setattr(
+        "loom.agent.terminus2.runtime._import_terminus2",
+        lambda: (_FailingTerminus2, _FakeContext),
+    )
+    monkeypatch.setattr(
+        "loom.agent.terminus2.harbor_environment._import_harbor",
+        lambda: None,
+    )
+
+    class _TrialPaths:
+        def __init__(self, trial_dir: Path) -> None:
+            self.trial_dir = trial_dir
+
+        def mkdir(self) -> None:
+            self.trial_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        "loom.agent.terminus2.runtime.make_trial_paths",
+        lambda logs_root: _TrialPaths(logs_root),
+    )
+    monkeypatch.setattr(
+        "loom.agent.terminus2.runtime.LoomHarborEnvironment.create",
+        staticmethod(lambda **kwargs: object()),
+    )
+
+    runtime = LoomTerminus2Runtime(
+        model=ModelSpec(provider="openai", name="gpt-4"),
+        team_id=str(uuid4()),
+        trial_id=uuid4(),
+        cp_client=_TokenCP(),
+        gateway_url="http://127.0.0.1:19100",
+    )
+    driver = FakeDriver()
+    await driver.start()
+    writer = TrajectoryWriter(
+        local_path=tmp_path / "tmux-fail.jsonl",
+        store=FakeObjectStore(),
+        bucket="trajectories",
+        key="t/events.jsonl",
+        flush_event_count=1000,
+        flush_bytes=10_000_000,
+        flush_sec=3600,
+        min_part_bytes=0,
+    )
+
+    with pytest.raises(AgentError, match="no server running"):
+        async with writer:
+            await runtime.run(
+                instruction="x",
+                env=driver,
+                trajectory=writer,
+                mcp=[],
+                skills_dir=PurePosixPath("/workspace"),
+                step_id="main",
+            )
+    await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_tmux_alive_guard_raises_when_session_dies_after_send_keys() -> None:
+    class _Session:
+        def __init__(self) -> None:
+            self._alive = True
+            self.calls = 0
+
+        async def send_keys(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            self.calls += 1
+
+        async def is_session_alive(self) -> bool:
+            return self._alive
+
+    class _Agent:
+        def __init__(self) -> None:
+            self._session = _Session()
+
+    agent = _Agent()
+    _install_tmux_session_alive_guard(agent)
+
+    await agent._session.send_keys("echo ok\n")
+    assert agent._session.calls == 1
+
+    agent._session._alive = False
+    with pytest.raises(AgentError, match="lost mid-dispatch"):
+        await agent._session.send_keys("chmod +x /tmp/x\n")
+    assert agent._session.calls == 2

@@ -63,6 +63,35 @@ def test_generic_exception_is_internal():
     assert msg is None
 
 
+def test_tmux_no_server_mid_dispatch_is_agent_error():
+    reason, msg = classify_failure(
+        RuntimeError(
+            "loom-trial-main: failed to send non-blocking keys: "
+            "command=\"tmux send-keys -t terminus-2 -- 'chmod +x x\\n'\", "
+            "return_code=1, stderr='no server running on /tmp/tmux-0/default\\n', "
+            "stdout=''"
+        )
+    )
+    assert reason == FailureReason.AGENT_ERROR
+    assert msg == "Terminus2 tmux server disappeared mid-dispatch."
+
+
+def test_tmux_session_lost_guard_message_is_agent_error():
+    reason, msg = classify_failure_message(
+        "Terminus2 tmux session/server lost mid-dispatch."
+    )
+    assert reason == FailureReason.AGENT_ERROR
+    assert msg == "Terminus2 tmux server disappeared mid-dispatch."
+
+
+def test_tmux_duplicate_session_at_setup_is_agent_error():
+    reason, msg = classify_failure(
+        RuntimeError("Failed to start tmux session. Error: duplicate session: terminus-2")
+    )
+    assert reason == FailureReason.AGENT_ERROR
+    assert msg == "Terminus2 tmux session already exists at setup."
+
+
 def test_textual_provider_transport_disconnect_is_classified_and_redacted():
     reason, msg = classify_failure(
         RuntimeError(

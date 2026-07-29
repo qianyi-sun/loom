@@ -54,6 +54,9 @@ def _harbor_model_name(model: ModelSpec) -> str:
 
 _HARBOR_ARTIFACT_NAMES = ("trajectory.json", "recording.cast")
 _HARBOR_TMUX_SESSION = "terminus-2"
+_TMUX_SESSION_LOST_MID_DISPATCH = (
+    "Terminus2 tmux session/server lost mid-dispatch."
+)
 
 
 async def _reset_harbor_tmux_session(env: Driver) -> None:
@@ -67,6 +70,27 @@ async def _reset_harbor_tmux_session(env: Driver) -> None:
     await env.exec(
         f"tmux kill-session -t {_HARBOR_TMUX_SESSION} 2>/dev/null || true",
     )
+
+
+def _install_tmux_session_alive_guard(agent: Any) -> None:
+    """Fail closed if Harbor's tmux session dies between send_keys calls (#1068).
+
+    Instance-local wrap only — GB10 workers run many Terminus2 trials
+    concurrently, so a process-global monkeypatch would race.
+    """
+    session = getattr(agent, "_session", None)
+    if session is None:
+        return
+    original_send_keys = session.send_keys
+
+    async def _send_keys_with_alive_check(*args: Any, **kwargs: Any) -> Any:
+        result = await original_send_keys(*args, **kwargs)
+        is_alive = getattr(session, "is_session_alive", None)
+        if is_alive is not None and not await is_alive():
+            raise AgentError(_TMUX_SESSION_LOST_MID_DISPATCH)
+        return result
+
+    session.send_keys = _send_keys_with_alive_check
 
 
 async def _publish_harbor_artifacts_to_sandbox(
@@ -191,6 +215,7 @@ class LoomTerminus2Runtime:
         try:
             await _reset_harbor_tmux_session(env)
             await agent.setup(harbor_env)
+            _install_tmux_session_alive_guard(agent)
             await agent.run(instruction, harbor_env, context)
         except asyncio.CancelledError:
             completeness = "partial"
@@ -201,6 +226,12 @@ class LoomTerminus2Runtime:
             except CheckpointBridgeError:
                 pass
             raise
+        except AgentError:
+            raise
+        except Exception as exc:
+            # Harbor tmux/session failures are bare RuntimeError; wrap so
+            # step_runner keeps an actionable message (#1068).
+            raise AgentError(str(exc)) from exc
         finally:
             poll_stop.set()
             await poll_task
