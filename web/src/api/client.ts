@@ -87,7 +87,18 @@ async function throwIfApiError(
       ) {
         const d = (parsed as { detail: unknown }).detail;
         if (typeof d === "string") detail = d;
-        else detail = JSON.stringify(d);
+        else if (
+          typeof d === "object" &&
+          d !== null &&
+          "message" in d &&
+          typeof (d as { message: unknown }).message === "string"
+        ) {
+          // Structured FastAPI detail ({code, message, ...}) — prefer
+          // the human message for UI/CLI surfaces (#918).
+          detail = (d as { message: string }).message;
+        } else {
+          detail = JSON.stringify(d);
+        }
       }
     } catch {
       /* keep raw text */
@@ -1249,6 +1260,22 @@ export const api = {
       headers: { "X-Loom-Admin-Actor": actor },
       body: JSON.stringify(body),
     }),
+  enableTeamPublicRegistration: (id: string, actor: string) =>
+    apiFetch<AdminTeam>(
+      `/api/v1/admin/teams/${encodeURIComponent(id)}/public-registration/enable`,
+      {
+        method: "POST",
+        headers: { "X-Loom-Admin-Actor": actor },
+      },
+    ),
+  disableTeamPublicRegistration: (id: string, actor: string) =>
+    apiFetch<AdminTeam>(
+      `/api/v1/admin/teams/${encodeURIComponent(id)}/public-registration/disable`,
+      {
+        method: "POST",
+        headers: { "X-Loom-Admin-Actor": actor },
+      },
+    ),
   approveTeamRegistration: (
     id: string,
     actor: string,

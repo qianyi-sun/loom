@@ -952,7 +952,14 @@ def test_models_refresh_upstream_502_surfaces_error(
     mock_server.canned[(
         "POST", f"/api/v1/provider-connections/{conn['id']}/models/refresh",
     )] = httpx.Response(502, json={
-        "detail": "upstream /models fetch failed: HTTP 401 ... (upstream HTTP 401)",
+        "detail": {
+            "code": "upstream_http_error",
+            "message": (
+                "Models unavailable for this connection: upstream /models "
+                "returned HTTP 401"
+            ),
+            "upstream_http_status": 401,
+        },
     })
 
     rc = main([
@@ -961,7 +968,7 @@ def test_models_refresh_upstream_502_surfaces_error(
     assert rc == 1
     err = capsys.readouterr().err
     assert "HTTP 502" in err
-    assert "upstream HTTP 401" in err
+    assert "upstream_http_status" in err or "HTTP 401" in err
 
 
 # ──────────────────────────────────────────────────────────────────────

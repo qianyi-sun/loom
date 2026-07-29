@@ -341,10 +341,11 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   ordinary users. Platform-admin sessions use the fixed internal-team registry
   for a team-name selector and can leave the filter blank for platform-wide
   rollups; the UI does not ask users to paste raw team UUIDs.
-- **Settings** — signed-out username/password login, account request,
-  forgot-password request, and CLI setup guidance; signed-in current team,
-  role, team switcher, joined browser members, role-aware setup links, and
-  API-token summaries. Token-paste login is no longer the normal production SPA
+- **Settings** — authenticated current team, role, team switcher, joined
+  browser members, role-aware setup links, and API-token summaries. Signed-out
+  username/password login, account request, forgot-password request, and CLI
+  setup guidance live at `/auth/login` (legacy signed-out `/settings`
+  redirects there). Token-paste login is no longer the normal production SPA
   auth path, and staging does not collect email.
 - **InviteAccept** — invite lookup and acceptance states for pending, expired,
   revoked, and already-used links.

@@ -561,13 +561,23 @@ async def preflight_model(
 
 class UpstreamModelFetchError(Exception):
     """Upstream `/models` listing call failed or returned an unparseable
-    shape. Includes the http_status when one was received."""
+    shape. Includes the http_status when one was received.
+
+    ``error_code`` is a stable operator-facing classifier (e.g.
+    ``upstream_non_json``) so the SPA can render a typed message without
+    embedding raw upstream HTML bodies.
+    """
 
     def __init__(
-        self, message: str, *, http_status: int | None = None,
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        error_code: str = "upstream_models_fetch_failed",
     ) -> None:
         super().__init__(message)
         self.http_status = http_status
+        self.error_code = error_code
 
 
 def _parse_upstream_models(
@@ -587,14 +597,18 @@ def _parse_upstream_models(
     """
     if not isinstance(payload, dict):
         raise UpstreamModelFetchError(
-            f"upstream /models returned non-object: {type(payload).__name__}",
+            "Models unavailable for this connection: upstream /models "
+            "returned a malformed catalog.",
+            error_code="upstream_malformed_catalog",
         )
     ids: list[str] = []
     if provider_type == "google":
         raw_list = payload.get("models")
         if not isinstance(raw_list, list):
             raise UpstreamModelFetchError(
-                "google /models response missing top-level `models` array",
+                "Models unavailable for this connection: upstream /models "
+                "catalog is missing a models list.",
+                error_code="upstream_malformed_catalog",
             )
         for entry in raw_list:
             if not isinstance(entry, dict):
@@ -610,8 +624,9 @@ def _parse_upstream_models(
         raw_list = payload.get("data")
         if not isinstance(raw_list, list):
             raise UpstreamModelFetchError(
-                f"{provider_type} /models response missing top-level "
-                "`data` array",
+                "Models unavailable for this connection: upstream /models "
+                "catalog is missing a data list.",
+                error_code="upstream_malformed_catalog",
             )
         for entry in raw_list:
             if not isinstance(entry, dict):
@@ -621,7 +636,9 @@ def _parse_upstream_models(
                 ids.append(mid)
     if not ids:
         raise UpstreamModelFetchError(
-            "upstream /models returned no model entries we could parse",
+            "Models unavailable for this connection: upstream /models "
+            "returned no parseable model entries.",
+            error_code="upstream_malformed_catalog",
         )
     # Dedup preserving order — operators see the upstream's preferred
     # ordering, but the same id repeated would be a UNIQUE-violation
@@ -662,17 +679,23 @@ async def fetch_upstream_models(
                 resp = await client.get(url, headers=headers)
             except httpx.TimeoutException as e:
                 raise UpstreamModelFetchError(
-                    f"timeout after {_PROBE_TIMEOUT_SEC}s: {e}",
+                    f"Models unavailable for this connection: upstream "
+                    f"/models timed out after {_PROBE_TIMEOUT_SEC}s.",
+                    error_code="upstream_timeout",
                 ) from e
             except httpx.RequestError as e:
                 raise UpstreamModelFetchError(
-                    f"{type(e).__name__}: {e}",
+                    "Models unavailable for this connection: could not "
+                    "reach upstream /models.",
+                    error_code="upstream_transport",
                 ) from e
     except UpstreamModelFetchError:
         raise
     except Exception as e:
         raise UpstreamModelFetchError(
-            f"{type(e).__name__}: {e}",
+            "Models unavailable for this connection: upstream /models "
+            "fetch failed.",
+            error_code="upstream_models_fetch_failed",
         ) from e
 
     if not (200 <= resp.status_code < 300):
@@ -683,15 +706,22 @@ async def fetch_upstream_models(
         safe_url = _redact_secret(url, api_key)
         safe_excerpt = _redact_secret(excerpt, api_key)
         raise UpstreamModelFetchError(
-            f"HTTP {resp.status_code} from {safe_url}; "
+            f"Models unavailable for this connection: upstream /models "
+            f"returned HTTP {resp.status_code} from {safe_url}; "
             f"body excerpt: {safe_excerpt!r}",
             http_status=resp.status_code,
+            error_code="upstream_http_error",
         )
     try:
         payload = resp.json()
     except ValueError as e:
+        # Do not embed the raw body or parser text — yibuapi (and similar)
+        # may return HTML with HTTP 200 (#918).
         raise UpstreamModelFetchError(
-            f"upstream /models returned non-JSON body: {e}",
+            "Models unavailable for this connection: upstream returned a "
+            "non-JSON /models response. Add a model manually if you know "
+            "the ID.",
             http_status=resp.status_code,
+            error_code="upstream_non_json",
         ) from e
     return _parse_upstream_models(provider_type, payload)

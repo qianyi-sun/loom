@@ -382,14 +382,28 @@ def _credential_type(ctx: AuthContext) -> str:
     return f"{ctx.type}_credential"
 
 
+def team_allows_public_registration(team: Team) -> bool:
+    """Shared eligibility for public discovery and registration submission.
+
+    All failures must look identical to clients (404 team not found) so a
+    remembered private UUID cannot enumerate policy (#775).
+    """
+    return (
+        bool(team.public_registration_enabled)
+        and team.disabled_at is None
+        and team.name.lower() != "admin"
+        and team.id != TASKSET_FENCE_CANARY_TEAM_ID
+    )
+
+
 @router.get("/public-teams")
 async def public_teams(request: Request) -> dict[str, list[dict[str, str]]]:
-    # System Teams are deployment-owned and never self-service registration
-    # targets. ``admin`` predates the fixed canary identity and remains name
-    # scoped for compatibility; the canary uses a reserved UUID.
+    # Only Teams with an explicit public-registration opt-in are discoverable.
+    # System Teams (``admin`` by name, reserved canary UUID) never qualify.
     async with request.app.state.session_factory() as session:
         rows = (await session.execute(
             select(Team)
+            .where(Team.public_registration_enabled.is_(True))
             .where(Team.disabled_at.is_(None))
             .where(func.lower(Team.name) != "admin")
             .where(Team.id != TASKSET_FENCE_CANARY_TEAM_ID)
@@ -405,15 +419,14 @@ async def request_registration(
 ) -> dict[str, Any]:
     username_normalized = normalize_username(payload.username)
     async with request.app.state.session_factory() as session:
+        # Lock the Team row so a concurrent admin policy change cannot race
+        # past a stale client selection.
         team = (await session.execute(
-            select(Team).where(Team.id == payload.team_id),
+            select(Team)
+            .where(Team.id == payload.team_id)
+            .with_for_update(),
         )).scalar_one_or_none()
-        if (
-            team is None
-            or team.disabled_at is not None
-            or team.name.lower() == "admin"
-            or team.id == TASKSET_FENCE_CANARY_TEAM_ID
-        ):
+        if team is None or not team_allows_public_registration(team):
             raise HTTPException(status_code=404, detail="team not found")
         existing_user = (await session.execute(
             select(User.id).where(User.username_normalized == username_normalized),

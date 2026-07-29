@@ -1,8 +1,8 @@
 /**
  * App shell. Sidebar on the left, scrollable main content area on the
- * right. Unauthenticated visitors are redirected to /settings unless
+ * right. Unauthenticated visitors are redirected to /auth/login unless
  * they are on a public onboarding route such as password setup/reset
- * or invite acceptance.
+ * or invite acceptance. Legacy signed-out /settings also redirects.
  */
 import { Navigate, useLocation } from "react-router-dom";
 
@@ -31,11 +31,13 @@ export default function Layout(): JSX.Element {
   } = useAuth();
   const loc = useLocation();
   const isSettings = loc.pathname.startsWith("/settings");
+  const isAuthLogin = loc.pathname.startsWith("/auth/login");
   const isInviteAccept = loc.pathname.startsWith("/invites/accept");
   const isPasswordAction =
     loc.pathname.startsWith("/auth/setup") ||
     loc.pathname.startsWith("/auth/reset");
-  const isPublicRoute = isSettings || isInviteAccept || isPasswordAction;
+  const isPublicRoute =
+    isAuthLogin || isInviteAccept || isPasswordAction;
 
   if (sessionStatus === "loading") {
     return (
@@ -74,8 +76,12 @@ export default function Layout(): JSX.Element {
     );
   }
 
+  if (!isAuthenticated && isSettings) {
+    return <Navigate to="/auth/login" replace />;
+  }
+
   if (!isAuthenticated && !isPublicRoute) {
-    return <Navigate to="/settings" replace />;
+    return <Navigate to="/auth/login" replace />;
   }
 
   if (!isAuthenticated) {
@@ -86,7 +92,7 @@ export default function Layout(): JSX.Element {
           data-testid="public-onboarding-shell"
           className={cn(
             "mx-auto w-full",
-            isSettings ? "max-w-6xl" : "max-w-3xl",
+            isAuthLogin ? "max-w-6xl" : "max-w-3xl",
           )}
         >
           <RouteRecoveryBoundary />

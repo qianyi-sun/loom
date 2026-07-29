@@ -11,6 +11,7 @@ const NOT_FOUND_RESOURCE_ERROR =
 const routes: Record<BrowserRole, string[]> = {
   "logged-out": [
     "/",
+    "/auth/login",
     "/settings",
     "/auth/setup?token=expired",
     "/auth/reset?token=expired",
@@ -124,6 +125,6 @@ test("exact prefix canonicalizes without losing the route", async ({
   });
   const response = await page.goto(browserHarness.baseURL);
   expect(response?.ok()).toBe(true);
-  await expect(page).toHaveURL(`${browserHarness.baseURL}/settings`);
+  await expect(page).toHaveURL(`${browserHarness.baseURL}/auth/login`);
   await expect(page.locator("#root")).toHaveAttribute("data-loom-mounted", "true");
 });

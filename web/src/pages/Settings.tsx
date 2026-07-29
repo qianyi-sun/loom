@@ -2,33 +2,25 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 
 import { api, type ApiTokenEntry } from "../api/client";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
-import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
-import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 import { cn } from "../lib/cn";
 import { formatLocalDateTime } from "../lib/dateTime";
-import { cliLoginCommands } from "../lib/quickstartSnippets";
-import { currentServerOrigin } from "../lib/serverOrigin";
 
 type TeamDetail = Awaited<ReturnType<typeof api.getTeam>>;
 type TeamUserMember = NonNullable<TeamDetail["user_members"]>[number];
 
 const LINK_BUTTON =
   "inline-flex items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-medium";
-const SIGN_IN_FAILURE = new Error(
-  "Sign-in failed. Check your username and password, then try again.",
-);
 
 const ROLE_DESCRIPTIONS: Record<string, string> = {
   owner: "Can manage team access, API tokens, provider credentials, and submissions.",
@@ -106,18 +98,10 @@ export default function Settings(): JSX.Element {
     isAdmin,
     currentTeamId,
     teams,
-    loginPassword,
     switchTeam,
     logout,
   } = useAuth();
-  const [loginUsername, setLoginUsername] = useState("");
-  const [loginPasswordValue, setLoginPasswordValue] = useState("");
-  const [registerUsername, setRegisterUsername] = useState("");
-  const [registerTeamId, setRegisterTeamId] = useState("");
-  const [resetUsername, setResetUsername] = useState("");
   const [tokenToRevoke, setTokenToRevoke] = useState<ApiTokenEntry | null>(null);
-  const serverOrigin = currentServerOrigin();
-  const cliLoginCommand = cliLoginCommands(serverOrigin).join("\n");
 
   const queryClient = useQueryClient();
   const currentTeam = teams.find((team) => team.id === currentTeamId) ?? null;
@@ -138,15 +122,6 @@ export default function Settings(): JSX.Element {
     queryFn: () => api.getTeam(currentTeamId ?? ""),
     enabled: isAuthenticated && currentTeamId !== null,
     retry: false,
-  });
-
-  const publicTeams = useQuery({
-    queryKey: ["public-teams"],
-    queryFn: () => api.publicTeams(),
-    enabled: !isAuthenticated,
-  });
-  const signIn = useMutation({
-    mutationFn: () => loginPassword(loginUsername.trim(), loginPasswordValue),
   });
 
   const switchTeamMutation = useMutation({
@@ -170,178 +145,10 @@ export default function Settings(): JSX.Element {
     await revoke.mutateAsync(tokenToRevoke.token_hash_prefix);
     setTokenToRevoke(null);
   };
-  const requestAccess = useMutation({
-    mutationFn: () =>
-      api.requestRegistration({
-        username: registerUsername.trim(),
-        team_id: registerTeamId || publicTeams.data?.items[0]?.id || "",
-      }),
-  });
-  const requestReset = useMutation({
-    mutationFn: () => api.requestPasswordReset(resetUsername.trim()),
-  });
 
+  // Legacy signed-out /settings → canonical /auth/login (#775).
   if (!isAuthenticated) {
-    const selectedRegistrationTeamId = registerTeamId || publicTeams.data?.items[0]?.id || "";
-    return (
-      <div className="space-y-8">
-        <header className="max-w-3xl">
-          <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-            Loom staging
-          </p>
-          <h1 className="mt-2 text-3xl font-bold text-slate-950">
-            Sign in to run and review evaluations
-          </h1>
-          <p className="mt-3 text-base text-slate-600">
-            Staging account requests are reviewed by an admin. Request a
-            username for an existing team, set your password from the approved
-            setup link, then use the same account in the browser and CLI.
-          </p>
-        </header>
-
-        <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,26rem)]">
-          <Card>
-            <Card.Body className="space-y-5 p-6 sm:p-7">
-              <div>
-                <h2 className="text-xl font-semibold text-slate-900">
-                  Sign in
-                </h2>
-                <p className="mt-2 text-sm text-slate-500">
-                  Use the username and password you set from an admin-approved
-                  account link.
-                </p>
-              </div>
-              <div className="grid gap-3">
-                <Input
-                  placeholder="Username"
-                  value={loginUsername}
-                  onChange={(e) => setLoginUsername(e.target.value)}
-                  aria-label="Username"
-                />
-                <Input
-                  type="password"
-                  placeholder="Password"
-                  value={loginPasswordValue}
-                  onChange={(e) => setLoginPasswordValue(e.target.value)}
-                  aria-label="Password"
-                />
-                <Button
-                  variant="primary"
-                  className="w-full"
-                  onClick={() => signIn.mutate()}
-                  disabled={!loginUsername.trim() || !loginPasswordValue || signIn.isPending}
-                >
-                  Sign in
-                </Button>
-              </div>
-              {signIn.isError ? (
-                <div role="alert">
-                  <ErrorState error={SIGN_IN_FAILURE} />
-                </div>
-              ) : null}
-            </Card.Body>
-          </Card>
-
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-1">
-            <DocsCallout
-              title="First run checklist"
-              tone="info"
-              className="md:col-span-2 lg:col-span-1"
-            >
-              <ol className="list-decimal space-y-1 pl-4">
-                <li>Submit a username request for an existing team.</li>
-                <li>Wait for an admin to approve it and share a password link.</li>
-                <li>Set your password, then sign in here or from CLI.</li>
-                <li>Create a provider, then launch a one-task smoke batch.</li>
-              </ol>
-            </DocsCallout>
-
-            <Card>
-              <Card.Header
-                title="Request account"
-                description="Choose an existing team. Ask an admin to create the team first if it is missing."
-              />
-              <Card.Body className="space-y-3">
-                <Input
-                  aria-label="Requested username"
-                  value={registerUsername}
-                  onChange={(event) => setRegisterUsername(event.target.value)}
-                  placeholder="Username"
-                />
-                <select
-                  aria-label="Registration team"
-                  className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
-                  value={selectedRegistrationTeamId}
-                  onChange={(event) => setRegisterTeamId(event.target.value)}
-                >
-                  {(publicTeams.data?.items ?? []).map((team) => (
-                    <option key={team.id} value={team.id}>{team.name}</option>
-                  ))}
-                </select>
-                <Button
-                  variant="secondary"
-                  className="w-full"
-                  disabled={
-                    !registerUsername.trim() ||
-                    !selectedRegistrationTeamId ||
-                    requestAccess.isPending
-                  }
-                  onClick={() => requestAccess.mutate()}
-                >
-                  Request account
-                </Button>
-                {requestAccess.isSuccess ? (
-                  <p className="text-sm text-emerald-700">
-                    Request submitted. An admin will review it and share a
-                    password setup link manually if approved.
-                  </p>
-                ) : null}
-                {requestAccess.isError ? <ErrorState error={requestAccess.error} /> : null}
-              </Card.Body>
-            </Card>
-
-            <Card>
-              <Card.Header
-                title="Forgot password"
-                description="Submit a reset request for admin approval."
-              />
-              <Card.Body className="space-y-3">
-                <Input
-                  aria-label="Reset username"
-                  value={resetUsername}
-                  onChange={(event) => setResetUsername(event.target.value)}
-                  placeholder="Username"
-                />
-                <Button
-                  variant="secondary"
-                  className="w-full"
-                  disabled={!resetUsername.trim() || requestReset.isPending}
-                  onClick={() => requestReset.mutate()}
-                >
-                  Request reset
-                </Button>
-                {requestReset.isSuccess ? (
-                  <p className="text-sm text-emerald-700">
-                    Reset request submitted. An admin will share a reset link if approved.
-                  </p>
-                ) : null}
-                {requestReset.isError ? <ErrorState error={requestReset.error} /> : null}
-              </Card.Body>
-            </Card>
-
-            <Card className="md:col-span-2 lg:col-span-1">
-              <Card.Header
-                title="CLI setup"
-                description="Use the same approved username and password with the CLI."
-              />
-              <Card.Body>
-                <CommandSnippet label="CLI login" command={cliLoginCommand} />
-              </Card.Body>
-            </Card>
-          </div>
-        </div>
-      </div>
-    );
+    return <Navigate to="/auth/login" replace />;
   }
 
   return (

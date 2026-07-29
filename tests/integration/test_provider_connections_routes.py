@@ -1986,7 +1986,10 @@ def test_models_refresh_upstream_502_does_not_partially_commit(
         headers=_auth(tokens["team_a"]),
     )
     assert r.status_code == 502
-    assert "upstream HTTP 401" in r.json()["detail"]
+    detail = r.json()["detail"]
+    assert detail["code"] == "upstream_models_fetch_failed"
+    assert detail["message"] == "auth failure"
+    assert detail["upstream_http_status"] == 401
 
     # Cache state still has the prior gpt-4o row, untouched.
     listed = c.get(

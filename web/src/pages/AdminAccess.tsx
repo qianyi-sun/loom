@@ -163,7 +163,9 @@ type AccessDestructiveAction =
   | { kind: "rotate-token"; token: ApiTokenEntry }
   | { kind: "revoke-token"; token: ApiTokenEntry }
   | { kind: "revoke-invite"; invite: InviteEntry }
-  | { kind: "resend-invite"; invite: InviteEntry };
+  | { kind: "resend-invite"; invite: InviteEntry }
+  | { kind: "enable-public-registration"; team: AdminTeam }
+  | { kind: "disable-public-registration"; team: AdminTeam };
 
 const ADMIN_ACCESS_SECTIONS: Array<{ value: AccessSection; label: string }> = [
   { value: "requests", label: "Requests" },
@@ -314,6 +316,24 @@ export default function AdminAccess(): JSX.Element {
       });
       queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
+  const enablePublicRegistration = useMutation({
+    mutationFn: (team: AdminTeam) =>
+      api.enableTeamPublicRegistration(team.id, actor.trim()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+      queryClient.invalidateQueries({ queryKey: ["public-teams"] });
+    },
+  });
+  const disablePublicRegistration = useMutation({
+    mutationFn: (team: AdminTeam) =>
+      api.disableTeamPublicRegistration(team.id, actor.trim()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+      queryClient.invalidateQueries({ queryKey: ["public-teams"] });
     },
   });
   const reject = useMutation({
@@ -473,6 +493,12 @@ export default function AdminAccess(): JSX.Element {
       case "resend-invite":
         resendInvite.reset();
         break;
+      case "enable-public-registration":
+        enablePublicRegistration.reset();
+        break;
+      case "disable-public-registration":
+        disablePublicRegistration.reset();
+        break;
     }
   }
 
@@ -509,6 +535,12 @@ export default function AdminAccess(): JSX.Element {
         break;
       case "resend-invite":
         await resendInvite.mutateAsync(destructiveAction.invite);
+        break;
+      case "enable-public-registration":
+        await enablePublicRegistration.mutateAsync(destructiveAction.team);
+        break;
+      case "disable-public-registration":
+        await disablePublicRegistration.mutateAsync(destructiveAction.team);
         break;
     }
     setDestructiveAction(null);
@@ -593,6 +625,28 @@ export default function AdminAccess(): JSX.Element {
           pending: resendInvite.isPending,
           error: resendInvite.error,
         };
+      case "enable-public-registration":
+        return {
+          title: "Enable public registration",
+          target: destructiveAction.team.name,
+          consequence:
+            "This team will appear on /auth/login and accept account requests until disabled again.",
+          confirmLabel: "Enable public registration",
+          pendingLabel: "Enabling…",
+          pending: enablePublicRegistration.isPending,
+          error: enablePublicRegistration.error,
+        };
+      case "disable-public-registration":
+        return {
+          title: "Disable public registration",
+          target: destructiveAction.team.name,
+          consequence:
+            "This team will leave the public list and reject new account requests for its UUID.",
+          confirmLabel: "Disable public registration",
+          pendingLabel: "Disabling…",
+          pending: disablePublicRegistration.isPending,
+          error: disablePublicRegistration.error,
+        };
       default:
         return {
           title: "",
@@ -644,6 +698,15 @@ export default function AdminAccess(): JSX.Element {
     return (
       (revokeInvite.isPending && revokeInvite.variables?.id === invite.id) ||
       (resendInvite.isPending && resendInvite.variables?.id === invite.id)
+    );
+  }
+
+  function publicRegistrationBusy(team: AdminTeam): boolean {
+    return (
+      (enablePublicRegistration.isPending &&
+        enablePublicRegistration.variables?.id === team.id) ||
+      (disablePublicRegistration.isPending &&
+        disablePublicRegistration.variables?.id === team.id)
     );
   }
 
@@ -942,7 +1005,7 @@ export default function AdminAccess(): JSX.Element {
         >
           <Card.Header
             title="Internal teams"
-            description="Maintain the fixed teams that new members can join during approval."
+            description="Maintain fixed teams and which ones accept public account requests on /auth/login."
           />
           <Card.Body className="space-y-5">
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]">
@@ -973,6 +1036,7 @@ export default function AdminAccess(): JSX.Element {
                         <th className="px-3 py-2 font-semibold">Team</th>
                         <th className="px-3 py-2 font-semibold">Members</th>
                         <th className="px-3 py-2 font-semibold">Status</th>
+                        <th className="px-3 py-2 font-semibold">Public registration</th>
                         <th className="px-3 py-2 font-semibold">Actions</th>
                       </tr>
                     </thead>
@@ -980,6 +1044,9 @@ export default function AdminAccess(): JSX.Element {
                       {adminTeams.data.items.map((team) => {
                         const editName = teamNameEdits[team.id] ?? team.name;
                         const unchanged = editName.trim() === team.name;
+                        const isAdminName = team.name.toLowerCase() === "admin";
+                        const publicEnabled = Boolean(team.public_registration_enabled);
+                        const rowBusy = publicRegistrationBusy(team);
                         return (
                           <tr key={team.id}>
                             <td className="min-w-64 px-3 py-2">
@@ -1000,19 +1067,55 @@ export default function AdminAccess(): JSX.Element {
                             <td className="whitespace-nowrap px-3 py-2 text-slate-600">
                               {team.disabled_at ? "Disabled" : "Active"}
                             </td>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                              {publicEnabled ? "Enabled" : "Private"}
+                            </td>
                             <td className="px-3 py-2">
-                              <Button
-                                size="sm"
-                                disabled={
-                                  actorMissing ||
-                                  !editName.trim() ||
-                                  unchanged ||
-                                  updateTeam.isPending
-                                }
-                                onClick={() => updateTeam.mutate({ team, name: editName })}
-                              >
-                                Save
-                              </Button>
+                              <div className="flex flex-wrap gap-2">
+                                <Button
+                                  size="sm"
+                                  disabled={
+                                    actorMissing ||
+                                    !editName.trim() ||
+                                    unchanged ||
+                                    updateTeam.isPending
+                                  }
+                                  onClick={() => updateTeam.mutate({ team, name: editName })}
+                                >
+                                  Save
+                                </Button>
+                                {!isAdminName ? (
+                                  <Button
+                                    size="sm"
+                                    variant={publicEnabled ? "danger" : "secondary"}
+                                    disabled={actorMissing || rowBusy}
+                                    onClick={() =>
+                                      openDestructiveAction({
+                                        kind: publicEnabled
+                                          ? "disable-public-registration"
+                                          : "enable-public-registration",
+                                        team,
+                                      })
+                                    }
+                                  >
+                                    {publicEnabled
+                                      ? "Disable public registration"
+                                      : "Enable public registration"}
+                                  </Button>
+                                ) : null}
+                              </div>
+                              {enablePublicRegistration.isError &&
+                              enablePublicRegistration.variables?.id === team.id ? (
+                                <div className="mt-2">
+                                  <ErrorState error={enablePublicRegistration.error} />
+                                </div>
+                              ) : null}
+                              {disablePublicRegistration.isError &&
+                              disablePublicRegistration.variables?.id === team.id ? (
+                                <div className="mt-2">
+                                  <ErrorState error={disablePublicRegistration.error} />
+                                </div>
+                              ) : null}
                             </td>
                           </tr>
                         );

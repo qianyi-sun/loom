@@ -78,32 +78,57 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
           {lookup.isPending && token ? <LoadingState /> : null}
           {lookup.isError ? <ErrorState error={lookup.error} /> : null}
           {lookup.data && !complete.isSuccess ? (
-            <>
-              <Input
-                type="password"
-                autoComplete="new-password"
-                aria-label="Password"
-                placeholder="Password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
-              <Input
-                type="password"
-                autoComplete="new-password"
-                aria-label="Confirm password"
-                placeholder="Confirm password"
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-              />
+            <form
+              className="space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (complete.isPending || disabled) return;
+                complete.mutate();
+              }}
+            >
+              <div className="grid gap-1.5">
+                <label
+                  className="block text-sm font-medium text-slate-700"
+                  htmlFor="password-action-password"
+                >
+                  Password
+                </label>
+                <Input
+                  id="password-action-password"
+                  name="password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <label
+                  className="block text-sm font-medium text-slate-700"
+                  htmlFor="password-action-confirm"
+                >
+                  Confirm password
+                </label>
+                <Input
+                  id="password-action-confirm"
+                  name="confirm_password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                />
+              </div>
               <Button
+                type="submit"
                 variant="primary"
                 className="w-full"
                 disabled={disabled}
-                onClick={() => complete.mutate()}
               >
-                {isSetup ? "Set password" : "Reset password"}
+                {complete.isPending
+                  ? (isSetup ? "Setting…" : "Resetting…")
+                  : (isSetup ? "Set password" : "Reset password")}
               </Button>
-            </>
+            </form>
           ) : null}
           {complete.isError ? <ErrorState error={complete.error} /> : null}
           {complete.isSuccess ? (
@@ -111,7 +136,7 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
               <p className="text-sm font-medium text-emerald-700">
                 Password updated for {complete.data.user.username}.
               </p>
-              <Link className="text-sm font-medium text-accent hover:text-accent-hover" to="/settings">
+              <Link className="text-sm font-medium text-accent hover:text-accent-hover" to="/auth/login">
                 Sign in
               </Link>
             </div>

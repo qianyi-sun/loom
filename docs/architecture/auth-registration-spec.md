@@ -346,9 +346,18 @@ login uses username/password and does not create login challenges.
 
 `GET /api/v1/auth/public-teams`
 
-Returns fixed teams that users may request to join. Registration cannot create a
-new team. If a team is missing, the user contacts an admin and retries after the
-admin creates it.
+Returns Teams that have an explicit `public_registration_enabled` policy and
+are otherwise eligible (not disabled, not the historical `admin` Team, not the
+deployment canary). Registration cannot create a new team. Private Teams are
+omitted from discovery; submitting a remembered private UUID returns
+`404 {"detail":"team not found"}` — the same response as unknown Teams.
+
+Platform admins toggle the policy on Admin → Teams
+(`POST …/public-registration/enable|disable`). Existing and newly created Teams
+default to private.
+
+Signed-out onboarding lives at `/auth/login` (legacy signed-out `/settings`
+redirects there). Authenticated `/settings` remains Team/session settings.
 
 `POST /api/v1/auth/registration-requests`
 

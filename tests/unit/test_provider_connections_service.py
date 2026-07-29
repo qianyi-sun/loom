@@ -683,24 +683,24 @@ def test_parse_dedup_preserves_order() -> None:
 
 
 def test_parse_rejects_non_dict_body() -> None:
-    with pytest.raises(UpstreamModelFetchError, match="non-object"):
+    with pytest.raises(UpstreamModelFetchError, match="malformed catalog"):
         _parse_upstream_models("openai-compatible", [{"id": "x"}])
 
 
 def test_parse_rejects_missing_data_field() -> None:
-    with pytest.raises(UpstreamModelFetchError, match="missing top-level"):
+    with pytest.raises(UpstreamModelFetchError, match="missing a data list"):
         _parse_upstream_models("openai-compatible", {"models": [{"id": "x"}]})
 
 
 def test_parse_rejects_missing_models_field_for_google() -> None:
-    with pytest.raises(UpstreamModelFetchError, match="missing top-level"):
+    with pytest.raises(UpstreamModelFetchError, match="missing a models list"):
         _parse_upstream_models("google", {"data": [{"name": "models/x"}]})
 
 
 def test_parse_rejects_empty_result() -> None:
     """A 200 with no recognized entries → error so the cache doesn't
     silently get wiped on a parser-shape regression."""
-    with pytest.raises(UpstreamModelFetchError, match="no model entries"):
+    with pytest.raises(UpstreamModelFetchError, match="no parseable model"):
         _parse_upstream_models("openai-compatible", {"data": [{"foo": "bar"}]})
 
 
@@ -739,22 +739,27 @@ async def test_fetch_upstream_models_timeout() -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("connect timeout")
 
-    with pytest.raises(UpstreamModelFetchError, match="timeout"):
+    with pytest.raises(UpstreamModelFetchError, match="timed out") as exc:
         await fetch_upstream_models(
             "openai-compatible", "https://api.openai.com/v1", "k",
             _client_factory=_client_factory(httpx.MockTransport(_handler)),
         )
+    assert exc.value.error_code == "upstream_timeout"
 
 
 async def test_fetch_upstream_models_non_json_body() -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="<html>nginx</html>")
 
-    with pytest.raises(UpstreamModelFetchError, match="non-JSON"):
+    with pytest.raises(UpstreamModelFetchError, match="non-JSON") as exc:
         await fetch_upstream_models(
             "openai-compatible", "https://api.openai.com/v1", "k",
             _client_factory=_client_factory(httpx.MockTransport(_handler)),
         )
+    assert exc.value.http_status == 200
+    assert exc.value.error_code == "upstream_non_json"
+    # Must not leak upstream HTML into the operator-facing message.
+    assert "<html>" not in str(exc.value)
 
 
 # ──────────────────────────────────────────────────────────────────────
