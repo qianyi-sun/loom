@@ -1284,7 +1284,7 @@ describe("AdminAccess", () => {
       },
     ];
     let enableGate: Promise<Response> | null = null;
-    let resolveEnable: ((value: Response) => void) | null = null;
+    let resolveEnable!: (value: Response) => void;
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
@@ -1378,7 +1378,7 @@ describe("AdminAccess", () => {
     ).toBeDisabled();
 
     teams[0] = { ...teams[0], public_registration_enabled: true };
-    resolveEnable?.(jsonResponse(teams[0]));
+    resolveEnable(jsonResponse(teams[0]));
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(
@@ -1423,15 +1423,11 @@ describe("AdminAccess", () => {
     expect(
       await screen.findAllByText("audit insert failed"),
     ).not.toHaveLength(0);
-    expect(
-      within(publicRowAfter!).getByText("audit insert failed", { hidden: true }),
-    ).toBeInTheDocument();
+    expect(publicRowAfter).toHaveTextContent("audit insert failed");
     const privateRowAfter = screen
       .getByLabelText("Team name for Private Lab")
       .closest("tr");
-    expect(
-      within(privateRowAfter!).queryByText("audit insert failed", { hidden: true }),
-    ).toBeNull();
-    expect(within(publicRowAfter!).getByText("Enabled", { hidden: true })).toBeInTheDocument();
+    expect(privateRowAfter).not.toHaveTextContent("audit insert failed");
+    expect(publicRowAfter).toHaveTextContent("Enabled");
   });
 });
