@@ -10,7 +10,6 @@ import re
 import signal
 import subprocess
 import sys
-import traceback
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -31,6 +30,7 @@ from .backup_job import (
 )
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path, load_validated_envelope
+from .failure_diagnostics import unclassified_failure_diagnostic
 from .lifecycle import LifecycleCoordinator
 from .model import (
     ActivePointer,
@@ -84,12 +84,7 @@ def _backup_failure_diagnostic_text(error: BaseException) -> str | None:
     """
     if isinstance(error, BackupError):
         return error.diagnostic
-    location = ""
-    frames = traceback.extract_tb(error.__traceback__)
-    if frames:
-        last = frames[-1]
-        location = f" at {Path(last.filename).name}:{last.lineno} in {last.name}"
-    return f"unclassified backup failure: {type(error).__name__}{location}"
+    return unclassified_failure_diagnostic(error, activity="backup")
 
 
 def _write_backup_failure_diagnostic(
@@ -893,8 +888,12 @@ def main(
         if isinstance(exc, KeyboardInterrupt):
             raise
         if dependencies is not None:
+            # Last-resort boundary: an error escaped run-attempt/run-backup
+            # without a coded reason. Surface the exception type + raise-site
+            # (secret-safe) instead of a dead-end "failed safely" (#1085 p1).
+            activity = getattr(args, "command", None) or "worker"
             dependencies.stderr.write(
-                f"error: {redact_rollout_text('worker attempt failed safely')}\n"
+                f"error: {redact_rollout_text(unclassified_failure_diagnostic(exc, activity=str(activity)))}\n"
             )
         return 1
     finally:
