@@ -97,7 +97,8 @@ def test_apply_is_idempotent_when_desired_state_already_at_target() -> None:
 
     component.apply(plan)  # must not raise
 
-    assert "apply" not in transport.calls  # no redundant mutation was issued
+    # apply observed the desired state once and returned without mutating.
+    assert transport.calls == ["desired-read"]
     assert component.classify_desired(plan).state is ComponentState.EXACT
 
 
