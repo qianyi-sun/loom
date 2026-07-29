@@ -302,7 +302,16 @@ class ProtectedEnvironmentStateComponent:
             raise RuntimeError("protected environment-state epoch ownership changed before apply")
         evidence = self.transport.observe(plan, include_runtime=False)
         if evidence.desired_exact:
-            raise RuntimeError("protected environment-state changed before apply")
+            # Idempotent: the desired environment-state is already at the target
+            # for this candidate — e.g. a prior or concurrent same-candidate
+            # apply advanced it, or this is a rollout re-run after the state was
+            # already advanced (#1081). Applying is a no-op and the post-apply
+            # re-classify confirms EXACT, so return rather than failing the whole
+            # protected apply. The epoch guard above still fail-closes on any
+            # real mutation-epoch change, so this cannot mask a conflicting
+            # mutation — desired_exact means the live desired state equals this
+            # plan's own target.
+            return
         self.transport.apply(plan)
 
     def _classify(
