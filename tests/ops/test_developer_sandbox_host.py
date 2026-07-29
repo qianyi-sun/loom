@@ -41,12 +41,17 @@ def _current_identity(user: str) -> host.Identity:
     )
 
 
-def _receipt(profile: host.Profile, sha: str) -> host.ActivationReceipt:
+def _receipt(
+    profile: host.Profile,
+    sha: str,
+    *,
+    expires_at: datetime | None = None,
+) -> host.ActivationReceipt:
     return host.ActivationReceipt(
         path=host.combined_receipt_path(profile, sha),
         payload_sha256="d" * 64,
         fleet_payload_sha256="sha256:" + "e" * 64,
-        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        expires_at=expires_at or datetime.now(UTC) + timedelta(minutes=10),
     )
 
 
@@ -421,9 +426,21 @@ def test_attestation_renewal_timer_is_persistent_and_bounded() -> None:
     ) in service
     assert "User=root" in service
     assert "UMask=0077" in service
+    requires = next(line for line in service.splitlines() if line.startswith("Requires="))
+    after = next(line for line in service.splitlines() if line.startswith("After="))
+    for sandbox in host.SANDBOXES:
+        unit = f"loom-developer-sandbox-link@{sandbox}.service"
+        assert unit in requires.split()
+        assert unit in after.split()
     assert "OnUnitActiveSec=5min" in timer
     assert "Persistent=true" in timer
     assert "WantedBy=timers.target" in timer
+
+    sandbox_unit = (root / "loom-developer-sandbox@.service").read_text(encoding="utf-8")
+    link_unit = (root / "loom-developer-sandbox-link@.service").read_text(encoding="utf-8")
+    assert "loom-developer-sandbox-link@" not in sandbox_unit
+    assert "After=network-online.target loom-developer-sandbox@%i.service" in link_unit
+    assert "Requires=loom-developer-sandbox@%i.service" in link_unit
 
 
 def test_runtime_attestation_history_is_monotonic_and_candidate_bound(
@@ -433,6 +450,7 @@ def test_runtime_attestation_history_is_monotonic_and_candidate_bound(
     profile = _temporary_profile(tmp_path)
     tree = "b" * 40
     monkeypatch.setattr(host, "COMBINED_RECEIPT_ROOT", tmp_path / "attestations")
+    monkeypatch.setattr(host, "FLEET_ATTESTATION_ROOT", tmp_path / "attestations")
     monkeypatch.setattr(host, "RENEWAL_STATE_ROOT", tmp_path / "renewal-state")
     monkeypatch.setattr(host.os, "fchown", lambda *_args: None)
     monkeypatch.setattr(host, "_read_combined_receipt_bytes", lambda path: path.read_bytes())
@@ -578,14 +596,42 @@ def test_runtime_attestation_history_is_monotonic_and_candidate_bound(
             receipt(other, minute=20, generation=1, embedded_candidate=SHA),
         )
 
+    history_path = Path(second["path"])
+    generation, archived = host._archived_activation_from_path(
+        profile,
+        SHA,
+        tree,
+        history_path,
+    )
+    assert generation == 2
+    assert archived.payload_sha256 == second_receipt.payload_sha256
+    tampered = json.loads(history_path.read_text(encoding="utf-8"))
+    tampered["candidate_tree"] = "f" * 40
+    history_path.write_text(
+        json.dumps(
+            tampered,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(host.HostConvergeError, match="binding"):
+        host._archived_activation_from_path(profile, SHA, tree, history_path)
 
-def test_service_converge_rebuilds_expired_attestation_before_lifecycle(
+
+def test_service_converge_uses_expired_archive_before_links_are_active(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     profile = _temporary_profile(tmp_path)
     desired = {"candidate_sha": SHA}
-    refreshed = _receipt(profile, SHA)
+    archived = _receipt(
+        profile,
+        SHA,
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+    )
     events: list[str] = []
     monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
     monkeypatch.setattr(host, "verify_candidate_root", lambda *_args: None)
@@ -598,10 +644,16 @@ def test_service_converge_rebuilds_expired_attestation_before_lifecycle(
     )
     monkeypatch.setattr(
         host,
-        "_renew_attestation_locked",
-        lambda *_args, **_kwargs: events.append("renew") or refreshed,
+        "_verify_archived_activation",
+        lambda *_args, **_kwargs: events.append("archive") or archived,
     )
-    monkeypatch.setattr(host, "_load_json", lambda *_args: {"candidate_sha": SHA})
+    monkeypatch.setattr(
+        host,
+        "_renew_attestation_locked",
+        lambda *_args, **_kwargs: pytest.fail(
+            "sandbox convergence must not renew before its link is active",
+        ),
+    )
     monkeypatch.setattr(host, "_validate_desired_binding", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(host, "ensure_secret_files", lambda *_args: None)
     monkeypatch.setattr(host, "_sandbox_state_sha", lambda *_args: SHA)
@@ -615,7 +667,7 @@ def test_service_converge_rebuilds_expired_attestation_before_lifecycle(
 
     host._service_converge_locked(profile, desired)
 
-    assert events == ["renew", "update", "check"]
+    assert events == ["archive", "update", "check"]
 
 
 def test_cli_plan_is_non_mutating_and_secret_safe(capsys: pytest.CaptureFixture[str]) -> None:
@@ -808,7 +860,111 @@ def test_rollback_waits_for_the_global_install_serialization(
     assert not failures
 
 
-def test_rollback_crash_after_desired_write_recovers_previous_candidate(
+def test_rollback_after_attestation_ttl_renews_before_positive_readiness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    current_sha = "b" * 40
+    target_sha = "c" * 40
+    target_tree = "d" * 40
+    current = {
+        "schema_version": 1,
+        "sandbox": profile.sandbox,
+        "candidate_sha": current_sha,
+        "previous_sha": target_sha,
+    }
+    monkeypatch.setattr(host, "DESIRED_ROOT", tmp_path / "desired")
+    monkeypatch.setattr(host, "TRANSACTION_ROOT", tmp_path / "transactions")
+    profile.desired_file.parent.mkdir(parents=True)
+    profile.desired_file.write_text(json.dumps(current), encoding="utf-8")
+    profile.desired_file.chmod(0o600)
+    events: list[str] = []
+
+    @contextmanager
+    def lock(*_args: object) -> object:
+        yield
+
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "verify_nfs_mount", lambda: None)
+    monkeypatch.setattr(host, "verify_state_parent", lambda: None)
+    monkeypatch.setattr(host, "_install_lock", lock)
+    monkeypatch.setattr(host, "_activation_lock", lock)
+    monkeypatch.setattr(
+        host,
+        "_ensure_root_private_directory",
+        lambda path: path.mkdir(parents=True, exist_ok=True),
+    )
+    monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
+    monkeypatch.setattr(
+        host,
+        "verify_candidate",
+        lambda _profile, path, _sha, _identity: (
+            target_tree if path.name == target_sha else "e" * 40
+        ),
+    )
+    monkeypatch.setattr(host, "_migration_tree", lambda *_args: "same")
+    monkeypatch.setattr(host, "verify_worker_runtime_env", lambda *_args: None)
+    expired = _receipt(
+        profile,
+        target_sha,
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    def archived(*_args: object, **_kwargs: object) -> host.ActivationReceipt:
+        events.append("archive")
+        return expired
+
+    monkeypatch.setattr(host, "_verify_archived_activation", archived)
+    monkeypatch.setattr(host, "_current_relay_sha", lambda _profile: current_sha)
+    monkeypatch.setattr(
+        host,
+        "_run",
+        lambda command, **_kwargs: events.append(f"systemd:{command[-1]}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_restore_relay",
+        lambda _profile, sha, _transaction_sha: events.append(f"relay:{sha}"),
+    )
+    fresh = _receipt(profile, target_sha)
+
+    def renew(
+        selected: host.Profile,
+        *,
+        sha: str,
+        tree: str,
+    ) -> host.ActivationReceipt:
+        events.append("renew")
+        host.write_desired(selected, sha, tree, fresh)
+        return fresh
+
+    monkeypatch.setattr(host, "_renew_attestation_locked", renew)
+
+    def check(_sandbox: str) -> None:
+        persisted = json.loads(profile.desired_file.read_text(encoding="utf-8"))
+        assert persisted["combined_receipt_sha256"] == fresh.payload_sha256
+        assert host._transaction_payload(profile)["phase"] == "domains-proved"
+        events.append("fresh-check")
+
+    monkeypatch.setattr(host, "service_check", check)
+
+    host.rollback(profile, target_sha)
+
+    assert events == [
+        "archive",
+        f"systemd:{host.UNIT_NAME.format(sandbox=profile.sandbox)}",
+        f"relay:{target_sha}",
+        "renew",
+        "fresh-check",
+    ]
+    assert (
+        json.loads(profile.desired_file.read_text(encoding="utf-8"))["candidate_sha"] == target_sha
+    )
+    assert not host._transaction_file(profile).exists()
+
+
+def test_rollback_crash_after_link_switch_recovers_and_can_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -863,16 +1019,23 @@ def test_rollback_crash_after_desired_write_recovers_previous_candidate(
     monkeypatch.setattr(host, "verify_worker_runtime_env", lambda *_args: None)
     monkeypatch.setattr(
         host,
-        "verify_combined_receipt",
+        "_verify_archived_activation",
         lambda *_args: _receipt(profile, target_sha),
     )
     monkeypatch.setattr(host, "_desired_payload", lambda *_args, **_kwargs: replacement)
     monkeypatch.setattr(host, "_current_relay_sha", lambda _profile: current_sha)
+    monkeypatch.setattr(host, "_run", lambda *_args, **_kwargs: None)
+    switched: list[str] = []
+    monkeypatch.setattr(
+        host,
+        "_restore_relay",
+        lambda _profile, sha, _transaction_sha: switched.append(str(sha)),
+    )
     write_transaction = host._write_transaction
 
     def write_then_crash(*args: object, **kwargs: object) -> None:
         write_transaction(*args, **kwargs)
-        if kwargs["phase"] == "desired-written":
+        if kwargs["phase"] == "link-installed":
             raise SimulatedCrash
 
     monkeypatch.setattr(host, "_write_transaction", write_then_crash)
@@ -884,7 +1047,8 @@ def test_rollback_crash_after_desired_write_recovers_previous_candidate(
     transaction = host._transaction_payload(profile)
     assert transaction is not None
     assert transaction["operation"] == "rollback"
-    assert transaction["phase"] == "desired-written"
+    assert transaction["phase"] == "link-installed"
+    assert switched == [target_sha]
     events: list[str] = []
     monkeypatch.setattr(
         host,
@@ -908,8 +1072,21 @@ def test_rollback_crash_after_desired_write_recovers_previous_candidate(
     assert events == [f"update:{current_sha}", f"relay:{current_sha}"]
     assert not host._transaction_file(profile).exists()
 
+    monkeypatch.setattr(host, "_write_transaction", write_transaction)
+    monkeypatch.setattr(host, "_restore_relay", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_renew_attestation_locked",
+        lambda *_args, **_kwargs: _receipt(profile, target_sha),
+    )
+    monkeypatch.setattr(host, "service_check", lambda *_args: None)
 
-def test_service_converge_serializes_on_the_activation_lock(
+    host.rollback(profile, target_sha)
+
+    assert not host._transaction_file(profile).exists()
+
+
+def test_service_converge_leaves_pending_rollback_for_link_and_fresh_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -963,7 +1140,7 @@ def test_service_converge_serializes_on_the_activation_lock(
     host.service_converge(profile.sandbox)
 
     assert not locked
-    assert events == ["converge", "write:committed", "remove"]
+    assert events == ["converge"]
 
 
 def test_empty_namespace_first_install_materializes_before_prepare_and_attest(

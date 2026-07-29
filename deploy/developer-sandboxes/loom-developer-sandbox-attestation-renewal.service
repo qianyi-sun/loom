@@ -1,7 +1,7 @@
 [Unit]
 Description=Renew exact-candidate developer sandbox runtime attestations
-Requires=network-online.target
-After=network-online.target
+Requires=network-online.target loom-developer-sandbox-link@qianyi.service loom-developer-sandbox-link@hongjian.service loom-developer-sandbox-link@devansh.service
+After=network-online.target loom-developer-sandbox-link@qianyi.service loom-developer-sandbox-link@hongjian.service loom-developer-sandbox-link@devansh.service
 
 [Service]
 Type=oneshot

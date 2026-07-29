@@ -353,8 +353,15 @@ result is copied to an immutable root-owned mode-`0600` history record under
 `.../<sandbox>/<SHA>/renewals/`, with a monotonic generation and digest link to
 the previous record. The adapter continues to consume only the current
 `combined.json`; the immutable series is the liveness evidence used by the
-long-running acceptance gate. A reboot or manual sandbox-service start also
-rebuilds an expired proof before lifecycle convergence.
+long-running acceptance gate. On reboot, the sandbox oneshot may use a
+digest-, SHA-, tree-, environment-, fleet-, and domain-bound immutable history
+record to converge the core service even when that record has expired. The
+candidate-bound link units start only after core convergence; the renewal
+service is explicitly ordered after all three links and then publishes a fresh
+chain. Adapters and positive capacity readiness continue to accept only fresh
+`combined.json` bytes. Rollback uses the same immutable history to start the
+previous core and link, then synchronously renews that previous candidate
+before it can become ready.
 
 Run one supervisor cycle manually:
 

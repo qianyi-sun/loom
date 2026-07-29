@@ -74,6 +74,7 @@ RENEWAL_TIMER = "loom-developer-sandbox-attestation-renewal.timer"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RENEWAL_HISTORY_RE = re.compile(r"^([0-9]{20})-([0-9a-f]{64})\.json$")
 TRANSACTION_TTL = timedelta(minutes=30)
 RECEIPT_FRESHNESS = timedelta(seconds=60)
 ATTESTATION_TTL = timedelta(minutes=15)
@@ -1352,6 +1353,243 @@ def _archive_runtime_attestation(
     }
 
 
+def _archived_activation_from_path(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    path: Path,
+) -> tuple[int, ActivationReceipt]:
+    raw = _read_combined_receipt_bytes(path)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HostConvergeError("archived activation receipt is invalid") from exc
+    if not isinstance(payload, dict):
+        raise HostConvergeError("archived activation receipt is invalid")
+    canonical = (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+        + b"\n"
+    )
+    _exact_keys(
+        payload,
+        {
+            "schema_version",
+            "kind",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "renewal_generation",
+            "previous_payload_sha256",
+            "collected_at",
+            "expires_at",
+            "domain_generations",
+            "fleet_attestation",
+            "combined_receipt",
+            "payload_sha256",
+        },
+        "archived activation receipt",
+    )
+    unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode(),
+    ).hexdigest()
+    generation = payload["renewal_generation"]
+    filename = RENEWAL_HISTORY_RE.fullmatch(path.name)
+    previous_digest = payload["previous_payload_sha256"]
+    if (
+        raw != canonical
+        or payload["schema_version"] != 1
+        or payload["kind"] != "loom.developer-runtime-attestation-renewal"
+        or payload["sandbox"] != profile.sandbox
+        or payload["candidate_sha"] != sha
+        or payload["candidate_tree"] != tree
+        or type(generation) is not int
+        or generation < 1
+        or not isinstance(payload["payload_sha256"], str)
+        or payload["payload_sha256"] != expected_digest
+        or filename is None
+        or int(filename.group(1)) != generation
+        or filename.group(2) != expected_digest
+        or (
+            previous_digest is not None
+            and (
+                not isinstance(previous_digest, str) or DIGEST_RE.fullmatch(previous_digest) is None
+            )
+        )
+    ):
+        raise HostConvergeError("archived activation receipt binding is invalid")
+
+    collected_at = _parse_attestation_time(payload["collected_at"], "collected_at")
+    expires_at = _parse_attestation_time(payload["expires_at"], "expires_at")
+    if expires_at <= collected_at or expires_at - collected_at > ATTESTATION_TTL:
+        raise HostConvergeError("archived activation receipt lifetime is invalid")
+
+    domain_generations = payload["domain_generations"]
+    combined = payload["combined_receipt"]
+    fleet = payload["fleet_attestation"]
+    if (
+        not isinstance(domain_generations, dict)
+        or set(domain_generations) != {"oldlab", "gb10"}
+        or any(
+            type(domain_generations[domain]) is not int or domain_generations[domain] < 1
+            for domain in ("oldlab", "gb10")
+        )
+        or not isinstance(combined, dict)
+        or not isinstance(fleet, dict)
+    ):
+        raise HostConvergeError("archived activation receipt sections are invalid")
+
+    combined_digest = combined.get("payload_sha256")
+    combined_unsigned = {key: value for key, value in combined.items() if key != "payload_sha256"}
+    expected_combined_digest = hashlib.sha256(
+        json.dumps(
+            combined_unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode(),
+    ).hexdigest()
+    collector = combined.get("collector")
+    combined_domains = combined.get("domains")
+    fleet_reference = combined.get("fleet_attestation")
+    if (
+        combined.get("schema_version") != 1
+        or combined.get("kind") != "loom.developer-runtime-combined-activation"
+        or combined.get("sandbox") != profile.sandbox
+        or combined.get("candidate_sha") != sha
+        or combined.get("candidate_tree") != tree
+        or not isinstance(combined_digest, str)
+        or combined_digest != expected_combined_digest
+        or not isinstance(collector, dict)
+        or collector.get("hostname") != EXPECTED_HOSTNAME
+        or collector.get("collected_at") != payload["collected_at"]
+        or collector.get("expires_at") != payload["expires_at"]
+        or not isinstance(combined_domains, dict)
+        or set(combined_domains) != {"oldlab", "gb10"}
+        or any(
+            not isinstance(combined_domains[domain], dict)
+            or combined_domains[domain].get("generation") != domain_generations[domain]
+            for domain in ("oldlab", "gb10")
+        )
+        or not isinstance(fleet_reference, dict)
+    ):
+        raise HostConvergeError("archived combined receipt binding is invalid")
+
+    fleet_unsigned = {key: value for key, value in fleet.items() if key != "payload_sha256"}
+    expected_fleet_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                fleet_unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+    )
+    fleet_nodes = fleet.get("nodes")
+    fleet_bundle = fleet.get("bundle_generation")
+    fleet_server = fleet.get("server")
+    if (
+        fleet.get("sandbox") != profile.sandbox
+        or fleet.get("candidate_sha") != sha
+        or fleet.get("payload_sha256") != expected_fleet_digest
+        or fleet_reference.get("path")
+        != str(FLEET_ATTESTATION_ROOT / profile.sandbox / sha / "fleet.json")
+        or fleet_reference.get("payload_sha256") != expected_fleet_digest
+        or fleet_reference.get("generated_at") != fleet.get("generated_at")
+        or fleet_reference.get("expires_at") != fleet.get("expires_at")
+        or fleet.get("eligible_nodes") != list(ELIGIBLE_LINK_NODES)
+        or not isinstance(fleet_nodes, dict)
+        or set(fleet_nodes) != set(ELIGIBLE_LINK_NODES)
+        or not isinstance(fleet_bundle, dict)
+        or fleet_bundle.get("candidate_sha") != sha
+        or not isinstance(fleet_server, dict)
+        or fleet_server.get("active_candidate_sha") != sha
+        or fleet_server.get("node") != "oldlab-2"
+        or fleet_server.get("unit_active") is not True
+        or any(
+            not isinstance(node, dict) or node.get("candidate_sha") != sha
+            for node in fleet_nodes.values()
+        )
+    ):
+        raise HostConvergeError("archived fleet attestation binding is invalid")
+    fleet_generated = _parse_attestation_time(fleet.get("generated_at"), "fleet generated_at")
+    fleet_expires = _parse_attestation_time(fleet.get("expires_at"), "fleet expires_at")
+    if (
+        fleet_generated > collected_at + timedelta(seconds=30)
+        or collected_at - fleet_generated > RECEIPT_FRESHNESS
+        or fleet_expires - fleet_generated != ATTESTATION_TTL
+        or fleet_expires < expires_at
+    ):
+        raise HostConvergeError("archived fleet attestation lifetime is invalid")
+    return generation, ActivationReceipt(
+        path=combined_receipt_path(profile, sha),
+        payload_sha256=combined_digest,
+        fleet_payload_sha256=expected_fleet_digest,
+        expires_at=expires_at,
+    )
+
+
+def _verify_archived_activation(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    *,
+    desired: Mapping[str, Any] | None = None,
+) -> ActivationReceipt:
+    history_root = COMBINED_RECEIPT_ROOT / profile.sandbox / sha / "renewals"
+    descriptor = -1
+    try:
+        descriptor = _open_absolute_directory(history_root, create=False)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise HostConvergeError("archived activation directory is unsafe")
+        names = sorted(os.listdir(descriptor))
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        raise HostConvergeError("archived activation history is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not names or any(RENEWAL_HISTORY_RE.fullmatch(name) is None for name in names):
+        raise HostConvergeError("archived activation history is invalid")
+    receipts = [
+        _archived_activation_from_path(profile, sha, tree, history_root / name) for name in names
+    ]
+    receipts.sort(key=lambda item: item[0], reverse=True)
+    if desired is None:
+        return receipts[0][1]
+    for _generation, receipt in receipts:
+        try:
+            _validate_desired_binding(
+                profile,
+                desired,
+                sha=sha,
+                tree=tree,
+                receipt=receipt,
+            )
+        except HostConvergeError:
+            continue
+        return receipt
+    raise HostConvergeError("desired state has no matching archived activation")
+
+
 def _desired_payload(
     profile: Profile,
     sha: str,
@@ -1738,16 +1976,16 @@ def _service_converge_locked(
             tree=tree,
             receipt=receipt,
         )
-    except HostConvergeError as receipt_error:
-        receipt = _renew_attestation_locked(profile, sha=sha, tree=tree)
-        refreshed = _load_json(profile.desired_file, "sandbox desired state")
-        if refreshed is None:
-            raise HostConvergeError(
-                "renewed sandbox desired state is absent",
-            ) from receipt_error
+    except HostConvergeError:
+        receipt = _verify_archived_activation(
+            profile,
+            sha,
+            tree,
+            desired=desired,
+        )
         _validate_desired_binding(
             profile,
-            refreshed,
+            desired,
             sha=sha,
             tree=tree,
             receipt=receipt,
@@ -1782,7 +2020,7 @@ def service_converge(sandbox: str) -> None:
                 "sandbox desired state does not match pending activation transaction",
             )
         _service_converge_locked(locked_profile, desired)
-        if transaction is not None:
+        if transaction is not None and transaction["operation"] != "rollback":
             _write_transaction(
                 profile,
                 operation=str(transaction["operation"]),
@@ -2902,7 +3140,11 @@ def rollback(profile: Profile, target_sha: str) -> None:
                         f"loom-sandbox-{profile.sandbox}",
                     ),
                 )
-                receipt = verify_combined_receipt(profile, target_sha, target_tree)
+                receipt = _verify_archived_activation(
+                    profile,
+                    target_sha,
+                    target_tree,
+                )
                 replacement = _desired_payload(
                     profile,
                     target_sha,
@@ -2943,6 +3185,41 @@ def rollback(profile: Profile, target_sha: str) -> None:
                 )
             _run(("systemctl", "start", UNIT_NAME.format(sandbox=profile.sandbox)))
             with _activation_lock(profile):
+                transaction = _transaction_payload(profile)
+                if (
+                    transaction is None
+                    or transaction["operation"] != "rollback"
+                    or transaction["candidate_sha"] != target_sha
+                    or transaction["phase"] != "desired-written"
+                ):
+                    raise HostConvergeError(
+                        "rollback transaction changed during sandbox convergence",
+                    )
+                _restore_relay(profile, target_sha, current_sha)
+                _write_transaction(
+                    profile,
+                    operation="rollback",
+                    sha=target_sha,
+                    tree=target_tree,
+                    phase="link-installed",
+                    previous_desired=desired,
+                    previous_relay_sha=previous_relay,
+                )
+                _renew_attestation_locked(
+                    profile,
+                    sha=target_sha,
+                    tree=target_tree,
+                )
+                _write_transaction(
+                    profile,
+                    operation="rollback",
+                    sha=target_sha,
+                    tree=target_tree,
+                    phase="domains-proved",
+                    previous_desired=desired,
+                    previous_relay_sha=previous_relay,
+                )
+                service_check(profile.sandbox)
                 _write_transaction(
                     profile,
                     operation="rollback",
